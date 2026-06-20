@@ -1,0 +1,17 @@
+[package]
+name = "gen-parsers"
+description = "Bioinformatic file format parsers for Gen."
+version = "0.1.31"
+edition = "2024"
+repository = "https://github.com/genhub-bio/gen"
+homepage = "https://genhub.bio"
+license = "Apache-2.0"
+
+[dependencies]
+gen-core = { path = "../gen-core", version = "0.1.31" }
+gen-graph = { path = "../gen-graph", version = "0.1.31" }
+thiserror = "2.0.18"
+
+[dev-dependencies]
+petgraph = "0.6.5"
+similar-asserts = "1.7.0"

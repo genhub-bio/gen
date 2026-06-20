@@ -3,6 +3,7 @@ use clap::{Args, Subcommand};
 
 use crate::commands::cli_context::CliContext;
 
+mod alignment;
 mod fasta;
 mod genbank;
 mod gfa;
@@ -17,6 +18,8 @@ pub struct Command {
 /// Import commands
 #[derive(Clone, Debug, Subcommand)]
 pub enum Commands {
+    /// Import alignment
+    Alignment(alignment::Command),
     /// Import fasta
     Fasta(fasta::Command),
     /// Import genbank
@@ -29,6 +32,7 @@ pub enum Commands {
 
 pub fn execute(ctx: &CliContext, command: Command) -> anyhow::Result<()> {
     match command.command {
+        Commands::Alignment(cmd) => crate::commands::import::alignment::execute(ctx, cmd),
         Commands::Fasta(cmd) => crate::commands::import::fasta::execute(ctx, cmd),
         Commands::Genbank(cmd) => crate::commands::import::genbank::execute(ctx, cmd),
         Commands::Gfa(cmd) => crate::commands::import::gfa::execute(ctx, cmd),

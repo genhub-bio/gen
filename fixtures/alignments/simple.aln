@@ -1,0 +1,6 @@
+CLUSTAL W (2.1) multiple sequence alignment
+
+SeqA.chr1      ACGT
+SeqB.chr1      A-GT
+SeqC.chr1      ACG-
+          * **
