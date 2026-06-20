@@ -15,6 +15,7 @@ use r#gen::{
     },
 };
 use gen_annotations::projection::annotation_segments;
+use gen_core::range::Range;
 use gen_graph::GraphNode;
 use gen_models::{
     annotations::Annotation, block_group::BlockGroup, db::DbContext, node::Node, sample::Sample,
@@ -593,9 +594,15 @@ impl PySequenceGraph {
                     let len = path
                         .length(conn)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                    let (s, e) = resolve_start_end(start, end, len)?;
+                    let resolved_range = clamped_range(start, end, len)?;
                     with_translation_operation(ctx, &label, || {
-                        translate_path_range(conn, &bg_id, s, e, params)
+                        translate_path_range(
+                            conn,
+                            &bg_id,
+                            resolved_range.start,
+                            resolved_range.end,
+                            params,
+                        )
                     })
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                 } else {
@@ -614,9 +621,15 @@ impl PySequenceGraph {
                         let len = path
                             .length(conn)
                             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                        let (s, e) = resolve_start_end(start, end, len)?;
+                        let resolved_range = clamped_range(start, end, len)?;
                         with_translation_operation(ctx, &annotation.name, || {
-                            translate_path_range(conn, &self.id, s, e, params)
+                            translate_path_range(
+                                conn,
+                                &self.id,
+                                resolved_range.start,
+                                resolved_range.end,
+                                params,
+                            )
                         })
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                     } else {
@@ -634,9 +647,15 @@ impl PySequenceGraph {
                         let len = path
                             .length(conn)
                             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                        let (s, e) = resolve_start_end(start, end, len)?;
+                        let resolved_range = clamped_range(start, end, len)?;
                         with_translation_operation(ctx, region_str, || {
-                            translate_path_range(conn, &self.id, s, e, params)
+                            translate_path_range(
+                                conn,
+                                &self.id,
+                                resolved_range.start,
+                                resolved_range.end,
+                                params,
+                            )
                         })
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                     } else {
@@ -662,9 +681,15 @@ impl PySequenceGraph {
                             let len = path
                                 .length(conn)
                                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                            let (s, e) = resolve_start_end(start, end, len)?;
+                            let resolved_range = clamped_range(start, end, len)?;
                             with_translation_operation(ctx, region_str, || {
-                                translate_path_range(conn, &self.id, s, e, params)
+                                translate_path_range(
+                                    conn,
+                                    &self.id,
+                                    resolved_range.start,
+                                    resolved_range.end,
+                                    params,
+                                )
                             })
                             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                         } else {
@@ -686,12 +711,8 @@ impl PySequenceGraph {
     }
 }
 
-fn resolve_start_end(
-    start: Option<i64>,
-    end: Option<i64>,
-    path_length: i64,
-) -> PyResult<(i64, i64)> {
-    gen_core::resolve_start_end(start, end, path_length).map_err(PyRuntimeError::new_err)
+fn clamped_range(start: Option<i64>, end: Option<i64>, path_length: i64) -> PyResult<Range> {
+    Range::clamped(start, end, path_length).map_err(PyRuntimeError::new_err)
 }
 
 impl PySequenceGraph {

@@ -9,6 +9,24 @@ pub struct Range {
 }
 
 impl Range {
+    /// Build a `Range` from optional `start`/`end`, defaulting `start` to 0 and
+    /// `end` to `length` when omitted. Returns an error message on out-of-range
+    /// or inverted bounds; callers wrap it in their own error type.
+    pub fn clamped(start: Option<i64>, end: Option<i64>, length: i64) -> Result<Range, String> {
+        let start = start.unwrap_or(0);
+        let end = end.unwrap_or(length);
+        if start < 0 {
+            return Err(format!("start ({start}) must be >= 0"));
+        }
+        if end > length {
+            return Err(format!("end ({end}) must be <= path length ({length})"));
+        }
+        if start > end {
+            return Err(format!("start ({start}) must be <= end ({end})"));
+        }
+        Ok(Range { start, end })
+    }
+
     pub fn extend_to(&self, other: &Range) -> Range {
         Range {
             start: self.start,

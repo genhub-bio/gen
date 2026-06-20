@@ -42,7 +42,7 @@ use gen_annotations::{
     projection::annotation_segments,
     translate::{bed::translate_bed, gff::translate_gff},
 };
-use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
+use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node, range::Range};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     annotations::Annotation,
@@ -2024,12 +2024,8 @@ struct SequenceGraph {
 unsafe impl Send for SequenceGraph {}
 unsafe impl Sync for SequenceGraph {}
 
-fn resolve_start_end(
-    start: Option<i64>,
-    end: Option<i64>,
-    path_length: i64,
-) -> Result<(i64, i64), Error> {
-    gen_core::resolve_start_end(start, end, path_length).map_err(Error::Other)
+fn clamped_range(start: Option<i64>, end: Option<i64>, path_length: i64) -> Result<Range, Error> {
+    Range::clamped(start, end, path_length).map_err(Error::Other)
 }
 
 #[extendr]
@@ -2410,9 +2406,15 @@ impl SequenceGraph {
                 let path = BlockGroup::get_current_path(conn, &bg_id)
                     .map_err(|e| Error::Other(e.to_string()))?;
                 let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
-                let (s, e) = resolve_start_end(start, end, len)?;
+                let resolved_range = clamped_range(start, end, len)?;
                 run_translation_operation(&self.context, &label, || {
-                    translate_path_range(conn, &bg_id, s, e, tr_params)
+                    translate_path_range(
+                        conn,
+                        &bg_id,
+                        resolved_range.start,
+                        resolved_range.end,
+                        tr_params,
+                    )
                 })?
             } else {
                 run_translation_operation(&self.context, &label, || {
@@ -2426,9 +2428,15 @@ impl SequenceGraph {
 
             if let Some(path) = path {
                 let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
-                let (s, e) = resolve_start_end(start, end, len)?;
+                let resolved_range = clamped_range(start, end, len)?;
                 run_translation_operation(&self.context, &name, || {
-                    translate_path_range(conn, &bg_id, s, e, tr_params)
+                    translate_path_range(
+                        conn,
+                        &bg_id,
+                        resolved_range.start,
+                        resolved_range.end,
+                        tr_params,
+                    )
                 })?
             } else {
                 let annotation = Annotation::query_with_lineage(
@@ -2451,9 +2459,15 @@ impl SequenceGraph {
                     let path = BlockGroup::get_current_path(conn, &bg_id)
                         .map_err(|e| Error::Other(e.to_string()))?;
                     let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
-                    let (s, e) = resolve_start_end(start, end, len)?;
+                    let resolved_range = clamped_range(start, end, len)?;
                     run_translation_operation(&self.context, &name, || {
-                        translate_path_range(conn, &bg_id, s, e, tr_params)
+                        translate_path_range(
+                            conn,
+                            &bg_id,
+                            resolved_range.start,
+                            resolved_range.end,
+                            tr_params,
+                        )
                     })?
                 } else {
                     run_translation_operation(&self.context, &name, || {
@@ -2469,9 +2483,15 @@ impl SequenceGraph {
                 let path = BlockGroup::get_current_path(conn, &bg_id)
                     .map_err(|e| Error::Other(e.to_string()))?;
                 let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
-                let (s, e) = resolve_start_end(start, end, len)?;
+                let resolved_range = clamped_range(start, end, len)?;
                 run_translation_operation(&self.context, &label, || {
-                    translate_path_range(conn, &bg_id, s, e, tr_params)
+                    translate_path_range(
+                        conn,
+                        &bg_id,
+                        resolved_range.start,
+                        resolved_range.end,
+                        tr_params,
+                    )
                 })?
             } else {
                 run_translation_operation(&self.context, &label, || {
