@@ -248,7 +248,7 @@ struct NodeCodons {
 struct WalkFrom {
     id: HashId,
     coord: i64,
-    merkle: String,
+    identity_hash: String,
 }
 
 /// Immutable context threaded through the codon walk.
@@ -257,25 +257,37 @@ struct WalkCtx<'a> {
     dna_by_node: &'a HashMap<HashId, String>,
     protein_node_ids: &'a HashMap<(HashId, u8), HashId>,
     codon_table: &'a CodonTable,
-    stop_node_id: HashId,
 }
 
-/// Hash seed for the single shared stop node every real in-frame stop codon
-/// converges on, regardless of which translation or predecessor produced it.
-const STOP_NODE_LABEL: &str = "gen:protein:stop";
+/// A site that needs an edge into the protein graph's `*` stop node, recorded
+/// during the codon walk and resolved once every site has been visited and the
+/// stop node's final identity hash is known (see its use in `translate_core`).
+struct PendingStopEdge {
+    predecessor_id: HashId,
+    predecessor_coord: i64,
+    chromosome_index: i64,
+    predecessor_hash: String,
+}
 
-/// Fetch or create the single protein node shared by every in-frame stop codon
-/// across every translation. `Node::create` and `Sequence::save` are both
-/// content-hash idempotent, so calling this repeatedly from many translations
-/// safely converges on the same row instead of erroring or duplicating it.
-fn stop_node(conn: &GraphConnection) -> Result<HashId, TranslationError> {
+/// Create (or fetch, by content hash) a protein node identified by its sorted
+/// predecessor identity hashes and amino-acid sequence. Returns the node id and
+/// its own identity hash, the latter usable as a predecessor hash for whatever
+/// node comes next. `Node::create` and `Sequence::save` are both content-hash
+/// idempotent, so two calls with the same inputs converge on the same row.
+fn create_protein_node(
+    conn: &GraphConnection,
+    predecessor_hashes: &[String],
+    amino_acids: &str,
+) -> Result<(HashId, String), TranslationError> {
     let sequence = Sequence::new()
         .sequence_type("AA")
-        .sequence(&(STOP_CODON as char).to_string())
+        .sequence(amino_acids)
         .save(conn)
         .map_err(|e| TranslationError::Sequence(e.to_string()))?;
-    Node::create(conn, &sequence.hash, &HashId::convert_str(STOP_NODE_LABEL))
-        .map_err(|e| TranslationError::NodeError(e.to_string()))
+    let identity_hash = format!("{}:{}", predecessor_hashes.join(","), amino_acids);
+    let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str(&identity_hash))
+        .map_err(|e| TranslationError::NodeError(e.to_string()))?;
+    Ok((node_id, identity_hash))
 }
 
 /// Whether `bytes` begins with a complete codon that is an in-frame stop. Used
@@ -324,6 +336,7 @@ fn codon_walk(
     node: HashId,
     ci: i64,
     bg_edges: &mut Vec<BlockGroupEdgeData>,
+    stop_edges: &mut Vec<PendingStopEdge>,
 ) -> Result<(), TranslationError> {
     let dna = ctx
         .dna_by_node
@@ -343,24 +356,12 @@ fn codon_walk(
         // No complete codon starts here. If the bytes available so far already begin
         // with a stop, the walk ends here regardless of what successors hold.
         if starts_with_stop(ctx.codon_table, dna) {
-            bg_edges.push(make_edge(
-                conn,
-                bg_id,
-                from.id,
-                from.coord,
-                ctx.stop_node_id,
-                0,
-                ci,
-            )?);
-            bg_edges.push(make_edge(
-                conn,
-                bg_id,
-                ctx.stop_node_id,
-                1,
-                PATH_END_NODE_ID,
-                0,
-                ci,
-            )?);
+            stop_edges.push(PendingStopEdge {
+                predecessor_id: from.id,
+                predecessor_coord: from.coord,
+                chromosome_index: ci,
+                predecessor_hash: from.identity_hash.clone(),
+            });
             return Ok(());
         }
         // Node shorter than a codon: consume it and continue building the codon in
@@ -370,7 +371,9 @@ fn codon_walk(
         }
         let carried = dna.to_vec();
         for succ in &successors {
-            codon_walk(conn, bg_id, ctx, from, &carried, *succ, ci, bg_edges)?;
+            codon_walk(
+                conn, bg_id, ctx, from, &carried, *succ, ci, bg_edges, stop_edges,
+            )?;
         }
         return Ok(());
     }
@@ -384,7 +387,9 @@ fn codon_walk(
         let mut carried = pending.to_vec();
         carried.extend_from_slice(dna);
         for succ in &successors {
-            codon_walk(conn, bg_id, ctx, from, &carried, *succ, ci, bg_edges)?;
+            codon_walk(
+                conn, bg_id, ctx, from, &carried, *succ, ci, bg_edges, stop_edges,
+            )?;
         }
         return Ok(());
     }
@@ -395,47 +400,26 @@ fn codon_walk(
     let aa = ctx.codon_table.translate_codon(&codon);
 
     if aa == STOP_CODON {
-        // First in-frame stop codon ends the walk: wire straight to the shared stop
-        // node and bound it by the END sentinel, with no junction node created for
-        // this codon.
-        bg_edges.push(make_edge(
-            conn,
-            bg_id,
-            from.id,
-            from.coord,
-            ctx.stop_node_id,
-            0,
-            ci,
-        )?);
-        bg_edges.push(make_edge(
-            conn,
-            bg_id,
-            ctx.stop_node_id,
-            1,
-            PATH_END_NODE_ID,
-            0,
-            ci,
-        )?);
+        // First in-frame stop codon ends the walk: record the edge into the
+        // eventual stop node, with no junction node created for this codon.
+        stop_edges.push(PendingStopEdge {
+            predecessor_id: from.id,
+            predecessor_coord: from.coord,
+            chromosome_index: ci,
+            predecessor_hash: from.identity_hash.clone(),
+        });
         return Ok(());
     }
 
     let aa_char = aa as char;
-    // Same Merkle-chain formula as a regular anchor (Step 5): a single-element
-    // predecessor list joined with its amino acid. A junction always has exactly
-    // one predecessor, so this collapses identically to that single-codon anchor
-    // case, keeping junction nodes indistinguishable from anchors once built.
-    let junction_merkle = format!("{}:{aa_char}", from.merkle);
-    let junction_seq = Sequence::new()
-        .sequence_type("AA")
-        .sequence(&aa_char.to_string())
-        .save(conn)
-        .map_err(|e| TranslationError::Sequence(e.to_string()))?;
-    let junction_id = Node::create(
+    // A junction always has exactly one predecessor, so the same predecessor-hash
+    // formula as a regular anchor (Step 5) collapses to a single-element list
+    // here, keeping junction nodes indistinguishable from anchors once built.
+    let (junction_id, junction_hash) = create_protein_node(
         conn,
-        &junction_seq.hash,
-        &HashId::convert_str(&junction_merkle),
-    )
-    .map_err(|e| TranslationError::NodeError(e.to_string()))?;
+        std::slice::from_ref(&from.identity_hash),
+        &aa_char.to_string(),
+    )?;
     bg_edges.push(make_edge(
         conn,
         bg_id,
@@ -449,7 +433,7 @@ fn codon_walk(
     let junction_from = WalkFrom {
         id: junction_id,
         coord: 1,
-        merkle: junction_merkle,
+        identity_hash: junction_hash,
     };
     // After the codon, `node`'s entry frame on this path equals the bytes carried in.
     let anchor_frame = pending.len() as u8;
@@ -462,31 +446,29 @@ fn codon_walk(
     // bases begin the next codon, unless they already are a stop on their own.
     let rem = &dna[need..];
     if starts_with_stop(ctx.codon_table, rem) {
-        bg_edges.push(make_edge(
-            conn,
-            bg_id,
-            junction_id,
-            1,
-            ctx.stop_node_id,
-            0,
-            ci,
-        )?);
-        bg_edges.push(make_edge(
-            conn,
-            bg_id,
-            ctx.stop_node_id,
-            1,
-            PATH_END_NODE_ID,
-            0,
-            ci,
-        )?);
+        stop_edges.push(PendingStopEdge {
+            predecessor_id: junction_from.id,
+            predecessor_coord: junction_from.coord,
+            chromosome_index: ci,
+            predecessor_hash: junction_from.identity_hash.clone(),
+        });
         return Ok(());
     }
     if successors.is_empty() {
         return connect_to_end(conn, bg_id, &junction_from, ci, bg_edges);
     }
     for succ in &successors {
-        codon_walk(conn, bg_id, ctx, &junction_from, rem, *succ, ci, bg_edges)?;
+        codon_walk(
+            conn,
+            bg_id,
+            ctx,
+            &junction_from,
+            rem,
+            *succ,
+            ci,
+            bg_edges,
+            stop_edges,
+        )?;
     }
     Ok(())
 }
@@ -645,11 +627,16 @@ fn extract_full_graph(
     })
 }
 
-/// Extract the sub-DAG between an annotation's entry and exit coordinates from the
-/// sequence graph's GenGraph, capturing every variant branch in between. No
-/// database writes. The entry/exit nodes are trimmed to the annotation's
-/// coordinates.
-fn extract_annotation(
+/// Extract the sub-DAG from an annotation's entry coordinate to the sequence
+/// graph's end, capturing every variant branch along the way. No database
+/// writes.
+///
+/// There is no separate exit anchor: `codon_walk` ends each branch at its own
+/// first in-frame stop codon, so the annotation's declared end coordinate is
+/// never consulted, and a boundary allele near the natural stop is captured on
+/// the same footing as the reference (see
+/// `boundary_last_base_mutation_in_child_is_captured`).
+fn extract_from_annotation_start(
     conn: &GraphConnection,
     bg_id: &HashId,
     segments: &[AnnotationSegment],
@@ -659,18 +646,7 @@ fn extract_annotation(
 
     let entry_node_id = segments[0].node_id;
     let entry_coord = segments[0].range.start;
-    let last_seg = segments.last().unwrap();
-    let exit_node_id = last_seg.node_id;
-    let exit_coord = last_seg.range.end;
 
-    // GraphNode slices that contain the annotation's entry/exit coordinates.
-    //
-    // Known limitation: a boundary-base variant parallel to the *exit* coordinate
-    // is still dropped, because the exit anchor pins a single slice and an allele
-    // running alongside it falls outside `[entry..exit]`. See the ignored
-    // `boundary_last_base_mutation_in_child_is_captured` test below. The entry side
-    // does not have this problem: the 5' frontier below captures every allele at the
-    // first base.
     let entry_gn = gen_graph
         .nodes()
         .find(|gn| {
@@ -683,18 +659,10 @@ fn extract_annotation(
                 "annotation entry coordinate {entry_coord} not found in graph"
             ))
         })?;
-    let exit_gn = gen_graph
+    let end_gn = gen_graph
         .nodes()
-        .find(|gn| {
-            gn.node_id == exit_node_id
-                && gn.sequence_start < exit_coord
-                && gn.sequence_end >= exit_coord
-        })
-        .ok_or_else(|| {
-            TranslationError::NodeError(format!(
-                "annotation exit coordinate {exit_coord} not found in graph"
-            ))
-        })?;
+        .find(|gn| gn.node_id == PATH_END_NODE_ID)
+        .ok_or_else(|| TranslationError::BlockGroupError("graph has no end node".into()))?;
 
     // 5' boundary ambiguity: when the annotation begins at the very first base of
     // its entry node, a variant allele of that base lives in a parallel node that a
@@ -720,17 +688,15 @@ fn extract_annotation(
     let mut graph: DiGraphMap<HashId, ()> = DiGraphMap::new();
     let mut node_ranges: HashMap<HashId, (HashId, Option<i64>, Option<i64>)> = HashMap::new();
     let mut edge_chromosome_indices: HashMap<(HashId, HashId), Vec<i64>> = HashMap::new();
-    let exit_vid = virtual_id(exit_gn);
-    let mut exit_nodes: HashSet<HashId> = HashSet::from([exit_vid]);
+    let mut exit_nodes: HashSet<HashId> = HashSet::new();
 
-    // Union the sub-DAGs from each frontier entry to the exit. A boundary allele and
-    // the reference allele rejoin downstream, so their shared edges are deduplicated
-    // both as graph edges (DiGraphMap collapses them) and as chromosome indices. A
-    // candidate with no path to the exit node (the annotation's whole span fits
-    // inside that single node, true for both the reference node and any
-    // same-length boundary allele) is its own standalone entry-and-exit component.
+    // Union the sub-DAGs from each frontier entry to the graph's end. A boundary
+    // allele and the reference allele rejoin downstream, so their shared edges are
+    // deduplicated both as graph edges (DiGraphMap collapses them) and as
+    // chromosome indices. A candidate with a direct edge to the end (no internal
+    // sequence beyond it) is its own standalone entry-and-exit component.
     for &entry in &entry_frontier {
-        let intermediate_edges = all_intermediate_edges(&gen_graph, entry, exit_gn);
+        let intermediate_edges = all_intermediate_edges(&gen_graph, entry, end_gn);
         if intermediate_edges.is_empty() {
             let vid = virtual_id(entry);
             graph.add_node(vid);
@@ -738,8 +704,16 @@ fn extract_annotation(
             continue;
         }
         for edge_ref in &intermediate_edges {
-            let src_vid = virtual_id(edge_ref.source());
-            let tgt_vid = virtual_id(edge_ref.target());
+            let src = edge_ref.source();
+            let tgt = edge_ref.target();
+            if is_terminal(tgt.node_id) && !is_terminal(src.node_id) {
+                exit_nodes.insert(virtual_id(src));
+            }
+            if is_terminal(src.node_id) || is_terminal(tgt.node_id) {
+                continue;
+            }
+            let src_vid = virtual_id(src);
+            let tgt_vid = virtual_id(tgt);
             graph.add_node(src_vid);
             graph.add_node(tgt_vid);
             graph.add_edge(src_vid, tgt_vid, ());
@@ -754,9 +728,20 @@ fn extract_annotation(
         }
     }
 
-    // DNA range for every node in the subgraph; entry/exit trimmed to the
-    // annotation's coordinates. Frontier alleles other than the entry node begin at
-    // their own start, since the whole allele lies downstream of the shared base.
+    // A frontier candidate or exit reached only via an edge straight to a terminal
+    // (e.g. a single-node annotation: entry → END) has no non-terminal edge of its
+    // own and so is skipped by the loop above; add it directly.
+    for &entry in &entry_frontier {
+        graph.add_node(virtual_id(entry));
+    }
+    for &vid in &exit_nodes {
+        graph.add_node(vid);
+    }
+
+    // DNA range for every node in the subgraph; only the entry node is trimmed, to
+    // the annotation's start coordinate. Frontier alleles other than the entry node
+    // begin at their own start, since the whole allele lies downstream of the
+    // shared base.
     for gn in gen_graph.nodes() {
         let vid = virtual_id(gn);
         if !graph.contains_node(vid) {
@@ -767,12 +752,7 @@ fn extract_annotation(
         } else {
             gn.sequence_start
         };
-        let seq_end = if gn == exit_gn {
-            exit_coord
-        } else {
-            gn.sequence_end
-        };
-        node_ranges.insert(vid, (gn.node_id, Some(seq_start), Some(seq_end)));
+        node_ranges.insert(vid, (gn.node_id, Some(seq_start), Some(gn.sequence_end)));
     }
 
     let entry_nodes: Vec<HashId> = entry_frontier
@@ -823,7 +803,7 @@ pub fn translate_annotation(
         }
     };
 
-    let subgraph = extract_annotation(conn, bg_id, &segments)?;
+    let subgraph = extract_from_annotation_start(conn, bg_id, &segments)?;
     let bg_name = params
         .name
         .map(str::to_string)
@@ -842,7 +822,7 @@ pub fn translate_annotation(
 /// Translate a coordinate range on a sequence graph's current path into a
 /// protein sequence graph, in memory. The path's interval tree maps the path-space
 /// `start`/`end` coordinates to node-level entry/exit points; the same
-/// `extract_annotation` + `translate_core` pipeline used by `translate_annotation`
+/// `extract_from_annotation_start` + `translate_core` pipeline used by `translate_annotation`
 /// is then applied to the resulting subgraph.
 pub fn translate_path_range(
     conn: &GraphConnection,
@@ -910,7 +890,7 @@ pub fn translate_path_range(
         ]
     };
 
-    let subgraph = extract_annotation(conn, bg_id, &segments)?;
+    let subgraph = extract_from_annotation_start(conn, bg_id, &segments)?;
     let bg_name = params
         .name
         .map(str::to_string)
@@ -1002,7 +982,10 @@ where
 /// Shared translation core: fetch sequences, orient by strand, propagate reading
 /// frames, then build and persist the protein sequence graph.
 ///
-/// `label_hash` seeds the Merkle hash of nodes with no protein predecessor.
+/// `label_hash` seeds the identity hash of nodes with no protein predecessor.
+/// Each node's identity hash also folds in its predecessors' identity hashes, so
+/// the protein graph is a Merkle DAG (not a tree: a node can have more than one
+/// predecessor, e.g. where a junction or two variant paths reconverge).
 fn translate_core(
     conn: &GraphConnection,
     subgraph: TranslationSubgraph,
@@ -1205,9 +1188,10 @@ fn translate_core(
     let bg_id = protein_bg.id;
     let mut bg_edges: Vec<BlockGroupEdgeData> = Vec::new();
 
-    // Merkle-chain hashing: each protein node's hash = hash(sorted_predecessor_protein_hashes + aa_sequence).
-    // Two DNA nodes that translate to the same AA and have predecessors with identical
-    // protein hashes collapse to the same protein node (synonymous-variant collapse).
+    // Merkle DAG hashing: each protein node's identity hash =
+    // hash(sorted_predecessor_identity_hashes + aa_sequence). Two DNA nodes that
+    // translate to the same AA and have predecessors with identical identity
+    // hashes collapse to the same protein node (synonymous-variant collapse).
     // Process nodes in topological order so predecessor hashes are always available.
     let mut topo_order: Vec<HashId> = Vec::new();
     {
@@ -1232,13 +1216,13 @@ fn translate_core(
         }
     }
 
-    // Step 5: create protein node IDs via Merkle-chain hashing (protein_node_ids).
-    // One anchor per (dna_node, entry_frame) that contains at least one complete
+    // Step 5: create protein node IDs by content hash (protein_node_ids). One
+    // anchor per (dna_node, entry_frame) that contains at least one complete
     // codon. Nodes with no complete codon contribute only to junctions and get no
-    // anchor. Merkle hashing collapses synonymous variants that share both
-    // predecessor protein hashes and amino-acid sequence.
+    // anchor. Hashing on predecessor identity hashes plus amino-acid sequence
+    // collapses synonymous variants that share both.
     let mut protein_node_ids: HashMap<(HashId, u8), HashId> = HashMap::new();
-    let mut protein_merkle_hashes: HashMap<(HashId, u8), HashId> = HashMap::new();
+    let mut protein_identity_hashes: HashMap<(HashId, u8), String> = HashMap::new();
     let mut protein_aa_len: HashMap<(HashId, u8), i64> = HashMap::new();
 
     for &node_id in &topo_order {
@@ -1252,23 +1236,18 @@ fn translate_core(
                 _ => continue,
             };
             let aa_str = String::from_utf8_lossy(&codons.aa).into_owned();
-            let seq = Sequence::new()
-                .sequence_type("AA")
-                .sequence(&aa_str)
-                .save(conn)
-                .map_err(|e| TranslationError::Sequence(e.to_string()))?;
 
-            // Collect protein hashes of all DNA predecessors whose exit frame equals
-            // this node's entry frame, then sort for determinism.
+            // Collect identity hashes of all DNA predecessors whose exit frame
+            // equals this node's entry frame, then sort for determinism.
             let mut pred_hashes: Vec<String> = Vec::new();
             for src in subgraph.neighbors_directed(node_id, Direction::Incoming) {
                 let src_len = dna_by_node.get(&src).map(|s| s.len()).unwrap_or(0);
                 if let Some(src_frames) = entry_frames.get(&src) {
                     for &src_frame in src_frames {
                         if (src_frame as usize + src_len) % 3 == frame as usize
-                            && let Some(h) = protein_merkle_hashes.get(&(src, src_frame))
+                            && let Some(h) = protein_identity_hashes.get(&(src, src_frame))
                         {
-                            pred_hashes.push(h.to_string());
+                            pred_hashes.push(h.clone());
                         }
                     }
                 }
@@ -1278,24 +1257,24 @@ fn translate_core(
                 pred_hashes.push(label_hash.to_string());
             }
 
-            let node_hash = HashId::convert_str(&format!("{}:{}", pred_hashes.join(","), aa_str));
-            let nid = Node::create(conn, &seq.hash, &node_hash)
-                .map_err(|e| TranslationError::NodeError(e.to_string()))?;
-            protein_node_ids.insert((node_id, frame), nid);
-            protein_merkle_hashes.insert((node_id, frame), node_hash);
+            let (node_id_protein, identity_hash) =
+                create_protein_node(conn, &pred_hashes, &aa_str)?;
+            protein_node_ids.insert((node_id, frame), node_id_protein);
+            protein_identity_hashes.insert((node_id, frame), identity_hash);
             protein_aa_len.insert((node_id, frame), codons.aa.len() as i64);
         }
     }
 
     // Step 6: wire the protein graph by walking codons across the DNA sub-DAG.
+    // The `*` stop node is created once every walk has finished and its full set
+    // of predecessors is known (see `stop_edges` below), rather than up front.
     let exit_set: HashSet<HashId> = exit_nodes.iter().copied().collect();
-    let stop_node_id = stop_node(conn)?;
+    let mut stop_edges: Vec<PendingStopEdge> = Vec::new();
     let ctx = WalkCtx {
         subgraph: &subgraph,
         dna_by_node: &dna_by_node,
         protein_node_ids: &protein_node_ids,
         codon_table: &params.codon_table,
-        stop_node_id,
     };
 
     // PATH_START → entry. When an entry node is too short to hold a complete codon,
@@ -1303,7 +1282,7 @@ fn translate_core(
     let start_from = WalkFrom {
         id: PATH_START_NODE_ID,
         coord: 0,
-        merkle: label_hash.to_string(),
+        identity_hash: label_hash.to_string(),
     };
     for &entry_node in &entry_nodes {
         let frames: Vec<u8> = entry_frames
@@ -1332,24 +1311,12 @@ fn translate_core(
             let head_skip = ((3 - frame as usize) % 3).min(dna.len());
             let rem = dna[head_skip..].to_vec();
             if starts_with_stop(&params.codon_table, &rem) {
-                bg_edges.push(make_edge(
-                    conn,
-                    &bg_id,
-                    PATH_START_NODE_ID,
-                    0,
-                    stop_node_id,
-                    0,
-                    0,
-                )?);
-                bg_edges.push(make_edge(
-                    conn,
-                    &bg_id,
-                    stop_node_id,
-                    1,
-                    PATH_END_NODE_ID,
-                    0,
-                    0,
-                )?);
+                stop_edges.push(PendingStopEdge {
+                    predecessor_id: start_from.id,
+                    predecessor_coord: start_from.coord,
+                    chromosome_index: 0,
+                    predecessor_hash: start_from.identity_hash.clone(),
+                });
                 continue;
             }
             for succ in subgraph.neighbors(entry_node) {
@@ -1367,6 +1334,7 @@ fn translate_core(
                         succ,
                         ci,
                         &mut bg_edges,
+                        &mut stop_edges,
                     )?;
                 }
             }
@@ -1381,35 +1349,26 @@ fn translate_core(
             .get(&(node, frame))
             .is_some_and(|codons| codons.is_terminal)
         {
-            // The walk ended at an in-frame stop inside this anchor: connect through
-            // the shared stop node to the END sentinel, without spilling a tail into
+            // The walk ended at an in-frame stop inside this anchor: record the
+            // edge into the eventual stop node, without spilling a tail into
             // successors.
-            bg_edges.push(make_edge(
-                conn,
-                &bg_id,
-                protein_id,
-                aa_len,
-                stop_node_id,
-                0,
-                0,
-            )?);
-            bg_edges.push(make_edge(
-                conn,
-                &bg_id,
-                stop_node_id,
-                1,
-                PATH_END_NODE_ID,
-                0,
-                0,
-            )?);
+            stop_edges.push(PendingStopEdge {
+                predecessor_id: protein_id,
+                predecessor_coord: aa_len,
+                chromosome_index: 0,
+                predecessor_hash: protein_identity_hashes
+                    .get(&(node, frame))
+                    .cloned()
+                    .unwrap_or_default(),
+            });
             continue;
         }
         let from = WalkFrom {
             id: protein_id,
             coord: aa_len,
-            merkle: protein_merkle_hashes
+            identity_hash: protein_identity_hashes
                 .get(&(node, frame))
-                .map(|h| h.to_string())
+                .cloned()
                 .unwrap_or_default(),
         };
         let tail = node_codons
@@ -1422,7 +1381,17 @@ fn translate_core(
                 .map(Vec::as_slice)
                 .unwrap_or(&[0])
             {
-                codon_walk(conn, &bg_id, &ctx, &from, &tail, succ, ci, &mut bg_edges)?;
+                codon_walk(
+                    conn,
+                    &bg_id,
+                    &ctx,
+                    &from,
+                    &tail,
+                    succ,
+                    ci,
+                    &mut bg_edges,
+                    &mut stop_edges,
+                )?;
             }
         }
         if exit_set.contains(&node) {
@@ -1434,6 +1403,46 @@ fn translate_core(
                 PATH_END_NODE_ID,
                 0,
                 0,
+            )?);
+        }
+    }
+
+    // The `*` stop node's identity hash depends on every site that reaches it
+    // across the whole walk, so it is only created now that `stop_edges` is
+    // complete, instead of up front like `stop_node` used to be.
+    if !stop_edges.is_empty() {
+        let mut pred_hashes: Vec<String> = stop_edges
+            .iter()
+            .map(|edge| edge.predecessor_hash.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        pred_hashes.sort();
+        let (stop_id, _) =
+            create_protein_node(conn, &pred_hashes, &(STOP_CODON as char).to_string())?;
+
+        let mut stop_exit_chromosome_indices: HashSet<i64> = HashSet::new();
+        for edge in &stop_edges {
+            bg_edges.push(make_edge(
+                conn,
+                &bg_id,
+                edge.predecessor_id,
+                edge.predecessor_coord,
+                stop_id,
+                0,
+                edge.chromosome_index,
+            )?);
+            stop_exit_chromosome_indices.insert(edge.chromosome_index);
+        }
+        for ci in stop_exit_chromosome_indices {
+            bg_edges.push(make_edge(
+                conn,
+                &bg_id,
+                stop_id,
+                1,
+                PATH_END_NODE_ID,
+                0,
+                ci,
             )?);
         }
     }
@@ -2240,8 +2249,12 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["M*"]);
     }
 
-    /// A single-node annotation (entry_gn == exit_gn) with a boundary-first-base
-    /// variant must still surface the alt allele, not just the reference.
+    /// A single-node annotation (the whole annotated span is one node) with a
+    /// boundary-first-base variant must still surface the alt allele, not just
+    /// the reference. The annotation only covers the first codon, but
+    /// translation is no longer bounded by the annotation's declared end: it
+    /// continues into the downstream "suffix" node to its natural stop on both
+    /// alleles.
     #[test]
     fn single_node_boundary_first_base_variant_is_captured() {
         let (conn, parent_bg) = new_block_group("test-gene");
@@ -2261,7 +2274,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             ],
         );
 
-        // Annotation covers ONLY the first codon node (entry_gn == exit_gn).
+        // Annotation covers ONLY the first codon node.
         let annotation = accession_annotation(
             &conn,
             &parent_bg.id,
@@ -2294,7 +2307,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
-            vec!["L", "M"],
+            vec!["LE*", "ME*"],
             "boundary-first-base variant was dropped from a single-node annotation"
         );
     }
@@ -2625,7 +2638,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// A SNP at the *first* base of the annotated CDS should surface the variant
     /// residue (CTG → L) alongside the wild-type (ATG → M).
     ///
-    /// `extract_annotation` starts the walk from every base immediately downstream
+    /// `extract_from_annotation_start` starts the walk from every base immediately downstream
     /// of the base immediately upstream of the annotation's first base, so both
     /// alleles of a boundary SNP are captured.
     #[test]
@@ -2693,13 +2706,6 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
     /// A SNP at the *last* base of the annotated CDS should surface the variant
     /// residue (TGG → W) alongside the wild-type stop (TGA → *).
-    ///
-    /// Ignored: same root cause as the first-base case — a variant allele
-    /// parallel to the exit anchor falls outside `[entry..exit]` and is dropped,
-    /// so the protein comes out wild-type only. Re-enable once the extraction
-    /// captures alleles at the entry/exit coordinate rather than the specific
-    /// anchor node.
-    #[ignore = "known limitation: boundary-base variant parallel to the exit anchor is dropped by extract_annotation"]
     #[test]
     fn boundary_last_base_mutation_in_child_is_captured() {
         let (conn, parent_bg) = new_block_group("test-gene");
@@ -2760,146 +2766,6 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             protein_full_paths(&conn, &protein.id),
             vec!["ME*", "MEW"],
             "last-base variant was dropped from the extracted subgraph",
-        );
-    }
-
-    /// SPEC (ignored): a deletion at the 5′ boundary should make the gene start
-    /// *later* — never reach upstream to backfill — and the variant branch is
-    /// translated in the resulting shifted frame all the way to the annotation's
-    /// defined end, passing *through* any premature stop (with a frameshift
-    /// warning) rather than truncating at it.
-    ///
-    ///   wt CDS  "ATGAAATAA"   → ATG AAA TAA            → "MK*"
-    ///   child deletes the first base, leaving "TGAAATAA" read in frame 0:
-    ///           TGA(*) AAT(N) [AA dropped]             → "*N"
-    ///
-    /// The frameshift warning is part of the spec but cannot be asserted until
-    /// translation surfaces one; for now we only assert the protein paths.
-    #[ignore = "spec: 5′ boundary deletion (start gene later, frameshift through stop to defined end) not yet implemented"]
-    #[test]
-    fn boundary_5prime_deletion_in_child_starts_gene_later() {
-        let (conn, parent_bg) = new_block_group("test-gene");
-
-        let (first, _) = build_node(&conn, "A", "first"); // 5′ base
-        let (rest, rest_len) = build_node(&conn, "TGAAATAA", "rest"); // ATG AAA TAA remainder
-
-        // Parent: START → A → TGAAATAA → END  (ATG AAA TAA = M K *).
-        let start_first = build_edge(&conn, PATH_START_NODE_ID, 0, first, 0);
-        let first_rest = build_edge(&conn, first, 1, rest, 0);
-        let rest_end = build_edge(&conn, rest, rest_len, PATH_END_NODE_ID, 0);
-        BlockGroupEdge::bulk_create(
-            &conn,
-            &[
-                build_block_group_edge(parent_bg.id, start_first, 0),
-                build_block_group_edge(parent_bg.id, first_rest, 0),
-                build_block_group_edge(parent_bg.id, rest_end, 0),
-            ],
-        );
-
-        let annotation = accession_annotation(
-            &conn,
-            &parent_bg.id,
-            "test-gene",
-            &[(first, 1), (rest, rest_len)],
-            Strand::Forward,
-        );
-
-        // Child: the 5′ base is deleted, reference path kept alongside.
-        //   START → A → rest → END   (ci 0, reference)
-        //   START → rest → END       (ci 1, deletion skips the first base)
-        let child_bg = create_bg(&conn, "test", "child", "test-gene");
-        SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
-        let start_rest = build_edge(&conn, PATH_START_NODE_ID, 0, rest, 0);
-        BlockGroupEdge::bulk_create(
-            &conn,
-            &[
-                build_block_group_edge(child_bg.id, start_first, 0),
-                build_block_group_edge(child_bg.id, first_rest, 0),
-                build_block_group_edge(child_bg.id, start_rest, 1),
-                build_block_group_edge(child_bg.id, rest_end, 0),
-            ],
-        );
-
-        let protein = translate_annotation(
-            &conn,
-            &annotation,
-            Some(&child_bg.id),
-            TranslationParams::new("test"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["*N", "MK*"],
-            "5′ deletion should start the gene later and translate the shifted frame to the defined end",
-        );
-    }
-
-    /// SPEC (ignored): an insertion at the 5′ boundary should *grow* the
-    /// annotation to cover the inserted bases; the variant branch is translated
-    /// in the resulting shifted frame to the defined end. Here a 1 bp insertion
-    /// splits the stop apart (readthrough), which should also raise a frameshift
-    /// warning.
-    ///
-    ///   wt CDS  "ATGAAATAA"        → ATG AAA TAA        → "MK*"
-    ///   child inserts "G" before the start; grown span "GATGAAATAA" in frame 0:
-    ///           GAT(D) GAA(E) ATA(I) [A dropped]        → "DEI"
-    #[ignore = "spec: 5′ boundary insertion (grow annotation, frameshift to defined end) not yet implemented"]
-    #[test]
-    fn boundary_5prime_insertion_in_child_grows_annotation() {
-        let (conn, parent_bg) = new_block_group("test-gene");
-
-        let (ins, _) = build_node(&conn, "G", "ins"); // inserted base
-        let (gene, gene_len) = build_node(&conn, "ATGAAATAA", "gene"); // ATG AAA TAA
-
-        // Parent: START → ATGAAATAA → END  (M K *).
-        let start_gene = build_edge(&conn, PATH_START_NODE_ID, 0, gene, 0);
-        let gene_end = build_edge(&conn, gene, gene_len, PATH_END_NODE_ID, 0);
-        BlockGroupEdge::bulk_create(
-            &conn,
-            &[
-                build_block_group_edge(parent_bg.id, start_gene, 0),
-                build_block_group_edge(parent_bg.id, gene_end, 0),
-            ],
-        );
-
-        let annotation = accession_annotation(
-            &conn,
-            &parent_bg.id,
-            "test-gene",
-            &[(gene, gene_len)],
-            Strand::Forward,
-        );
-
-        // Child: "G" inserted before the gene, reference path kept alongside.
-        //   START → ATGAAATAA → END        (ci 0, reference)
-        //   START → G → ATGAAATAA → END     (ci 1, insertion)
-        let child_bg = create_bg(&conn, "test", "child", "test-gene");
-        SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
-        let start_ins = build_edge(&conn, PATH_START_NODE_ID, 0, ins, 0);
-        let ins_gene = build_edge(&conn, ins, 1, gene, 0);
-        BlockGroupEdge::bulk_create(
-            &conn,
-            &[
-                build_block_group_edge(child_bg.id, start_gene, 0),
-                build_block_group_edge(child_bg.id, gene_end, 0),
-                build_block_group_edge(child_bg.id, start_ins, 1),
-                build_block_group_edge(child_bg.id, ins_gene, 1),
-            ],
-        );
-
-        let protein = translate_annotation(
-            &conn,
-            &annotation,
-            Some(&child_bg.id),
-            TranslationParams::new("test"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["DEI", "MK*"],
-            "5′ insertion should grow the annotation and translate the shifted frame to the defined end",
         );
     }
 }
