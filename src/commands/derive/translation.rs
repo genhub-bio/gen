@@ -7,9 +7,12 @@ use crate::commands::{
 
 /// Translate a sequence graph or annotation into a protein sequence graph.
 ///
-/// Pass --region with just a name to translate an entire sequence graph, or
-/// include coordinates (e.g. mreB:10-200) to translate a subrange. The protein
-/// sequence graph is created in the same sample as the DNA sequence graph.
+/// Pass --region with just a name to translate an entire sequence graph or
+/// annotation from its own start, or include a start coordinate (e.g.
+/// mreB:10) to translate from that point instead. Translation always reads
+/// forward to its own first in-frame stop codon; an end coordinate, if given,
+/// is ignored. The protein sequence graph is created in the same sample as the
+/// DNA sequence graph.
 #[derive(Debug, Args, Clone)]
 pub struct Command {
     /// Collection (defaults to the current default collection)
@@ -19,7 +22,9 @@ pub struct Command {
     #[arg(short, long)]
     sample: String,
     /// Region to translate: a sequence graph name, annotation name, or name with
-    /// coordinates (e.g. mreB, mreB:10-200, chr1:1000-2000)
+    /// a start coordinate (e.g. mreB, mreB:10, chr1:1000). Translation reads
+    /// forward from there to its own first in-frame stop codon; any end
+    /// coordinate is ignored.
     #[arg(short, long)]
     region: String,
     /// Name for the protein sequence graph (defaults to "{region} (protein)")

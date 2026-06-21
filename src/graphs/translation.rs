@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_annotations::projection::{self, AnnotationSegment};
+use gen_annotations::projection;
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal,
-    range::Range,
 };
 use gen_graph::{GraphNode, all_intermediate_edges};
 use gen_models::{
@@ -261,7 +260,7 @@ struct WalkCtx<'a> {
 
 /// A site that needs an edge into the protein graph's `*` stop node, recorded
 /// during the codon walk and resolved once every site has been visited and the
-/// stop node's final identity hash is known (see its use in `translate_core`).
+/// stop node's final identity hash is known (see its use in `translate_from`).
 struct PendingStopEdge {
     predecessor_id: HashId,
     predecessor_coord: i64,
@@ -507,13 +506,17 @@ fn virtual_id(gn: GraphNode) -> HashId {
     ))
 }
 
-/// The DNA sub-DAG to translate, plus its entry/exit frontiers.
+/// The DNA sub-DAG to translate, plus where reading frames are seeded
+/// (`entry_nodes`) and where the walk connects straight to `PATH_END`
+/// (`exit_nodes`).
 ///
 /// `graph` keys are "virtual IDs" — one per GraphNode slice. `node_ranges` maps a
 /// virtual ID to `(real_node_id, seq_start, seq_end)`; `None` bounds mean "use the
-/// full node sequence". `entry_nodes`/`exit_nodes` are the source/sink frontiers
-/// (every node directly after the graph start / before the graph end), so parallel
-/// branches at the first and last columns are all represented.
+/// full node sequence". `extract_full_graph` populates `entry_nodes` with every
+/// node directly after the graph start (so every parallel branch at the first
+/// column gets seeded), and `exit_nodes` with every node directly before the
+/// graph end; `extract_from_entry` always sets `entry_nodes` to a single node,
+/// with `exit_nodes` derived the same way from there to the graph end.
 struct TranslationSubgraph {
     graph: DiGraphMap<HashId, ()>,
     node_ranges: HashMap<HashId, (HashId, Option<i64>, Option<i64>)>,
@@ -542,7 +545,7 @@ pub fn translate_block_group(
         .name
         .map(str::to_string)
         .unwrap_or_else(|| format!("{} (protein)", bg.name));
-    translate_core(
+    translate_from(
         conn,
         subgraph,
         strand,
@@ -627,25 +630,20 @@ fn extract_full_graph(
     })
 }
 
-/// Extract the sub-DAG from an annotation's entry coordinate to the sequence
-/// graph's end, capturing every variant branch along the way. No database
-/// writes.
+/// Extract the sub-DAG from a single entry coordinate to the sequence graph's
+/// end, capturing every variant branch along the way. No database writes.
 ///
-/// There is no separate exit anchor: `codon_walk` ends each branch at its own
-/// first in-frame stop codon, so the annotation's declared end coordinate is
-/// never consulted, and a boundary allele near the natural stop is captured on
-/// the same footing as the reference (see
-/// `boundary_last_base_mutation_in_child_is_captured`).
-fn extract_from_annotation_start(
+/// The entry coordinate names exactly one node, the sole starting point for the
+/// walk. `codon_walk` ends each branch at its own first in-frame stop codon, so
+/// nothing past the entry point is ever consulted.
+fn extract_from_entry(
     conn: &GraphConnection,
     bg_id: &HashId,
-    segments: &[AnnotationSegment],
+    entry_node_id: HashId,
+    entry_coord: i64,
 ) -> Result<TranslationSubgraph, TranslationError> {
     let gen_graph = BlockGroup::get_graph(conn, bg_id)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
-
-    let entry_node_id = segments[0].node_id;
-    let entry_coord = segments[0].range.start;
 
     let entry_gn = gen_graph
         .nodes()
@@ -656,7 +654,7 @@ fn extract_from_annotation_start(
         })
         .ok_or_else(|| {
             TranslationError::NodeError(format!(
-                "annotation entry coordinate {entry_coord} not found in graph"
+                "entry coordinate {entry_coord} not found in graph"
             ))
         })?;
     let end_gn = gen_graph
@@ -664,84 +662,52 @@ fn extract_from_annotation_start(
         .find(|gn| gn.node_id == PATH_END_NODE_ID)
         .ok_or_else(|| TranslationError::BlockGroupError("graph has no end node".into()))?;
 
-    // 5' boundary ambiguity: when the annotation begins at the very first base of
-    // its entry node, a variant allele of that base lives in a parallel node that a
-    // single entry anchor would miss. Treat the start as "any base immediately
-    // downstream of the base immediately upstream of the annotation's first base":
-    // every successor of every predecessor of the entry node. When the annotation
-    // starts mid-node there is no parallel allele and the entry node stands alone.
-    let entry_frontier: Vec<GraphNode> = if entry_coord > entry_gn.sequence_start {
-        vec![entry_gn]
-    } else {
-        let mut frontier: HashSet<GraphNode> = HashSet::new();
-        for predecessor in gen_graph.neighbors_directed(entry_gn, Direction::Incoming) {
-            for successor in gen_graph.neighbors_directed(predecessor, Direction::Outgoing) {
-                if !is_terminal(successor.node_id) {
-                    frontier.insert(successor);
-                }
-            }
-        }
-        frontier.insert(entry_gn);
-        frontier.into_iter().collect()
-    };
-
     let mut graph: DiGraphMap<HashId, ()> = DiGraphMap::new();
     let mut node_ranges: HashMap<HashId, (HashId, Option<i64>, Option<i64>)> = HashMap::new();
     let mut edge_chromosome_indices: HashMap<(HashId, HashId), Vec<i64>> = HashMap::new();
     let mut exit_nodes: HashSet<HashId> = HashSet::new();
 
-    // Union the sub-DAGs from each frontier entry to the graph's end. A boundary
-    // allele and the reference allele rejoin downstream, so their shared edges are
-    // deduplicated both as graph edges (DiGraphMap collapses them) and as
-    // chromosome indices. A candidate with a direct edge to the end (no internal
-    // sequence beyond it) is its own standalone entry-and-exit component.
-    for &entry in &entry_frontier {
-        let intermediate_edges = all_intermediate_edges(&gen_graph, entry, end_gn);
-        if intermediate_edges.is_empty() {
-            let vid = virtual_id(entry);
-            graph.add_node(vid);
-            exit_nodes.insert(vid);
+    let entry_vid = virtual_id(entry_gn);
+    let intermediate_edges = all_intermediate_edges(&gen_graph, entry_gn, end_gn);
+    if intermediate_edges.is_empty() {
+        // A direct edge to the end (no internal sequence beyond the entry, e.g. a
+        // single-node annotation) makes the entry its own standalone exit too.
+        exit_nodes.insert(entry_vid);
+    }
+    for edge_ref in &intermediate_edges {
+        let src = edge_ref.source();
+        let tgt = edge_ref.target();
+        if is_terminal(tgt.node_id) && !is_terminal(src.node_id) {
+            exit_nodes.insert(virtual_id(src));
+        }
+        if is_terminal(src.node_id) || is_terminal(tgt.node_id) {
             continue;
         }
-        for edge_ref in &intermediate_edges {
-            let src = edge_ref.source();
-            let tgt = edge_ref.target();
-            if is_terminal(tgt.node_id) && !is_terminal(src.node_id) {
-                exit_nodes.insert(virtual_id(src));
-            }
-            if is_terminal(src.node_id) || is_terminal(tgt.node_id) {
-                continue;
-            }
-            let src_vid = virtual_id(src);
-            let tgt_vid = virtual_id(tgt);
-            graph.add_node(src_vid);
-            graph.add_node(tgt_vid);
-            graph.add_edge(src_vid, tgt_vid, ());
-            let indices = edge_chromosome_indices
-                .entry((src_vid, tgt_vid))
-                .or_default();
-            for graph_edge in edge_ref.weight() {
-                if !indices.contains(&graph_edge.chromosome_index) {
-                    indices.push(graph_edge.chromosome_index);
-                }
+        let src_vid = virtual_id(src);
+        let tgt_vid = virtual_id(tgt);
+        graph.add_node(src_vid);
+        graph.add_node(tgt_vid);
+        graph.add_edge(src_vid, tgt_vid, ());
+        let indices = edge_chromosome_indices
+            .entry((src_vid, tgt_vid))
+            .or_default();
+        for graph_edge in edge_ref.weight() {
+            if !indices.contains(&graph_edge.chromosome_index) {
+                indices.push(graph_edge.chromosome_index);
             }
         }
     }
 
-    // A frontier candidate or exit reached only via an edge straight to a terminal
-    // (e.g. a single-node annotation: entry → END) has no non-terminal edge of its
-    // own and so is skipped by the loop above; add it directly.
-    for &entry in &entry_frontier {
-        graph.add_node(virtual_id(entry));
-    }
+    // The entry node itself, or an exit reached only via a direct edge to a
+    // terminal, has no non-terminal edge of its own and so is skipped by the
+    // loop above; add it directly.
+    graph.add_node(entry_vid);
     for &vid in &exit_nodes {
         graph.add_node(vid);
     }
 
-    // DNA range for every node in the subgraph; only the entry node is trimmed, to
-    // the annotation's start coordinate. Frontier alleles other than the entry node
-    // begin at their own start, since the whole allele lies downstream of the
-    // shared base.
+    // DNA range for every node in the subgraph; only the entry node is trimmed,
+    // to the entry coordinate.
     for gn in gen_graph.nodes() {
         let vid = virtual_id(gn);
         if !graph.contains_node(vid) {
@@ -755,23 +721,22 @@ fn extract_from_annotation_start(
         node_ranges.insert(vid, (gn.node_id, Some(seq_start), Some(gn.sequence_end)));
     }
 
-    let entry_nodes: Vec<HashId> = entry_frontier
-        .iter()
-        .map(|gn| virtual_id(*gn))
-        .filter(|vid| graph.contains_node(*vid))
-        .collect();
-
     Ok(TranslationSubgraph {
         graph,
         node_ranges,
         edge_chromosome_indices,
-        entry_nodes,
+        entry_nodes: vec![entry_vid],
         exit_nodes: exit_nodes.into_iter().collect(),
     })
 }
 
-/// Translate a gene annotation. The variant branches inside the annotated region
-/// come from the sequence graph's GenGraph, so a `block_group_id` is required.
+/// Translate a gene annotation: take the entry coordinate and strand from the
+/// annotation's first segment (the transcription-start end of its accession
+/// path, see `projection::annotation_segments`) and translate from there, the
+/// same way `translate_from_path` does for a raw path coordinate. Translation
+/// is not bounded by or spliced across the rest of the annotation's segments:
+/// it reads the literal underlying DNA graph from the entry point to its own
+/// first in-frame stop codon, the same as every other translation entry point.
 pub fn translate_annotation(
     conn: &GraphConnection,
     annotation: &Annotation,
@@ -803,12 +768,12 @@ pub fn translate_annotation(
         }
     };
 
-    let subgraph = extract_from_annotation_start(conn, bg_id, &segments)?;
+    let subgraph = extract_from_entry(conn, bg_id, segments[0].node_id, segments[0].range.start)?;
     let bg_name = params
         .name
         .map(str::to_string)
         .unwrap_or_else(|| format!("{} (protein)", annotation.name));
-    translate_core(
+    translate_from(
         conn,
         subgraph,
         strand,
@@ -819,16 +784,14 @@ pub fn translate_annotation(
     )
 }
 
-/// Translate a coordinate range on a sequence graph's current path into a
-/// protein sequence graph, in memory. The path's interval tree maps the path-space
-/// `start`/`end` coordinates to node-level entry/exit points; the same
-/// `extract_from_annotation_start` + `translate_core` pipeline used by `translate_annotation`
-/// is then applied to the resulting subgraph.
-pub fn translate_path_range(
+/// Translate from a single path-space coordinate on a sequence graph's current
+/// path into a protein sequence graph, in memory. The coordinate is resolved to
+/// a node and node-relative offset via the path's interval tree, then handed to
+/// the same entry-point pipeline `translate_annotation` uses.
+pub fn translate_from_path(
     conn: &GraphConnection,
     bg_id: &HashId,
-    start: i64,
-    end: i64,
+    coordinate: i64,
     params: TranslationParams<'_>,
 ) -> Result<BlockGroup, TranslationError> {
     let bg = BlockGroup::get_by_id(conn, bg_id)
@@ -840,63 +803,22 @@ pub fn translate_path_range(
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let entry_block: NodeIntervalBlock = tree
-        .query_point(start)
+        .query_point(coordinate)
         .map(|e| e.value)
         .next()
         .ok_or_else(|| {
-            TranslationError::NodeError(format!("no node found at path coordinate {start}"))
+            TranslationError::NodeError(format!("no node found at path coordinate {coordinate}"))
         })?;
-    // Query at `end - 1` so an exclusive end coordinate lands inside the last node.
-    let exit_block: NodeIntervalBlock = tree
-        .query_point(end - 1)
-        .map(|e| e.value)
-        .next()
-        .ok_or_else(|| {
-            TranslationError::NodeError(format!("no node found at path coordinate {end}"))
-        })?;
-
-    let entry_seq = entry_block.sequence_start + (start - entry_block.start);
-    let exit_seq = exit_block.sequence_start + (end - exit_block.start);
-
+    let entry_seq = entry_block.sequence_start + (coordinate - entry_block.start);
     let strand = params.strand.unwrap_or(entry_block.strand);
 
-    let segments = if entry_block.node_id == exit_block.node_id {
-        vec![AnnotationSegment {
-            node_id: entry_block.node_id,
-            range: Range {
-                start: entry_seq,
-                end: exit_seq,
-            },
-            strand,
-        }]
-    } else {
-        vec![
-            AnnotationSegment {
-                node_id: entry_block.node_id,
-                range: Range {
-                    start: entry_seq,
-                    end: entry_block.sequence_end,
-                },
-                strand,
-            },
-            AnnotationSegment {
-                node_id: exit_block.node_id,
-                range: Range {
-                    start: exit_block.sequence_start,
-                    end: exit_seq,
-                },
-                strand,
-            },
-        ]
-    };
-
-    let subgraph = extract_from_annotation_start(conn, bg_id, &segments)?;
+    let subgraph = extract_from_entry(conn, bg_id, entry_block.node_id, entry_seq)?;
     let bg_name = params
         .name
         .map(str::to_string)
         .unwrap_or_else(|| format!("{} (protein)", bg.name));
-    let label = HashId::convert_str(&format!("translate-range:{bg_id}:{start}-{end}"));
-    translate_core(
+    let label = HashId::convert_str(&format!("translate-from:{bg_id}:{coordinate}"));
+    translate_from(
         conn,
         subgraph,
         strand,
@@ -979,14 +901,16 @@ where
     Ok(protein_bg)
 }
 
-/// Shared translation core: fetch sequences, orient by strand, propagate reading
+/// Shared translation engine every entry point (`translate_annotation`,
+/// `translate_from_path`, `translate_block_group`) funnels into once it has built its own
+/// `TranslationSubgraph`: fetch sequences, orient by strand, propagate reading
 /// frames, then build and persist the protein sequence graph.
 ///
 /// `label_hash` seeds the identity hash of nodes with no protein predecessor.
 /// Each node's identity hash also folds in its predecessors' identity hashes, so
 /// the protein graph is a Merkle DAG (not a tree: a node can have more than one
 /// predecessor, e.g. where a junction or two variant paths reconverge).
-fn translate_core(
+fn translate_from(
     conn: &GraphConnection,
     subgraph: TranslationSubgraph,
     strand: Strand,
@@ -1408,8 +1332,7 @@ fn translate_core(
     }
 
     // The `*` stop node's identity hash depends on every site that reaches it
-    // across the whole walk, so it is only created now that `stop_edges` is
-    // complete, instead of up front like `stop_node` used to be.
+    // across the whole walk, so it is only created once `stop_edges` is complete.
     if !stop_edges.is_empty() {
         let mut pred_hashes: Vec<String> = stop_edges
             .iter()
@@ -1481,7 +1404,7 @@ mod tests {
 
     use super::{
         CodonTable, TranslationError, TranslationParams, translate_annotation,
-        translate_block_group,
+        translate_block_group, translate_from_path,
     };
     use crate::test_helpers::{create_bg, get_connection};
 
@@ -1738,6 +1661,54 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             Strand::Forward,
         );
         (conn, annotation, bg.id)
+    }
+
+    /// Reverse-strand counterpart of `setup_variant_gene`. `prefix`/`wt_mid`/
+    /// `alt_mid`/`suffix` are given as the biological CDS pieces, read 5' to 3';
+    /// each becomes a node storing the reverse complement of its own piece, laid
+    /// out in reverse graph order (the suffix piece nearest PATH_START, the
+    /// prefix piece nearest PATH_END), so that translating with strand = Reverse
+    /// reconstructs the same CDS, read left to right. The current path follows
+    /// the wild-type branch (ci 0). Returns the suffix node's id and length,
+    /// which is also the graph's literal entry point (path coordinate 0).
+    fn setup_reverse_variant_gene(
+        prefix: &str,
+        wt_mid: &str,
+        alt_mid: &str,
+        suffix: &str,
+    ) -> (GraphConnection, HashId, HashId, i64) {
+        let (conn, bg) = new_block_group("test-gene");
+        let (suf, suf_len) = build_node(&conn, &revcomp(suffix), "suf");
+        let (wt, wt_len) = build_node(&conn, &revcomp(wt_mid), "wt");
+        let (alt, alt_len) = build_node(&conn, &revcomp(alt_mid), "alt");
+        let (pre, pre_len) = build_node(&conn, &revcomp(prefix), "pre");
+
+        let e_s_suf = build_edge(&conn, PATH_START_NODE_ID, 0, suf, 0);
+        let e_suf_wt = build_edge(&conn, suf, suf_len, wt, 0);
+        let e_wt_pre = build_edge(&conn, wt, wt_len, pre, 0);
+        let e_pre_end = build_edge(&conn, pre, pre_len, PATH_END_NODE_ID, 0);
+        let e_suf_alt = build_edge(&conn, suf, suf_len, alt, 0);
+        let e_alt_pre = build_edge(&conn, alt, alt_len, pre, 0);
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[
+                build_block_group_edge(bg.id, e_s_suf, 0),
+                build_block_group_edge(bg.id, e_suf_wt, 0),
+                build_block_group_edge(bg.id, e_wt_pre, 0),
+                build_block_group_edge(bg.id, e_pre_end, 0),
+                build_block_group_edge(bg.id, e_suf_alt, 1),
+                build_block_group_edge(bg.id, e_alt_pre, 1),
+            ],
+        );
+        Path::create(
+            &conn,
+            "test-gene",
+            &bg.id,
+            &[e_s_suf, e_suf_wt, e_wt_pre, e_pre_end],
+        )
+        .unwrap();
+
+        (conn, bg.id, suf, suf_len)
     }
 
     /// Two fully-connected columns of two nodes each:
@@ -2249,14 +2220,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["M*"]);
     }
 
-    /// A single-node annotation (the whole annotated span is one node) with a
-    /// boundary-first-base variant must still surface the alt allele, not just
-    /// the reference. The annotation only covers the first codon, but
-    /// translation is no longer bounded by the annotation's declared end: it
-    /// continues into the downstream "suffix" node to its natural stop on both
-    /// alleles.
+    /// A single-node annotation (the whole annotated span is one node) translates
+    /// only the annotation's own node (`wt`); a sibling node (`alt`) that starts
+    /// at the same graph position but belongs to a different sample's path is
+    /// not part of this walk. Translation continues past the annotation's
+    /// declared end into the downstream "suffix" node to its natural stop.
     #[test]
-    fn single_node_boundary_first_base_variant_is_captured() {
+    fn single_node_translates_only_its_own_entry_node() {
         let (conn, parent_bg) = new_block_group("test-gene");
         let (wt, wt_len) = build_node(&conn, "ATG", "wt-first-codon");
         let (alt, alt_len) = build_node(&conn, "CTG", "alt-first-codon");
@@ -2307,8 +2277,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
-            vec!["LE*", "ME*"],
-            "boundary-first-base variant was dropped from a single-node annotation"
+            vec!["ME*"],
+            "translation should only follow the annotation's own entry node"
         );
     }
 
@@ -2481,14 +2451,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
     //
     // `translate_annotation` operates per block group: the annotation pins the
-    // entry/exit nodes, and the sequence between them is read from the block
-    // group's own graph. These tests model a parent and a child sample as two
-    // block groups that share the CDS nodes, then translate the same annotation
+    // entry node, and the sequence forward of it is read from the block group's
+    // own graph. These tests model a parent and a child sample as two block
+    // groups that share the CDS nodes, then translate the same annotation
     // against each to check how an edit in the child propagates to the protein.
 
     /// A deletion *upstream* of the annotated CDS in a child sample must leave the
-    /// translated protein unchanged: edits outside the annotation's entry/exit
-    /// span are invisible to translation.
+    /// translated protein unchanged: edits before the annotation's entry point
+    /// are invisible to translation.
     #[test]
     fn upstream_deletion_in_child_keeps_translation_identical() {
         let (conn, parent_bg) = new_block_group("test-gene");
@@ -2635,14 +2605,12 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
     }
 
-    /// A SNP at the *first* base of the annotated CDS should surface the variant
-    /// residue (CTG → L) alongside the wild-type (ATG → M).
-    ///
-    /// `extract_from_annotation_start` starts the walk from every base immediately downstream
-    /// of the base immediately upstream of the annotation's first base, so both
-    /// alleles of a boundary SNP are captured.
+    /// A SNP at the *first* base of the annotated CDS translates only the
+    /// annotation's own entry node (`first_wt`) and does not surface the
+    /// variant residue (CTG → L) carried by the alternate node (`first_alt`)
+    /// at that position.
     #[test]
-    fn boundary_first_base_mutation_in_child_is_captured() {
+    fn entry_boundary_snp_does_not_surface_alternate_allele() {
         let (conn, parent_bg) = new_block_group("test-gene");
 
         // First CDS base is its own node so a SNP there forms a bubble at entry.
@@ -2699,8 +2667,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
-            vec!["LE*", "ME*"],
-            "first-base variant was dropped from the extracted subgraph",
+            vec!["ME*"],
+            "translation should only follow the annotation's own entry node"
         );
     }
 
@@ -2766,6 +2734,120 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             protein_full_paths(&conn, &protein.id),
             vec!["ME*", "MEW"],
             "last-base variant was dropped from the extracted subgraph",
+        );
+    }
+
+    /// translate_from_path translates only the literal node at the given
+    /// coordinate, even at coordinate 0: a parallel branch from PATH_START (D
+    /// below) that does not pass through the entry node is not part of the
+    /// walk. translate_block_group, which starts from every direct successor
+    /// of PATH_START, produces more paths here — the two are intentionally
+    /// different operations.
+    ///
+    ///   START -> A (ci0, current path)         A = "TAA"      (stop alone)
+    ///   START -> D (ci1)                        D = "G"        (1 byte)
+    ///   D -> P (ci1)                             P = "C"        (1 byte)
+    ///   P -> A (ci1)                             (rejoins entry node A)
+    ///   P -> Z (ci2)                             Z = "TTTTAA"  (F* in frame 0)
+    ///   A -> END (ci0), Z -> END (ci2)
+    #[test]
+    fn translate_from_path_zero_follows_only_the_entry_node() {
+        let (conn, bg) = new_block_group("probe");
+        let (a, a_len) = build_node(&conn, "TAA", "a");
+        let (d, d_len) = build_node(&conn, "G", "d");
+        let (p, p_len) = build_node(&conn, "C", "p");
+        let (z, z_len) = build_node(&conn, "TTTTAA", "z");
+
+        let e_start_a = build_edge(&conn, PATH_START_NODE_ID, 0, a, 0);
+        let e_start_d = build_edge(&conn, PATH_START_NODE_ID, 0, d, 0);
+        let e_d_p = build_edge(&conn, d, d_len, p, 0);
+        let e_p_a = build_edge(&conn, p, p_len, a, 0);
+        let e_p_z = build_edge(&conn, p, p_len, z, 0);
+        let e_a_end = build_edge(&conn, a, a_len, PATH_END_NODE_ID, 0);
+        let e_z_end = build_edge(&conn, z, z_len, PATH_END_NODE_ID, 0);
+
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[
+                build_block_group_edge(bg.id, e_start_a, 0),
+                build_block_group_edge(bg.id, e_start_d, 1),
+                build_block_group_edge(bg.id, e_d_p, 1),
+                build_block_group_edge(bg.id, e_p_a, 1),
+                build_block_group_edge(bg.id, e_p_z, 2),
+                build_block_group_edge(bg.id, e_a_end, 0),
+                build_block_group_edge(bg.id, e_z_end, 2),
+            ],
+        );
+        Path::create(&conn, "probe", &bg.id, &[e_start_a, e_a_end]).unwrap();
+
+        let from_path =
+            translate_from_path(&conn, &bg.id, 0, TranslationParams::new("test")).unwrap();
+
+        assert_eq!(
+            protein_full_paths(&conn, &from_path.id),
+            vec!["*"],
+            "translate_from_path(0) should only translate the literal entry node (A), \
+             not the unrelated D/P/Z branch reachable from PATH_START"
+        );
+    }
+
+    // Extra flanking codons so codon-order bugs can't hide behind a coincidental match.
+    const REV_PREFIX: &str = "ATGAAACCC"; // M K P
+    const REV_SUFFIX: &str = "GGGTTTTGA"; // G F *
+
+    /// Whole-block-group translation on the reverse strand reads every node's
+    /// reverse complement and walks the graph back to front, reconstructing the
+    /// CDS and both branches of the variant bubble at the middle codon.
+    #[test]
+    fn reverse_strand_block_group_translation_handles_variant() {
+        let (conn, bg_id, _, _) = setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
+        let params = TranslationParams::new("test").strand(Strand::Reverse);
+        let protein = translate_block_group(&conn, &bg_id, params).unwrap();
+
+        assert_eq!(
+            protein_full_paths(&conn, &protein.id),
+            vec!["MKPEGF*", "MKPQGF*"]
+        );
+    }
+
+    /// Annotation translation on the reverse strand reads every node's reverse
+    /// complement and walks the graph back to front from the entry segment,
+    /// reconstructing the CDS and both branches of the variant bubble. Strand is
+    /// inferred from the accession's own segment, not passed explicitly.
+    #[test]
+    fn reverse_strand_annotation_translation_handles_variant() {
+        let (conn, bg_id, suf, suf_len) =
+            setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
+        let annotation = accession_annotation(
+            &conn,
+            &bg_id,
+            "rev-gene",
+            &[(suf, suf_len)],
+            Strand::Reverse,
+        );
+
+        let params = TranslationParams::new("test");
+        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+
+        assert_eq!(
+            protein_full_paths(&conn, &protein.id),
+            vec!["MKPEGF*", "MKPQGF*"]
+        );
+    }
+
+    /// Path-coordinate translation on the reverse strand reads every node's
+    /// reverse complement and walks the graph back to front from the entry
+    /// coordinate, reconstructing the CDS and both branches of the variant
+    /// bubble.
+    #[test]
+    fn reverse_strand_path_translation_handles_variant() {
+        let (conn, bg_id, _, _) = setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
+        let params = TranslationParams::new("test").strand(Strand::Reverse);
+        let protein = translate_from_path(&conn, &bg_id, 0, params).unwrap();
+
+        assert_eq!(
+            protein_full_paths(&conn, &protein.id),
+            vec!["MKPEGF*", "MKPQGF*"]
         );
     }
 }

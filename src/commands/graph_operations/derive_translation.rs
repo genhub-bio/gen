@@ -6,7 +6,7 @@ use crate::{
     commands::get_default_collection,
     graphs::translation::{
         CodonTable, TranslationOperationError, TranslationParams, translate_annotation,
-        translate_path_range, with_translation_operation,
+        translate_from_path, with_translation_operation,
     },
 };
 
@@ -67,8 +67,10 @@ pub fn derive_translation_operation(
     let bg_id = resolved.block_group.id;
 
     // When the region names an annotation without coordinates, use translate_annotation
-    // so that multi-exon structure is preserved via accession edges. When coordinates
-    // are present or the region is a block group / path, use path-space coordinate extraction.
+    // to take its entry point and strand from the annotation itself. When coordinates are
+    // present or the region is a block group / path, translate from the resolved start
+    // coordinate instead. Either way translation reads forward to its own first in-frame
+    // stop codon; neither path is bounded by a declared end coordinate.
     let protein_bg = if resolved.annotation.is_some()
         && resolved.start == resolved.anchor_start
         && resolved.end == resolved.anchor_end
@@ -84,7 +86,7 @@ pub fn derive_translation_operation(
         .map_err(op_err)?
     } else {
         with_translation_operation(db_context, region_str, || {
-            translate_path_range(graph_conn, &bg_id, resolved.start, resolved.end, tr_params)
+            translate_from_path(graph_conn, &bg_id, resolved.start, tr_params)
         })
         .map_err(op_err)?
     };

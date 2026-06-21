@@ -22,7 +22,7 @@ use r#gen::{
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
         translation::{
             CodonTable, TranslationParams, translate_annotation, translate_block_group,
-            translate_path_range, with_translation_operation,
+            translate_from_path, with_translation_operation,
         },
     },
     views::{
@@ -42,7 +42,7 @@ use gen_annotations::{
     projection::annotation_segments,
     translate::{bed::translate_bed, gff::translate_gff},
 };
-use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node, range::Range};
+use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     annotations::Annotation,
@@ -2025,10 +2025,6 @@ struct SequenceGraph {
 unsafe impl Send for SequenceGraph {}
 unsafe impl Sync for SequenceGraph {}
 
-fn clamped_range(start: Option<i64>, end: Option<i64>, path_length: i64) -> Result<Range, Error> {
-    Range::clamped(start, end, path_length).map_err(Error::Other)
-}
-
 #[extendr]
 impl SequenceGraph {
     fn id(&self) -> String {
@@ -2340,10 +2336,12 @@ impl SequenceGraph {
     ///   path name or annotation name scoped to this sequence graph (path names
     ///   take priority); or a `gen_annotation` record from `list_annotations()`
     ///   (matched by database id, so unambiguous).
-    /// @param start 0-based start coordinate in path space. Defaults to 0 when
-    ///   NULL. Must be >= 0 and <= `end`. Default: NULL.
-    /// @param end Exclusive end coordinate in path space. Defaults to path
-    ///   length when NULL. Must be <= path length. Default: NULL.
+    /// @param start 0-based path-space coordinate to translate from. Defaults to
+    ///   0 (the start of the path) when NULL, and is ignored when `region`
+    ///   names an annotation (the annotation's own entry point is used
+    ///   instead). Translation reads forward from this coordinate to its own
+    ///   first in-frame stop codon; it is not bounded by any end coordinate.
+    ///   Default: NULL.
     /// @param output_collection Collection for the protein sequence graph.
     ///   Defaults to this graph's collection.
     /// @param name Name for the protein sequence graph. Defaults to
@@ -2358,7 +2356,6 @@ impl SequenceGraph {
         &self,
         region: Robj,
         start: Nullable<i64>,
-        end: Nullable<i64>,
         output_collection: Nullable<String>,
         name: Nullable<String>,
         strand: Nullable<String>,
@@ -2366,7 +2363,6 @@ impl SequenceGraph {
         codon_table: i32,
     ) -> std::result::Result<SequenceGraph, Error> {
         let start = nullable_i64_to_option(start);
-        let end = nullable_i64_to_option(end);
 
         let conn = self.context.graph().conn();
 
@@ -2403,19 +2399,9 @@ impl SequenceGraph {
         let bg_id = self.id;
         let protein_bg = if region.is_null() {
             let label = self.name.clone();
-            if start.is_some() || end.is_some() {
-                let path = BlockGroup::get_current_path(conn, &bg_id)
-                    .map_err(|e| Error::Other(e.to_string()))?;
-                let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
-                let resolved_range = clamped_range(start, end, len)?;
+            if let Some(start) = start {
                 run_translation_operation(&self.context, &label, || {
-                    translate_path_range(
-                        conn,
-                        &bg_id,
-                        resolved_range.start,
-                        resolved_range.end,
-                        tr_params,
-                    )
+                    translate_from_path(conn, &bg_id, start, tr_params)
                 })?
             } else {
                 run_translation_operation(&self.context, &label, || {
@@ -2427,17 +2413,10 @@ impl SequenceGraph {
             let path = BlockGroup::get_path_by_name(conn, &bg_id, &name)
                 .map_err(|e| Error::Other(e.to_string()))?;
 
-            if let Some(path) = path {
-                let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
-                let resolved_range = clamped_range(start, end, len)?;
+            if path.is_some() {
+                let coordinate = start.unwrap_or(0);
                 run_translation_operation(&self.context, &name, || {
-                    translate_path_range(
-                        conn,
-                        &bg_id,
-                        resolved_range.start,
-                        resolved_range.end,
-                        tr_params,
-                    )
+                    translate_from_path(conn, &bg_id, coordinate, tr_params)
                 })?
             } else {
                 let annotation = Annotation::query_with_lineage(
@@ -2456,49 +2435,17 @@ impl SequenceGraph {
                     ))
                 })?;
 
-                if start.is_some() || end.is_some() {
-                    let path = BlockGroup::get_current_path(conn, &bg_id)
-                        .map_err(|e| Error::Other(e.to_string()))?;
-                    let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
-                    let resolved_range = clamped_range(start, end, len)?;
-                    run_translation_operation(&self.context, &name, || {
-                        translate_path_range(
-                            conn,
-                            &bg_id,
-                            resolved_range.start,
-                            resolved_range.end,
-                            tr_params,
-                        )
-                    })?
-                } else {
-                    run_translation_operation(&self.context, &name, || {
-                        translate_annotation(conn, &annotation, Some(&bg_id), tr_params)
-                    })?
-                }
+                run_translation_operation(&self.context, &name, || {
+                    translate_annotation(conn, &annotation, Some(&bg_id), tr_params)
+                })?
             }
         } else if let Some(id) = gen_annotation_record_id(&region)? {
             let annotation = Annotation::get_by_id(conn, &id)
                 .ok_or_else(|| Error::Other(format!("Annotation with id '{id}' not found")))?;
             let label = annotation.name.clone();
-            if start.is_some() || end.is_some() {
-                let path = BlockGroup::get_current_path(conn, &bg_id)
-                    .map_err(|e| Error::Other(e.to_string()))?;
-                let len = path.length(conn).map_err(|e| Error::Other(e.to_string()))?;
-                let resolved_range = clamped_range(start, end, len)?;
-                run_translation_operation(&self.context, &label, || {
-                    translate_path_range(
-                        conn,
-                        &bg_id,
-                        resolved_range.start,
-                        resolved_range.end,
-                        tr_params,
-                    )
-                })?
-            } else {
-                run_translation_operation(&self.context, &label, || {
-                    translate_annotation(conn, &annotation, Some(&bg_id), tr_params)
-                })?
-            }
+            run_translation_operation(&self.context, &label, || {
+                translate_annotation(conn, &annotation, Some(&bg_id), tr_params)
+            })?
         } else {
             return Err(Error::Other(
                 "region must be NULL, an annotation name, or a gen_annotation record".to_string(),
