@@ -151,6 +151,6 @@ impl PyRepository {
         let found = BlockGroup::get_by_id(conn, &child_id).map_err(|e| {
             PyRuntimeError::new_err(format!("Stitched BG created but not found: {e}"))
         })?;
-        Ok(self.into_py_block_group(found))
+        Ok(self.to_py_block_group(found))
     }
 }

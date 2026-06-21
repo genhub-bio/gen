@@ -255,8 +255,10 @@ impl Accession {
     /// position it is in the array. Accessions are not meant to be restricted
     /// to a graph topology. Take the following example of a spliced gene:
     ///
+    /// ```text
     /// AAAAAAAAAAAAAAAATTTTTTTTTTTTCCCCCCCCCCCCCCCCCCCGGGGGGGGGGGGGGGG
     ///     [part-a]--->[part-b]---->[part-c]-->[part-d]
+    /// ```
     ///
     /// There are no edges in the primary sequence, but there are 4 accession nodes
     /// linked together. There is similarly no guarantee that nodes are on the same
@@ -266,10 +268,12 @@ impl Accession {
     /// because the variation in the graph does not impact the accession. Take an example
     /// where a variant is introduced in the intronic region of a gene:
     ///
+    /// ```text
     ///             A
     ///            / \
     /// AAAAAAAAAA-TTT-TTTTTTCCCCCCCCCCC
     /// [part-1]----------->[part-2]
+    /// ```
     ///
     /// If we annotated according to edges, the introduction of the A variant questions
     /// if we should store part-1/part-2 also on the new edge between them. Storing it

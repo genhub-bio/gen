@@ -1,0 +1,57 @@
+use clap::Args;
+
+use crate::commands::{
+    cli_context::CliContext,
+    graph_operations::derive_translation::{DeriveTranslationArgs, derive_translation_operation},
+};
+
+/// Translate a sequence graph or annotation into a protein sequence graph.
+///
+/// Pass --region with just a name to translate an entire sequence graph or
+/// annotation from its own start, or include a start coordinate (e.g.
+/// mreB:10) to translate from that point instead. Translation always reads
+/// forward to its own first in-frame stop codon; an end coordinate, if given,
+/// is ignored. The protein sequence graph is created in the same sample as the
+/// DNA sequence graph.
+#[derive(Debug, Args, Clone)]
+pub struct Command {
+    /// Collection (defaults to the current default collection)
+    #[arg(short, long)]
+    collection: Option<String>,
+    /// The sample that owns the sequence graph or annotation
+    #[arg(short, long)]
+    sample: String,
+    /// Region to translate: a sequence graph name, annotation name, or name with
+    /// a start coordinate (e.g. mreB, mreB:10, chr1:1000). Translation reads
+    /// forward from there to its own first in-frame stop codon; any end
+    /// coordinate is ignored.
+    #[arg(short, long)]
+    region: String,
+    /// Name for the protein sequence graph (defaults to "{region} (protein)")
+    #[arg(long)]
+    name: Option<String>,
+    /// Strand of the CDS ("forward" or "reverse"; inferred from the annotation when omitted)
+    #[arg(long)]
+    strand: Option<String>,
+    /// Initial reading frame offset (0, 1, or 2)
+    #[arg(long, default_value = "0")]
+    frame: u8,
+    /// NCBI codon table ID (default: 1 = Standard)
+    #[arg(long, default_value = "1")]
+    codon_table: u8,
+}
+
+pub fn execute(cli_context: &CliContext, cmd: Command) -> anyhow::Result<()> {
+    derive_translation_operation(
+        cli_context.context,
+        DeriveTranslationArgs {
+            collection: cmd.collection,
+            sample: cmd.sample,
+            region: cmd.region,
+            name: cmd.name,
+            strand: cmd.strand,
+            frame: cmd.frame,
+            codon_table: cmd.codon_table,
+        },
+    )
+}

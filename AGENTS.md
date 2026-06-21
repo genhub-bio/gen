@@ -54,6 +54,8 @@ These are extremely important details about data models.
 - Use `#[expect(lint, reason = "...")]` rather than `#[allow(...)]`.
 - `expect` messages for `Result` and `Option` should start with `should`.
 - Keep comments sparse and useful. Place comments on their own line above the code they explain.
+- Avoid shorthand identifiers (`bg`, `gn`, `vid`, `ci`, `src`/`tgt`, `nid`, `succ`, `deg`, `rem`, `aa`). Spell out the full word (`block_group`, `graph_node`, `virtual_id`, `chromosome_index`, `source`/`target`, `node_id`, `successor`, `degree`, `remaining`, `amino_acid`) even when it makes a line longer; match the fuller naming already used elsewhere in the same module rather than introducing a new abbreviation.
+- No banner comments (lines of `---`, `===`, or similar dividers). No double blank lines.
 
 ## Persistence And Migrations
 

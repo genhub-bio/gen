@@ -6,8 +6,15 @@ use r#gen::{
     },
     core::HashId,
     exports::{fasta::export_fasta, genbank::export_genbank, gfa::export_gfa},
-    graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
+    graphs::{
+        graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
+        translation::{
+            translate_annotation, translate_block_group, translate_from_path,
+            with_translation_operation,
+        },
+    },
 };
+use gen_annotations::projection::annotation_segments;
 use gen_graph::GraphNode;
 use gen_models::{
     annotations::Annotation, block_group::BlockGroup, db::DbContext, node::Node, sample::Sample,
@@ -15,10 +22,11 @@ use gen_models::{
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
 use super::{
-    annotation::{PyAnnotation, annotation_segments},
+    annotation::PyAnnotation,
     graph_node::PyGraphNode,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
+    translation::build_translation_params,
     utils::block_group_err_to_pyerr,
 };
 
@@ -307,9 +315,9 @@ impl PySequenceGraph {
                 node.node_id
             ))
         })?;
-        Ok(sequence
+        sequence
             .get_sequence(node.sequence_start, node.sequence_end)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -524,6 +532,123 @@ impl PySequenceGraph {
             })
             .collect())
     }
+
+    /// Translate a sequence graph or annotation into a protein ``SequenceGraph``.
+    ///
+    /// When ``region`` is a string it is resolved against this sequence graph
+    /// only, in priority order: named path within this graph first, then
+    /// annotation in this graph's lineage. No other sequence graphs are
+    /// searched. The protein sequence graph is created in this graph's sample.
+    ///
+    /// Parameters
+    /// ----------
+    /// region : str or Annotation, optional
+    ///     - ``str``: a path name or annotation name scoped to this sequence
+    ///       graph. Path names take priority over annotation names.
+    ///     - ``Annotation``: an object returned by ``list_annotations()``.
+    ///       Identified by database id, so unambiguous.
+    ///     - omitted: translates the entire sequence graph.
+    /// start : int, optional
+    ///     0-based path-space coordinate to translate from. Defaults to 0 (the
+    ///     start of the path) when omitted, and is ignored when ``region`` names
+    ///     an annotation (the annotation's own entry point is used instead).
+    ///     Translation reads forward from this coordinate to its own first
+    ///     in-frame stop codon; it is not bounded by any end coordinate.
+    /// output_collection : str, optional
+    ///     Collection for the protein sequence graph. Defaults to this graph's collection.
+    /// name : str, optional
+    ///     Name for the protein sequence graph. Defaults to "{region} (protein)".
+    /// strand : str, optional
+    ///     ``"forward"`` or ``"reverse"``. Inferred from the annotation when omitted.
+    /// frame : int
+    ///     Initial reading frame offset (0, 1, or 2). Default: 0.
+    /// codon_table : int
+    ///     NCBI codon table ID. Default: 1 (Standard).
+    #[pyo3(signature = (region=None, output_collection=None, name=None, strand=None, frame=0, codon_table=1, start=None))]
+    #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
+    fn translate_annotation(
+        &self,
+        region: Option<Bound<'_, PyAny>>,
+        output_collection: Option<&str>,
+        name: Option<&str>,
+        strand: Option<&str>,
+        frame: u8,
+        codon_table: u8,
+        start: Option<i64>,
+    ) -> PyResult<PySequenceGraph> {
+        let ctx = self.require_context("translate_annotation()")?;
+        let conn = ctx.graph().conn();
+
+        let out_collection = output_collection.unwrap_or(&self.collection_name);
+
+        let params = build_translation_params(out_collection, name, strand, frame, codon_table)?;
+
+        let protein_bg = match region {
+            None => {
+                let label = self.name.clone();
+                let bg_id = self.id;
+                if let Some(start) = start {
+                    with_translation_operation(ctx, &label, || {
+                        translate_from_path(conn, &bg_id, start, params)
+                    })
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                } else {
+                    with_translation_operation(ctx, &label, || {
+                        translate_block_group(conn, &bg_id, params)
+                    })
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                }
+            }
+            Some(region) => {
+                if let Ok(ann) = region.extract::<PyRef<PyAnnotation>>() {
+                    let annotation = ann.inner.clone();
+                    with_translation_operation(ctx, &annotation.name, || {
+                        translate_annotation(conn, &annotation, Some(&self.id), params)
+                    })
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                } else if let Ok(region_str) = region.extract::<&str>() {
+                    // Resolution scoped to self: named path first, then annotation in lineage.
+                    let path = BlockGroup::get_path_by_name(conn, &self.id, region_str)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+                    if path.is_some() {
+                        let coordinate = start.unwrap_or(0);
+                        with_translation_operation(ctx, region_str, || {
+                            translate_from_path(conn, &self.id, coordinate, params)
+                        })
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    } else {
+                        let annotation = Annotation::query_with_lineage(
+                            conn,
+                            &self.collection_name,
+                            &self.sample_name,
+                            &self.name,
+                        )
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .into_iter()
+                        .find(|a| a.name.eq_ignore_ascii_case(region_str))
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err(format!(
+                                "no path or annotation named '{region_str}' in sequence graph '{}'",
+                                self.name
+                            ))
+                        })?;
+
+                        with_translation_operation(ctx, region_str, || {
+                            translate_annotation(conn, &annotation, Some(&self.id), params)
+                        })
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    }
+                } else {
+                    return Err(PyRuntimeError::new_err(
+                        "region must be a string or Annotation object",
+                    ));
+                }
+            }
+        };
+
+        Ok(self.to_py_block_group(protein_bg))
+    }
 }
 
 impl PySequenceGraph {
@@ -536,7 +661,7 @@ impl PySequenceGraph {
     }
 
     /// Wraps a raw `BlockGroup` model with this sequence graph's database context.
-    fn into_py_block_group(&self, bg: BlockGroup) -> Self {
+    fn to_py_block_group(&self, bg: BlockGroup) -> Self {
         PySequenceGraph {
             id: bg.id,
             collection_name: bg.collection_name,
@@ -589,7 +714,7 @@ impl PySequenceGraph {
         );
         let found = BlockGroup::get_by_id(conn, &child_id)
             .map_err(|e| PyRuntimeError::new_err(format!("Subgraph created but not found: {e}")))?;
-        Ok(self.into_py_block_group(found))
+        Ok(self.to_py_block_group(found))
     }
 
     /// Split this sequence graph into coordinate-bounded subgraphs.
@@ -630,7 +755,7 @@ impl PySequenceGraph {
             Sample::get_block_groups(conn, &self.collection_name, &new_sample)
                 .into_iter()
                 .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
-                .map(|bg| self.into_py_block_group(bg))
+                .map(|bg| self.to_py_block_group(bg))
                 .collect(),
         )
     }

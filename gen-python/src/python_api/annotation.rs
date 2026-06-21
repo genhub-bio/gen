@@ -1,11 +1,6 @@
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
-use gen_models::{
-    accession::Accession,
-    annotations::Annotation,
-    db::{DbContext, GraphConnection},
-    locus::GraphLocus,
-};
+use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::prelude::*;
 
 use super::graph_search::PyGraphLocus;
@@ -147,15 +142,4 @@ impl PyAnnotation {
             self.inner.name, self.inner.group
         )
     }
-}
-
-/// Compute the annotation segments from accession nodes.
-pub(super) fn annotation_segments(
-    conn: &GraphConnection,
-    annotation: &Annotation,
-) -> Vec<AnnotationSegment> {
-    Accession::get_nodes_by_id(conn, &annotation.accession_id)
-        .iter()
-        .map(AnnotationSegment::from)
-        .collect()
 }

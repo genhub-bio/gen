@@ -3,6 +3,7 @@ use gen_models::db::OperationsConnection;
 
 pub mod cli_context;
 pub mod clone;
+pub mod derive;
 pub mod export;
 pub mod graph_operations;
 pub mod import;
@@ -358,48 +359,9 @@ pub enum Commands {
         #[arg(long)]
         gfa: String,
     },
-    /// Replace a sequence graph with a subgraph in the range of the specified coordinates
-    DeriveSubgraph {
-        /// The name of the collection to derive the subgraph from
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the parent sample
-        #[arg(short, long)]
-        sample: String,
-        /// The name of the new sample
-        #[arg(long)]
-        new_sample: String,
-        /// The name of the region to derive the subgraph from
-        #[arg(short, long)]
-        region: String,
-        /// Name of alternate path (not current) to use
-        #[arg(long)]
-        backbone: Option<String>,
-    },
-    /// Replace a sequence graph with subgraphs in the ranges of the specified coordinates
-    DeriveChunks {
-        /// The name of the collection to derive the subgraph from
-        #[arg(short, long)]
-        name: Option<String>,
-        /// The name of the parent sample
-        #[arg(short, long)]
-        sample: String,
-        /// The name of the new sample
-        #[arg(long)]
-        new_sample: String,
-        /// The name of the region to derive the subgraph from
-        #[arg(short, long)]
-        region: String,
-        /// Name of alternate path (not current) to use
-        #[arg(long)]
-        backbone: Option<String>,
-        /// Breakpoints to derive chunks from
-        #[arg(long)]
-        breakpoints: Option<String>,
-        /// The size of the chunks to derive
-        #[arg(long)]
-        chunk_size: Option<i64>,
-    },
+    /// Commands for deriving new sequence graphs
+    #[command(arg_required_else_help(true))]
+    Derive(derive::Command),
     #[command(
         verbatim_doc_comment,
         long_about = "Combine multiple sequence graphs into one. Example:

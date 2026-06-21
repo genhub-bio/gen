@@ -14,13 +14,8 @@ use clap::{Parser, Subcommand};
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{
-        Cli, Commands,
-        cli_context::CliContext,
-        graph_operations::{
-            derive_chunks::derive_chunks_operation, derive_subgraph::derive_subgraph_operation,
-            make_stitch::make_stitch_operation,
-        },
-        remote::handle_remote_command,
+        Cli, Commands, cli_context::CliContext,
+        graph_operations::make_stitch::make_stitch_operation, remote::handle_remote_command,
     },
     diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection,
@@ -164,6 +159,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
         Some(Commands::Update(cmd)) => Ok(r#gen::commands::update::execute(&cli_context, cmd)?),
         Some(Commands::Export(cmd)) => Ok(r#gen::commands::export::execute(&cli_context, cmd)?),
+        Some(Commands::Derive(cmd)) => Ok(r#gen::commands::derive::execute(&cli_context, cmd)?),
         Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
         Some(Commands::View {
             graph,
@@ -825,52 +821,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 sample2.as_str(),
             )?;
             Ok(())
-        }
-        Some(Commands::DeriveSubgraph {
-            name,
-            sample,
-            new_sample,
-            region,
-            backbone,
-        }) => {
-            match derive_subgraph_operation(&db_context, name, sample, new_sample, region, backbone)
-            {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("Error deriving subgraph: {e}").into()),
-            }
-        }
-        Some(Commands::DeriveChunks {
-            name,
-            sample,
-            new_sample,
-            region,
-            backbone,
-            breakpoints,
-            chunk_size,
-        }) => {
-            let parsed_breakpoints = breakpoints
-                .map(|s| {
-                    s.split(',')
-                        .map(|bp| {
-                            bp.parse::<i64>()
-                                .map_err(|_| format!("Invalid breakpoint: {bp}"))
-                        })
-                        .collect::<Result<Vec<i64>, _>>()
-                })
-                .transpose()?;
-            match derive_chunks_operation(
-                &db_context,
-                name,
-                sample,
-                new_sample,
-                region,
-                backbone,
-                parsed_breakpoints,
-                chunk_size,
-            ) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("Error deriving chunks: {e}").into()),
-            }
         }
         Some(Commands::MakeStitch {
             name,
