@@ -970,8 +970,16 @@ where
 
 /// Shared translation engine every entry point (`translate_annotation`,
 /// `translate_from_path`, `translate_block_group`) funnels into once it has built its own
-/// `TranslationSubgraph`: fetch sequences, orient by strand, propagate reading
-/// frames, then build and persist the protein sequence graph.
+/// `TranslationSubgraph`: subgraph that is searched plus its metadata.
+///
+/// The overlal algorithm goes as follows:
+/// 1) Fetches sequences for every node (dna_by_node)
+/// 2) Handles reverse-strand orientation (revcomp + flip edges)
+/// 3) Propagates reading frames forward via Kahn's BFS (entry_frames)
+/// 4) Computes per-(node, frame) codon runs (node_codons)
+/// 5) Creates NodeIds with Merkle-chain hashing for synonymous-variant collapse (protein_node_ids)
+/// 6) Wires up the protein graph's edges by calling codon_walk from each entry point and from each anchor node's trailing partial codon
+/// 7) Dedupes and bulk-inserts the edges
 ///
 /// `label_hash` seeds the identity hash of nodes with no protein predecessor.
 /// Each node's identity hash also folds in its predecessors' identity hashes, so
@@ -1922,51 +1930,6 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         }
     }
 
-    /// Every full PATH_START → PATH_END amino-acid string, read left to right.
-    fn protein_full_paths(conn: &GraphConnection, block_group_id: &HashId) -> Vec<String> {
-        let mut adjacency: HashMap<HashId, HashSet<HashId>> = HashMap::new();
-        for augmented_edge in BlockGroupEdge::edges_for_block_group(conn, block_group_id) {
-            adjacency
-                .entry(augmented_edge.edge.source_node_id)
-                .or_default()
-                .insert(augmented_edge.edge.target_node_id);
-        }
-        let mut ids: HashSet<HashId> = adjacency.keys().copied().collect();
-        for targets in adjacency.values() {
-            ids.extend(targets.iter().copied());
-        }
-        ids.remove(&PATH_START_NODE_ID);
-        ids.remove(&PATH_END_NODE_ID);
-        let id_vec: Vec<HashId> = ids.into_iter().collect();
-        let sequences = Node::get_sequences_by_node_ids(conn, &id_vec);
-        let sequence_of = |node: HashId| {
-            sequences
-                .get(&node)
-                .map(|sequence| sequence.get_sequence(None, None).unwrap_or_default())
-                .unwrap_or_default()
-        };
-
-        let mut results = Vec::new();
-        let mut stack: Vec<(HashId, String)> = vec![(PATH_START_NODE_ID, String::new())];
-        while let Some((node, accumulated)) = stack.pop() {
-            if node == PATH_END_NODE_ID {
-                results.push(accumulated);
-                continue;
-            }
-            if let Some(targets) = adjacency.get(&node) {
-                for &target in targets {
-                    let mut next = accumulated.clone();
-                    if target != PATH_END_NODE_ID {
-                        next.push_str(&sequence_of(target));
-                    }
-                    stack.push((target, next));
-                }
-            }
-        }
-        results.sort();
-        results
-    }
-
     #[test]
     fn translate_simple_forward() {
         // ATG→M, GAA→E, TGA→* : single node, frame 0
@@ -1974,7 +1937,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test");
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
-        assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string()])
+        );
     }
 
     #[test]
@@ -2019,7 +1985,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test").initial_frame(1).unwrap();
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
-        assert_eq!(protein_full_paths(&conn, &protein.id), vec!["GM"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["GM".to_string()])
+        );
     }
 
     #[test]
@@ -2030,7 +1999,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test");
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
-        assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string()])
+        );
     }
 
     #[test]
@@ -2041,7 +2013,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test");
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
-        assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string()])
+        );
     }
 
     #[test]
@@ -2052,7 +2027,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test");
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
-        assert_eq!(protein_full_paths(&conn, &protein.id), vec!["WE*"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["WE*".to_string()])
+        );
     }
 
     #[test]
@@ -2062,7 +2040,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test").codon_table(CodonTable::ncbi(4).unwrap());
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
-        assert_eq!(protein_full_paths(&conn, &protein.id), vec!["MW"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["MW".to_string()])
+        );
     }
 
     #[test]
@@ -2152,8 +2133,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             translate_annotation(&conn, &annotation, Some(&block_group.id), params).unwrap();
 
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec![expected],
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from([expected.to_string()]),
             "reverse-strand protein should read N → C left to right"
         );
     }
@@ -2328,7 +2309,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test");
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
-        assert_eq!(protein_full_paths(&conn, &protein.id), vec!["M*"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["M*".to_string()])
+        );
     }
 
     /// A single-node annotation (the whole annotated span is one node) translates
@@ -2387,8 +2371,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["ME*"],
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string()]),
             "translation should only follow the annotation's own entry node"
         );
     }
@@ -2402,7 +2386,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test");
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
-        assert_eq!(protein_full_paths(&conn, &protein.id), vec!["*"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["*".to_string()])
+        );
     }
 
     /// A 1 bp deletion in the middle node shifts the downstream reading frame so the
@@ -2421,8 +2408,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["MP*", "MPVG*"],
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["MP*".to_string(), "MPVG*".to_string()]),
             "frameshift deletion should truncate the variant protein at the premature stop"
         );
     }
@@ -2442,8 +2429,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["MK*", "MND*"],
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["MK*".to_string(), "MND*".to_string()]),
             "frameshift deletion should read through the wild-type stop to a later one"
         );
     }
@@ -2633,10 +2620,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
 
-        assert_eq!(protein_full_paths(&conn, &parent_protein.id), vec!["ME*"]);
         assert_eq!(
-            protein_full_paths(&conn, &child_protein.id),
-            protein_full_paths(&conn, &parent_protein.id),
+            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string()])
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
             "upstream deletion changed the annotated protein",
         );
     }
@@ -2712,11 +2702,17 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
 
-        assert_eq!(protein_full_paths(&conn, &parent_protein.id), vec!["ME*"]);
-        assert_eq!(protein_full_paths(&conn, &child_protein.id), vec!["MQ*"]);
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string()])
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
+            HashSet::from(["MQ*".to_string()])
+        );
         assert_ne!(
-            protein_full_paths(&conn, &child_protein.id),
-            protein_full_paths(&conn, &parent_protein.id),
+            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
             "point mutation inside the CDS did not change the protein",
         );
     }
@@ -2782,8 +2778,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["ME*"],
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string()]),
             "translation should only follow the annotation's own entry node"
         );
     }
@@ -2847,8 +2843,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["ME*", "MEW"],
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string(), "MEW".to_string()]),
             "last-base variant was dropped from the extracted subgraph",
         );
     }
@@ -2900,8 +2896,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             translate_from_path(&conn, &block_group.id, 0, TranslationParams::new("test")).unwrap();
 
         assert_eq!(
-            protein_full_paths(&conn, &from_path.id),
-            vec!["*"],
+            BlockGroup::get_all_sequences(&conn, &from_path.id, true).unwrap(),
+            HashSet::from(["*".to_string()]),
             "translate_from_path(0) should only translate the literal entry node (A), \
              not the unrelated D/P/Z branch reachable from PATH_START"
         );
@@ -2922,8 +2918,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
 
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["MKPEGF*", "MKPQGF*"]
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
 
@@ -2948,8 +2944,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
 
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["MKPEGF*", "MKPQGF*"]
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
 
@@ -2965,8 +2961,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein = translate_from_path(&conn, &block_group_id, 0, params).unwrap();
 
         assert_eq!(
-            protein_full_paths(&conn, &protein.id),
-            vec!["MKPEGF*", "MKPQGF*"]
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
 }
