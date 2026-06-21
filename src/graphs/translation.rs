@@ -228,14 +228,14 @@ impl<'a> TranslationParams<'a> {
 ///
 /// The node's leading bases that finish a codon begun in a predecessor are
 /// handled separately by an incoming junction and are not part of either field
-/// here. `aa` is the run of fully-contained codons after that head (empty if the
+/// here. `amino_acids` is the run of fully-contained codons after that head (empty if the
 /// node is too short to hold one), excluding the first in-frame stop codon and
 /// anything after it. `tail` is the trailing partial codon, empty once a stop has
 /// ended the walk. `is_terminal` is set when a stop codon ended the run: the codon
 /// walk ends here and the anchor connects to the shared stop node, which in turn
 /// connects to the END sentinel.
 struct NodeCodons {
-    aa: Vec<u8>,
+    amino_acids: Vec<u8>,
     tail: Vec<u8>,
     is_terminal: bool,
 }
@@ -301,20 +301,20 @@ fn starts_with_stop(codon_table: &CodonTable, bytes: &[u8]) -> bool {
 /// a single residue contributes no edge).
 fn connect_to_end(
     conn: &GraphConnection,
-    bg_id: &HashId,
+    block_group_id: &HashId,
     from: &WalkFrom,
-    ci: i64,
-    bg_edges: &mut Vec<BlockGroupEdgeData>,
+    chromosome_index: i64,
+    block_group_edges: &mut Vec<BlockGroupEdgeData>,
 ) -> Result<(), TranslationError> {
     if from.id != PATH_START_NODE_ID {
-        bg_edges.push(make_edge(
+        block_group_edges.push(make_edge(
             conn,
-            bg_id,
+            block_group_id,
             from.id,
             from.coord,
             PATH_END_NODE_ID,
             0,
-            ci,
+            chromosome_index,
         )?);
     }
     Ok(())
@@ -328,37 +328,43 @@ fn connect_to_end(
 #[expect(clippy::too_many_arguments, reason = "recursive graph walk state")]
 fn codon_walk(
     conn: &GraphConnection,
-    bg_id: &HashId,
-    ctx: &WalkCtx<'_>,
+    block_group_id: &HashId,
+    context: &WalkCtx<'_>,
     from: &WalkFrom,
     pending: &[u8],
     node: HashId,
-    ci: i64,
-    bg_edges: &mut Vec<BlockGroupEdgeData>,
+    chromosome_index: i64,
+    block_group_edges: &mut Vec<BlockGroupEdgeData>,
     stop_edges: &mut Vec<PendingStopEdge>,
 ) -> Result<(), TranslationError> {
-    let dna = ctx
+    let dna = context
         .dna_by_node
         .get(&node)
         .map(|s| s.as_bytes())
         .unwrap_or(&[]);
-    let successors: Vec<HashId> = ctx.subgraph.neighbors(node).collect();
+    let successors: Vec<HashId> = context.subgraph.neighbors(node).collect();
 
     if pending.is_empty() {
         // At a codon boundary entering `node`: frame 0 for this node on this path.
-        if let Some(&protein_id) = ctx.protein_node_ids.get(&(node, 0)) {
-            bg_edges.push(make_edge(
-                conn, bg_id, from.id, from.coord, protein_id, 0, ci,
+        if let Some(&protein_id) = context.protein_node_ids.get(&(node, 0)) {
+            block_group_edges.push(make_edge(
+                conn,
+                block_group_id,
+                from.id,
+                from.coord,
+                protein_id,
+                0,
+                chromosome_index,
             )?);
             return Ok(());
         }
         // No complete codon starts here. If the bytes available so far already begin
         // with a stop, the walk ends here regardless of what successors hold.
-        if starts_with_stop(ctx.codon_table, dna) {
+        if starts_with_stop(context.codon_table, dna) {
             stop_edges.push(PendingStopEdge {
                 predecessor_id: from.id,
                 predecessor_coord: from.coord,
-                chromosome_index: ci,
+                chromosome_index,
                 predecessor_hash: from.identity_hash.clone(),
             });
             return Ok(());
@@ -366,12 +372,26 @@ fn codon_walk(
         // Node shorter than a codon: consume it and continue building the codon in
         // the successors.
         if successors.is_empty() {
-            return connect_to_end(conn, bg_id, from, ci, bg_edges);
+            return connect_to_end(
+                conn,
+                block_group_id,
+                from,
+                chromosome_index,
+                block_group_edges,
+            );
         }
         let carried = dna.to_vec();
-        for succ in &successors {
+        for successor in &successors {
             codon_walk(
-                conn, bg_id, ctx, from, &carried, *succ, ci, bg_edges, stop_edges,
+                conn,
+                block_group_id,
+                context,
+                from,
+                &carried,
+                *successor,
+                chromosome_index,
+                block_group_edges,
+                stop_edges,
             )?;
         }
         return Ok(());
@@ -381,13 +401,27 @@ fn codon_walk(
     if dna.len() < need {
         // `node` is fully consumed by the in-progress codon; keep walking.
         if successors.is_empty() {
-            return connect_to_end(conn, bg_id, from, ci, bg_edges);
+            return connect_to_end(
+                conn,
+                block_group_id,
+                from,
+                chromosome_index,
+                block_group_edges,
+            );
         }
         let mut carried = pending.to_vec();
         carried.extend_from_slice(dna);
-        for succ in &successors {
+        for successor in &successors {
             codon_walk(
-                conn, bg_id, ctx, from, &carried, *succ, ci, bg_edges, stop_edges,
+                conn,
+                block_group_id,
+                context,
+                from,
+                &carried,
+                *successor,
+                chromosome_index,
+                block_group_edges,
+                stop_edges,
             )?;
         }
         return Ok(());
@@ -396,37 +430,37 @@ fn codon_walk(
     // The codon completes inside `node`.
     let mut codon = pending.to_vec();
     codon.extend_from_slice(&dna[..need]);
-    let aa = ctx.codon_table.translate_codon(&codon);
+    let amino_acid = context.codon_table.translate_codon(&codon);
 
-    if aa == STOP_CODON {
+    if amino_acid == STOP_CODON {
         // First in-frame stop codon ends the walk: record the edge into the
         // eventual stop node, with no junction node created for this codon.
         stop_edges.push(PendingStopEdge {
             predecessor_id: from.id,
             predecessor_coord: from.coord,
-            chromosome_index: ci,
+            chromosome_index,
             predecessor_hash: from.identity_hash.clone(),
         });
         return Ok(());
     }
 
-    let aa_char = aa as char;
+    let amino_acid_char = amino_acid as char;
     // A junction always has exactly one predecessor, so the same predecessor-hash
     // formula as a regular anchor (Step 5) collapses to a single-element list
     // here, keeping junction nodes indistinguishable from anchors once built.
     let (junction_id, junction_hash) = create_protein_node(
         conn,
         std::slice::from_ref(&from.identity_hash),
-        &aa_char.to_string(),
+        &amino_acid_char.to_string(),
     )?;
-    bg_edges.push(make_edge(
+    block_group_edges.push(make_edge(
         conn,
-        bg_id,
+        block_group_id,
         from.id,
         from.coord,
         junction_id,
         0,
-        ci,
+        chromosome_index,
     )?);
 
     let junction_from = WalkFrom {
@@ -436,36 +470,50 @@ fn codon_walk(
     };
     // After the codon, `node`'s entry frame on this path equals the bytes carried in.
     let anchor_frame = pending.len() as u8;
-    if let Some(&protein_id) = ctx.protein_node_ids.get(&(node, anchor_frame)) {
-        bg_edges.push(make_edge(conn, bg_id, junction_id, 1, protein_id, 0, ci)?);
+    if let Some(&protein_id) = context.protein_node_ids.get(&(node, anchor_frame)) {
+        block_group_edges.push(make_edge(
+            conn,
+            block_group_id,
+            junction_id,
+            1,
+            protein_id,
+            0,
+            chromosome_index,
+        )?);
         return Ok(());
     }
 
     // No anchor here (node too short for a full codon after its head): the leftover
     // bases begin the next codon, unless they already are a stop on their own.
-    let rem = &dna[need..];
-    if starts_with_stop(ctx.codon_table, rem) {
+    let remainder = &dna[need..];
+    if starts_with_stop(context.codon_table, remainder) {
         stop_edges.push(PendingStopEdge {
             predecessor_id: junction_from.id,
             predecessor_coord: junction_from.coord,
-            chromosome_index: ci,
+            chromosome_index,
             predecessor_hash: junction_from.identity_hash.clone(),
         });
         return Ok(());
     }
     if successors.is_empty() {
-        return connect_to_end(conn, bg_id, &junction_from, ci, bg_edges);
+        return connect_to_end(
+            conn,
+            block_group_id,
+            &junction_from,
+            chromosome_index,
+            block_group_edges,
+        );
     }
-    for succ in &successors {
+    for successor in &successors {
         codon_walk(
             conn,
-            bg_id,
-            ctx,
+            block_group_id,
+            context,
             &junction_from,
-            rem,
-            *succ,
-            ci,
-            bg_edges,
+            remainder,
+            *successor,
+            chromosome_index,
+            block_group_edges,
             stop_edges,
         )?;
     }
@@ -474,7 +522,7 @@ fn codon_walk(
 
 fn make_edge(
     conn: &GraphConnection,
-    bg_id: &HashId,
+    block_group_id: &HashId,
     source: HashId,
     source_coord: i64,
     target: HashId,
@@ -492,17 +540,17 @@ fn make_edge(
     )
     .map_err(|e| TranslationError::EdgeError(e.to_string()))?;
     Ok(BlockGroupEdgeData {
-        block_group_id: *bg_id,
+        block_group_id: *block_group_id,
         edge_id: edge.id,
         chromosome_index,
         phased: 0,
     })
 }
 
-fn virtual_id(gn: GraphNode) -> HashId {
+fn virtual_id(graph_node: GraphNode) -> HashId {
     HashId::convert_str(&format!(
-        "gn:{}:{}:{}",
-        gn.node_id, gn.sequence_start, gn.sequence_end
+        "graph_node:{}:{}:{}",
+        graph_node.node_id, graph_node.sequence_start, graph_node.sequence_end
     ))
 }
 
@@ -511,7 +559,7 @@ fn virtual_id(gn: GraphNode) -> HashId {
 /// (`exit_nodes`).
 ///
 /// `graph` keys are "virtual IDs" — one per GraphNode slice. `node_ranges` maps a
-/// virtual ID to `(real_node_id, seq_start, seq_end)`; `None` bounds mean "use the
+/// virtual ID to `(real_node_id, sequence_start, sequence_end)`; `None` bounds mean "use the
 /// full node sequence". `extract_full_graph` populates `entry_nodes` with every
 /// node directly after the graph start (so every parallel branch at the first
 /// column gets seeded), and `exit_nodes` with every node directly before the
@@ -536,22 +584,22 @@ pub fn translate_block_group(
     block_group_id: &HashId,
     params: TranslationParams<'_>,
 ) -> Result<BlockGroup, TranslationError> {
-    let bg = BlockGroup::get_by_id(conn, block_group_id)
+    let block_group = BlockGroup::get_by_id(conn, block_group_id)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
     let subgraph = extract_full_graph(conn, block_group_id)?;
     let strand = params.strand.unwrap_or(Strand::Forward);
     let label = HashId::convert_str(&format!("translate-full:{block_group_id}"));
-    let bg_name = params
+    let block_group_name = params
         .name
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{} (protein)", bg.name));
+        .unwrap_or_else(|| format!("{} (protein)", block_group.name));
     translate_from(
         conn,
         subgraph,
         strand,
         params,
-        &bg.sample_name,
-        &bg_name,
+        &block_group.sample_name,
+        &block_group_name,
         label,
     )
 }
@@ -560,17 +608,17 @@ pub fn translate_block_group(
 /// terminals) as an in-memory sub-DAG. No database writes.
 fn extract_full_graph(
     conn: &GraphConnection,
-    bg_id: &HashId,
+    block_group_id: &HashId,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, bg_id)
+    let gen_graph = BlockGroup::get_graph(conn, block_group_id)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
-    let start_gn = gen_graph
+    let start_node = gen_graph
         .nodes()
-        .find(|gn| gn.node_id == PATH_START_NODE_ID)
+        .find(|graph_node| graph_node.node_id == PATH_START_NODE_ID)
         .ok_or_else(|| TranslationError::BlockGroupError("graph has no start node".into()))?;
-    let end_gn = gen_graph
+    let end_node = gen_graph
         .nodes()
-        .find(|gn| gn.node_id == PATH_END_NODE_ID)
+        .find(|graph_node| graph_node.node_id == PATH_END_NODE_ID)
         .ok_or_else(|| TranslationError::BlockGroupError("graph has no end node".into()))?;
 
     let mut graph: DiGraphMap<HashId, ()> = DiGraphMap::new();
@@ -579,44 +627,51 @@ fn extract_full_graph(
     let mut entry_set: HashSet<HashId> = HashSet::new();
     let mut exit_set: HashSet<HashId> = HashSet::new();
 
-    for edge_ref in all_intermediate_edges(&gen_graph, start_gn, end_gn) {
-        let src = edge_ref.source();
-        let tgt = edge_ref.target();
+    for edge_ref in all_intermediate_edges(&gen_graph, start_node, end_node) {
+        let source = edge_ref.source();
+        let target = edge_ref.target();
         // Edges touching a terminal mark the entry/exit frontier but are not added
         // to the DNA subgraph (terminals carry no sequence).
-        if is_terminal(src.node_id) && !is_terminal(tgt.node_id) {
-            entry_set.insert(virtual_id(tgt));
+        if is_terminal(source.node_id) && !is_terminal(target.node_id) {
+            entry_set.insert(virtual_id(target));
         }
-        if is_terminal(tgt.node_id) && !is_terminal(src.node_id) {
-            exit_set.insert(virtual_id(src));
+        if is_terminal(target.node_id) && !is_terminal(source.node_id) {
+            exit_set.insert(virtual_id(source));
         }
-        if is_terminal(src.node_id) || is_terminal(tgt.node_id) {
+        if is_terminal(source.node_id) || is_terminal(target.node_id) {
             continue;
         }
-        let src_vid = virtual_id(src);
-        let tgt_vid = virtual_id(tgt);
-        graph.add_node(src_vid);
-        graph.add_node(tgt_vid);
-        graph.add_edge(src_vid, tgt_vid, ());
+        let source_virtual_id = virtual_id(source);
+        let target_virtual_id = virtual_id(target);
+        graph.add_node(source_virtual_id);
+        graph.add_node(target_virtual_id);
+        graph.add_edge(source_virtual_id, target_virtual_id, ());
         for graph_edge in edge_ref.weight() {
             edge_chromosome_indices
-                .entry((src_vid, tgt_vid))
+                .entry((source_virtual_id, target_virtual_id))
                 .or_default()
                 .push(graph_edge.chromosome_index);
         }
     }
 
     // A single-node graph (start → N → end) has no internal edges; capture N too.
-    for gn in gen_graph.nodes() {
-        if is_terminal(gn.node_id) {
+    for graph_node in gen_graph.nodes() {
+        if is_terminal(graph_node.node_id) {
             continue;
         }
-        let vid = virtual_id(gn);
-        if graph.contains_node(vid) || entry_set.contains(&vid) || exit_set.contains(&vid) {
-            graph.add_node(vid);
+        let virtual_node_id = virtual_id(graph_node);
+        if graph.contains_node(virtual_node_id)
+            || entry_set.contains(&virtual_node_id)
+            || exit_set.contains(&virtual_node_id)
+        {
+            graph.add_node(virtual_node_id);
             node_ranges.insert(
-                vid,
-                (gn.node_id, Some(gn.sequence_start), Some(gn.sequence_end)),
+                virtual_node_id,
+                (
+                    graph_node.node_id,
+                    Some(graph_node.sequence_start),
+                    Some(graph_node.sequence_end),
+                ),
             );
         }
     }
@@ -638,28 +693,28 @@ fn extract_full_graph(
 /// nothing past the entry point is ever consulted.
 fn extract_from_entry(
     conn: &GraphConnection,
-    bg_id: &HashId,
+    block_group_id: &HashId,
     entry_node_id: HashId,
     entry_coord: i64,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, bg_id)
+    let gen_graph = BlockGroup::get_graph(conn, block_group_id)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
-    let entry_gn = gen_graph
+    let entry_node = gen_graph
         .nodes()
-        .find(|gn| {
-            gn.node_id == entry_node_id
-                && gn.sequence_start <= entry_coord
-                && gn.sequence_end > entry_coord
+        .find(|graph_node| {
+            graph_node.node_id == entry_node_id
+                && graph_node.sequence_start <= entry_coord
+                && graph_node.sequence_end > entry_coord
         })
         .ok_or_else(|| {
             TranslationError::NodeError(format!(
                 "entry coordinate {entry_coord} not found in graph"
             ))
         })?;
-    let end_gn = gen_graph
+    let end_node = gen_graph
         .nodes()
-        .find(|gn| gn.node_id == PATH_END_NODE_ID)
+        .find(|graph_node| graph_node.node_id == PATH_END_NODE_ID)
         .ok_or_else(|| TranslationError::BlockGroupError("graph has no end node".into()))?;
 
     let mut graph: DiGraphMap<HashId, ()> = DiGraphMap::new();
@@ -667,29 +722,29 @@ fn extract_from_entry(
     let mut edge_chromosome_indices: HashMap<(HashId, HashId), Vec<i64>> = HashMap::new();
     let mut exit_nodes: HashSet<HashId> = HashSet::new();
 
-    let entry_vid = virtual_id(entry_gn);
-    let intermediate_edges = all_intermediate_edges(&gen_graph, entry_gn, end_gn);
+    let entry_virtual_id = virtual_id(entry_node);
+    let intermediate_edges = all_intermediate_edges(&gen_graph, entry_node, end_node);
     if intermediate_edges.is_empty() {
         // A direct edge to the end (no internal sequence beyond the entry, e.g. a
         // single-node annotation) makes the entry its own standalone exit too.
-        exit_nodes.insert(entry_vid);
+        exit_nodes.insert(entry_virtual_id);
     }
     for edge_ref in &intermediate_edges {
-        let src = edge_ref.source();
-        let tgt = edge_ref.target();
-        if is_terminal(tgt.node_id) && !is_terminal(src.node_id) {
-            exit_nodes.insert(virtual_id(src));
+        let source = edge_ref.source();
+        let target = edge_ref.target();
+        if is_terminal(target.node_id) && !is_terminal(source.node_id) {
+            exit_nodes.insert(virtual_id(source));
         }
-        if is_terminal(src.node_id) || is_terminal(tgt.node_id) {
+        if is_terminal(source.node_id) || is_terminal(target.node_id) {
             continue;
         }
-        let src_vid = virtual_id(src);
-        let tgt_vid = virtual_id(tgt);
-        graph.add_node(src_vid);
-        graph.add_node(tgt_vid);
-        graph.add_edge(src_vid, tgt_vid, ());
+        let source_virtual_id = virtual_id(source);
+        let target_virtual_id = virtual_id(target);
+        graph.add_node(source_virtual_id);
+        graph.add_node(target_virtual_id);
+        graph.add_edge(source_virtual_id, target_virtual_id, ());
         let indices = edge_chromosome_indices
-            .entry((src_vid, tgt_vid))
+            .entry((source_virtual_id, target_virtual_id))
             .or_default();
         for graph_edge in edge_ref.weight() {
             if !indices.contains(&graph_edge.chromosome_index) {
@@ -701,31 +756,38 @@ fn extract_from_entry(
     // The entry node itself, or an exit reached only via a direct edge to a
     // terminal, has no non-terminal edge of its own and so is skipped by the
     // loop above; add it directly.
-    graph.add_node(entry_vid);
-    for &vid in &exit_nodes {
-        graph.add_node(vid);
+    graph.add_node(entry_virtual_id);
+    for &virtual_node_id in &exit_nodes {
+        graph.add_node(virtual_node_id);
     }
 
     // DNA range for every node in the subgraph; only the entry node is trimmed,
     // to the entry coordinate.
-    for gn in gen_graph.nodes() {
-        let vid = virtual_id(gn);
-        if !graph.contains_node(vid) {
+    for graph_node in gen_graph.nodes() {
+        let virtual_node_id = virtual_id(graph_node);
+        if !graph.contains_node(virtual_node_id) {
             continue;
         }
-        let seq_start = if gn == entry_gn {
+        let sequence_start = if graph_node == entry_node {
             entry_coord
         } else {
-            gn.sequence_start
+            graph_node.sequence_start
         };
-        node_ranges.insert(vid, (gn.node_id, Some(seq_start), Some(gn.sequence_end)));
+        node_ranges.insert(
+            virtual_node_id,
+            (
+                graph_node.node_id,
+                Some(sequence_start),
+                Some(graph_node.sequence_end),
+            ),
+        );
     }
 
     Ok(TranslationSubgraph {
         graph,
         node_ranges,
         edge_chromosome_indices,
-        entry_nodes: vec![entry_vid],
+        entry_nodes: vec![entry_virtual_id],
         exit_nodes: exit_nodes.into_iter().collect(),
     })
 }
@@ -743,10 +805,10 @@ pub fn translate_annotation(
     block_group_id: Option<&HashId>,
     params: TranslationParams<'_>,
 ) -> Result<BlockGroup, TranslationError> {
-    let bg_id = block_group_id.ok_or_else(|| {
+    let block_group_id = block_group_id.ok_or_else(|| {
         TranslationError::BlockGroupError("translation requires a sequence graph id".into())
     })?;
-    let bg = BlockGroup::get_by_id(conn, bg_id)
+    let block_group = BlockGroup::get_by_id(conn, block_group_id)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let segments = projection::annotation_segments(conn, annotation);
@@ -768,8 +830,13 @@ pub fn translate_annotation(
         }
     };
 
-    let subgraph = extract_from_entry(conn, bg_id, segments[0].node_id, segments[0].range.start)?;
-    let bg_name = params
+    let subgraph = extract_from_entry(
+        conn,
+        block_group_id,
+        segments[0].node_id,
+        segments[0].range.start,
+    )?;
+    let block_group_name = params
         .name
         .map(str::to_string)
         .unwrap_or_else(|| format!("{} (protein)", annotation.name));
@@ -778,8 +845,8 @@ pub fn translate_annotation(
         subgraph,
         strand,
         params,
-        &bg.sample_name,
-        &bg_name,
+        &block_group.sample_name,
+        &block_group_name,
         annotation.id,
     )
 }
@@ -790,13 +857,13 @@ pub fn translate_annotation(
 /// the same entry-point pipeline `translate_annotation` uses.
 pub fn translate_from_path(
     conn: &GraphConnection,
-    bg_id: &HashId,
+    block_group_id: &HashId,
     coordinate: i64,
     params: TranslationParams<'_>,
 ) -> Result<BlockGroup, TranslationError> {
-    let bg = BlockGroup::get_by_id(conn, bg_id)
+    let block_group = BlockGroup::get_by_id(conn, block_group_id)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
-    let path = BlockGroup::get_current_path(conn, bg_id)
+    let path = BlockGroup::get_current_path(conn, block_group_id)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
     let tree = path
         .intervaltree(conn)
@@ -812,19 +879,19 @@ pub fn translate_from_path(
     let entry_seq = entry_block.sequence_start + (coordinate - entry_block.start);
     let strand = params.strand.unwrap_or(entry_block.strand);
 
-    let subgraph = extract_from_entry(conn, bg_id, entry_block.node_id, entry_seq)?;
-    let bg_name = params
+    let subgraph = extract_from_entry(conn, block_group_id, entry_block.node_id, entry_seq)?;
+    let block_group_name = params
         .name
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{} (protein)", bg.name));
-    let label = HashId::convert_str(&format!("translate-from:{bg_id}:{coordinate}"));
+        .unwrap_or_else(|| format!("{} (protein)", block_group.name));
+    let label = HashId::convert_str(&format!("translate-from:{block_group_id}:{coordinate}"));
     translate_from(
         conn,
         subgraph,
         strand,
         params,
-        &bg.sample_name,
-        &bg_name,
+        &block_group.sample_name,
+        &block_group_name,
         label,
     )
 }
@@ -845,15 +912,15 @@ pub enum TranslationOperationError {
 /// used by the CLI, Python, and R bindings — call it instead of hand-rolling
 /// `start_operation` / `end_operation` around translation.
 pub fn with_translation_operation<F>(
-    ctx: &DbContext,
+    context: &DbContext,
     label: &str,
     f: F,
 ) -> Result<BlockGroup, TranslationOperationError>
 where
     F: FnOnce() -> Result<BlockGroup, TranslationError>,
 {
-    let graph_conn = ctx.graph().conn();
-    let operation_conn = ctx.operations().conn();
+    let graph_conn = context.graph().conn();
+    let operation_conn = context.operations().conn();
     let mut session = start_operation(graph_conn);
 
     graph_conn
@@ -869,7 +936,7 @@ where
             let _ = operation_conn.execute("ROLLBACK TRANSACTION;", []);
             return Err(TranslationOperationError::Translation(e));
         }
-        Ok(bg) => bg,
+        Ok(block_group) => block_group,
     };
 
     let summary = format!(
@@ -877,7 +944,7 @@ where
         protein_bg.name
     );
     if let Err(e) = end_operation(
-        ctx,
+        context,
         &mut session,
         &OperationInfo {
             files: vec![],
@@ -916,7 +983,7 @@ fn translate_from(
     strand: Strand,
     params: TranslationParams<'_>,
     sample_name: &str,
-    bg_name: &str,
+    block_group_name: &str,
     label_hash: HashId,
 ) -> Result<BlockGroup, TranslationError> {
     let TranslationSubgraph {
@@ -939,17 +1006,18 @@ fn translate_from(
     let sequences_by_node = Node::get_sequences_by_node_ids(conn, &real_node_ids);
 
     let mut dna_by_node: HashMap<HashId, String> = HashMap::new();
-    for vid in subgraph.nodes() {
-        let (real_nid, seq_start, seq_end) = node_ranges
-            .get(&vid)
-            .ok_or_else(|| TranslationError::Sequence(format!("no range for node {vid}")))?;
-        let seq = sequences_by_node
-            .get(real_nid)
-            .ok_or_else(|| TranslationError::Sequence(format!("missing node {real_nid}")))?;
-        let slice = seq
-            .get_sequence(*seq_start, *seq_end)
+    for virtual_node_id in subgraph.nodes() {
+        let (real_node_id, sequence_start, sequence_end) =
+            node_ranges.get(&virtual_node_id).ok_or_else(|| {
+                TranslationError::Sequence(format!("no range for node {virtual_node_id}"))
+            })?;
+        let sequence = sequences_by_node
+            .get(real_node_id)
+            .ok_or_else(|| TranslationError::Sequence(format!("missing node {real_node_id}")))?;
+        let slice = sequence
+            .get_sequence(*sequence_start, *sequence_end)
             .map_err(|e| TranslationError::Sequence(e.to_string()))?;
-        dna_by_node.insert(vid, slice);
+        dna_by_node.insert(virtual_node_id, slice);
     }
 
     // Step 2: handle reverse-strand orientation. Rev-comp sequences and flip graph
@@ -965,8 +1033,8 @@ fn translate_from(
             for node in subgraph.nodes() {
                 rev_graph.add_node(node);
             }
-            for (src, tgt, _) in subgraph.all_edges() {
-                rev_graph.add_edge(tgt, src, ());
+            for (source, target, _) in subgraph.all_edges() {
+                rev_graph.add_edge(target, source, ());
             }
             let rev_ci: HashMap<(HashId, HashId), Vec<i64>> = edge_chromosome_indices
                 .into_iter()
@@ -991,8 +1059,8 @@ fn translate_from(
         in_degree.insert(node, 0);
         entry_frames.insert(node, HashSet::new());
     }
-    for (_, tgt, _) in subgraph.all_edges() {
-        *in_degree.get_mut(&tgt).unwrap() += 1;
+    for (_, target, _) in subgraph.all_edges() {
+        *in_degree.get_mut(&target).unwrap() += 1;
     }
 
     let mut queue: VecDeque<HashId> = VecDeque::new();
@@ -1020,19 +1088,19 @@ fn translate_from(
             let exit_frame = ((frame as usize + seq_len) % 3) as u8;
             for successor in subgraph.neighbors(node) {
                 entry_frames.get_mut(&successor).unwrap().insert(exit_frame);
-                let deg = in_degree.get_mut(&successor).unwrap();
-                if *deg > 0 {
-                    *deg -= 1;
+                let degree = in_degree.get_mut(&successor).unwrap();
+                if *degree > 0 {
+                    *degree -= 1;
                 }
-                if *deg == 0 && !processed.contains(&successor) {
+                if *degree == 0 && !processed.contains(&successor) {
                     queue.push_back(successor);
                 }
             }
         }
     }
 
-    for (node, &deg) in &in_degree {
-        if deg > 0 && !processed.contains(node) {
+    for (node, &degree) in &in_degree {
+        if degree > 0 && !processed.contains(node) {
             return Err(TranslationError::CycleDetected(*node));
         }
     }
@@ -1051,7 +1119,7 @@ fn translate_from(
             let body = &seq_bytes[head_skip..];
             let codon_count = body.len() / 3;
             let split = codon_count * 3;
-            let mut aa: Vec<u8> = Vec::with_capacity(codon_count);
+            let mut amino_acids: Vec<u8> = Vec::with_capacity(codon_count);
             let mut is_terminal = false;
             for codon in body[..split].chunks_exact(3) {
                 let amino_acid = params.codon_table.translate_codon(codon);
@@ -1062,7 +1130,7 @@ fn translate_from(
                     is_terminal = true;
                     break;
                 }
-                aa.push(amino_acid);
+                amino_acids.push(amino_acid);
             }
             // The trailing partial codon only spills into successors when the walk
             // continues past this node.
@@ -1074,7 +1142,7 @@ fn translate_from(
             node_codons.insert(
                 (node_id, frame),
                 NodeCodons {
-                    aa,
+                    amino_acids,
                     tail,
                     is_terminal,
                 },
@@ -1092,9 +1160,16 @@ fn translate_from(
     // (its id is a deterministic hash of collection+sample+name), so check for an
     // existing sequence graph up front rather than risk merging new protein edges
     // into someone else's sequence graph.
-    let existing_id = BlockGroup::get_id(params.output_collection_name, sample_name, bg_name, None);
+    let existing_id = BlockGroup::get_id(
+        params.output_collection_name,
+        sample_name,
+        block_group_name,
+        None,
+    );
     if BlockGroup::get_by_id(conn, &existing_id).is_ok() {
-        return Err(TranslationError::DuplicateBlockGroup(bg_name.to_string()));
+        return Err(TranslationError::DuplicateBlockGroup(
+            block_group_name.to_string(),
+        ));
     }
 
     let protein_bg = BlockGroup::create(
@@ -1102,15 +1177,15 @@ fn translate_from(
         NewBlockGroup {
             collection_name: params.output_collection_name,
             sample_name,
-            name: bg_name,
+            name: block_group_name,
             parent_block_group_id: None,
             is_default: false,
         },
     )
     .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
-    let bg_id = protein_bg.id;
-    let mut bg_edges: Vec<BlockGroupEdgeData> = Vec::new();
+    let block_group_id = protein_bg.id;
+    let mut block_group_edges: Vec<BlockGroupEdgeData> = Vec::new();
 
     // Merkle DAG hashing: each protein node's identity hash =
     // hash(sorted_predecessor_identity_hashes + aa_sequence). Two DNA nodes that
@@ -1119,22 +1194,22 @@ fn translate_from(
     // Process nodes in topological order so predecessor hashes are always available.
     let mut topo_order: Vec<HashId> = Vec::new();
     {
-        let mut indegree: HashMap<HashId, usize> = subgraph.nodes().map(|n| (n, 0)).collect();
-        for (_, tgt, _) in subgraph.all_edges() {
-            *indegree.get_mut(&tgt).unwrap() += 1;
+        let mut indegree: HashMap<HashId, usize> = subgraph.nodes().map(|node| (node, 0)).collect();
+        for (_, target, _) in subgraph.all_edges() {
+            *indegree.get_mut(&target).unwrap() += 1;
         }
-        let mut q: VecDeque<HashId> = indegree
+        let mut queue: VecDeque<HashId> = indegree
             .iter()
-            .filter(|(_, d)| **d == 0)
-            .map(|(&n, _)| n)
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(&node, _)| node)
             .collect();
-        while let Some(n) = q.pop_front() {
-            topo_order.push(n);
-            for succ in subgraph.neighbors(n) {
-                let d = indegree.get_mut(&succ).unwrap();
-                *d -= 1;
-                if *d == 0 {
-                    q.push_back(succ);
+        while let Some(node) = queue.pop_front() {
+            topo_order.push(node);
+            for successor in subgraph.neighbors(node) {
+                let degree = indegree.get_mut(&successor).unwrap();
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(successor);
                 }
             }
         }
@@ -1147,7 +1222,7 @@ fn translate_from(
     // collapses synonymous variants that share both.
     let mut protein_node_ids: HashMap<(HashId, u8), HashId> = HashMap::new();
     let mut protein_identity_hashes: HashMap<(HashId, u8), String> = HashMap::new();
-    let mut protein_aa_len: HashMap<(HashId, u8), i64> = HashMap::new();
+    let mut protein_amino_acid_len: HashMap<(HashId, u8), i64> = HashMap::new();
 
     for &node_id in &topo_order {
         let frames: Vec<u8> = match entry_frames.get(&node_id) {
@@ -1156,20 +1231,20 @@ fn translate_from(
         };
         for frame in frames {
             let codons = match node_codons.get(&(node_id, frame)) {
-                Some(c) if !c.aa.is_empty() => c,
+                Some(c) if !c.amino_acids.is_empty() => c,
                 _ => continue,
             };
-            let aa_str = String::from_utf8_lossy(&codons.aa).into_owned();
+            let amino_acid_str = String::from_utf8_lossy(&codons.amino_acids).into_owned();
 
             // Collect identity hashes of all DNA predecessors whose exit frame
             // equals this node's entry frame, then sort for determinism.
             let mut pred_hashes: Vec<String> = Vec::new();
-            for src in subgraph.neighbors_directed(node_id, Direction::Incoming) {
-                let src_len = dna_by_node.get(&src).map(|s| s.len()).unwrap_or(0);
-                if let Some(src_frames) = entry_frames.get(&src) {
-                    for &src_frame in src_frames {
-                        if (src_frame as usize + src_len) % 3 == frame as usize
-                            && let Some(h) = protein_identity_hashes.get(&(src, src_frame))
+            for source in subgraph.neighbors_directed(node_id, Direction::Incoming) {
+                let source_len = dna_by_node.get(&source).map(|s| s.len()).unwrap_or(0);
+                if let Some(source_frames) = entry_frames.get(&source) {
+                    for &source_frame in source_frames {
+                        if (source_frame as usize + source_len) % 3 == frame as usize
+                            && let Some(h) = protein_identity_hashes.get(&(source, source_frame))
                         {
                             pred_hashes.push(h.clone());
                         }
@@ -1182,10 +1257,10 @@ fn translate_from(
             }
 
             let (node_id_protein, identity_hash) =
-                create_protein_node(conn, &pred_hashes, &aa_str)?;
+                create_protein_node(conn, &pred_hashes, &amino_acid_str)?;
             protein_node_ids.insert((node_id, frame), node_id_protein);
             protein_identity_hashes.insert((node_id, frame), identity_hash);
-            protein_aa_len.insert((node_id, frame), codons.aa.len() as i64);
+            protein_amino_acid_len.insert((node_id, frame), codons.amino_acids.len() as i64);
         }
     }
 
@@ -1194,7 +1269,7 @@ fn translate_from(
     // of predecessors is known (see `stop_edges` below), rather than up front.
     let exit_set: HashSet<HashId> = exit_nodes.iter().copied().collect();
     let mut stop_edges: Vec<PendingStopEdge> = Vec::new();
-    let ctx = WalkCtx {
+    let context = WalkCtx {
         subgraph: &subgraph,
         dna_by_node: &dna_by_node,
         protein_node_ids: &protein_node_ids,
@@ -1215,9 +1290,9 @@ fn translate_from(
             .unwrap_or_default();
         for frame in frames {
             if let Some(&protein_id) = protein_node_ids.get(&(entry_node, frame)) {
-                bg_edges.push(make_edge(
+                block_group_edges.push(make_edge(
                     conn,
-                    &bg_id,
+                    &block_group_id,
                     PATH_START_NODE_ID,
                     0,
                     protein_id,
@@ -1233,8 +1308,8 @@ fn translate_from(
                 .map(|s| s.as_bytes())
                 .unwrap_or(&[]);
             let head_skip = ((3 - frame as usize) % 3).min(dna.len());
-            let rem = dna[head_skip..].to_vec();
-            if starts_with_stop(&params.codon_table, &rem) {
+            let remainder = dna[head_skip..].to_vec();
+            if starts_with_stop(&params.codon_table, &remainder) {
                 stop_edges.push(PendingStopEdge {
                     predecessor_id: start_from.id,
                     predecessor_coord: start_from.coord,
@@ -1243,21 +1318,21 @@ fn translate_from(
                 });
                 continue;
             }
-            for succ in subgraph.neighbors(entry_node) {
-                for &ci in edge_chromosome_indices
-                    .get(&(entry_node, succ))
+            for successor in subgraph.neighbors(entry_node) {
+                for &chromosome_index in edge_chromosome_indices
+                    .get(&(entry_node, successor))
                     .map(Vec::as_slice)
                     .unwrap_or(&[0])
                 {
                     codon_walk(
                         conn,
-                        &bg_id,
-                        &ctx,
+                        &block_group_id,
+                        &context,
                         &start_from,
-                        &rem,
-                        succ,
-                        ci,
-                        &mut bg_edges,
+                        &remainder,
+                        successor,
+                        chromosome_index,
+                        &mut block_group_edges,
                         &mut stop_edges,
                     )?;
                 }
@@ -1268,7 +1343,10 @@ fn translate_from(
     // Each anchor's outgoing edges: walk its trailing partial codon into successors,
     // and connect exit anchors to PATH_END.
     for (&(node, frame), &protein_id) in &protein_node_ids {
-        let aa_len = protein_aa_len.get(&(node, frame)).copied().unwrap_or(0);
+        let amino_acid_len = protein_amino_acid_len
+            .get(&(node, frame))
+            .copied()
+            .unwrap_or(0);
         if node_codons
             .get(&(node, frame))
             .is_some_and(|codons| codons.is_terminal)
@@ -1278,7 +1356,7 @@ fn translate_from(
             // successors.
             stop_edges.push(PendingStopEdge {
                 predecessor_id: protein_id,
-                predecessor_coord: aa_len,
+                predecessor_coord: amino_acid_len,
                 chromosome_index: 0,
                 predecessor_hash: protein_identity_hashes
                     .get(&(node, frame))
@@ -1289,7 +1367,7 @@ fn translate_from(
         }
         let from = WalkFrom {
             id: protein_id,
-            coord: aa_len,
+            coord: amino_acid_len,
             identity_hash: protein_identity_hashes
                 .get(&(node, frame))
                 .cloned()
@@ -1299,31 +1377,31 @@ fn translate_from(
             .get(&(node, frame))
             .map(|c| c.tail.clone())
             .unwrap_or_default();
-        for succ in subgraph.neighbors(node) {
-            for &ci in edge_chromosome_indices
-                .get(&(node, succ))
+        for successor in subgraph.neighbors(node) {
+            for &chromosome_index in edge_chromosome_indices
+                .get(&(node, successor))
                 .map(Vec::as_slice)
                 .unwrap_or(&[0])
             {
                 codon_walk(
                     conn,
-                    &bg_id,
-                    &ctx,
+                    &block_group_id,
+                    &context,
                     &from,
                     &tail,
-                    succ,
-                    ci,
-                    &mut bg_edges,
+                    successor,
+                    chromosome_index,
+                    &mut block_group_edges,
                     &mut stop_edges,
                 )?;
             }
         }
         if exit_set.contains(&node) {
-            bg_edges.push(make_edge(
+            block_group_edges.push(make_edge(
                 conn,
-                &bg_id,
+                &block_group_id,
                 protein_id,
-                aa_len,
+                amino_acid_len,
                 PATH_END_NODE_ID,
                 0,
                 0,
@@ -1346,9 +1424,9 @@ fn translate_from(
 
         let mut stop_exit_chromosome_indices: HashSet<i64> = HashSet::new();
         for edge in &stop_edges {
-            bg_edges.push(make_edge(
+            block_group_edges.push(make_edge(
                 conn,
-                &bg_id,
+                &block_group_id,
                 edge.predecessor_id,
                 edge.predecessor_coord,
                 stop_id,
@@ -1357,15 +1435,15 @@ fn translate_from(
             )?);
             stop_exit_chromosome_indices.insert(edge.chromosome_index);
         }
-        for ci in stop_exit_chromosome_indices {
-            bg_edges.push(make_edge(
+        for chromosome_index in stop_exit_chromosome_indices {
+            block_group_edges.push(make_edge(
                 conn,
-                &bg_id,
+                &block_group_id,
                 stop_id,
                 1,
                 PATH_END_NODE_ID,
                 0,
-                ci,
+                chromosome_index,
             )?);
         }
     }
@@ -1374,9 +1452,9 @@ fn translate_from(
     // anchor from several paths; drop duplicate (edge, chromosome_index) entries
     // before persisting.
     let mut seen: HashSet<(HashId, i64)> = HashSet::new();
-    bg_edges.retain(|e| seen.insert((e.edge_id, e.chromosome_index)));
+    block_group_edges.retain(|e| seen.insert((e.edge_id, e.chromosome_index)));
 
-    BlockGroupEdge::bulk_create(conn, &bg_edges);
+    BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
     Ok(protein_bg)
 }
@@ -1501,8 +1579,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn new_block_group(name: &str) -> (GraphConnection, BlockGroup) {
         let conn = get_connection(None).expect("should open in-memory database");
         Collection::create(&conn, "test").unwrap();
-        let bg = create_bg(&conn, "test", Sample::DEFAULT_NAME, name);
-        (conn, bg)
+        let block_group = create_bg(&conn, "test", Sample::DEFAULT_NAME, name);
+        (conn, block_group)
     }
 
     /// Save a DNA sequence as a node. Returns the node id and its length.
@@ -1543,12 +1621,12 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     }
 
     fn build_block_group_edge(
-        bg_id: HashId,
+        block_group_id: HashId,
         edge_id: HashId,
         chromosome_index: i64,
     ) -> BlockGroupEdgeData {
         BlockGroupEdgeData {
-            block_group_id: bg_id,
+            block_group_id,
             edge_id,
             chromosome_index,
             phased: 0,
@@ -1559,7 +1637,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// chain on a single strand. Each entry is a `(node_id, length)` pair.
     fn accession_annotation(
         conn: &GraphConnection,
-        bg_id: &HashId,
+        block_group_id: &HashId,
         name: &str,
         chain: &[(HashId, i64)],
         strand: Strand,
@@ -1579,7 +1657,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             conn,
             &NewAccession {
                 name: name.to_string(),
-                block_group_id: *bg_id,
+                block_group_id: *block_group_id,
                 parent_accession_id: None,
                 spans,
             },
@@ -1592,7 +1670,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// Linear forward gene: each DNA segment becomes a node, wired into both the
     /// block-group path and the annotation accession (all at chromosome_index 0).
     fn setup_linear_gene(segments: &[&str]) -> (GraphConnection, Annotation, HashId) {
-        let (conn, bg) = new_block_group("test-gene");
+        let (conn, block_group) = new_block_group("test-gene");
         let chain: Vec<(HashId, i64)> = segments
             .iter()
             .enumerate()
@@ -1605,16 +1683,17 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let mut prev_coord = 0;
         for (node, len) in &chain {
             let e = build_edge(&conn, prev, prev_coord, *node, 0);
-            edges.push(build_block_group_edge(bg.id, e, 0));
+            edges.push(build_block_group_edge(block_group.id, e, 0));
             prev = *node;
             prev_coord = *len;
         }
         let e_out = build_edge(&conn, prev, prev_coord, PATH_END_NODE_ID, 0);
-        edges.push(build_block_group_edge(bg.id, e_out, 0));
+        edges.push(build_block_group_edge(block_group.id, e_out, 0));
         BlockGroupEdge::bulk_create(&conn, &edges);
 
-        let annotation = accession_annotation(&conn, &bg.id, "test-gene", &chain, Strand::Forward);
-        (conn, annotation, bg.id)
+        let annotation =
+            accession_annotation(&conn, &block_group.id, "test-gene", &chain, Strand::Forward);
+        (conn, annotation, block_group.id)
     }
 
     /// Gene with a variant bubble at the middle node:
@@ -1628,13 +1707,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         alt_mid: &str,
         suffix: &str,
     ) -> (GraphConnection, Annotation, HashId) {
-        let (conn, bg) = new_block_group("test-gene");
+        let (conn, block_group) = new_block_group("test-gene");
         let (pre, pre_len) = build_node(&conn, prefix, "pre");
         let (wt, wt_len) = build_node(&conn, wt_mid, "wt");
         let (alt, alt_len) = build_node(&conn, alt_mid, "alt");
         let (suf, suf_len) = build_node(&conn, suffix, "suf");
 
-        // Block-group graph: wild-type path (ci 0) plus the variant detour (ci 1).
+        // Block-group graph: wild-type path (chromosome_index 0) plus the variant detour (chromosome_index 1).
         let e_s_pre = build_edge(&conn, PATH_START_NODE_ID, 0, pre, 0);
         let e_pre_wt = build_edge(&conn, pre, pre_len, wt, 0);
         let e_wt_suf = build_edge(&conn, wt, wt_len, suf, 0);
@@ -1644,23 +1723,23 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                build_block_group_edge(bg.id, e_s_pre, 0),
-                build_block_group_edge(bg.id, e_pre_wt, 0),
-                build_block_group_edge(bg.id, e_wt_suf, 0),
-                build_block_group_edge(bg.id, e_suf_end, 0),
-                build_block_group_edge(bg.id, e_pre_alt, 1),
-                build_block_group_edge(bg.id, e_alt_suf, 1),
+                build_block_group_edge(block_group.id, e_s_pre, 0),
+                build_block_group_edge(block_group.id, e_pre_wt, 0),
+                build_block_group_edge(block_group.id, e_wt_suf, 0),
+                build_block_group_edge(block_group.id, e_suf_end, 0),
+                build_block_group_edge(block_group.id, e_pre_alt, 1),
+                build_block_group_edge(block_group.id, e_alt_suf, 1),
             ],
         );
 
         let annotation = accession_annotation(
             &conn,
-            &bg.id,
+            &block_group.id,
             "test-gene",
             &[(pre, pre_len), (wt, wt_len), (suf, suf_len)],
             Strand::Forward,
         );
-        (conn, annotation, bg.id)
+        (conn, annotation, block_group.id)
     }
 
     /// Reverse-strand counterpart of `setup_variant_gene`. `prefix`/`wt_mid`/
@@ -1669,7 +1748,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// out in reverse graph order (the suffix piece nearest PATH_START, the
     /// prefix piece nearest PATH_END), so that translating with strand = Reverse
     /// reconstructs the same CDS, read left to right. The current path follows
-    /// the wild-type branch (ci 0). Returns the suffix node's id and length,
+    /// the wild-type branch (chromosome_index 0). Returns the suffix node's id and length,
     /// which is also the graph's literal entry point (path coordinate 0).
     fn setup_reverse_variant_gene(
         prefix: &str,
@@ -1677,7 +1756,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         alt_mid: &str,
         suffix: &str,
     ) -> (GraphConnection, HashId, HashId, i64) {
-        let (conn, bg) = new_block_group("test-gene");
+        let (conn, block_group) = new_block_group("test-gene");
         let (suf, suf_len) = build_node(&conn, &revcomp(suffix), "suf");
         let (wt, wt_len) = build_node(&conn, &revcomp(wt_mid), "wt");
         let (alt, alt_len) = build_node(&conn, &revcomp(alt_mid), "alt");
@@ -1692,23 +1771,23 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                build_block_group_edge(bg.id, e_s_suf, 0),
-                build_block_group_edge(bg.id, e_suf_wt, 0),
-                build_block_group_edge(bg.id, e_wt_pre, 0),
-                build_block_group_edge(bg.id, e_pre_end, 0),
-                build_block_group_edge(bg.id, e_suf_alt, 1),
-                build_block_group_edge(bg.id, e_alt_pre, 1),
+                build_block_group_edge(block_group.id, e_s_suf, 0),
+                build_block_group_edge(block_group.id, e_suf_wt, 0),
+                build_block_group_edge(block_group.id, e_wt_pre, 0),
+                build_block_group_edge(block_group.id, e_pre_end, 0),
+                build_block_group_edge(block_group.id, e_suf_alt, 1),
+                build_block_group_edge(block_group.id, e_alt_pre, 1),
             ],
         );
         Path::create(
             &conn,
             "test-gene",
-            &bg.id,
+            &block_group.id,
             &[e_s_suf, e_suf_wt, e_wt_pre, e_pre_end],
         )
         .unwrap();
 
-        (conn, bg.id, suf, suf_len)
+        (conn, block_group.id, suf, suf_len)
     }
 
     /// Two fully-connected columns of two nodes each:
@@ -1716,7 +1795,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// The stored current path runs START → col1a → col2a → END. There is no
     /// annotation; this fixture exercises whole-block-group translation.
     fn setup_parallel_columns() -> (GraphConnection, HashId) {
-        let (conn, bg) = new_block_group("columns");
+        let (conn, block_group) = new_block_group("columns");
 
         // GGT→G, GCT→A, GAT→D, TTT→F (all codon-aligned, no junctions).
         let (c1a, l1a) = build_node(&conn, "GGT", "c1a");
@@ -1736,29 +1815,35 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                build_block_group_edge(bg.id, e_s1a, 0),
-                build_block_group_edge(bg.id, e_s1b, 1),
-                build_block_group_edge(bg.id, e_1a2a, 0),
-                build_block_group_edge(bg.id, e_1a2b, 1),
-                build_block_group_edge(bg.id, e_1b2a, 1),
-                build_block_group_edge(bg.id, e_1b2b, 1),
-                build_block_group_edge(bg.id, e_2a_end, 0),
-                build_block_group_edge(bg.id, e_2b_end, 1),
+                build_block_group_edge(block_group.id, e_s1a, 0),
+                build_block_group_edge(block_group.id, e_s1b, 1),
+                build_block_group_edge(block_group.id, e_1a2a, 0),
+                build_block_group_edge(block_group.id, e_1a2b, 1),
+                build_block_group_edge(block_group.id, e_1b2a, 1),
+                build_block_group_edge(block_group.id, e_1b2b, 1),
+                build_block_group_edge(block_group.id, e_2a_end, 0),
+                build_block_group_edge(block_group.id, e_2b_end, 1),
             ],
         );
-        Path::create(&conn, "columns", &bg.id, &[e_s1a, e_1a2a, e_2a_end]).unwrap();
-        (conn, bg.id)
+        Path::create(
+            &conn,
+            "columns",
+            &block_group.id,
+            &[e_s1a, e_1a2a, e_2a_end],
+        )
+        .unwrap();
+        (conn, block_group.id)
     }
 
     /// A 1-bp SNP that falls mid-codon, modelled as a real block-group bubble
     /// (the annotation's accession only carries the wild-type path):
     ///   pre  = "ATGG"  → M, then tail "G"
-    ///   ref  = "A" (ci 0)   alt = "C" (ci 1)
+    ///   ref  = "A" (chromosome_index 0)   alt = "C" (chromosome_index 1)
     ///   post = "ATAA"  → completes the junction codon, then "TAA" = *
     /// Junction codon: G + {A|C} + A → GAA = E (wt) / GCA = A (variant).
     /// The protein graph must stay connected: START → M → {E|A} → * → END.
     fn setup_real_bubble() -> (GraphConnection, Annotation, HashId) {
-        let (conn, bg) = new_block_group("bubble");
+        let (conn, block_group) = new_block_group("bubble");
 
         let (pre, pre_len) = build_node(&conn, "ATGG", "pre");
         let (rf, rf_len) = build_node(&conn, "A", "ref");
@@ -1775,18 +1860,18 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                build_block_group_edge(bg.id, e_s_pre, 0),
-                build_block_group_edge(bg.id, e_pre_ref, 0),
-                build_block_group_edge(bg.id, e_ref_post, 0),
-                build_block_group_edge(bg.id, e_post_e, 0),
-                build_block_group_edge(bg.id, e_pre_alt, 1),
-                build_block_group_edge(bg.id, e_alt_post, 1),
+                build_block_group_edge(block_group.id, e_s_pre, 0),
+                build_block_group_edge(block_group.id, e_pre_ref, 0),
+                build_block_group_edge(block_group.id, e_ref_post, 0),
+                build_block_group_edge(block_group.id, e_post_e, 0),
+                build_block_group_edge(block_group.id, e_pre_alt, 1),
+                build_block_group_edge(block_group.id, e_alt_post, 1),
             ],
         );
         Path::create(
             &conn,
             "bubble",
-            &bg.id,
+            &block_group.id,
             &[e_s_pre, e_pre_ref, e_ref_post, e_post_e],
         )
         .unwrap();
@@ -1794,36 +1879,41 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Accession = wild-type linear path only (no variant edges).
         let annotation = accession_annotation(
             &conn,
-            &bg.id,
+            &block_group.id,
             "bubble-gene",
             &[(pre, pre_len), (rf, rf_len), (post, post_len)],
             Strand::Forward,
         );
-        (conn, annotation, bg.id)
+        (conn, annotation, block_group.id)
     }
 
-    /// Count protein nodes in the given block group whose amino-acid sequence equals `aa`.
-    fn count_protein_nodes_with_aa(conn: &GraphConnection, bg_id: &HashId, aa: &str) -> usize {
-        let aug_edges = BlockGroupEdge::edges_for_block_group(conn, bg_id);
+    /// Count protein nodes in the given block group whose amino-acid sequence equals `amino_acid`.
+    fn count_protein_nodes_with_aa(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        amino_acid: &str,
+    ) -> usize {
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
         let mut node_ids: HashSet<HashId> = HashSet::new();
-        for ae in &aug_edges {
-            node_ids.insert(ae.edge.source_node_id);
-            node_ids.insert(ae.edge.target_node_id);
+        for augmented_edge in &augmented_edges {
+            node_ids.insert(augmented_edge.edge.source_node_id);
+            node_ids.insert(augmented_edge.edge.target_node_id);
         }
         node_ids.retain(|id| *id != PATH_START_NODE_ID && *id != PATH_END_NODE_ID);
         let node_ids_vec: Vec<HashId> = node_ids.into_iter().collect();
-        let seqs_by_node = Node::get_sequences_by_node_ids(conn, &node_ids_vec);
-        seqs_by_node
+        let sequences_by_node = Node::get_sequences_by_node_ids(conn, &node_ids_vec);
+        sequences_by_node
             .values()
             .filter(|seq| {
-                seq.sequence_type == "AA" && seq.get_sequence(None, None).unwrap_or_default() == aa
+                seq.sequence_type == "AA"
+                    && seq.get_sequence(None, None).unwrap_or_default() == amino_acid
             })
             .count()
     }
 
     /// Whether PATH_END is reachable from PATH_START in the protein graph.
-    fn start_reaches_end(conn: &GraphConnection, bg_id: &HashId) -> bool {
-        let graph = BlockGroup::get_graph(conn, bg_id).expect("should load protein graph");
+    fn start_reaches_end(conn: &GraphConnection, block_group_id: &HashId) -> bool {
+        let graph = BlockGroup::get_graph(conn, block_group_id).expect("should load protein graph");
         let start = graph.nodes().find(|n| n.node_id == PATH_START_NODE_ID);
         let end = graph.nodes().find(|n| n.node_id == PATH_END_NODE_ID);
         match (start, end) {
@@ -1833,41 +1923,43 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     }
 
     /// Every full PATH_START → PATH_END amino-acid string, read left to right.
-    fn protein_full_paths(conn: &GraphConnection, bg_id: &HashId) -> Vec<String> {
-        let mut adj: HashMap<HashId, HashSet<HashId>> = HashMap::new();
-        for ae in BlockGroupEdge::edges_for_block_group(conn, bg_id) {
-            adj.entry(ae.edge.source_node_id)
+    fn protein_full_paths(conn: &GraphConnection, block_group_id: &HashId) -> Vec<String> {
+        let mut adjacency: HashMap<HashId, HashSet<HashId>> = HashMap::new();
+        for augmented_edge in BlockGroupEdge::edges_for_block_group(conn, block_group_id) {
+            adjacency
+                .entry(augmented_edge.edge.source_node_id)
                 .or_default()
-                .insert(ae.edge.target_node_id);
+                .insert(augmented_edge.edge.target_node_id);
         }
-        let mut ids: HashSet<HashId> = adj.keys().copied().collect();
-        for tgts in adj.values() {
-            ids.extend(tgts.iter().copied());
+        let mut ids: HashSet<HashId> = adjacency.keys().copied().collect();
+        for targets in adjacency.values() {
+            ids.extend(targets.iter().copied());
         }
         ids.remove(&PATH_START_NODE_ID);
         ids.remove(&PATH_END_NODE_ID);
         let id_vec: Vec<HashId> = ids.into_iter().collect();
-        let seqs = Node::get_sequences_by_node_ids(conn, &id_vec);
-        let seq_of = |n: HashId| {
-            seqs.get(&n)
-                .map(|s| s.get_sequence(None, None).unwrap_or_default())
+        let sequences = Node::get_sequences_by_node_ids(conn, &id_vec);
+        let sequence_of = |node: HashId| {
+            sequences
+                .get(&node)
+                .map(|sequence| sequence.get_sequence(None, None).unwrap_or_default())
                 .unwrap_or_default()
         };
 
         let mut results = Vec::new();
         let mut stack: Vec<(HashId, String)> = vec![(PATH_START_NODE_ID, String::new())];
-        while let Some((node, acc)) = stack.pop() {
+        while let Some((node, accumulated)) = stack.pop() {
             if node == PATH_END_NODE_ID {
-                results.push(acc);
+                results.push(accumulated);
                 continue;
             }
-            if let Some(tgts) = adj.get(&node) {
-                for &t in tgts {
-                    let mut next = acc.clone();
-                    if t != PATH_END_NODE_ID {
-                        next.push_str(&seq_of(t));
+            if let Some(targets) = adjacency.get(&node) {
+                for &target in targets {
+                    let mut next = accumulated.clone();
+                    if target != PATH_END_NODE_ID {
+                        next.push_str(&sequence_of(target));
                     }
-                    stack.push((t, next));
+                    stack.push((target, next));
                 }
             }
         }
@@ -1878,39 +1970,42 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn translate_simple_forward() {
         // ATG→M, GAA→E, TGA→* : single node, frame 0
-        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
     }
 
     #[test]
     fn translate_default_name_is_source_name_protein_suffixed() {
-        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein.name, "test-gene (protein)");
     }
 
     #[test]
     fn translate_explicit_name_overrides_default() {
-        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test").name("custom-protein-name");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein.name, "custom-protein-name");
     }
 
     #[test]
     fn translate_duplicate_name_in_sample_errors() {
-        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test");
-        translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
 
         // Same collection, same sample (it's always the source sample now), same
         // default name: the second translation must error instead of silently
         // merging new protein edges into the first run's sequence graph.
         let params = TranslationParams::new("test");
-        let result = translate_annotation(&conn, &annotation, Some(&bg_id), params);
+        let result = translate_annotation(&conn, &annotation, Some(&block_group_id), params);
         assert!(matches!(
             result,
             Err(TranslationError::DuplicateBlockGroup(name)) if name == "test-gene (protein)"
@@ -1920,9 +2015,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn translate_frame1() {
         // initial_frame=1 → head_skip=2, reads "GGAATG" → G,M; tail "A" dropped
-        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGGAATGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test").initial_frame(1).unwrap();
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["GM"]);
     }
 
@@ -1930,9 +2026,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn translate_junction_codon() {
         // Node A = "ATGG": ATG→M, tail "G" (1 base)
         // Node B = "AATGA": junction G+"AA"="GAA"→E; B[2..]="TGA"→*
-        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGG", "AATGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGG", "AATGA"]);
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
     }
 
@@ -1940,9 +2037,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn translate_short_node_junction() {
         // A="AT" (2b), B="G" (1b), C="GAATGA" (6b), frame 0
         // Junction ATG=M (B fully consumed); node C: GAA→E, TGA→* → "E*"
-        let (conn, annotation, bg_id) = setup_linear_gene(&["AT", "G", "GAATGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["AT", "G", "GAATGA"]);
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["ME*"]);
     }
 
@@ -1950,18 +2048,20 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn translate_multi_hop_junction() {
         // A="T" (1b), B="G" (1b), C="GGAATGA" (7b), frame 0
         // Multi-hop junction "T"+"G"+"G" = TGG = W; node C → "E*"
-        let (conn, annotation, bg_id) = setup_linear_gene(&["T", "G", "GGAATGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["T", "G", "GGAATGA"]);
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["WE*"]);
     }
 
     #[test]
     fn translate_table4_tga() {
         // Table 4: TGA → W (Trp), not stop
-        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGTGA"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGTGA"]);
         let params = TranslationParams::new("test").codon_table(CodonTable::ncbi(4).unwrap());
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["MW"]);
     }
 
@@ -1973,7 +2073,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
     #[test]
     fn translate_ambiguous_strand_error() {
-        let (conn, bg) = new_block_group("test-gene");
+        let (conn, block_group) = new_block_group("test-gene");
         let (n1, l1) = build_node(&conn, "ATGGAATGA", "n1");
         let (n2, l2) = build_node(&conn, "CCCGGG", "n2");
 
@@ -1994,7 +2094,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             &conn,
             &NewAccession {
                 name: "test-gene".to_string(),
-                block_group_id: bg.id,
+                block_group_id: block_group.id,
                 parent_accession_id: None,
                 spans,
             },
@@ -2007,7 +2107,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test");
         // Strand is resolved before subgraph extraction, so a valid block-group id is
         // required even though this case errors out first.
-        let result = translate_annotation(&conn, &annotation, Some(&bg.id), params);
+        let result = translate_annotation(&conn, &annotation, Some(&block_group.id), params);
         assert!(
             matches!(result, Err(TranslationError::AmbiguousStrand)),
             "expected AmbiguousStrand, got {:?}",
@@ -2026,24 +2126,30 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Reverse strand: the node stores the reverse complement of the CDS.
         let stored = revcomp(&cds);
 
-        let (conn, bg) = new_block_group("rev");
+        let (conn, block_group) = new_block_group("rev");
         let (node, len) = build_node(&conn, &stored, "rev");
         let e_in = build_edge(&conn, PATH_START_NODE_ID, 0, node, 0);
         let e_out = build_edge(&conn, node, len, PATH_END_NODE_ID, 0);
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                build_block_group_edge(bg.id, e_in, 0),
-                build_block_group_edge(bg.id, e_out, 0),
+                build_block_group_edge(block_group.id, e_in, 0),
+                build_block_group_edge(block_group.id, e_out, 0),
             ],
         );
 
         // Accession covers the whole node on the reverse strand.
-        let annotation =
-            accession_annotation(&conn, &bg.id, "rev-gene", &[(node, len)], Strand::Reverse);
+        let annotation = accession_annotation(
+            &conn,
+            &block_group.id,
+            "rev-gene",
+            &[(node, len)],
+            Strand::Reverse,
+        );
 
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg.id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group.id), params).unwrap();
 
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
@@ -2053,18 +2159,19 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     }
 
     /// A non-synonymous SNP in the middle node should produce two parallel protein
-    /// paths: wildtype (ci 0) and variant (ci 1).
+    /// paths: wildtype (chromosome_index 0) and variant (chromosome_index 1).
     ///
     /// DNA layout (frame 0, codon-aligned):
     ///   prefix  "ATG"           → M
-    ///   wt_mid  "GAA" (ci = 0)  → E
-    ///   alt_mid "CAA" (ci = 1)  → Q  ← different amino acid
+    ///   wt_mid  "GAA" (chromosome_index = 0)  → E
+    ///   alt_mid "CAA" (chromosome_index = 1)  → Q  ← different amino acid
     ///   suffix  "TGA"           → *
     #[test]
     fn non_synonymous_snp_creates_variant_protein_path() {
-        let (conn, annotation, bg_id) = setup_variant_gene("ATG", "GAA", "CAA", "TGA");
+        let (conn, annotation, block_group_id) = setup_variant_gene("ATG", "GAA", "CAA", "TGA");
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
 
         // Both amino acids must appear as protein nodes.
         assert_eq!(
@@ -2078,15 +2185,15 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             "variant Q node missing"
         );
 
-        // The protein graph must contain both the wildtype (ci 0) and variant (ci 1)
+        // The protein graph must contain both the wildtype (chromosome_index 0) and variant (chromosome_index 1)
         // paths so they remain distinguishable.
-        let aug_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
         assert!(
-            aug_edges.iter().any(|e| e.chromosome_index == 1),
+            augmented_edges.iter().any(|e| e.chromosome_index == 1),
             "no chromosome_index=1 edge found in protein graph; variant path was lost"
         );
         assert!(
-            aug_edges.iter().any(|e| e.chromosome_index == 0),
+            augmented_edges.iter().any(|e| e.chromosome_index == 0),
             "no chromosome_index=0 edge found in protein graph"
         );
     }
@@ -2097,14 +2204,15 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     ///
     /// DNA layout (frame 0, codon-aligned):
     ///   prefix  "ATG"           → M
-    ///   wt_mid  "GAA" (ci = 0)  → E
-    ///   alt_mid "GAG" (ci = 1)  → E  ← same amino acid (synonymous)
+    ///   wt_mid  "GAA" (chromosome_index = 0)  → E
+    ///   alt_mid "GAG" (chromosome_index = 1)  → E  ← same amino acid (synonymous)
     ///   suffix  "TGA"           → *
     #[test]
     fn synonymous_snp_collapses_to_single_protein_node() {
-        let (conn, annotation, bg_id) = setup_variant_gene("ATG", "GAA", "GAG", "TGA");
+        let (conn, annotation, block_group_id) = setup_variant_gene("ATG", "GAA", "GAG", "TGA");
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
 
         // Synonymous collapse: exactly one protein node with sequence "E".
         assert_eq!(
@@ -2115,9 +2223,9 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         // The variant path is still tracked: chromosome_index = 1 must appear on
         // at least one edge (the two parallel edges from M→E).
-        let aug_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
         assert!(
-            aug_edges.iter().any(|e| e.chromosome_index == 1),
+            augmented_edges.iter().any(|e| e.chromosome_index == 1),
             "no chromosome_index=1 edge found; synonymous variant path was lost"
         );
     }
@@ -2128,14 +2236,15 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     ///
     /// DNA layout (frame 0):
     ///   prefix  "ATGG"          → M, tail "G" (1 base)
-    ///   wt_mid  "AA" (ci=0)     → junction G+AA = GAA = E
-    ///   alt_mid "AG" (ci=1)     → junction G+AG = GAG = E (synonymous!)
+    ///   wt_mid  "AA" (chromosome_index=0)     → junction G+AA = GAA = E
+    ///   alt_mid "AG" (chromosome_index=1)     → junction G+AG = GAG = E (synonymous!)
     ///   suffix  "TAA"           → * (shared)
     #[test]
     fn synonymous_junction_snp_collapses_junction_node() {
-        let (conn, annotation, bg_id) = setup_variant_gene("ATGG", "AA", "AG", "TAA");
+        let (conn, annotation, block_group_id) = setup_variant_gene("ATGG", "AA", "AG", "TAA");
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
 
         // Exactly one junction node coding for E.
         assert_eq!(
@@ -2145,9 +2254,9 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
 
         // Variant edge must be present.
-        let aug_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
         assert!(
-            aug_edges.iter().any(|e| e.chromosome_index == 1),
+            augmented_edges.iter().any(|e| e.chromosome_index == 1),
             "no chromosome_index=1 edge found; junction variant path was lost"
         );
     }
@@ -2156,15 +2265,15 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// columns, not collapse them to the single node on the current path.
     #[test]
     fn full_block_group_keeps_parallel_columns() {
-        let (conn, bg_id) = setup_parallel_columns();
+        let (conn, block_group_id) = setup_parallel_columns();
         let params = TranslationParams::new("test");
-        let protein = translate_block_group(&conn, &bg_id, params).unwrap();
+        let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
 
-        for aa in ["G", "A", "D", "F"] {
+        for amino_acid in ["G", "A", "D", "F"] {
             assert_eq!(
-                count_protein_nodes_with_aa(&conn, &protein.id, aa),
+                count_protein_nodes_with_aa(&conn, &protein.id, amino_acid),
                 1,
-                "protein node for {aa} missing; a parallel column was collapsed"
+                "protein node for {amino_acid} missing; a parallel column was collapsed"
             );
         }
         assert!(
@@ -2175,9 +2284,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
     #[test]
     fn variant_bubble_protein_graph_is_connected() {
-        let (conn, annotation, bg_id) = setup_real_bubble();
+        let (conn, annotation, block_group_id) = setup_real_bubble();
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
 
         // Both the wild-type (E) and variant (A) junction residues must appear.
         assert_eq!(
@@ -2214,9 +2324,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn junction_codon_stop_terminates_at_junction() {
         // A = "ATGT": ATG→M, tail "T" (1 byte). B = "AAGG": junction "T"+"AA" = "TAA" = stop.
-        let (conn, annotation, bg_id) = setup_linear_gene(&["ATGT", "AAGG"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGT", "AAGG"]);
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["M*"]);
     }
 
@@ -2287,9 +2398,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     #[test]
     fn first_codon_stop_translates_to_lone_stop() {
         // TAA is a stop in the standard table; the rest of the node is never read.
-        let (conn, annotation, bg_id) = setup_linear_gene(&["TAAGGGCCC"]);
+        let (conn, annotation, block_group_id) = setup_linear_gene(&["TAAGGGCCC"]);
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(protein_full_paths(&conn, &protein.id), vec!["*"]);
     }
 
@@ -2303,9 +2415,11 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     ///         read in frame: ATG CCG TAG …   → "MP*"  (TAG stop, early)
     #[test]
     fn frameshift_deletion_causes_early_stop() {
-        let (conn, annotation, bg_id) = setup_variant_gene("ATG", "CCC", "CC", "GTAGGGTAA");
+        let (conn, annotation, block_group_id) =
+            setup_variant_gene("ATG", "CCC", "CC", "GTAGGGTAA");
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
             vec!["MP*", "MPVG*"],
@@ -2322,9 +2436,11 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     ///         read in frame: ATG AAT GAC TAA → "MND*" (later stop)
     #[test]
     fn frameshift_deletion_causes_late_stop() {
-        let (conn, annotation, bg_id) = setup_variant_gene("ATG", "AAA", "AA", "TGACTAAGG");
+        let (conn, annotation, block_group_id) =
+            setup_variant_gene("ATG", "AAA", "AA", "TGACTAAGG");
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
             vec!["MK*", "MND*"],
@@ -2337,7 +2453,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// base of each successor → AAA/AAG = K, AAC/AAT = N. Each successor's
     /// remaining bytes ("TAA") are themselves an in-frame stop.
     fn setup_junction_fanout() -> (GraphConnection, HashId) {
-        let (conn, bg) = new_block_group("fanout");
+        let (conn, block_group) = new_block_group("fanout");
 
         let (prefix, prefix_len) = build_node(&conn, "ATGAA", "prefix");
         let (a_node, a_len) = build_node(&conn, "ATAA", "a");
@@ -2358,19 +2474,19 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                build_block_group_edge(bg.id, e_start, 0),
-                build_block_group_edge(bg.id, e_a, 0),
-                build_block_group_edge(bg.id, e_c, 1),
-                build_block_group_edge(bg.id, e_t, 2),
-                build_block_group_edge(bg.id, e_g, 3),
-                build_block_group_edge(bg.id, e_a_end, 0),
-                build_block_group_edge(bg.id, e_c_end, 1),
-                build_block_group_edge(bg.id, e_t_end, 2),
-                build_block_group_edge(bg.id, e_g_end, 3),
+                build_block_group_edge(block_group.id, e_start, 0),
+                build_block_group_edge(block_group.id, e_a, 0),
+                build_block_group_edge(block_group.id, e_c, 1),
+                build_block_group_edge(block_group.id, e_t, 2),
+                build_block_group_edge(block_group.id, e_g, 3),
+                build_block_group_edge(block_group.id, e_a_end, 0),
+                build_block_group_edge(block_group.id, e_c_end, 1),
+                build_block_group_edge(block_group.id, e_t_end, 2),
+                build_block_group_edge(block_group.id, e_g_end, 3),
             ],
         );
-        Path::create(&conn, "fanout", &bg.id, &[e_start, e_a, e_a_end]).unwrap();
-        (conn, bg.id)
+        Path::create(&conn, "fanout", &block_group.id, &[e_start, e_a, e_a_end]).unwrap();
+        (conn, block_group.id)
     }
 
     /// Junction codons sharing the same predecessor and amino acid must collapse
@@ -2379,9 +2495,9 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// four.
     #[test]
     fn junction_codons_with_same_amino_acid_deduplicate() {
-        let (conn, bg_id) = setup_junction_fanout();
+        let (conn, block_group_id) = setup_junction_fanout();
         let params = TranslationParams::new("test");
-        let protein = translate_block_group(&conn, &bg_id, params).unwrap();
+        let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
 
         assert_eq!(
             count_protein_nodes_with_aa(&conn, &protein.id, "K"),
@@ -2401,7 +2517,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// way. The successor's remaining bytes ("TAA") are themselves an in-frame
     /// stop.
     fn setup_many_to_one_junction() -> (GraphConnection, HashId) {
-        let (conn, bg) = new_block_group("converge");
+        let (conn, block_group) = new_block_group("converge");
 
         let (f_prefix, f_len) = build_node(&conn, "ATGTTTAA", "f-prefix");
         let (p_prefix, p_len) = build_node(&conn, "ATGCCCAA", "p-prefix");
@@ -2416,15 +2532,15 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                build_block_group_edge(bg.id, e_start_f, 0),
-                build_block_group_edge(bg.id, e_start_p, 1),
-                build_block_group_edge(bg.id, e_f, 0),
-                build_block_group_edge(bg.id, e_p, 1),
-                build_block_group_edge(bg.id, e_end, 0),
+                build_block_group_edge(block_group.id, e_start_f, 0),
+                build_block_group_edge(block_group.id, e_start_p, 1),
+                build_block_group_edge(block_group.id, e_f, 0),
+                build_block_group_edge(block_group.id, e_p, 1),
+                build_block_group_edge(block_group.id, e_end, 0),
             ],
         );
-        Path::create(&conn, "converge", &bg.id, &[e_start_f, e_f, e_end]).unwrap();
-        (conn, bg.id)
+        Path::create(&conn, "converge", &block_group.id, &[e_start_f, e_f, e_end]).unwrap();
+        (conn, block_group.id)
     }
 
     /// Many-to-one junction convergence: two different predecessor anchors (F and
@@ -2438,9 +2554,9 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
                 so many-to-one convergence onto the same junction codon does not \
                 deduplicate the way anchors do"]
     fn many_to_one_junction_convergence_deduplicates() {
-        let (conn, bg_id) = setup_many_to_one_junction();
+        let (conn, block_group_id) = setup_many_to_one_junction();
         let params = TranslationParams::new("test");
-        let protein = translate_block_group(&conn, &bg_id, params).unwrap();
+        let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
 
         assert_eq!(
             count_protein_nodes_with_aa(&conn, &protein.id, "K"),
@@ -2640,8 +2756,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
 
         // Child: first base mutated A→C, kept as a bubble alongside the reference.
-        //   START → A → rest → END   (ci 0, reference)
-        //   START → C → rest → END   (ci 1, variant)
+        //   START → A → rest → END   (chromosome_index 0, reference)
+        //   START → C → rest → END   (chromosome_index 1, variant)
         let child_bg = create_bg(&conn, "test", "child", "test-gene");
         SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
         let start_alt = build_edge(&conn, PATH_START_NODE_ID, 0, first_alt, 0);
@@ -2705,8 +2821,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
 
         // Child: last base mutated A→G, kept as a bubble alongside the reference.
-        //   head → A → END   (ci 0, reference)
-        //   head → G → END   (ci 1, variant)
+        //   head → A → END   (chromosome_index 0, reference)
+        //   head → G → END   (chromosome_index 1, variant)
         let child_bg = create_bg(&conn, "test", "child", "test-gene");
         SampleLineage::create(&conn, Sample::DEFAULT_NAME, "child").unwrap();
         let head_alt = build_edge(&conn, head, head_len, last_alt, 0);
@@ -2752,7 +2868,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     ///   A -> END (ci0), Z -> END (ci2)
     #[test]
     fn translate_from_path_zero_follows_only_the_entry_node() {
-        let (conn, bg) = new_block_group("probe");
+        let (conn, block_group) = new_block_group("probe");
         let (a, a_len) = build_node(&conn, "TAA", "a");
         let (d, d_len) = build_node(&conn, "G", "d");
         let (p, p_len) = build_node(&conn, "C", "p");
@@ -2769,19 +2885,19 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         BlockGroupEdge::bulk_create(
             &conn,
             &[
-                build_block_group_edge(bg.id, e_start_a, 0),
-                build_block_group_edge(bg.id, e_start_d, 1),
-                build_block_group_edge(bg.id, e_d_p, 1),
-                build_block_group_edge(bg.id, e_p_a, 1),
-                build_block_group_edge(bg.id, e_p_z, 2),
-                build_block_group_edge(bg.id, e_a_end, 0),
-                build_block_group_edge(bg.id, e_z_end, 2),
+                build_block_group_edge(block_group.id, e_start_a, 0),
+                build_block_group_edge(block_group.id, e_start_d, 1),
+                build_block_group_edge(block_group.id, e_d_p, 1),
+                build_block_group_edge(block_group.id, e_p_a, 1),
+                build_block_group_edge(block_group.id, e_p_z, 2),
+                build_block_group_edge(block_group.id, e_a_end, 0),
+                build_block_group_edge(block_group.id, e_z_end, 2),
             ],
         );
-        Path::create(&conn, "probe", &bg.id, &[e_start_a, e_a_end]).unwrap();
+        Path::create(&conn, "probe", &block_group.id, &[e_start_a, e_a_end]).unwrap();
 
         let from_path =
-            translate_from_path(&conn, &bg.id, 0, TranslationParams::new("test")).unwrap();
+            translate_from_path(&conn, &block_group.id, 0, TranslationParams::new("test")).unwrap();
 
         assert_eq!(
             protein_full_paths(&conn, &from_path.id),
@@ -2800,9 +2916,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// CDS and both branches of the variant bubble at the middle codon.
     #[test]
     fn reverse_strand_block_group_translation_handles_variant() {
-        let (conn, bg_id, _, _) = setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
+        let (conn, block_group_id, _, _) =
+            setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
         let params = TranslationParams::new("test").strand(Strand::Reverse);
-        let protein = translate_block_group(&conn, &bg_id, params).unwrap();
+        let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
 
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
@@ -2816,18 +2933,19 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// inferred from the accession's own segment, not passed explicitly.
     #[test]
     fn reverse_strand_annotation_translation_handles_variant() {
-        let (conn, bg_id, suf, suf_len) =
+        let (conn, block_group_id, suf, suf_len) =
             setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
         let annotation = accession_annotation(
             &conn,
-            &bg_id,
+            &block_group_id,
             "rev-gene",
             &[(suf, suf_len)],
             Strand::Reverse,
         );
 
         let params = TranslationParams::new("test");
-        let protein = translate_annotation(&conn, &annotation, Some(&bg_id), params).unwrap();
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
 
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
@@ -2841,9 +2959,10 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// bubble.
     #[test]
     fn reverse_strand_path_translation_handles_variant() {
-        let (conn, bg_id, _, _) = setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
+        let (conn, block_group_id, _, _) =
+            setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
         let params = TranslationParams::new("test").strand(Strand::Reverse);
-        let protein = translate_from_path(&conn, &bg_id, 0, params).unwrap();
+        let protein = translate_from_path(&conn, &block_group_id, 0, params).unwrap();
 
         assert_eq!(
             protein_full_paths(&conn, &protein.id),
