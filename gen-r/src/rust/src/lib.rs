@@ -1016,7 +1016,7 @@ impl Repository {
         for bg in BlockGroup::all(conn) {
             let collection_name = bg.collection_name.clone();
             let sample_name = bg.sample_name.clone();
-            let sg = r!(self.into_sequence_graph(bg));
+            let sg = r!(self.to_sequence_graph(bg));
             match samples
                 .iter_mut()
                 .find(|(c, s, _)| *c == collection_name && *s == sample_name)
@@ -2072,7 +2072,7 @@ impl Repository {
         let conn = self.context.graph().conn();
         let block_groups = Sample::get_block_groups(conn, collection_name, sample_name)
             .into_iter()
-            .map(|bg| r!(self.into_sequence_graph(bg)))
+            .map(|bg| r!(self.to_sequence_graph(bg)))
             .collect();
         sample_record(collection_name, sample_name, block_groups)
     }
@@ -2088,7 +2088,7 @@ impl Repository {
         Sample::get_block_groups(conn, collection_name, sample_name)
             .into_iter()
             .find(|bg| bg.name == name)
-            .map(|bg| self.into_sequence_graph(bg))
+            .map(|bg| self.to_sequence_graph(bg))
             .ok_or_else(|| {
                 Error::Other(format!(
                     "Block group '{name}' not found in sample '{sample_name}'"

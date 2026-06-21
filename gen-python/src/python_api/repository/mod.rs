@@ -114,7 +114,7 @@ impl PyRepository {
         let block_groups =
             Sample::get_block_groups(self.context.graph().conn(), collection_name, sample_name)
                 .into_iter()
-                .map(|bg| self.into_py_block_group(bg))
+                .map(|bg| self.to_py_block_group(bg))
                 .collect();
         PySample::new(
             collection_name.to_string(),
@@ -133,7 +133,7 @@ impl PyRepository {
         Sample::get_block_groups(self.context.graph().conn(), collection_name, sample_name)
             .into_iter()
             .find(|bg| bg.name == name)
-            .map(|bg| self.into_py_block_group(bg))
+            .map(|bg| self.to_py_block_group(bg))
             .ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
                     "Block group '{}' not found in sample '{}'",
@@ -279,7 +279,7 @@ impl PyRepository {
         let conn = self.context.graph().conn();
         let mut samples: Vec<PySample> = Vec::new();
         for bg in BlockGroup::all(conn) {
-            let py_bg = self.into_py_block_group(bg);
+            let py_bg = self.to_py_block_group(bg);
             match samples.iter_mut().find(|sample| {
                 sample.collection_name == py_bg.collection_name
                     && sample.sample_name == py_bg.sample_name
