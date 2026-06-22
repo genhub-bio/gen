@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_core::{Strand, range::Range};
 use gen_models::{
-    accession::{Accession, AccessionEdge, AccessionEdgeData, AccessionPath},
+    accession::{Accession, AccessionSpan, NewAccession},
     annotations::{Annotation, AnnotationExtra, AnnotationGroupSample, PartExtra},
     block_group::{BlockGroup, NewBlockGroup},
     collection::Collection,
@@ -139,33 +139,24 @@ pub(crate) fn create_part_annotations(
         } else {
             format!("{}_{count}", part.name)
         };
-        let accession = Accession::get_or_create(conn, &annotation_name, &block_group_id, None)?;
         let ann_start = part.annotation_start.unwrap_or(0);
         let ann_end = part.annotation_end.unwrap_or(part.sequence_length);
-        let edge_ids = AccessionEdge::bulk_create(
+        let accession = Accession::get_or_create(
             conn,
-            &[
-                AccessionEdgeData {
-                    source_node_id: PATH_START_NODE_ID,
-                    source_coordinate: -1,
-                    source_strand: Strand::Forward,
-                    target_node_id: *node_id,
-                    target_coordinate: ann_start,
-                    target_strand: Strand::Forward,
-                    chromosome_index: 0,
-                },
-                AccessionEdgeData {
-                    source_node_id: *node_id,
-                    source_coordinate: ann_end,
-                    source_strand: Strand::Forward,
-                    target_node_id: PATH_END_NODE_ID,
-                    target_coordinate: -1,
-                    target_strand: Strand::Forward,
-                    chromosome_index: 0,
-                },
-            ],
-        );
-        AccessionPath::create(conn, &accession.id, &edge_ids)?;
+            &NewAccession {
+                name: annotation_name.clone(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![AccessionSpan {
+                    node_id: *node_id,
+                    range: Range {
+                        start: ann_start,
+                        end: ann_end,
+                    },
+                    strand: Strand::Forward,
+                }],
+            },
+        )?;
         let fasta = part.fasta_extra.clone();
         let extra_part = part.metadata.as_deref().and_then(|s| {
             serde_json::from_str(s)
@@ -466,16 +457,16 @@ mod tests {
 
         // p1 has [GEN_annotation_start=1][GEN_annotation_end=3] — covers "AA" (chars 1..3 of "AAAA")
         let p1 = annotations_by_name.remove("p1").unwrap();
-        let p1_edges = Accession::get_edges_by_id(conn, &p1.accession_id);
+        let p1_nodes = Accession::get_nodes_by_id(conn, &p1.accession_id);
         assert_eq!(
-            p1_edges[0].target_coordinate, 1,
+            p1_nodes[0].sequence_start, 1,
             "p1 annotation should start at offset 1"
         );
         assert_eq!(
-            p1_edges[1].source_coordinate, 3,
+            p1_nodes[0].sequence_end, 3,
             "p1 annotation should end at offset 3"
         );
-        let p1_node_id = p1_edges[0].target_node_id;
+        let p1_node_id = p1_nodes[0].node_id;
         let p1_sequences = Node::get_sequences_by_node_ids(conn, &[p1_node_id]);
         let p1_seq = p1_sequences[&p1_node_id]
             .get_sequence(1_i64, 3_i64)
@@ -500,28 +491,28 @@ mod tests {
 
         // p2 has no offsets — covers the full sequence "TAAT"
         let p2 = annotations_by_name.remove("p2").unwrap();
-        let p2_edges = Accession::get_edges_by_id(conn, &p2.accession_id);
+        let p2_nodes = Accession::get_nodes_by_id(conn, &p2.accession_id);
         assert_eq!(
-            p2_edges[0].target_coordinate, 0,
+            p2_nodes[0].sequence_start, 0,
             "p2 annotation should start at 0"
         );
         assert_eq!(
-            p2_edges[1].source_coordinate, 4,
+            p2_nodes[0].sequence_end, 4,
             "p2 annotation should end at sequence length"
         );
 
         // p3 has [GEN_annotation_end=3] only — covers "CAA" (chars 0..3 of "CAAC")
         let p3 = annotations_by_name.remove("p3").unwrap();
-        let p3_edges = Accession::get_edges_by_id(conn, &p3.accession_id);
+        let p3_nodes = Accession::get_nodes_by_id(conn, &p3.accession_id);
         assert_eq!(
-            p3_edges[0].target_coordinate, 0,
+            p3_nodes[0].sequence_start, 0,
             "p3 annotation should start at 0"
         );
         assert_eq!(
-            p3_edges[1].source_coordinate, 3,
+            p3_nodes[0].sequence_end, 3,
             "p3 annotation should end at offset 3"
         );
-        let p3_node_id = p3_edges[0].target_node_id;
+        let p3_node_id = p3_nodes[0].node_id;
         let p3_sequences = Node::get_sequences_by_node_ids(conn, &[p3_node_id]);
         let p3_seq = p3_sequences[&p3_node_id]
             .get_sequence(0_i64, 3_i64)
@@ -569,14 +560,11 @@ mod tests {
         let annotations = Annotation::query_by_group(conn, library_name).unwrap();
         assert_eq!(annotations.len(), 1);
         let cds = &annotations[0];
-        let edges = Accession::get_edges_by_id(conn, &cds.accession_id);
-        assert_eq!(
-            edges[0].target_coordinate, 3,
-            "annotation_start should be 3"
-        );
-        assert_eq!(edges[1].source_coordinate, 6, "annotation_end should be 6");
+        let nodes = Accession::get_nodes_by_id(conn, &cds.accession_id);
+        assert_eq!(nodes[0].sequence_start, 3, "annotation_start should be 3");
+        assert_eq!(nodes[0].sequence_end, 6, "annotation_end should be 6");
 
-        let node_id = edges[0].target_node_id;
+        let node_id = nodes[0].node_id;
         let sequences = Node::get_sequences_by_node_ids(conn, &[node_id]);
         let seq = sequences[&node_id].get_sequence(3_i64, 6_i64).unwrap();
         // "ATGATAA"[3..6] = "ATA"
