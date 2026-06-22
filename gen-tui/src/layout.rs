@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     distribute_nodes::{compact_layout, compact_layout_horizontal},
-    edge_router::route_graph::make_rectilinear,
+    edge_router::{layout_graph_process::prune_pin_stubs, route_graph::make_rectilinear},
     geometry::{BigRect, LayoutObject, LayoutPos, LocalPos, PartitionIndex},
     partition::{PartitionEdge, PartitionNode, StitchSide},
     plotter::NodeSizer,
@@ -142,6 +142,12 @@ pub enum NodeRole {
     Data(NodeIndex),
     Routing, // No stored data - glyph computed on-the-fly from connectivity
     Stitch(StitchSide),
+    /// Synthetic node rendering a backward edge as a full-width loop. Behaves exactly
+    /// like `Routing` everywhere except: it must survive `simplify_graph`'s straight-run
+    /// contraction (so it's always "critical" there, like `Data`/`Stitch`) so the
+    /// dedicated pin-pruning pass can find and remove it afterwards. See
+    /// `PartitionNode::Pin` and `edge_router::layout_graph_process::prune_pin_stubs`.
+    Pin,
 }
 
 /// Layout graphs contain two types of nodes: nodes that represent the input nodes,
@@ -250,6 +256,30 @@ impl PartitionLayout {
         if let Err(e) = make_rectilinear(&mut layout_graph) {
             log::warn!("Edge routing failed: {:?}", e);
         }
+        let pin_idx_before = layout_graph
+            .node_indices()
+            .find(|&idx| matches!(layout_graph[idx].role, NodeRole::Pin));
+        if let Some(idx) = pin_idx_before {
+            let neighbors: Vec<_> = layout_graph
+                .neighbors(idx)
+                .map(|n| (n, layout_graph[n].role.clone(), layout_graph[n].pos.x, layout_graph[n].pos.y))
+                .collect();
+            eprintln!(
+                "DEBUG for_section: Pin {:?} pos=({},{}) neighbors={:?}",
+                idx, layout_graph[idx].pos.x, layout_graph[idx].pos.y, neighbors
+            );
+        }
+        prune_pin_stubs(&mut layout_graph);
+        if pin_idx_before.is_some() {
+            eprintln!(
+                "DEBUG for_section: after pruning, node_count={} edge_count={}",
+                layout_graph.node_count(),
+                layout_graph.edge_count()
+            );
+            for node_idx in layout_graph.node_indices() {
+                eprintln!("  remaining node {:?} role={:?} pos=({},{})", node_idx, layout_graph[node_idx].role, layout_graph[node_idx].pos.x, layout_graph[node_idx].pos.y);
+            }
+        }
 
         // Rebuild all coordinates with the separation-constraint solver:
         // removes dead space (Brandes-Köpf averaging artifacts, raw routing
@@ -291,6 +321,8 @@ impl PartitionLayout {
         if let Err(e) = make_rectilinear(&mut layout_graph) {
             log::warn!("Edge routing failed: {:?}", e);
         }
+        // Pin nodes only ever live in section partitions (see PartitionTable::new_with_backward_edges),
+        // never in a bridge's reconstructed boundary-only graph, so no pruning pass runs here.
 
         // Compact horizontally only: bridge endpoints keep the y coordinates
         // inherited from the adjacent section layouts.
@@ -377,7 +409,7 @@ impl PartitionLayout {
                         *new_idx,
                         *original_node_idx,
                     ),
-                    NodeRole::Routing => LayoutObject::routing_node(
+                    NodeRole::Routing | NodeRole::Pin => LayoutObject::routing_node(
                         LayoutPos::new(node_data.pos.x, node_data.pos.y),
                         *new_idx,
                     ),
@@ -593,7 +625,7 @@ impl<'a> LayoutEngine<'a> {
                         let d: i32 = i32::try_from(domain_idx.index()).unwrap_or(i32::MAX);
                         i32::MAX.saturating_sub(d)
                     }
-                    PartitionNode::Stitch(_) => 0,
+                    PartitionNode::Stitch(_) | PartitionNode::Pin => 0,
                 };
                 vertex.set_sort_bias(sort_bias);
                 let new_vertex_idx = vertex_graph.add_node(vertex);
@@ -629,6 +661,19 @@ impl<'a> LayoutEngine<'a> {
                 };
 
                 vertex_graph.add_edge(src_vertex_idx, dst_vertex_idx, edge);
+            }
+        }
+
+        for pidx in partition_graph.node_indices() {
+            if matches!(partition_graph[pidx], PartitionNode::Pin) {
+                let vidx = node_map[&pidx];
+                eprintln!(
+                    "DEBUG LayoutEngine::new: Pin partition_idx={:?} vertex_idx={:?} vertex_degree={}",
+                    pidx,
+                    vidx,
+                    vertex_graph.edges_directed(vidx, petgraph::Direction::Outgoing).count()
+                        + vertex_graph.edges_directed(vidx, petgraph::Direction::Incoming).count()
+                );
             }
         }
 
@@ -679,7 +724,7 @@ impl<'a> LayoutEngine<'a> {
                 // For Data nodes, use the node sizer
                 node_sizer.get_node_size(&node_idx, detail_level)
             } else {
-                // For Stitch nodes, use dummy size
+                // For Stitch and Pin nodes, use dummy size
                 node_sizer.get_dummy_size()
             };
 
@@ -693,6 +738,7 @@ impl<'a> LayoutEngine<'a> {
             let role = match partition_node {
                 PartitionNode::Data(d) => NodeRole::Data(*d),
                 PartitionNode::Stitch(s) => NodeRole::Stitch(*s),
+                PartitionNode::Pin => NodeRole::Pin,
             };
             let layout_node = LayoutNode::new(role, pos, (width, height), Some(0));
 
@@ -726,6 +772,17 @@ impl<'a> LayoutEngine<'a> {
         // in the LayoutEngine.
         if self.vertex_layers.is_none() {
             self.vertex_layers = Some(run_sugiyama_algorithm(&mut self.vertex_graph, &self.config));
+        }
+        for vidx in self.vertex_graph.node_indices() {
+            eprintln!(
+                "DEBUG after sugiyama: vidx={:?} input_node_idx={:?} rank={} role={:?}",
+                vidx,
+                self.vertex_graph[vidx].input_node_idx,
+                self.vertex_graph[vidx].get_rank(),
+                self.vertex_graph[vidx]
+                    .input_node_idx
+                    .map(|pidx| format!("{:?}", self.partition_graph[self.partition_graph.from_index(pidx.index())]))
+            );
         }
 
         // Make a fresh copy for this specific layout computation
@@ -810,6 +867,7 @@ impl<'a> LayoutEngine<'a> {
                     match &self.partition_graph[pidx] {
                         PartitionNode::Data(domain_idx) => NodeRole::Data(*domain_idx),
                         PartitionNode::Stitch(side) => NodeRole::Stitch(*side),
+                        PartitionNode::Pin => NodeRole::Pin,
                     }
                 } else {
                     NodeRole::Routing
@@ -848,9 +906,22 @@ impl<'a> LayoutEngine<'a> {
         }
 
         // Create layout edges with aggregated bundles
-        for ((layout_source_idx, layout_target_idx), bundles) in edge_bundles {
-            let layout_edge = LayoutEdge { bundle: bundles };
-            layout_graph.add_edge(layout_source_idx, layout_target_idx, layout_edge);
+        for ((layout_source_idx, layout_target_idx), bundles) in &edge_bundles {
+            let layout_edge = LayoutEdge {
+                bundle: bundles.clone(),
+            };
+            layout_graph.add_edge(*layout_source_idx, *layout_target_idx, layout_edge);
+        }
+
+        for node_idx in layout_graph.node_indices() {
+            eprintln!(
+                "DEBUG build_layout_graph node: {:?} role={:?} pos=({},{}) degree={}",
+                node_idx,
+                layout_graph[node_idx].role,
+                layout_graph[node_idx].pos.x,
+                layout_graph[node_idx].pos.y,
+                layout_graph.neighbors_undirected(node_idx).count()
+            );
         }
 
         layout_graph

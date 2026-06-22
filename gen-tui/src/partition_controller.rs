@@ -105,10 +105,33 @@ where
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
-        let partition_table = PartitionTable::new_with_config(
+        Self::new_with_config_and_backward_edges(
+            graph,
+            node_sizer,
+            partition_config,
+            controller_config,
+            &[],
+        )
+    }
+
+    /// Create a new PartitionController, rewriting each backward edge in `backward_edges`
+    /// onto a pair of pin nodes so the partitioned graph stays acyclic. See
+    /// `PartitionTable::new_with_backward_edges`.
+    pub fn new_with_config_and_backward_edges(
+        graph: G,
+        node_sizer: S,
+        partition_config: PartitionConfig,
+        controller_config: ControllerConfig,
+        backward_edges: &[(G::NodeId, G::NodeId)],
+    ) -> Self
+    where
+        <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+    {
+        let partition_table = PartitionTable::new_with_backward_edges(
             &graph,
             partition_config.layer_count,
             partition_config.node_count,
+            backward_edges,
         );
         Self {
             graph,

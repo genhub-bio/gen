@@ -416,7 +416,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     }
                 }
             }
-            NodeRole::Routing => {
+            NodeRole::Routing | NodeRole::Pin => {
                 let edge_color = theme[0x05];
                 let base_glyph =
                     compute_junction_glyph(viewport_graph.neighbors(*world_pos), *world_pos);

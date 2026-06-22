@@ -14,6 +14,9 @@ use crate::layout::{PartitionLayout, VisualDetail};
 pub enum PartitionNode {
     Data(NodeIndex),
     Stitch(StitchSide),
+    /// Synthetic node injected to render a backward edge as a full-width loop.
+    /// Carries no domain data; sized and rendered like an ordinary routing node.
+    Pin,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Eq)]

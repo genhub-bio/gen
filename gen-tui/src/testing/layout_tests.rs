@@ -118,6 +118,98 @@ fn make_snapshot(
     )
 }
 
+/// Like `make_snapshot`, but rewrites `backward_edges` onto pin nodes via
+/// `GraphController::new_with_backward_edges`, so a cyclic domain graph renders as a loop
+/// instead of panicking.
+#[cfg(test)]
+fn make_snapshot_with_backward_edges(
+    domain_graph: MockDomainGraph,
+    viewport_width: u16,
+    viewport_height: u16,
+    layer_count: usize,
+    node_count: usize,
+    backward_edges: &[(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)],
+) -> String {
+    use crate::graph_controller::GraphConfig;
+
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut renderer = TestRenderers::debug();
+
+    let mut terminal = create_test_terminal(viewport_width, viewport_height);
+
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = layer_count;
+    config.partition.node_count = node_count;
+    let mut controller = GraphController::new_with_config_and_backward_edges(
+        domain_graph.clone(),
+        node_sizer,
+        config,
+        backward_edges,
+    );
+
+    let test_viewport = ratatui::layout::Rect::new(0, 0, viewport_width, viewport_height);
+    controller.viewport_state.viewport_bounds = test_viewport;
+    controller.set_detail_level(VisualDetail::Full);
+
+    let result = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+        let _ = controller.ensure_camera_coverage();
+
+        for idx in [6usize, 7, 8] {
+            if let Some(layout) = controller
+                .partition_controller
+                .partition_table
+                .get_layout(idx, controller.get_detail_level())
+            {
+                eprintln!("DEBUG layout partition {}:", idx);
+                for node_idx in layout.graph.node_indices() {
+                    let node = &layout.graph[node_idx];
+                    eprintln!(
+                        "  node {:?} role={:?} pos=({},{})",
+                        node_idx, node.role, node.pos.x, node.pos.y
+                    );
+                }
+                for edge in petgraph::visit::IntoEdgeReferences::edge_references(&layout.graph) {
+                    use petgraph::visit::EdgeRef;
+                    eprintln!(
+                        "  edge {:?} -> {:?} bundle={:?}",
+                        edge.source(),
+                        edge.target(),
+                        edge.weight().bundle
+                    );
+                }
+            } else {
+                eprintln!("DEBUG layout partition {}: NOT LOADED", idx);
+            }
+        }
+
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph for snapshot generation");
+        let viewport_graph = controller.get_viewport_graph();
+        let detail_level = controller.get_detail_level();
+
+        let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
+        plot_viewport_graph(
+            viewport_graph,
+            &mut buffer,
+            &mut renderer,
+            controller.graph(),
+            detail_level,
+            &crate::theme::current_theme(),
+        );
+    });
+
+    match result {
+        Ok(_) => format!("{}", terminal.backend()),
+        Err(e) => format!("Rendering failed: {}", e),
+    }
+}
+
 #[test]
 fn viewport_visual_regression_simple_chain() {
     let _ = env_logger::try_init();
@@ -2094,4 +2186,47 @@ fn test_diamond_variable_width_parallel_nodes() {
     );
 
     insta::assert_snapshot!("diamond_variable_width_parallel", snapshot);
+}
+
+#[test]
+fn viewport_visual_regression_circular_genome_loop() {
+    let _ = env_logger::try_init();
+    // a -> b -> c -> d, plus a backward edge d -> a closing the loop, mirroring a
+    // circular genome's PATH_END -> PATH_START edge.
+    let mut domain_graph = MockDomainGraph::new();
+    let a = domain_graph.add_node(());
+    let b = domain_graph.add_node(());
+    let c = domain_graph.add_node(());
+    let d = domain_graph.add_node(());
+    domain_graph.add_edge(a, b, ());
+    domain_graph.add_edge(b, c, ());
+    domain_graph.add_edge(c, d, ());
+
+    let snapshot =
+        make_snapshot_with_backward_edges(domain_graph, 80, 20, usize::MAX, usize::MAX, &[(d, a)]);
+
+    insta::assert_snapshot!("circular_genome_loop", snapshot);
+}
+
+#[test]
+fn viewport_visual_regression_circular_genome_loop_multi_partition() {
+    let _ = env_logger::try_init();
+    // A longer chain split across several partitions, with a backward edge from the
+    // last node back to the first, exercising the multi-partition pin-relay path.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..6).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..5 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        160,
+        20,
+        1,
+        usize::MAX,
+        &[(nodes[5], nodes[0])],
+    );
+
+    insta::assert_snapshot!("circular_genome_loop_multi_partition", snapshot);
 }

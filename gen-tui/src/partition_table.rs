@@ -1,4 +1,7 @@
-use std::{collections::HashMap, hash::Hash};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    hash::Hash,
+};
 
 use ftree::FenwickTree;
 #[cfg(test)]
@@ -172,7 +175,7 @@ where
                 self.original_sizer
                     .get_node_size(&original_node_id, detail_level)
             }
-            PartitionNode::Stitch(_) => self.original_sizer.get_dummy_size(),
+            PartitionNode::Stitch(_) | PartitionNode::Pin => self.original_sizer.get_dummy_size(),
         }
     }
 
@@ -215,6 +218,22 @@ where
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
+        Self::new_with_backward_edges(graph, min_width, max_nodes, &[])
+    }
+
+    /// Create a new PartitionTable from a generic graph, rewriting each backward edge
+    /// `(source, target)` in `backward_edges` onto a pair of synthetic pin nodes
+    /// (`left_pin -> target`, `left_pin -> right_pin`, `source -> right_pin`) so the
+    /// resulting graph is acyclic. See `gen-tui` cyclic-graph-rendering design notes.
+    pub fn new_with_backward_edges(
+        graph: &G,
+        min_width: usize,
+        max_nodes: usize,
+        backward_edges: &[(G::NodeId, G::NodeId)],
+    ) -> Self
+    where
+        <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+    {
         let mut all_partitions: Vec<Partition> = Vec::new();
         let mut current_partition: Partition = Partition::new();
         let mut current_partition_index = 0;
@@ -230,8 +249,12 @@ where
             articulation_points
         );
 
-        let node_ranks =
-            compute_all_ranks(graph).expect("Could not compute ranks for graph layout");
+        // Backward edges are excluded from ranking (and from the inter-partition edge
+        // pass below) so the graph is acyclic; they are re-attached afterwards onto a
+        // pair of synthetic pin nodes that render the loop as a full-width bypass edge.
+        let excluded_edges: HashSet<(G::NodeId, G::NodeId)> =
+            backward_edges.iter().copied().collect();
+        let node_ranks = compute_all_ranks_excluding(graph, &excluded_edges);
 
         let mut min_rank = 0; // The minimum rank of the current partition
         let mut prev_rank = 0; // Rank of previous node evaluated
@@ -282,10 +305,16 @@ where
         > = HashMap::new();
 
         for edge in graph.edge_references() {
-            let edge_idx_usize = <G as EdgeIndexable>::to_index(graph, edge.id());
-            let edge_idx = EdgeIndex::new(edge_idx_usize);
             let source = edge.source();
             let target = edge.target();
+
+            // Backward edges are rewired onto pin nodes below, not added as ordinary edges.
+            if excluded_edges.contains(&(source, target)) {
+                continue;
+            }
+
+            let edge_idx_usize = <G as EdgeIndexable>::to_index(graph, edge.id());
+            let edge_idx = EdgeIndex::new(edge_idx_usize);
 
             let (source_partition_idx, source_node_index) = node_map
                 .get(&source)
@@ -490,6 +519,58 @@ where
                     }
                 }
             }
+        }
+
+        // Rewire each backward edge onto a pair of pin nodes: `left_pin` in the first
+        // partition and `right_pin` in the last partition, connected by three forward
+        // edges (`left_pin -> target`, `left_pin -> right_pin`, `source -> right_pin`).
+        // `left_pin` has only outgoing edges and `right_pin` only incoming edges within
+        // their partitions, so each lands at the leftmost/rightmost rank automatically
+        // once laid out - no explicit rank-forcing is needed.
+        let last_partition_idx = num_partitions - 1;
+        for &(source, target) in backward_edges {
+            let (source_partition_idx, source_node_index) = node_map
+                .get(&source)
+                .copied()
+                .expect("Encountered backward edge with unknown source node");
+            let (target_partition_idx, target_node_index) = node_map
+                .get(&target)
+                .copied()
+                .expect("Encountered backward edge with unknown target node");
+
+            let source_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, source));
+            let target_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, target));
+            let bundle = (source_domain_idx, target_domain_idx);
+
+            let left_pin_idx = all_partitions[0].graph.add_node(PartitionNode::Pin);
+            let right_pin_idx = all_partitions[last_partition_idx]
+                .graph
+                .add_node(PartitionNode::Pin);
+
+            connect_across_partitions(
+                &mut all_partitions,
+                0,
+                left_pin_idx,
+                target_partition_idx,
+                target_node_index,
+                bundle,
+            );
+            connect_across_partitions(
+                &mut all_partitions,
+                source_partition_idx,
+                source_node_index,
+                last_partition_idx,
+                right_pin_idx,
+                bundle,
+            );
+            connect_across_partitions(
+                &mut all_partitions,
+                0,
+                left_pin_idx,
+                last_partition_idx,
+                right_pin_idx,
+                bundle,
+            );
         }
 
         PartitionTable {
@@ -1187,6 +1268,144 @@ where
     }
 }
 
+/// Connect `from_node` (in `from_partition_idx`) to `to_node` (in `to_partition_idx`),
+/// relaying through the left/right stitch chain of every partition in between when the
+/// two endpoints don't share a partition. Mirrors the existing inter-partition stitch
+/// wiring, but operates directly on the two given nodes instead of looking up bundles in
+/// `inter_partition_edges`, since pin nodes carry no domain id to key that map on.
+/// Requires `from_partition_idx <= to_partition_idx`.
+fn connect_across_partitions(
+    all_partitions: &mut [Partition],
+    from_partition_idx: PartitionIndex,
+    from_node: NodeIndex<u32>,
+    to_partition_idx: PartitionIndex,
+    to_node: NodeIndex<u32>,
+    bundle: (NodeIndex<u32>, NodeIndex<u32>),
+) {
+    assert!(
+        from_partition_idx <= to_partition_idx,
+        "connect_across_partitions requires a left-to-right connection"
+    );
+
+    if from_partition_idx == to_partition_idx {
+        all_partitions[from_partition_idx]
+            .graph
+            .add_edge(from_node, to_node, Some(bundle));
+        return;
+    }
+
+    let right_stitch_idx = all_partitions[from_partition_idx]
+        .right_stitch_idx
+        .expect("Non-last partition should have a right stitch node");
+    all_partitions[from_partition_idx]
+        .graph
+        .add_edge(from_node, right_stitch_idx, Some(bundle));
+
+    let mut partition_idx = from_partition_idx + 2;
+    while partition_idx < to_partition_idx {
+        if let (Some(left_idx), Some(right_idx)) = (
+            all_partitions[partition_idx].left_stitch_idx,
+            all_partitions[partition_idx].right_stitch_idx,
+        ) {
+            all_partitions[partition_idx]
+                .graph
+                .add_edge(left_idx, right_idx, Some(bundle));
+        }
+        partition_idx += 2;
+    }
+
+    let left_stitch_idx = all_partitions[to_partition_idx]
+        .left_stitch_idx
+        .expect("Non-first partition should have a left stitch node");
+    all_partitions[to_partition_idx]
+        .graph
+        .add_edge(left_stitch_idx, to_node, Some(bundle));
+}
+
+/// Like `compute_all_ranks`, but ignores edges in `excluded_edges` entirely - as if they
+/// were not part of the graph - both for the topological ordering and for rank assignment.
+/// Used to compute ranks for graphs containing backward edges destined to be rewired onto
+/// pin nodes: with the backward edge excluded, the graph is guaranteed acyclic.
+///
+/// Implemented as Kahn's algorithm rather than delegating to `compute_all_ranks` because
+/// excluding specific edges needs to be threaded through both the topological sort and
+/// the rank computation, and the available trait bounds only support neighbor-based
+/// graph traversal (no generic edge-filtering adaptor is available without widening the
+/// trait bounds required throughout this module).
+fn compute_all_ranks_excluding<G>(
+    graph: &G,
+    excluded_edges: &HashSet<(G::NodeId, G::NodeId)>,
+) -> Vec<(G::NodeId, usize)>
+where
+    G: GraphBase + NodeCount + Visitable,
+    for<'a> &'a G: IntoNodeIdentifiers<NodeId = G::NodeId> + IntoNeighborsDirected,
+    G::NodeId: Copy + Eq + Hash + Ord,
+{
+    if graph.node_count() == 0 {
+        return Vec::new();
+    }
+
+    let mut remaining_in_degree: HashMap<G::NodeId, usize> = HashMap::new();
+    for node in (&graph).node_identifiers() {
+        let degree = (&graph)
+            .neighbors_directed(node, Direction::Incoming)
+            .filter(|pred| !excluded_edges.contains(&(*pred, node)))
+            .count();
+        remaining_in_degree.insert(node, degree);
+    }
+
+    let mut ready: Vec<G::NodeId> = remaining_in_degree
+        .iter()
+        .filter(|&(_, &degree)| degree == 0)
+        .map(|(&node, _)| node)
+        .collect();
+    ready.sort_unstable();
+    let mut queue: VecDeque<G::NodeId> = ready.into();
+
+    let mut ranks: HashMap<G::NodeId, usize> = HashMap::new();
+    let mut processed = 0usize;
+    while let Some(node) = queue.pop_front() {
+        let rank = (&graph)
+            .neighbors_directed(node, Direction::Incoming)
+            .filter(|pred| !excluded_edges.contains(&(*pred, node)))
+            .filter_map(|pred| ranks.get(&pred))
+            .max()
+            .map_or(0, |pred_rank| pred_rank + 1);
+        ranks.insert(node, rank);
+        processed += 1;
+
+        let mut newly_ready: Vec<G::NodeId> = Vec::new();
+        for successor in (&graph)
+            .neighbors_directed(node, Direction::Outgoing)
+            .filter(|successor| !excluded_edges.contains(&(node, *successor)))
+        {
+            let degree = remaining_in_degree
+                .get_mut(&successor)
+                .expect("Successor should have a tracked in-degree");
+            *degree -= 1;
+            if *degree == 0 {
+                newly_ready.push(successor);
+            }
+        }
+        newly_ready.sort_unstable();
+        queue.extend(newly_ready);
+    }
+
+    assert_eq!(
+        processed,
+        remaining_in_degree.len(),
+        "Graph should be acyclic once excluded edges are removed"
+    );
+
+    let mut ranked_nodes: Vec<(G::NodeId, usize)> = (&graph)
+        .node_identifiers()
+        .map(|node| (node, ranks[&node]))
+        .collect();
+    ranked_nodes.sort_by_key(|&(_, rank)| rank);
+
+    ranked_nodes
+}
+
 /// Determine the rank of each node in a graph using a topological sorting of its nodes.
 /// In a hierarchical graph layout, this corresponds to the layer (in our case x-coordinate).
 /// The algorithm is simple:
@@ -1318,6 +1537,168 @@ mod tests {
         assert_eq!(ranks[0].1, 0); // First node in topo order should have rank 0
         let max_rank = ranks.iter().map(|(_, rank)| *rank).max().unwrap();
         assert_eq!(max_rank, 3);
+    }
+
+    #[test]
+    fn test_backward_edge_within_single_partition_adds_pins() {
+        // Linear chain 0 -> 1 -> 2 -> 3 with a backward edge 3 -> 0 closing the loop.
+        // Small enough (min_width large) to stay in a single partition.
+        let edges = vec![(0, 1), (1, 2), (2, 3)];
+        let graph = make_test_graph(edges);
+
+        let table = PartitionTable::new_with_backward_edges(
+            &graph,
+            1000,
+            usize::MAX,
+            &[(TestNode(3), TestNode(0))],
+        );
+
+        assert_eq!(
+            table.partitions.len(),
+            1,
+            "graph should fit in one partition"
+        );
+        let partition = &table.partitions[0];
+
+        // 4 data nodes + 2 pins
+        assert_eq!(partition.graph.node_count(), 6);
+        let pin_count = partition
+            .graph
+            .node_indices()
+            .filter(|&idx| matches!(partition.graph.node_weight(idx), Some(PartitionNode::Pin)))
+            .count();
+        assert_eq!(
+            pin_count, 2,
+            "should have injected exactly one left/right pin pair"
+        );
+
+        // The original backward edge should not appear as a normal edge between the
+        // domain nodes for 3 and 0.
+        let (_, node_3_idx) = table.node_map[&TestNode(3)];
+        let (_, node_0_idx) = table.node_map[&TestNode(0)];
+        assert!(
+            !partition.graph.contains_edge(node_3_idx, node_0_idx),
+            "backward edge should be rewired onto pins, not left as a direct edge"
+        );
+
+        // left_pin should have no incoming edges (pure source) and right_pin no outgoing
+        // edges (pure sink) - this is what the pruning heuristic relies on to find them.
+        let pins: Vec<NodeIndex<u32>> = partition
+            .graph
+            .node_indices()
+            .filter(|&idx| matches!(partition.graph.node_weight(idx), Some(PartitionNode::Pin)))
+            .collect();
+        let left_pin = pins
+            .iter()
+            .copied()
+            .find(|&idx| {
+                partition
+                    .graph
+                    .neighbors_directed(idx, Direction::Incoming)
+                    .count()
+                    == 0
+            })
+            .expect("left pin (pure source) should exist");
+        let right_pin = pins
+            .iter()
+            .copied()
+            .find(|&idx| {
+                partition
+                    .graph
+                    .neighbors_directed(idx, Direction::Outgoing)
+                    .count()
+                    == 0
+            })
+            .expect("right pin (pure sink) should exist");
+        assert_ne!(left_pin, right_pin);
+
+        assert!(partition.graph.contains_edge(left_pin, node_0_idx));
+        assert!(partition.graph.contains_edge(left_pin, right_pin));
+        assert!(partition.graph.contains_edge(node_3_idx, right_pin));
+    }
+
+    #[test]
+    fn test_backward_edge_spanning_multiple_partitions_adds_pins() {
+        // Long chain split across several partitions, with a backward edge from the
+        // last node back to the first - mirrors a circular genome path.
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)];
+        let graph = make_test_graph(edges);
+
+        let table = PartitionTable::new_with_backward_edges(
+            &graph,
+            1,
+            usize::MAX,
+            &[(TestNode(5), TestNode(0))],
+        );
+
+        assert!(
+            table.partitions.len() > 1,
+            "min_width=1 should force multiple partitions"
+        );
+
+        let last_partition_idx = table.partitions.len() - 1;
+        let left_pin_in_first = table.partitions[0].graph.node_indices().any(|idx| {
+            matches!(
+                table.partitions[0].graph.node_weight(idx),
+                Some(PartitionNode::Pin)
+            )
+        });
+        let right_pin_in_last = table.partitions[last_partition_idx]
+            .graph
+            .node_indices()
+            .any(|idx| {
+                matches!(
+                    table.partitions[last_partition_idx].graph.node_weight(idx),
+                    Some(PartitionNode::Pin)
+                )
+            });
+
+        assert!(
+            left_pin_in_first,
+            "left pin should live in the first partition"
+        );
+        assert!(
+            right_pin_in_last,
+            "right pin should live in the last partition"
+        );
+
+        // No partition in between should be missing the relay edges between its stitches.
+        for partition in table.partitions.iter().enumerate().step_by(2) {
+            let (idx, partition) = partition;
+            if idx == 0 || idx == last_partition_idx {
+                continue;
+            }
+            let left = partition
+                .left_stitch_idx
+                .unwrap_or_else(|| panic!("partition {} should have a left stitch", idx));
+            let right = partition
+                .right_stitch_idx
+                .unwrap_or_else(|| panic!("partition {} should have a right stitch", idx));
+            assert!(
+                partition.graph.contains_edge(left, right),
+                "intermediate partition {} should relay the pin bypass edge",
+                idx
+            );
+        }
+
+        let right_pin_idx = table.partitions[last_partition_idx]
+            .graph
+            .node_indices()
+            .find(|&idx| {
+                matches!(
+                    table.partitions[last_partition_idx].graph.node_weight(idx),
+                    Some(PartitionNode::Pin)
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            table.partitions[last_partition_idx]
+                .graph
+                .neighbors_undirected(right_pin_idx)
+                .count(),
+            2,
+            "right_pin should have exactly 2 edges: from source, and from its partition's left stitch"
+        );
     }
 
     #[test]

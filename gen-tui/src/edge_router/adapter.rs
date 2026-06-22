@@ -34,7 +34,7 @@ pub fn layout_node_to_node_data(
             layout_node.layer,                // Preserve layer info
             Some(layout_node.pos.partition_idx as u64), // Preserve partition info
         ),
-        NodeRole::Routing => (
+        NodeRole::Routing | NodeRole::Pin => (
             Some("Routing".to_string()),
             None, // Glyph computed on-the-fly, not stored
             None, // No original domain ID for routing nodes

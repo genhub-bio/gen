@@ -57,6 +57,18 @@ pub fn simplify_graph(
         return Ok(());
     }
 
+    let pin_idx_for_debug: Vec<NodeIndex> = graph
+        .node_indices()
+        .filter(|&idx| matches!(graph[idx].role, NodeRole::Pin))
+        .collect();
+    for &idx in &pin_idx_for_debug {
+        eprintln!(
+            "DEBUG simplify_graph ENTRY: Pin {:?} degree={}",
+            idx,
+            graph.neighbors(idx).count()
+        );
+    }
+
     let ports_map = assign_ports(graph);
 
     // Define straight orientations (these get contracted)
@@ -73,9 +85,11 @@ pub fn simplify_graph(
             .copied()
             .unwrap_or((false, false, false, false));
 
-        // Critical nodes are: non-straight routing nodes, or any Data/Stitch nodes
+        // Critical nodes are: non-straight routing nodes, or any Data/Stitch/Pin nodes.
+        // Pin nodes are always critical (never contracted here) so they survive until
+        // `prune_pin_stubs` runs and removes them explicitly.
         let is_critical = match &node.role {
-            NodeRole::Data(_) | NodeRole::Stitch(_) => true,
+            NodeRole::Data(_) | NodeRole::Stitch(_) | NodeRole::Pin => true,
             NodeRole::Routing => {
                 orientation != STRAIGHT_HORIZONTAL && orientation != STRAIGHT_VERTICAL
             }
@@ -199,5 +213,144 @@ pub fn simplify_graph(
         }
     }
 
+    for &idx in &pin_idx_for_debug {
+        if graph.node_weight(idx).is_some() {
+            eprintln!(
+                "DEBUG simplify_graph EXIT: Pin {:?} degree={}",
+                idx,
+                graph.neighbors(idx).count()
+            );
+        } else {
+            eprintln!("DEBUG simplify_graph EXIT: Pin {:?} was REMOVED", idx);
+        }
+    }
+
     Ok(())
+}
+
+/// Removes the synthetic `NodeRole::Pin` nodes used to render a backward edge as a
+/// full-width loop, once routing has finished and `simplify_graph` has already
+/// contracted ordinary straight runs (`Pin` is always "critical" there, so it survives
+/// untouched until this pass runs).
+///
+/// A pin always has exactly two neighbors - one toward the data node it pins in place,
+/// one continuing the long bypass edge - but, having both on the same side in x, it's a
+/// same-side bend that `simplify_graph` cannot contract (its contraction only collapses
+/// straight, opposite-side runs). This pass removes each pin and splices its two sides
+/// back into one continuous edge, walking outward past any further bend-only `Routing`
+/// nodes on either side until it reaches real content (`Data`/`Stitch`) or a genuine
+/// junction (any node without exactly one way to continue) - the visible result is the
+/// pin's two edges merging into a single edge spanning the whole loop. A no-op for any
+/// graph with no backward edges, since no `Pin` node is ever injected for one.
+pub fn prune_pin_stubs(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>) {
+    let pins: Vec<NodeIndex> = graph
+        .node_indices()
+        .filter(|&node_index| matches!(graph[node_index].role, NodeRole::Pin))
+        .collect();
+
+    for pin_index in pins {
+        // A pin's own stub may already have been removed while walking out from a
+        // previously processed pin (e.g. the two ends of a tiny loop meeting directly).
+        if graph.node_weight(pin_index).is_some() {
+            prune_pin(graph, pin_index);
+        }
+    }
+}
+
+/// One side of a chain walked outward from a pin: the real node it ends at (if the walk
+/// didn't dead-end), the bend-only `Routing` nodes passed through (to be removed), and
+/// the merged bundle data of all edges traversed.
+struct ChainEnd {
+    terminal: Option<NodeIndex>,
+    visited: Vec<NodeIndex>,
+    bundle: Vec<(NodeIndex, NodeIndex)>,
+}
+
+/// Walks outward from `start` (excluding the direction back towards `came_from`) through
+/// a chain of degree-2 `Routing` nodes, stopping at the first node that isn't a plain
+/// `Routing` node (real content, a junction, or another `Pin`).
+fn walk_chain(
+    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>,
+    came_from: NodeIndex,
+    start: NodeIndex,
+) -> ChainEnd {
+    let mut previous = came_from;
+    let mut current = start;
+    let mut visited = Vec::new();
+    let mut bundle = graph
+        .find_edge(previous, current)
+        .map(|edge| graph[edge].bundle.clone())
+        .unwrap_or_default();
+
+    loop {
+        if !matches!(graph[current].role, NodeRole::Routing) {
+            return ChainEnd {
+                terminal: Some(current),
+                visited,
+                bundle,
+            };
+        }
+
+        let other_neighbors: Vec<NodeIndex> = graph
+            .neighbors(current)
+            .filter(|&neighbor| neighbor != previous)
+            .collect();
+
+        match other_neighbors.as_slice() {
+            [only] => {
+                visited.push(current);
+                if let Some(edge) = graph.find_edge(current, *only) {
+                    bundle.extend(graph[edge].bundle.clone());
+                }
+                previous = current;
+                current = *only;
+            }
+            _ => {
+                // Either a dead end (no further neighbors) or a real junction (2+ other
+                // neighbors) - leave it in place rather than removing/resplicing it.
+                return ChainEnd {
+                    terminal: Some(current),
+                    visited,
+                    bundle,
+                };
+            }
+        }
+    }
+}
+
+/// Removes `pin_index` and splices its two sides into one continuous edge. See
+/// `prune_pin_stubs`.
+fn prune_pin(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>, pin_index: NodeIndex) {
+    let neighbors: Vec<NodeIndex> = graph.neighbors(pin_index).collect();
+    let [first, second] = neighbors.as_slice() else {
+        // Not the expected two-neighbor pin shape - just remove it.
+        graph.remove_node(pin_index);
+        return;
+    };
+
+    let left = walk_chain(graph, pin_index, *first);
+    let right = walk_chain(graph, pin_index, *second);
+
+    let mut to_remove = vec![pin_index];
+    to_remove.extend(left.visited);
+    to_remove.extend(right.visited);
+
+    if let (Some(left_terminal), Some(right_terminal)) = (left.terminal, right.terminal)
+        && left_terminal != right_terminal
+        && graph.find_edge(left_terminal, right_terminal).is_none()
+    {
+        let mut merged_bundle = left.bundle;
+        merged_bundle.extend(right.bundle);
+        graph.add_edge(
+            left_terminal,
+            right_terminal,
+            LayoutEdge {
+                bundle: merged_bundle,
+            },
+        );
+    }
+
+    for node_index in to_remove {
+        graph.remove_node(node_index);
+    }
 }

@@ -40,7 +40,7 @@ pub fn export_to_dot(viewport_graph: &CroppedGraph, filename: &str) -> Result<()
         // Create label based on node role
         let label = match &node.role {
             NodeRole::Data(payload) => format!("D{}", payload.index()),
-            NodeRole::Routing => "".to_string(),
+            NodeRole::Routing | NodeRole::Pin => "".to_string(),
             NodeRole::Stitch(side) => match side {
                 StitchSide::Left => "S_L".to_string(),
                 StitchSide::Right => "S_R".to_string(),
@@ -50,7 +50,7 @@ pub fn export_to_dot(viewport_graph: &CroppedGraph, filename: &str) -> Result<()
         // Shape and color based on node role
         let (shape, color) = match &node.role {
             NodeRole::Data(_) => ("box", "lightblue"),
-            NodeRole::Routing => ("point", "red"),
+            NodeRole::Routing | NodeRole::Pin => ("point", "red"),
             NodeRole::Stitch(_) => ("diamond", "orange"),
         };
 

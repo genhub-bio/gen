@@ -138,11 +138,52 @@ where
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
-        let mut partition_controller = PartitionController::new_with_config(
+        Self::new_with_config_and_backward_edges(graph, node_sizer, config, &[])
+    }
+
+    /// Create a new GraphController, rewriting each backward edge `(source, target)` in
+    /// `backward_edges` onto a pair of pin nodes spanning the full layout width, so it
+    /// renders as a loop instead of crashing the (DAG-only) partitioning/layout pipeline.
+    /// Intended for cycle-closing edges in circular genomes/GFA imports; ordinary acyclic
+    /// graphs are unaffected when `backward_edges` is empty - see `GraphController::new`.
+    ///
+    /// # Parameters
+    /// - graph: The graph to partition and manage
+    /// - node_sizer: Function object to determine node sizes at different levels of detail
+    /// - backward_edges: edges to rewrite onto pin nodes instead of leaving them as cycles
+    pub fn new_with_backward_edges(
+        graph: G,
+        node_sizer: S,
+        backward_edges: &[(G::NodeId, G::NodeId)],
+    ) -> Self
+    where
+        <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+    {
+        Self::new_with_config_and_backward_edges(
+            graph,
+            node_sizer,
+            GraphConfig::default(),
+            backward_edges,
+        )
+    }
+
+    /// Create a new GraphController with a graph, node sizer, custom configuration, and a
+    /// list of backward edges to rewire onto pin nodes. See `new_with_backward_edges`.
+    pub fn new_with_config_and_backward_edges(
+        graph: G,
+        node_sizer: S,
+        config: GraphConfig,
+        backward_edges: &[(G::NodeId, G::NodeId)],
+    ) -> Self
+    where
+        <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
+    {
+        let mut partition_controller = PartitionController::new_with_config_and_backward_edges(
             graph,
             node_sizer,
             config.partition,
             config.controller,
+            backward_edges,
         );
 
         if let Err(e) = partition_controller.set_anchor_partition(0) {
@@ -1605,6 +1646,60 @@ mod tests {
         }
 
         // If we get here without panicking, the test passes
+        println!("Test completed successfully");
+    }
+
+    #[test]
+    fn test_new_with_backward_edges_does_not_crash() {
+        use petgraph::graph::NodeIndex;
+        use ratatui::layout::Rect;
+
+        use crate::{layout::VisualDetail, plotter::NodeSizer, testing::mocks::MockDomainGraph};
+
+        #[derive(Clone)]
+        struct TestNodeSizer;
+
+        impl NodeSizer<MockDomainGraph> for TestNodeSizer {
+            fn get_node_size(&self, _node: &NodeIndex, _scale: VisualDetail) -> (u64, u64) {
+                (1, 1)
+            }
+
+            fn get_dummy_size(&self) -> (u64, u64) {
+                (1, 1)
+            }
+        }
+
+        // a -> b -> c -> d, plus a backward edge d -> a closing a loop, like a circular
+        // genome's PATH_END -> PATH_START edge.
+        let mut domain_graph = MockDomainGraph::new();
+        let a = domain_graph.add_node(());
+        let b = domain_graph.add_node(());
+        let c = domain_graph.add_node(());
+        let d = domain_graph.add_node(());
+        domain_graph.add_edge(a, b, ());
+        domain_graph.add_edge(b, c, ());
+        domain_graph.add_edge(c, d, ());
+
+        let node_sizer = TestNodeSizer;
+        let mut controller =
+            GraphController::new_with_backward_edges(domain_graph.clone(), node_sizer, &[(d, a)]);
+
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 20, 10);
+
+        // Loading every partition and computing layouts should not panic - this is the
+        // main risk for a graph that would otherwise contain a cycle.
+        for partition_idx in 0..controller
+            .partition_controller
+            .partition_table
+            .partitions
+            .len()
+        {
+            controller
+                .ensure_partition_loaded(partition_idx)
+                .expect("partition with backward edge rewired onto pins should still load");
+        }
+
+        let _ = controller.ensure_camera_coverage();
         println!("Test completed successfully");
     }
 }

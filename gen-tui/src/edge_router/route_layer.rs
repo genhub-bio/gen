@@ -529,6 +529,12 @@ pub fn layout_layer(
 
     // Check if there's backtracking by analyzing connected components
     let has_backtracking = detect_backtracking(&result_normal);
+    eprintln!(
+        "DEBUG layout_layer: result_normal nodes={} edges={} has_backtracking={}",
+        result_normal.node_count(),
+        result_normal.edge_count(),
+        has_backtracking
+    );
 
     if has_backtracking {
         log::debug!("Detected backtracking in normal routing, trying reversed order");
@@ -537,16 +543,25 @@ pub fn layout_layer(
         let result_reversed =
             layout_layer_internal(left_positions, right_positions, edges, edge_bundles, true)?;
         let has_backtracking_reversed = detect_backtracking(&result_reversed);
+        eprintln!(
+            "DEBUG layout_layer: result_reversed nodes={} edges={} has_backtracking_reversed={}",
+            result_reversed.node_count(),
+            result_reversed.edge_count(),
+            has_backtracking_reversed
+        );
 
         if !has_backtracking_reversed || result_reversed.node_count() < result_normal.node_count() {
             log::debug!("Chose reversed routing (less or no backtracking)");
+            eprintln!("DEBUG layout_layer: CHOSE REVERSED");
             Ok(result_reversed)
         } else {
             log::debug!("Reversed routing also has backtracking, keeping normal");
+            eprintln!("DEBUG layout_layer: CHOSE NORMAL (after backtracking check)");
             Ok(result_normal)
         }
     } else {
         log::debug!("No backtracking detected, using normal routing");
+        eprintln!("DEBUG layout_layer: CHOSE NORMAL (no backtracking)");
         Ok(result_normal)
     }
 }
@@ -749,7 +764,9 @@ fn layout_layer_internal(
     // has an edge to every node on the other side.
     // This is similar to the definition of bicliques, except that those may overlap.
     let mut bicliques = enumerate_bicliques(&edges_u64)?;
+    eprintln!("DEBUG layout_layer_internal: edges_u64={:?} bicliques={:?}", edges_u64, bicliques);
     let nets = make_nets(&mut bicliques);
+    eprintln!("DEBUG layout_layer_internal: nets={:?}", nets);
 
     // For each node, we create one terminal per net that it is part of.
     // Each terminal is defined by a linear position within its rank, and its net index.
@@ -846,6 +863,24 @@ fn layout_layer_internal(
     );
 
     let mut graph2 = router2.route()?;
+    eprintln!(
+        "DEBUG channel2: left_pin_list2={:?} right_pin_list2={:?} graph2 nodes={} edges={}",
+        left_pin_list2,
+        right_pin_list2,
+        graph2.node_count(),
+        graph2.edge_count()
+    );
+    for node in graph2.nodes() {
+        let neighbors: Vec<_> = graph2
+            .neighbors(node.node_id)
+            .into_iter()
+            .filter_map(|nid| graph2.get_node(nid).map(|n| n.position))
+            .collect();
+        eprintln!(
+            "DEBUG channel2 node: pos={:?} neighbors={:?}",
+            node.position, neighbors
+        );
+    }
 
     // Only anchor and translate if both graphs have nodes
     if graph1.node_count() > 0 && graph2.node_count() > 0 {
@@ -1004,12 +1039,18 @@ fn layout_layer_internal(
     }
 
     // Merge the three channel graphs into the StableGraph layer graph
-    for source_graph in [graph1, graph2, graph3] {
+    for (graph_i, source_graph) in [graph1, graph2, graph3].into_iter().enumerate() {
+        eprintln!(
+            "DEBUG merge graph{}: nodes={:?}",
+            graph_i + 1,
+            source_graph.nodes().map(|n| n.position).collect::<Vec<_>>()
+        );
         for node_data in source_graph.nodes() {
             let position = node_data.position;
 
             // Check if a node already exists at this position (coordinate-based deduplication)
             if position_to_node_idx.contains_key(&position) {
+                eprintln!("DEBUG merge graph{}: DEDUP at {:?}", graph_i + 1, position);
                 // Already added (e.g. an original right or left node position)
                 continue;
             }

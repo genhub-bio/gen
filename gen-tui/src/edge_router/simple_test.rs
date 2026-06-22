@@ -115,7 +115,7 @@ pub fn test_simple_adapter_pipeline() -> Result<(), Box<dyn std::error::Error>> 
                     node.size
                 );
             }
-            NodeRole::Routing => {
+            NodeRole::Routing | NodeRole::Pin => {
                 println!(
                     "  Node {}: Routing at ({}, {}) size {:?}",
                     idx.index(),
@@ -171,7 +171,7 @@ pub fn test_simple_adapter_pipeline() -> Result<(), Box<dyn std::error::Error>> 
                             node.size
                         );
                     }
-                    NodeRole::Routing => {
+                    NodeRole::Routing | NodeRole::Pin => {
                         println!(
                             "  Node {}: Routing at ({}, {}) size {:?}",
                             idx.index(),
