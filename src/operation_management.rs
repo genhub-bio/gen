@@ -1397,12 +1397,10 @@ fn download_remote_operation_assets(
                 stored_asset_path,
             )?;
         }
-    }
 
-    for file_addition in &manifest_operation.file_additions {
-        let stored_asset_path = repo_root.join(file_addition.file_addition.file_path());
-        if stored_asset_path.exists() {
-            materialize_operation_file(&workspace, file_addition, &stored_asset_path)?;
+        let stored_asset_actual_path = repo_root.join(file_addition.file_addition.file_path());
+        if stored_asset_actual_path.exists() {
+            materialize_operation_file(&workspace, file_addition, &stored_asset_actual_path)?;
         }
     }
 
