@@ -1,7 +1,6 @@
 use core::ops::Range;
 
 use gen_models::{
-    annotations::AnnotationGroupSample,
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
@@ -269,10 +268,13 @@ fn update_path_library(
         false,
     )?;
 
-    AnnotationGroupSample::create(conn, new_sample_name, new_sample_name)
-        .map_err(|e| UpdateWithLibraryError::BlockGroupCreationFailed(e.into()))?;
-    create_part_annotations(conn, target_block_group.id, new_sample_name, &part_nodes)
-        .map_err(UpdateWithLibraryError::BlockGroupCreationFailed)?;
+    create_part_annotations(
+        conn,
+        target_block_group.id,
+        new_sample_name,
+        new_sample_name,
+        &part_nodes,
+    )?;
 
     let mut block_group_chunks = vec![];
     let mut reference_block_group_chunks = vec![];
@@ -351,10 +353,13 @@ fn update_graph_native_library(
         false,
     )?;
 
-    AnnotationGroupSample::create(conn, new_sample_name, new_sample_name)
-        .map_err(|e| UpdateWithLibraryError::BlockGroupCreationFailed(e.into()))?;
-    create_part_annotations(conn, target_block_group.id, new_sample_name, &part_nodes)
-        .map_err(UpdateWithLibraryError::BlockGroupCreationFailed)?;
+    create_part_annotations(
+        conn,
+        target_block_group.id,
+        new_sample_name,
+        new_sample_name,
+        &part_nodes,
+    )?;
 
     let start_chunk = BlockGroupChunk {
         entry_node_points: graph_node_positions_to_points(start_positions),

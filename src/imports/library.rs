@@ -96,10 +96,7 @@ pub fn import_library(
     let (_chunk, part_nodes) =
         create_library(conn, new_block_group.id, library_name, parts_list, true)?;
 
-    AnnotationGroupSample::create(conn, library_name, sample)
-        .map_err(|e| LibraryImportError::BlockGroupError(e.into()))?;
-    create_part_annotations(conn, new_block_group.id, library_name, &part_nodes)
-        .map_err(LibraryImportError::BlockGroupError)?;
+    create_part_annotations(conn, new_block_group.id, library_name, sample, &part_nodes)?;
 
     let mut files = vec![];
     if let Some(library_file_path) = library_file_path {
@@ -127,9 +124,11 @@ pub fn import_library(
 pub(crate) fn create_part_annotations(
     conn: &gen_models::db::GraphConnection,
     block_group_id: gen_core::HashId,
+    group_name: &str,
     sample_name: &str,
     part_nodes: &[(gen_core::HashId, SequencePart)],
 ) -> Result<(), BlockGroupError> {
+    AnnotationGroupSample::create(conn, group_name, sample_name)?;
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     for (node_id, part) in part_nodes {
         let count = name_counts.entry(part.name.clone()).or_insert(0);
@@ -175,7 +174,7 @@ pub(crate) fn create_part_annotations(
         Annotation::get_or_create(
             conn,
             &annotation_name,
-            sample_name,
+            group_name,
             &accession.id,
             extra.as_ref(),
         )?;
@@ -450,7 +449,7 @@ mod tests {
         )?;
 
         let annotations = Annotation::query_by_group(conn, library_name).unwrap();
-        let mut annotations_by_name: std::collections::HashMap<_, _> = annotations
+        let mut annotations_by_name: HashMap<_, _> = annotations
             .into_iter()
             .map(|a| (a.name.clone(), a))
             .collect();
