@@ -231,7 +231,7 @@ pub fn update_with_vcf(
     fixed_sample: Option<&str>,
     parent_samples: Vec<String>,
     in_place: bool,
-) -> Result<Operation, VcfError> {
+) -> Result<(Operation, Vec<String>), VcfError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
@@ -671,7 +671,8 @@ pub fn update_with_vcf(
     )
     .map_err(VcfError::OperationError);
     bar.finish();
-    op
+    let output_samples: Vec<String> = created_samples.into_iter().map(String::from).collect();
+    op.map(|operation| (operation, output_samples))
 }
 
 #[cfg(test)]

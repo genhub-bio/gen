@@ -6,7 +6,10 @@ declare const INTERACTIVE: boolean;
 
 interface AnywidgetModel {
   get(key: "frame"): Frame;
+  get(key: "page_count"): number;
+  get(key: "page_index"): number;
   on(event: "change:frame", callback: () => void): void;
+  on(event: "change:page_index", callback: () => void): void;
   on(event: "msg:custom", callback: (msg: { type: string; data?: string }) => void): void;
   send(msg: Record<string, unknown>): void;
 }
@@ -42,6 +45,7 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
     let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
 
     const sharedBtnStyle = [
+      "box-sizing: border-box",
       "width: 24px",
       "height: 24px",
       "font-size: 16px",
@@ -62,34 +66,124 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
     btnContainer.style.cssText =
       "position: absolute; top: 8px; right: 8px; display: flex; flex-direction: row; gap: 4px; z-index: 1;";
 
-    const zoomInBtn = document.createElement("button");
-    zoomInBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    const pageArrowStyle = [
+      "box-sizing: border-box",
+      "width: 20px",
+      "height: 24px",
+      "font-size: 16px",
+      "line-height: 1",
+      "display: flex",
+      "align-items: center",
+      "justify-content: center",
+      "background: transparent",
+      "color: inherit",
+      "border: none",
+      "cursor: pointer",
+      "padding: 0",
+    ].join("; ");
+
+    function makeBtn(svg: string, title: string, onClick: () => void): HTMLButtonElement {
+      const btn = document.createElement("button");
+      btn.innerHTML = svg;
+      btn.setAttribute("style", sharedBtnStyle);
+      btn.title = title;
+      btn.addEventListener("mousedown", (e) => e.preventDefault());
+      btn.addEventListener("click", onClick);
+      return btn;
+    }
+
+    const pageable = (model.get("page_count") ?? 1) > 1;
+
+    // Floating "<index/count>" pager indicator: same height/style as the
+    // other floating buttons, with a clickable arrow on each side.
+    const pageIndicator = document.createElement("div");
+    pageIndicator.style.cssText = [
+      "box-sizing: border-box",
+      "height: 24px",
+      "display: flex",
+      "align-items: center",
+      "background: rgba(30,30,46,0.85)",
+      "color: #cdd6f4",
+      "border: 1px solid #45475a",
+      "border-radius: 4px",
+      "overflow: hidden",
+      "user-select: none",
+    ].join("; ");
+    pageIndicator.style.cssText += "; position: absolute; top: 8px; left: 8px; z-index: 1;";
+    pageIndicator.style.display = pageable ? "flex" : "none";
+
+    function makePageArrow(svg: string, title: string, direction: "prev" | "next"): HTMLButtonElement {
+      const arrow = document.createElement("button");
+      arrow.innerHTML = svg;
+      arrow.title = title;
+      arrow.setAttribute("style", pageArrowStyle);
+      arrow.addEventListener("mousedown", (e) => e.preventDefault());
+      arrow.addEventListener("click", () => model.send({ type: "page", direction }));
+      return arrow;
+    }
+
+    const pageLeftBtn = makePageArrow(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <polyline points="15 18 9 12 15 6" />
+</svg>`,
+      "Previous sequence graph",
+      "prev",
+    );
+
+    const pageLabel = document.createElement("span");
+    pageLabel.style.cssText = "font-size: 12px; line-height: 24px; padding: 0 2px; white-space: nowrap;";
+
+    const pageRightBtn = makePageArrow(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <polyline points="9 18 15 12 9 6" />
+</svg>`,
+      "Next sequence graph",
+      "next",
+    );
+
+    function updatePageLabel(): void {
+      const count = model.get("page_count") ?? 1;
+      const index = model.get("page_index") ?? 0;
+      pageLabel.textContent = `${index + 1}/${count}`;
+    }
+    updatePageLabel();
+    model.on("change:page_index", updatePageLabel);
+
+    pageIndicator.appendChild(pageLeftBtn);
+    pageIndicator.appendChild(pageLabel);
+    pageIndicator.appendChild(pageRightBtn);
+
+    const zoomInBtn = makeBtn(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
   <circle cx="10" cy="10" r="7" stroke-width="1.2" />
   <line x1="16" y1="16" x2="21" y2="21" stroke-width="2.5" />
   <line x1="10" y1="6" x2="10" y2="14" />
   <line x1="6" y1="10" x2="14" y2="10" />
-</svg>`;
-    zoomInBtn.setAttribute("style", sharedBtnStyle);
-    zoomInBtn.title = "Zoom in (+)";
+</svg>`,
+      "Zoom in (+)",
+      () => model.send({ type: "zoom", direction: "in" }),
+    );
 
-    const zoomOutBtn = document.createElement("button");
-    zoomOutBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    const zoomOutBtn = makeBtn(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
   <circle cx="10" cy="10" r="7" stroke-width="1.2" />
   <line x1="16" y1="16" x2="21" y2="21" stroke-width="2.5" />
   <line x1="6" y1="10" x2="14" y2="10" />
-</svg>`;
-    zoomOutBtn.setAttribute("style", sharedBtnStyle);
-    zoomOutBtn.title = "Zoom out (-)";
+</svg>`,
+      "Zoom out (-)",
+      () => model.send({ type: "zoom", direction: "out" }),
+    );
 
-    const freezeBtn = document.createElement("button");
-    freezeBtn.innerHTML = `
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+    const freezeBtn = makeBtn(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
   <rect x="5" y="10" width="14" height="11" rx="2" />
   <path d="M8 10V7a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-</svg>
-`;
-    freezeBtn.setAttribute("style", sharedBtnStyle);
-    freezeBtn.title = "Freeze as static image";
+</svg>`,
+      "Freeze as static image",
+      () => doFreeze(),
+    );
+
+    wrapper.appendChild(pageIndicator);
 
     btnContainer.appendChild(zoomOutBtn);
     btnContainer.appendChild(zoomInBtn);
@@ -126,6 +220,7 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
       if (snapshotTimer) { clearTimeout(snapshotTimer); snapshotTimer = null; }
       frozen = true;
       btnContainer.style.display = "none";
+      pageIndicator.style.display = "none";
       canvas.style.cursor = "default";
       canvas.style.boxShadow = "none";
       const { dataUrl, width, height } = captureHiRes();
@@ -139,13 +234,6 @@ function render({ model, el }: RenderContext): { destroy(): void } | void {
     model.on("msg:custom", (msg) => {
       if (msg.type === "freeze") doFreeze();
     });
-
-    zoomInBtn.addEventListener("mousedown", (e) => e.preventDefault());
-    zoomOutBtn.addEventListener("mousedown", (e) => e.preventDefault());
-    freezeBtn.addEventListener("mousedown", (e) => e.preventDefault());
-    zoomInBtn.addEventListener("click", () => model.send({ type: "zoom", direction: "in" }));
-    zoomOutBtn.addEventListener("click", () => model.send({ type: "zoom", direction: "out" }));
-    freezeBtn.addEventListener("click", () => doFreeze());
 
     const detachInteraction = attachInteraction(canvas, model, grid, () => nodeCells, () => frozen);
 

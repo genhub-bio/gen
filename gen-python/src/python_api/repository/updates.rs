@@ -15,7 +15,7 @@ use gen_models::{errors::OperationError, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{PyRepository, run_write};
-use crate::python_api::sequence_part::PySequencePart;
+use crate::python_api::{sample::PySample, sequence_part::PySequencePart};
 
 #[pymethods]
 impl PyRepository {
@@ -27,7 +27,7 @@ impl PyRepository {
         new_sample: String,
         region_name: String,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_fasta(
@@ -39,13 +39,13 @@ impl PyRepository {
                 &filename,
                 false,
             )
-            .map(|_| format!("Updated from '{}'.", filename))
             .map_err(|e| match e {
                 FastaError::OperationError(OperationError::NoChanges) => {
                     PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
                 }
                 _ => PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename)),
-            })
+            })?;
+            Ok(self.block_groups_in_sample(&collection, &new_sample))
         })
     }
 
@@ -56,14 +56,13 @@ impl PyRepository {
         sample: String,
         new_sample: String,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_gfa(ctx, &collection, &sample, &new_sample, &filename)
-                .map(|_| format!("Updated from '{}'.", filename))
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
-                })
+            update_with_gfa(ctx, &collection, &sample, &new_sample, &filename).map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
+            })?;
+            Ok(self.block_groups_in_sample(&collection, &new_sample))
         })
     }
 
@@ -75,7 +74,7 @@ impl PyRepository {
         sample: String,
         parent_sample: Option<String>,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_gaf(
@@ -86,10 +85,10 @@ impl PyRepository {
                 &sample,
                 parent_sample.as_deref(),
             )
-            .map(|_| format!("Updated from '{}'.", filename))
             .map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
-            })
+            })?;
+            Ok(self.block_groups_in_sample(&collection, &sample))
         })
     }
 
@@ -102,7 +101,7 @@ impl PyRepository {
         sample: Option<String>,
         in_place: bool,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<Vec<PySample>> {
         let parent_samples = match reference {
             None => vec![],
             Some(ref obj) => {
@@ -117,7 +116,7 @@ impl PyRepository {
         };
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_vcf(
+            let (_, output_samples) = update_with_vcf(
                 ctx,
                 &filename,
                 &collection,
@@ -126,13 +125,16 @@ impl PyRepository {
                 parent_samples.clone(),
                 in_place,
             )
-            .map(|_| format!("Updated from '{}'.", filename))
             .map_err(|e| match e {
                 VcfError::OperationError(OperationError::NoChanges) => PyRuntimeError::new_err(
                     "No changes made. Provide sample and genotype if missing from VCF.",
                 ),
                 _ => PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename)),
-            })
+            })?;
+            Ok(output_samples
+                .into_iter()
+                .map(|sample_name| self.block_groups_in_sample(&collection, &sample_name))
+                .collect())
         })
     }
 
@@ -143,7 +145,7 @@ impl PyRepository {
         sample: String,
         create_missing: bool,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<PySample> {
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
@@ -165,10 +167,10 @@ impl PyRepository {
                     description: "Update from GenBank".to_string(),
                 },
             )
-            .map(|_| format!("Updated from '{}'.", filename))
             .map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
-            })
+            })?;
+            Ok(self.block_groups_in_sample(&collection, &sample))
         })
     }
 
@@ -181,7 +183,7 @@ impl PyRepository {
         region_name: String,
         no_reference_path_update: bool,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_write(&self.context, !self.in_transaction, |ctx| {
             update_with_sequence(
@@ -193,8 +195,8 @@ impl PyRepository {
                 &sequence,
                 no_reference_path_update,
             )
-            .map(|_| "Updated with sequence.".to_string())
-            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))
+            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
+            Ok(self.block_groups_in_sample(&collection, &new_sample))
         })
     }
 
@@ -206,7 +208,7 @@ impl PyRepository {
         path_name: String,
         parts_list: Vec<Vec<PySequencePart>>,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         let rust_parts_list: Vec<Vec<SequencePart>> = parts_list
@@ -233,8 +235,8 @@ impl PyRepository {
                 None,
                 None,
             )
-            .map(|_| "Updated with library.".to_string())
-            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))
+            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
+            Ok(self.block_groups_in_sample(&collection, &new_sample_name))
         })
     }
 
@@ -247,7 +249,7 @@ impl PyRepository {
         library: String,
         parts: String,
         collection: Option<String>,
-    ) -> PyResult<String> {
+    ) -> PyResult<PySample> {
         let parts_list = parse_library(&parts, &library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
@@ -262,8 +264,8 @@ impl PyRepository {
                 Some(&parts),
                 Some(&library),
             )
-            .map(|_| "Updated with library.".to_string())
-            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))
+            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
+            Ok(self.block_groups_in_sample(&collection, &new_sample))
         })
     }
 }

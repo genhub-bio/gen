@@ -27,7 +27,7 @@ import_library(
 \item{collection}{Character or \code{NULL}.}
 }
 \value{
-Invisibly the import message string.
+The imported \code{SequenceGraph}.
 }
 \description{
 Thin wrapper around \code{repo$import_library()} that resolves any GRanges

@@ -4,7 +4,7 @@ use r#gen::{get_connection, get_operation_connection, track_database};
 use gen_core::config::Workspace;
 use gen_models::{
     block_group::BlockGroup, collection::Collection, db::DbContext, node::Node,
-    operations::Defaults, traits::Query,
+    operations::Defaults, sample::Sample, traits::Query,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
@@ -13,6 +13,7 @@ use super::{
     graph_node::PyGraphNode,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
+    sample::PySample,
     utils::{block_group_err_to_pyerr, path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
 
@@ -102,6 +103,43 @@ impl PyRepository {
             name: bg.name,
             context: Some(self.context.clone()),
         }
+    }
+
+    /// All block groups currently in `(collection, sample)`.
+    pub(crate) fn block_groups_in_sample(
+        &self,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> PySample {
+        let block_groups =
+            Sample::get_block_groups(self.context.graph().conn(), collection_name, sample_name)
+                .into_iter()
+                .map(|bg| self.to_py_block_group(bg))
+                .collect();
+        PySample::new(
+            collection_name.to_string(),
+            sample_name.to_string(),
+            block_groups,
+        )
+    }
+
+    /// Look up a single block group by its deterministic (collection, sample, name) id.
+    pub(crate) fn get_block_group(
+        &self,
+        collection_name: &str,
+        sample_name: &str,
+        name: &str,
+    ) -> PyResult<PySequenceGraph> {
+        Sample::get_block_groups(self.context.graph().conn(), collection_name, sample_name)
+            .into_iter()
+            .find(|bg| bg.name == name)
+            .map(|bg| self.to_py_block_group(bg))
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(format!(
+                    "Block group '{}' not found in sample '{}'",
+                    name, sample_name
+                ))
+            })
     }
 }
 
@@ -236,6 +274,27 @@ impl PyRepository {
             .collect())
     }
 
+    /// All samples in the repository, each holding its sequence graphs.
+    fn get_samples(&self) -> PyResult<Vec<PySample>> {
+        let conn = self.context.graph().conn();
+        let mut samples: Vec<PySample> = Vec::new();
+        for bg in BlockGroup::all(conn) {
+            let py_bg = self.to_py_block_group(bg);
+            match samples.iter_mut().find(|sample| {
+                sample.collection_name == py_bg.collection_name
+                    && sample.sample_name == py_bg.sample_name
+            }) {
+                Some(sample) => sample.block_groups.push(py_bg),
+                None => samples.push(PySample::new(
+                    py_bg.collection_name.clone(),
+                    py_bg.sample_name.clone(),
+                    vec![py_bg],
+                )),
+            }
+        }
+        Ok(samples)
+    }
+
     // -------------------------------------------------------------------------
     // Plot
     // -------------------------------------------------------------------------
@@ -249,16 +308,7 @@ impl PyRepository {
         cols: Option<u32>,
         detail: Option<&str>,
     ) -> PyResult<PyObject> {
-        let graph_conn = self.context.graph().conn();
-        let db_path = graph_conn
-            .path()
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-        let graph = BlockGroup::get_graph(graph_conn, &sequence_graph.id)
-            .map_err(block_group_err_to_pyerr)?;
-        let mut ctrl = PyGraphController::new(db_path, graph);
-        ctrl.block_group_id = Some(sequence_graph.id);
-        ctrl.auto_load_annotation_groups(graph_conn);
+        let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph)?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
@@ -373,11 +423,14 @@ mod python_tests {
                 .import_fasta(path.clone(), Some("test".to_string()), false, None)
                 .unwrap();
 
-            let err = py_repo
-                .borrow(py)
-                .import_fasta(path, Some("test".to_string()), false, None)
-                .unwrap_err()
-                .to_string();
+            let err =
+                match py_repo
+                    .borrow(py)
+                    .import_fasta(path, Some("test".to_string()), false, None)
+                {
+                    Err(e) => e.to_string(),
+                    Ok(_) => panic!("expected duplicate import to fail"),
+                };
             assert!(
                 err.contains("already exist"),
                 "Expected 'already exist' in error: {err}"

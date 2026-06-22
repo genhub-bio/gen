@@ -142,28 +142,7 @@ impl PySequenceGraph {
         detail: Option<&str>,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-
-        let (context, bg_id) = {
-            let bg = slf.borrow();
-            match bg.context.clone() {
-                Some(ctx) => (ctx, bg.id),
-                None => {
-                    return Err(PyRuntimeError::new_err(
-                        "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
-                    ));
-                }
-            }
-        };
-
-        let graph_conn = context.graph().conn();
-        let db_path = graph_conn
-            .path()
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-        let graph = BlockGroup::get_graph(graph_conn, &bg_id).map_err(block_group_err_to_pyerr)?;
-        let mut ctrl = PyGraphController::new(db_path, graph);
-        ctrl.block_group_id = Some(bg_id);
-        ctrl.auto_load_annotation_groups(graph_conn);
+        let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow())?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }

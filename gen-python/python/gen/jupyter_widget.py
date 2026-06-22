@@ -23,6 +23,28 @@ import traitlets
 DEFAULT_COLS = 60
 DEFAULT_ROWS = 12
 
+
+def _highlighted(cell: dict, frame: dict) -> bool:
+    """True when the cell carries a highlight colour.
+
+    The graph renderer paints text cells with inverted neutral colours
+    (fg=neutral_bg, bg=neutral_fg) by default.  A true highlight changes
+    the cell's *bg* to an accent colour while keeping the inverted fg.
+    Edge cells never set *bg* (highlighted edges are already drawn with
+    heavy/dashed box-drawing glyphs by the Rust renderer), so this only
+    ever fires for text cells.
+    """
+    bg = cell.get("bg")
+    if bg is None:
+        return False
+    return bg != frame.get("neutral_fg")
+
+
+def _transform(text: str, highlighted: bool) -> str:
+    """Adjust casing based on highlight state."""
+    return text.upper() if highlighted else text.lower()
+
+
 _ESM = pathlib.Path(__file__).parent / "static" / "jupyter_widget.js"
 
 # All live widget instances, so that module-level helpers can operate on them.
@@ -30,6 +52,12 @@ _ESM = pathlib.Path(__file__).parent / "static" / "jupyter_widget.js"
 
 class GraphWidget(anywidget.AnyWidget):
     """Jupyter widget that displays a Gen graph using the native Rust renderer.
+
+    A widget obtained from a single ``SequenceGraph`` (via ``repo.plot(sg)`` or
+    ``sg.plot()``) shows just that graph. A widget obtained from a ``Sample``
+    (via ``sample.plot()``) pages through every sequence graph it contains,
+    showing a header row with the sequence graph name plus a floating
+    ``<index/count>`` pager indicator next to the zoom buttons.
 
     Usage
     -----
@@ -41,8 +69,13 @@ class GraphWidget(anywidget.AnyWidget):
         widget  # display in Jupyter cell
 
         # Optionally send commands from Python afterwards:
-        widget.move_by(-5, 0)
+        widget.scroll_left()
         widget.zoom_in()
+
+        sample = repo.import_fasta(...)
+        sample_widget = sample.plot()
+        sample_widget.next_page()
+        sample_widget.prev_page()
     """
 
     _esm = _ESM
@@ -56,14 +89,23 @@ class GraphWidget(anywidget.AnyWidget):
     cols: int = traitlets.Int(DEFAULT_COLS).tag(sync=True)
     rows: int = traitlets.Int(DEFAULT_ROWS).tag(sync=True)
 
+    # Number of pages available. The frontend only shows pager arrows when
+    # this is greater than 1 (plain GraphWidgets have exactly one page).
+    page_count: int = traitlets.Int(1).tag(sync=True)
+
+    # Index of the currently active page, for the frontend's <index/count>
+    # pager indicator.
+    page_index: int = traitlets.Int(0).tag(sync=True)
+
     def __init__(self, controller, **kwargs):
         """
         Parameters
         ----------
         controller:
             A ``gen.PyGraphController`` instance.  Normally obtained via
-            ``repo.plot(sg)`` or ``sg.plot()``.
+            ``repo.plot(sg)``, ``sg.plot()``, or ``sample.plot()``.
         """
+        kwargs.setdefault("page_count", controller.page_count)
         super().__init__(**kwargs)
         self._controller = controller
         self._frozen = False
@@ -81,6 +123,30 @@ class GraphWidget(anywidget.AnyWidget):
 
     # ── Display ───────────────────────────────────────────────────────────────
 
+    def __repr__(self) -> str:
+        """Render the current frame as plain ASCII/Unicode text.
+
+        This is what shows up as the `text/plain` fallback wherever the
+        widget JS can't run (nbconvert text/markdown export, `print()`, a
+        plain terminal). The frame is already a full character grid computed
+        server-side by the Rust renderer, so no separate rendering path is
+        needed.
+        """
+        cols, rows = (
+            self.frame.get("cols", self.cols),
+            self.frame.get("rows", self.rows),
+        )
+        grid = [[" "] * cols for _ in range(rows)]
+        for cell in self.frame.get("cells", []):
+            x, y, text = cell["x"], cell["y"], cell["text"]
+            if text and 0 <= y < rows and 0 <= x < cols:
+                grid[y][x] = _transform(text, _highlighted(cell, self.frame))
+        lines = ["".join(row).rstrip() for row in grid]
+        if self.page_count > 1 and lines:
+            prefix = f"[{self.page_index + 1}/{self.page_count}] "
+            lines[0] = (prefix + lines[0].lstrip()).rstrip()
+        return "\n".join(lines)
+
     def _ipython_display_(self, **kwargs):
         """Clone the controller and display an independent widget in this cell.
 
@@ -92,7 +158,7 @@ class GraphWidget(anywidget.AnyWidget):
         from IPython.display import display
 
         cloned_ctrl = self._controller.clone_controller()
-        snapshot = GraphWidget(cloned_ctrl, cols=self.cols, rows=self.rows)
+        snapshot = type(self)(cloned_ctrl, cols=self.cols, rows=self.rows)
         data = {
             "text/plain": repr(snapshot),
             "application/vnd.jupyter.widget-view+json": {
@@ -109,6 +175,7 @@ class GraphWidget(anywidget.AnyWidget):
         """Ask Rust to render a frame and push it to the frontend."""
         frame_json = self._controller.render_frame(self.cols, self.rows)
         self.frame = json.loads(frame_json)
+        self.page_index = self._controller.page_index
 
     def _on_resize(self, change) -> None:
         # change is required by the traitlets observe protocol but we only need
@@ -160,15 +227,25 @@ class GraphWidget(anywidget.AnyWidget):
 
         if msg_type == "mouse_click":
             self.handle_click(int(msg.get("col", 0)), int(msg.get("row", 0)))
+            return
 
-        elif msg_type == "zoom":
+        if msg_type == "zoom":
             if msg.get("direction") == "in":
                 self.zoom_in()
             else:
                 self.zoom_out()
+            return
 
-        elif msg_type == "pan":
-            self.move_by(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
+        if msg_type == "pan":
+            self._move_by(int(msg.get("dx", 0)), int(msg.get("dy", 0)))
+            return
+
+        if msg_type == "page":
+            if msg.get("direction") == "next":
+                self.next_page()
+            else:
+                self.prev_page()
+            return
 
     # ── Public command API ────────────────────────────────────────────────────
 
@@ -194,11 +271,51 @@ class GraphWidget(anywidget.AnyWidget):
         self._controller.zoom_out()
         self._render()
 
-    def move_by(self, dx: int, dy: int) -> None:
-        """Move the viewport by dx, dy cells."""
+    def _move_by(self, dx: int, dy: int) -> None:
+        """Move the viewport like a mouse drag of (dx, dy) terminal cells.
+
+        ``dx``/``dy`` follow drag semantics, not camera-direction semantics:
+        the Rust controller negates dx internally (dragging right pulls
+        upstream/earlier content into view, like dragging a map), so a
+        *negative* dx here is what moves the camera rightward/downstream.
+        """
         if self._frozen:
             return
         self._controller.move_by(dx, dy)
+        self._render()
+
+    def scroll_right(self) -> None:
+        """Scroll the view right by one page, to show further-downstream sequence."""
+        self._move_by(
+            -self.cols, 0
+        )  # negative dx -> camera moves downstream (see _move_by)
+
+    def scroll_left(self) -> None:
+        """Scroll the view left by one page, back toward earlier/upstream sequence."""
+        self._move_by(
+            self.cols, 0
+        )  # positive dx -> camera moves upstream (see _move_by)
+
+    def scroll_down(self) -> None:
+        """Scroll the view down by one page, to show content below the current view."""
+        self._move_by(0, -self.rows)
+
+    def scroll_up(self) -> None:
+        """Scroll the view up by one page, to show content above the current view."""
+        self._move_by(0, self.rows)
+
+    def next_page(self) -> None:
+        """Advance to the next sequence graph (only meaningful for a ``Sample``-backed widget)."""
+        if self._frozen:
+            return
+        self._controller.next_page()
+        self._render()
+
+    def prev_page(self) -> None:
+        """Go back to the previous sequence graph (only meaningful for a ``Sample``-backed widget)."""
+        if self._frozen:
+            return
+        self._controller.prev_page()
         self._render()
 
     def go_to(self, target) -> None:

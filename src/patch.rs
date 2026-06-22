@@ -476,7 +476,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let op_2 = update_with_vcf(
+        let (op_2, _) = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -510,7 +510,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let op_2 = update_with_vcf(
+        let (op_2, _) = update_with_vcf(
             &source_context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -562,7 +562,7 @@ mod tests {
         let main_branch = Branch::get_by_name(operation_conn, "main").unwrap();
         let _branch = Branch::get_or_create(operation_conn, "new-branch");
         OperationState::set_branch(operation_conn, "new-branch");
-        let op_2 = update_with_vcf(
+        let (op_2, _) = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -610,7 +610,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let op_2 = update_with_vcf(
+        let (op_2, _) = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -651,7 +651,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let op_2 = update_with_vcf(
+        let (op_2, _) = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -699,7 +699,7 @@ mod tests {
         let external_file = Builder::new().suffix(".vcf").tempfile().unwrap();
         fs::copy(&fixture_vcf_path, external_file.path()).unwrap();
 
-        let operation = update_with_vcf(
+        let (operation, _) = update_with_vcf(
             &source_context,
             &external_file.path().to_string_lossy().to_string(),
             &collection,

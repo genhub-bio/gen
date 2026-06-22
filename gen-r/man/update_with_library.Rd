@@ -30,7 +30,7 @@ update_with_library(
 \item{collection}{Character or \code{NULL}.}
 }
 \value{
-Invisibly the update message string.
+The updated \code{gen_sample}.
 }
 \description{
 Apply a library update with optional GRanges part sequences

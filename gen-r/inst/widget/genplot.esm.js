@@ -138,7 +138,7 @@ function render({ model, el }) {
   canvas.style.cssText = "display: block; cursor: default; box-shadow: inset 0 0 0 2px #45475a;", wrapper.appendChild(canvas), el.appendChild(wrapper);
   let ctx = canvas.getContext("2d");
   if (paintFrame(ctx, canvas, grid, model.get("frame")), 0)
-    var captureHiRes, sendSnapshot, scheduleSnapshot, repaint, doFreeze;
+    var makeBtn, makePageArrow, updatePageLabel, captureHiRes, sendSnapshot, scheduleSnapshot, repaint, doFreeze;
 }
 var index_default = { render };
 export {

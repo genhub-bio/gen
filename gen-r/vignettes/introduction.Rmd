@@ -63,14 +63,8 @@ be preserved in the graph and displayed in the viewer.
 
 ```{r import}
 gbk_path <- system.file("extdata", "puc19.gbk", package = "genr")
-repo$import_genbank(gbk_path, sample = "wt")
-```
-
-List the sequence graphs in the repository to confirm the import:
-
-```{r list-sgs}
-sgs <- repo$get_sequence_graphs()
-sg_wt <- sgs[[1]]
+sample_wt <- repo$import_genbank(gbk_path, sample = "wt")
+sg_wt <- sample_wt$block_groups[[1]]
 cat("Sequence graph:", sg_wt$name(), "| sample:", sg_wt$sample_name(), "\n")
 ```
 
@@ -115,7 +109,7 @@ overhangs for assembly.
 
 golden_gate_mcs <- "GAATTCGGTCTCAAATGCATCATCATCATGCATTGAGACCAAGCTT"
 
-repo$update_with_sequence(
+sample_gg <- repo$update_with_sequence(
   sequence    = golden_gate_mcs,
   sample      = "wt",
   new_sample  = "gg_design",
@@ -125,17 +119,15 @@ repo$update_with_sequence(
   # looking these up by name directly from the database.
   region_name = "pUC19:395-452"
 )
+sg_gg <- sample_gg$block_groups[[1]]
 ```
 
 `update_with_sequence` creates a new sample ("gg_design") that shares
 the entire graph with "wt" except at the edited region, where the path
-diverges through the new MCS nodes.
+diverges through the new MCS nodes, and returns that sample's sequence
+graphs directly.
 
 ## Inspect the design
-
-```{r get-gg-bg}
-sg_gg <- Filter(function(x) x$sample_name() == "gg_design", repo$get_sequence_graphs())[[1]]
-```
 
 ### Confirm the BsaI sites with search
 
@@ -242,18 +234,19 @@ later sequencing results arrive as a VCF.
 ```{r update-vcf}
 vcf_path <- system.file("extdata", "puc19_sequenced.vcf", package = "genr")
 
-repo$update_with_vcf(
+samples_seq <- repo$update_with_vcf(
   filename       = vcf_path,
   sample         = "sequenced",
   reference = c("gg_design")
 )
+sg_seq <- samples_seq[[1]]$block_groups[[1]]
 ```
+
+`update_with_vcf()` returns a list of samples, one per output sample
+name — here there's a single output sample ("sequenced"), so we take
+its first (and only) sequence graph.
 
 Plot the sequenced sample:
-
-```{r get-sequenced-bg}
-sg_seq <- Filter(function(x) x$sample_name() == "sequenced", repo$get_sequence_graphs())[[1]]
-```
 
 ```{r plot-sequenced}
 p_seq <- plot(sg_seq)
@@ -435,14 +428,13 @@ cds_variants <- c(
 
 terminator <- c(terminator_T1 = "GCGCAACGCAATTAATGTGAGTTAGCTCACTCATTAGGCACCCCAGGC")
 
-repo$import_library(
+cassette_sg <- repo$import_library(
   library_name = "expression-cassette",
   parts_list   = list(upstream, promoters, rbs_variants, cds_variants, terminator),
   sample       = "design-v1"
 )
 
-cassette_bgs <- Filter(function(x) x$name() == "expression-cassette", repo$get_sequence_graphs())
-plot(cassette_bgs[[1]])
+plot(cassette_sg)
 ```
 
 `DNAStringSet` columns work identically to named character vectors and
@@ -478,7 +470,7 @@ of an existing one. The `region` argument uses `"<name>:<start>-<end>"`
 (0-based half-open) or just `"<name>"` for the full sequence:
 
 ```{r derive-subgraph, eval=FALSE}
-repo$derive_subgraph(
+mcs_region_sg <- repo$derive_subgraph(
   sample     = "gg_design",
   new_sample = "mcs_region",
   region     = "pUC19:390-460"
@@ -518,8 +510,7 @@ reassembled <- stitch(
 ```
 
 `repo$derive_chunks()` is the lower-level counterpart that creates
-chunks in-place (returning a status string); retrieve the results
-afterwards with `repo$get_sequence_graphs()` filtered by name.
+chunks in-place and returns the resulting sample directly.
 
 ### Annotation tracks
 

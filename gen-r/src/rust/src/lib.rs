@@ -42,7 +42,7 @@ use gen_annotations::{
     projection::annotation_segments,
     translate::{bed::translate_bed, gff::translate_gff},
 };
-use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node};
+use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node, region::Region};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     annotations::Annotation,
@@ -136,6 +136,18 @@ fn node_record(node_id: HashId, sequence_start: i64, sequence_end: i64) -> Robj 
         sequence_end = sequence_end
     ));
     obj.set_class(&["gen_node"]).unwrap();
+    obj
+}
+
+/// The sequence graphs produced by a single import/update/derive call, all
+/// within one sample. Index with `[[` or iterate over `$block_groups`.
+fn sample_record(collection_name: &str, sample_name: &str, block_groups: Vec<Robj>) -> Robj {
+    let mut obj = r!(list!(
+        collection_name = collection_name,
+        sample_name = sample_name,
+        block_groups = List::from_values(block_groups)
+    ));
+    obj.set_class(&["gen_sample"]).unwrap();
     obj
 }
 
@@ -997,6 +1009,29 @@ impl Repository {
         Ok(List::from_values(values))
     }
 
+    /// All samples in the repository, each holding its sequence graphs.
+    fn get_samples(&self) -> std::result::Result<List, Error> {
+        let conn = self.context.graph().conn();
+        let mut samples: Vec<(String, String, Vec<Robj>)> = Vec::new();
+        for bg in BlockGroup::all(conn) {
+            let collection_name = bg.collection_name.clone();
+            let sample_name = bg.sample_name.clone();
+            let sg = r!(self.to_sequence_graph(bg));
+            match samples
+                .iter_mut()
+                .find(|(c, s, _)| *c == collection_name && *s == sample_name)
+            {
+                Some((_, _, block_groups)) => block_groups.push(sg),
+                None => samples.push((collection_name, sample_name, vec![sg])),
+            }
+        }
+        let values = samples
+            .into_iter()
+            .map(|(c, s, block_groups)| sample_record(&c, &s, block_groups))
+            .collect::<Vec<_>>();
+        Ok(List::from_values(values))
+    }
+
     fn get_node_sequence(
         &self,
         node_id: String,
@@ -1019,7 +1054,7 @@ impl Repository {
         sample: String,
         shallow: bool,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1035,7 +1070,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Fasta imported.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &sample))
             }
             Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
                 rollback_transactions(&self.context);
@@ -1054,7 +1089,7 @@ impl Repository {
         reference: String,
         shallow: bool,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1082,7 +1117,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Fasta imported.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &reference))
             }
             Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
                 rollback_transactions(&self.context);
@@ -1200,7 +1235,7 @@ impl Repository {
         filename: String,
         sample: String,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<SequenceGraph, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1215,7 +1250,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("GFA imported.".to_string())
+                self.get_block_group(&collection_name, &sample, "")
             }
             Err(r#gen::imports::gfa::GFAImportError::OperationError(OperationError::NoChanges)) => {
                 rollback_transactions(&self.context);
@@ -1233,7 +1268,7 @@ impl Repository {
         filename: String,
         sample: String,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1258,7 +1293,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("GenBank imported.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &sample))
             }
             Err(e) => {
                 rollback_transactions(&self.context);
@@ -1274,7 +1309,7 @@ impl Repository {
         library: String,
         sample: String,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<SequenceGraph, Error> {
         let parts_list = parse_library(&parts, &library)
             .map_err(|e| Error::Other(format!("Problem parsing library files: {e}")))?;
         let collection_name = resolve_collection_name(
@@ -1294,7 +1329,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Library imported.".to_string())
+                self.get_block_group(&collection_name, &sample, &library_name)
             }
             Err(r#gen::imports::library::LibraryImportError::OperationError(
                 OperationError::NoChanges,
@@ -1315,7 +1350,7 @@ impl Repository {
         parts_list: Robj,
         sample: Nullable<String>,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<SequenceGraph, Error> {
         let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
@@ -1336,7 +1371,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Library imported.".to_string())
+                self.get_block_group(&collection_name, &sample_name, &library_name)
             }
             Err(r#gen::imports::library::LibraryImportError::OperationError(
                 OperationError::NoChanges,
@@ -1358,7 +1393,7 @@ impl Repository {
         new_sample: String,
         region_name: String,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1376,7 +1411,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Updated with fasta.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &new_sample))
             }
             Err(r#gen::fasta::FastaError::OperationError(OperationError::NoChanges)) => {
                 rollback_transactions(&self.context);
@@ -1395,7 +1430,7 @@ impl Repository {
         sample: String,
         new_sample: String,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1411,7 +1446,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Updated with GFA.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &new_sample))
             }
             Err(e) => {
                 rollback_transactions(&self.context);
@@ -1427,7 +1462,7 @@ impl Repository {
         sample: String,
         parent_sample: Nullable<String>,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1444,7 +1479,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Updated with GAF.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &sample))
             }
             Err(e) => {
                 rollback_transactions(&self.context);
@@ -1461,7 +1496,7 @@ impl Repository {
         reference: Vec<String>,
         in_place: bool,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<List, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1479,9 +1514,13 @@ impl Repository {
             reference,
             in_place,
         ) {
-            Ok(_) => {
+            Ok((_, output_samples)) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Updated with VCF.".to_string())
+                let samples = output_samples
+                    .into_iter()
+                    .map(|sample_name| self.block_groups_in_sample(&collection_name, &sample_name))
+                    .collect::<Vec<_>>();
+                Ok(List::from_values(samples))
             }
             Err(r#gen::updates::vcf::VcfError::OperationError(OperationError::NoChanges)) => {
                 rollback_transactions(&self.context);
@@ -1502,14 +1541,18 @@ impl Repository {
         sample: String,
         create_missing: bool,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
-        let collection_name_opt = nullable_string_to_option(collection);
+    ) -> std::result::Result<Robj, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
         let mut reader = read_genbank_reader(&filename).map_err(Error::Other)?;
         begin_transactions(&self.context).map_err(Error::Other)?;
         match r#gen::updates::genbank::update_with_genbank(
             &self.context,
             &mut reader,
-            collection_name_opt.as_deref(),
+            Some(collection_name.as_str()),
             &sample,
             create_missing,
             &OperationInfo {
@@ -1522,7 +1565,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Updated with GenBank.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &sample))
             }
             Err(e) => {
                 rollback_transactions(&self.context);
@@ -1539,7 +1582,7 @@ impl Repository {
         library: String,
         parts: String,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let parts_list = parse_library(&parts, &library)
             .map_err(|e| Error::Other(format!("Couldn't parse library files: {e}")))?;
         let collection_name = resolve_collection_name(
@@ -1560,7 +1603,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Updated with library.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &new_sample))
             }
             Err(e) => {
                 rollback_transactions(&self.context);
@@ -1576,7 +1619,7 @@ impl Repository {
         path_name: String,
         parts_list: Robj,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
@@ -1598,7 +1641,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Updated with library.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &new_sample_name))
             }
             Err(e) => {
                 rollback_transactions(&self.context);
@@ -1615,7 +1658,7 @@ impl Repository {
         region_name: String,
         no_reference_path_update: bool,
         collection: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.operations().conn(),
             nullable_string_to_option(collection),
@@ -1633,7 +1676,7 @@ impl Repository {
         ) {
             Ok(_) => {
                 end_transactions(&self.context).map_err(Error::Other)?;
-                Ok("Updated with sequence.".to_string())
+                Ok(self.block_groups_in_sample(&collection_name, &new_sample))
             }
             Err(e) => {
                 rollback_transactions(&self.context);
@@ -1879,17 +1922,28 @@ impl Repository {
         new_sample: String,
         region: String,
         backbone: Nullable<String>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<SequenceGraph, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
+        let parsed_region = Region::parse(&region)
+            .map_err(|e| Error::Other(format!("Failed to parse region '{region}': {e}")))?;
         derive_subgraph_operation(
             &self.context,
-            nullable_string_to_option(collection),
+            Some(collection_name.clone()),
             sample,
-            new_sample,
+            new_sample.clone(),
             region,
             nullable_string_to_option(backbone),
         )
         .map_err(|e| Error::Other(format!("Error deriving subgraph: {e}")))?;
-        Ok("Derived subgraph.".to_string())
+        self.get_block_group(
+            &collection_name,
+            &new_sample,
+            &parsed_region.name.to_string(),
+        )
     }
 
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
@@ -1902,12 +1956,17 @@ impl Repository {
         backbone: Nullable<String>,
         breakpoints: Vec<i32>,
         chunk_size: Nullable<i64>,
-    ) -> std::result::Result<String, Error> {
+    ) -> std::result::Result<Robj, Error> {
+        let collection_name = resolve_collection_name(
+            self.context.operations().conn(),
+            nullable_string_to_option(collection),
+        )
+        .map_err(Error::Other)?;
         derive_chunks_operation(
             &self.context,
-            nullable_string_to_option(collection),
+            Some(collection_name.clone()),
             sample,
-            new_sample,
+            new_sample.clone(),
             region,
             nullable_string_to_option(backbone),
             if breakpoints.is_empty() {
@@ -1918,7 +1977,7 @@ impl Repository {
             nullable_i64_to_option(chunk_size),
         )
         .map_err(|e| Error::Other(format!("Error deriving chunks: {e}")))?;
-        Ok("Derived chunks.".to_string())
+        Ok(self.block_groups_in_sample(&collection_name, &new_sample))
     }
 
     fn auto_load_annotation_groups(
@@ -2006,6 +2065,35 @@ impl Repository {
             sample_name: bg.sample_name,
             name: bg.name,
         }
+    }
+
+    /// All block groups currently in `(collection, sample)`, as a `gen_sample` record.
+    fn block_groups_in_sample(&self, collection_name: &str, sample_name: &str) -> Robj {
+        let conn = self.context.graph().conn();
+        let block_groups = Sample::get_block_groups(conn, collection_name, sample_name)
+            .into_iter()
+            .map(|bg| r!(self.to_sequence_graph(bg)))
+            .collect();
+        sample_record(collection_name, sample_name, block_groups)
+    }
+
+    /// Look up a single block group by its deterministic (collection, sample, name) id.
+    fn get_block_group(
+        &self,
+        collection_name: &str,
+        sample_name: &str,
+        name: &str,
+    ) -> std::result::Result<SequenceGraph, Error> {
+        let conn = self.context.graph().conn();
+        Sample::get_block_groups(conn, collection_name, sample_name)
+            .into_iter()
+            .find(|bg| bg.name == name)
+            .map(|bg| self.to_sequence_graph(bg))
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "Block group '{name}' not found in sample '{sample_name}'"
+                ))
+            })
     }
 }
 

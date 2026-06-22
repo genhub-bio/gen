@@ -1,3 +1,9 @@
+#'
+#' @section Methods:
+#'\subsection{Method `get_samples`}{
+#'All samples in the repository, each holding its sequence graphs.
+#'}
+#'
 Repository <- new.env(parent = emptyenv())
 
 Repository$new <- function(path) .Call("wrap__Repository__new", path, PACKAGE = "genr")
@@ -15,6 +21,8 @@ Repository$get_sequence_graph_by_id <- function(id) .Call("wrap__Repository__get
 Repository$get_sequence_graphs <- function() .Call("wrap__Repository__get_sequence_graphs", self, PACKAGE = "genr")
 
 Repository$get_sequence_graphs_by_collection <- function(collection_name) .Call("wrap__Repository__get_sequence_graphs_by_collection", self, collection_name, PACKAGE = "genr")
+
+Repository$get_samples <- function() .Call("wrap__Repository__get_samples", self, PACKAGE = "genr")
 
 Repository$get_node_sequence <- function(node_id, sequence_start, sequence_end) .Call("wrap__Repository__get_node_sequence", self, node_id, sequence_start, sequence_end, PACKAGE = "genr")
 
