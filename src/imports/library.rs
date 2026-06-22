@@ -12,6 +12,7 @@ use gen_models::{
     sample::Sample,
     session_operations,
 };
+use serde_json::from_str;
 use thiserror::Error;
 
 use crate::graphs::combinatorial_library::{
@@ -158,11 +159,10 @@ pub(crate) fn create_part_annotations(
             },
         )?;
         let fasta = part.fasta_extra.clone();
-        let extra_part = part.metadata.as_deref().and_then(|s| {
-            serde_json::from_str(s)
-                .ok()
-                .map(|v| PartExtra { metadata: Some(v) })
-        });
+        let extra_part = part
+            .metadata
+            .as_deref()
+            .and_then(|s| from_str(s).ok().map(|v| PartExtra { metadata: Some(v) }));
         let extra = if fasta.is_some() || extra_part.is_some() {
             Some(AnnotationExtra {
                 fasta,

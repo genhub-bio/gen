@@ -76,8 +76,8 @@ struct ParsedFastaDescription {
     annotation_end: Option<i64>,
 }
 
-fn parse_fasta_description(desc: &[u8]) -> ParsedFastaDescription {
-    let raw = String::from_utf8_lossy(desc);
+fn parse_fasta_description(description_bytes: &[u8]) -> ParsedFastaDescription {
+    let raw = String::from_utf8_lossy(description_bytes);
     let description = Some(raw.to_string());
     let mut modifiers = vec![];
     let mut annotation_start: Option<i64> = None;
@@ -133,7 +133,7 @@ pub fn parse_library(
         let name = String::from_utf8(record.name().to_vec()).unwrap();
         let parsed = record
             .description()
-            .map(|d| parse_fasta_description(d.as_ref()));
+            .map(|description| parse_fasta_description(description.as_ref()));
         let (fasta_extra, annotation_start, annotation_end) = match parsed {
             Some(p) => (Some(p.extra), p.annotation_start, p.annotation_end),
             None => (None, None, None),
