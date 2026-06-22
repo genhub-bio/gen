@@ -1469,7 +1469,7 @@ fn translate_from(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
     use gen_models::{
