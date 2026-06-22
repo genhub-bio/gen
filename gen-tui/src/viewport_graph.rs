@@ -115,9 +115,13 @@ impl CroppedGraph {
                     .world_to_local(clamped_viewport.max, detail_level)
                     .unwrap();
 
+                // Routing nodes at the partition's right edge have bounding rects starting
+                // at local_corner_max.x + 1, so extend the query envelope by 1 unit to the
+                // right to avoid excluding the rightmost column of routing nodes (and their
+                // connecting edges) from the viewport graph.
                 let envelope = rstar::AABB::from_corners(
                     [local_corner_min.x, local_corner_min.y],
-                    [local_corner_max.x, local_corner_max.y],
+                    [local_corner_max.x + 1, local_corner_max.y],
                 );
 
                 let visible_objects: Vec<_> = partition_layout

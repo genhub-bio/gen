@@ -75,6 +75,7 @@ fn generate_dot_debug(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u3
                     gen_tui::partition::StitchSide::Left => "S_L".to_string(),
                     gen_tui::partition::StitchSide::Right => "S_R".to_string(),
                 },
+                NodeRole::Pin => "PIN".to_string(),
             };
 
             let label = format!("{}\\n({},{})", node_title, x, y);
@@ -84,6 +85,7 @@ fn generate_dot_debug(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u3
                 NodeRole::Data(_) => ("box", "lightblue"),
                 NodeRole::Routing => ("circle", "lightgreen"),
                 NodeRole::Stitch(_) => ("diamond", "orange"),
+                NodeRole::Pin => ("triangle", "purple"),
             };
 
             writeln!(

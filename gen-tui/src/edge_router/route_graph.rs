@@ -159,15 +159,6 @@ pub(crate) fn make_rectilinear(
                 })
                 .collect();
 
-        eprintln!(
-            "DEBUG layer pair x_left={} x_right={} left_count={} right_count={} edges_found={}",
-            x_left,
-            x_right,
-            left_node_indices.len(),
-            right_node_indices.len(),
-            edges_with_bundles.len()
-        );
-
         // Separate edges and bundles for passing to layout_layer
         let edges: Vec<(NodeIndex, NodeIndex)> =
             edges_with_bundles.iter().map(|(e, _)| *e).collect();
@@ -296,40 +287,9 @@ pub(crate) fn make_rectilinear(
                 node_width_left, node_width_right, left_label_extent, right_label_extent, slack
             );
 
-            eprintln!(
-                "DEBUG before layout_layer: x_left={} x_right={} edges={:?} left_roles={:?} right_roles={:?}",
-                x_left,
-                x_right,
-                edges,
-                left_nodes.iter().map(|n| format!("{:?}", n.role)).collect::<Vec<_>>(),
-                right_nodes.iter().map(|n| format!("{:?}", n.role)).collect::<Vec<_>>(),
-            );
             // Rectilinear edge routing to replace the original edges
             let mut layer_graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)?;
-            eprintln!(
-                "DEBUG after layout_layer: node_count={} edge_count={}",
-                layer_graph.node_count(),
-                layer_graph.edge_count()
-            );
-            for nidx in layer_graph.node_indices() {
-                if matches!(layer_graph[nidx].role, NodeRole::Pin) {
-                    eprintln!(
-                        "DEBUG after layout_layer: Pin {:?} degree={}",
-                        nidx,
-                        layer_graph.neighbors(nidx).count()
-                    );
-                }
-            }
             simplify_graph(&mut layer_graph)?;
-            for nidx in layer_graph.node_indices() {
-                if matches!(layer_graph[nidx].role, NodeRole::Pin) {
-                    eprintln!(
-                        "DEBUG after simplify_graph (per-layer): Pin {:?} degree={}",
-                        nidx,
-                        layer_graph.neighbors(nidx).count()
-                    );
-                }
-            }
             // Label the rectilinear edges with a reference to original edge(s) they represent
             make_bundles(&mut layer_graph, graph)?;
             center_doglegs(&mut layer_graph)?;

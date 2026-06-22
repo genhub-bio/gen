@@ -826,6 +826,13 @@ where
                 let metrics = &mut self.metrics[detail_level.as_index()];
                 metrics.widths.add_at(partition_index, layout.width);
                 metrics.heights[partition_index] = layout.height;
+                // `layout.height` for a section is the rise computed by
+                // `align_partition_to_origin` (the vertical drift between the partition's
+                // leftmost and rightmost columns). It must be accumulated into the rise
+                // Fenwick tree so that `get_partition_origin` can place the next partition
+                // at the correct world Y; previously it was only ever stored on the layout
+                // itself and never propagated, leaving every partition's rise at 0.
+                metrics.rise.add_at(partition_index, layout.height);
                 self.debug_fenwick_state(detail_level);
             }
         }
@@ -894,18 +901,28 @@ where
             })
             .ok_or("Right layout has no left stitch node")?;
 
-        // Get edges coming into the bridge == coming into the stitch
+        // Get edges coming into the bridge == coming into the stitch.
+        //
+        // The bridge's own world offset already includes the left section's rise (see
+        // `get_partition_origin`: it's a prefix sum over every earlier partition's rise,
+        // which includes this section's own entry in the rise tree). But a node's stored
+        // `pos.y` is relative to its own section's origin, which does *not* yet include
+        // that section's rise. Left uncorrected, the bridge would double-count it: once
+        // via the node's own y, once via the bridge's offset. Subtract it here so the
+        // copy lines up with the real node's world position.
+        let left_rise = left_layout.height;
         let mut left_edges = Vec::new();
         for edge_ref in left_layout
             .graph
             .edges_directed(left_right_stitch, Direction::Incoming)
         {
             let source_idx = edge_ref.source();
-            let node_weight = left_layout
+            let mut node_weight = left_layout
                 .graph
                 .node_weight(source_idx)
                 .expect("Every node should have a weight")
                 .clone();
+            node_weight.pos.y -= left_rise;
             let edge_weight = edge_ref.weight();
             left_edges.push((source_idx, node_weight, edge_weight.clone()));
         }

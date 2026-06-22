@@ -246,6 +246,7 @@ impl PartitionLayout {
     pub fn for_section(
         mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
         vertex_spacing: f64,
+        partition_idx: usize,
     ) -> Self {
         log::trace!(
             "for_section: input layout_graph has {} nodes, {} edges",
@@ -256,37 +257,26 @@ impl PartitionLayout {
         if let Err(e) = make_rectilinear(&mut layout_graph) {
             log::warn!("Edge routing failed: {:?}", e);
         }
-        let pin_idx_before = layout_graph
-            .node_indices()
-            .find(|&idx| matches!(layout_graph[idx].role, NodeRole::Pin));
-        if let Some(idx) = pin_idx_before {
-            let neighbors: Vec<_> = layout_graph
-                .neighbors(idx)
-                .map(|n| (n, layout_graph[n].role.clone(), layout_graph[n].pos.x, layout_graph[n].pos.y))
-                .collect();
-            eprintln!(
-                "DEBUG for_section: Pin {:?} pos=({},{}) neighbors={:?}",
-                idx, layout_graph[idx].pos.x, layout_graph[idx].pos.y, neighbors
-            );
-        }
-        prune_pin_stubs(&mut layout_graph);
-        if pin_idx_before.is_some() {
-            eprintln!(
-                "DEBUG for_section: after pruning, node_count={} edge_count={}",
-                layout_graph.node_count(),
-                layout_graph.edge_count()
-            );
-            for node_idx in layout_graph.node_indices() {
-                eprintln!("  remaining node {:?} role={:?} pos=({},{})", node_idx, layout_graph[node_idx].role, layout_graph[node_idx].pos.x, layout_graph[node_idx].pos.y);
-            }
-        }
 
         // Rebuild all coordinates with the separation-constraint solver:
         // removes dead space (Brandes-Köpf averaging artifacts, raw routing
         // channel positions) and centers nodes within their slack in one pass.
         compact_layout(&mut layout_graph, vertex_spacing);
 
+        // Pin occupies the column alignment falls back to on the side of a boundary
+        // partition that has no stitch (see `align_partition_to_origin`), so pruning must
+        // wait until after alignment has consumed that column. Only the spatial index
+        // (and everything downstream of it) should ever see the pruned graph.
         let (dx, dy) = align_partition_to_origin(&mut layout_graph);
+
+        if let Ok(path) = std::env::var("GEN_TUI_DOT_DUMP") {
+            let _ = crate::dot_export::export_layout_graph_to_dot(
+                &layout_graph,
+                &format!("{path}.partition{partition_idx}.dot"),
+            );
+        }
+
+        prune_pin_stubs(&mut layout_graph);
 
         let spatial_index = Self::build_spatial_index(&layout_graph);
 
@@ -664,19 +654,6 @@ impl<'a> LayoutEngine<'a> {
             }
         }
 
-        for pidx in partition_graph.node_indices() {
-            if matches!(partition_graph[pidx], PartitionNode::Pin) {
-                let vidx = node_map[&pidx];
-                eprintln!(
-                    "DEBUG LayoutEngine::new: Pin partition_idx={:?} vertex_idx={:?} vertex_degree={}",
-                    pidx,
-                    vidx,
-                    vertex_graph.edges_directed(vidx, petgraph::Direction::Outgoing).count()
-                        + vertex_graph.edges_directed(vidx, petgraph::Direction::Incoming).count()
-                );
-            }
-        }
-
         Self {
             partition_graph,
             partition_idx,
@@ -773,17 +750,6 @@ impl<'a> LayoutEngine<'a> {
         if self.vertex_layers.is_none() {
             self.vertex_layers = Some(run_sugiyama_algorithm(&mut self.vertex_graph, &self.config));
         }
-        for vidx in self.vertex_graph.node_indices() {
-            eprintln!(
-                "DEBUG after sugiyama: vidx={:?} input_node_idx={:?} rank={} role={:?}",
-                vidx,
-                self.vertex_graph[vidx].input_node_idx,
-                self.vertex_graph[vidx].get_rank(),
-                self.vertex_graph[vidx]
-                    .input_node_idx
-                    .map(|pidx| format!("{:?}", self.partition_graph[self.partition_graph.from_index(pidx.index())]))
-            );
-        }
 
         // Make a fresh copy for this specific layout computation
         // (if memory ends up being an issue, we can probably figure out
@@ -814,7 +780,11 @@ impl<'a> LayoutEngine<'a> {
 
         // Save the layout and associated data using the section constructor
         // todo: move more of this logic into partitionlayout constructor
-        let layout = PartitionLayout::for_section(layout_graph, self.config.vertex_spacing);
+        let layout = PartitionLayout::for_section(
+            layout_graph,
+            self.config.vertex_spacing,
+            self.partition_idx,
+        );
 
         Ok(layout)
     }
@@ -906,22 +876,9 @@ impl<'a> LayoutEngine<'a> {
         }
 
         // Create layout edges with aggregated bundles
-        for ((layout_source_idx, layout_target_idx), bundles) in &edge_bundles {
-            let layout_edge = LayoutEdge {
-                bundle: bundles.clone(),
-            };
-            layout_graph.add_edge(*layout_source_idx, *layout_target_idx, layout_edge);
-        }
-
-        for node_idx in layout_graph.node_indices() {
-            eprintln!(
-                "DEBUG build_layout_graph node: {:?} role={:?} pos=({},{}) degree={}",
-                node_idx,
-                layout_graph[node_idx].role,
-                layout_graph[node_idx].pos.x,
-                layout_graph[node_idx].pos.y,
-                layout_graph.neighbors_undirected(node_idx).count()
-            );
+        for ((layout_source_idx, layout_target_idx), bundles) in edge_bundles {
+            let layout_edge = LayoutEdge { bundle: bundles };
+            layout_graph.add_edge(layout_source_idx, layout_target_idx, layout_edge);
         }
 
         layout_graph
@@ -954,17 +911,37 @@ fn count_connected_components<N, E>(graph: &StableDiGraph<N, E, u32>) -> usize {
     components
 }
 
+/// Mean y of every Data or Routing node in column `x`. Stitch is excluded even though
+/// it's never part of `min_x`/`max_x` (see `align_partition_to_origin`), because a stitch
+/// can still end up sharing a column with real content - `make_rectilinear` skips
+/// rectilinear routing for any layer pair touching a stitch (wiring the edge straight
+/// across instead; see `route_graph.rs`'s `has_stitch` check), leaving that edge
+/// "diagonal" by the time it reaches `distribute_nodes.rs`'s compaction solver, which
+/// gives diagonal edges a zero-gap constraint - free to collapse onto whatever column its
+/// neighbor lands on. A stitch's position is just wherever that left it, not a meaningful
+/// anchor.
+///
+/// Routing nodes are counted alongside Data: a bypass edge that re-converges on baseline
+/// before exiting through this column (e.g. a long spanning edge) is exactly as much a
+/// part of "where this partition hands off" as the data chain itself - both need to be
+/// satisfied by the same rise. Rounds down rather than to nearest: when a lifted data row
+/// and a baseline-seeking bypass split the average down the middle, flooring biases toward
+/// the lower (baseline) value, so the bypass's own row gets fully reconciled and the
+/// leftover slack lands on the data chain's side instead - which the bridge it's about to
+/// cross into is built to absorb with its own dogleg anyway.
 fn mean_y_for_x(
     layout_graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     x: i64,
-) -> i64 {
-    let layer_ys: Vec<i64> = layout_graph
+) -> Option<i64> {
+    let ys: Vec<i64> = layout_graph
         .node_weights()
-        .filter(|node| node.pos.x == x)
+        .filter(|node| node.pos.x == x && !matches!(node.role, NodeRole::Stitch(_)))
         .map(|node| node.pos.y)
-        .collect::<Vec<i64>>();
-
-    (layer_ys.iter().sum::<i64>() as f64 / layer_ys.len() as f64).round() as i64
+        .collect();
+    if ys.is_empty() {
+        return None;
+    }
+    Some((ys.iter().sum::<i64>() as f64 / ys.len() as f64).floor() as i64)
 }
 
 /// Take the contents of a layout graph and translate the node coordinates
@@ -976,6 +953,10 @@ fn mean_y_for_x(
 fn align_partition_to_origin(
     layout_graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
 ) -> (i64, i64) {
+    // Stitch nodes are handles for bridges to plug into, not a coordinate-meaningful
+    // interface row (see `mean_y_for_x`), so the reference for both the partition's own
+    // origin and its rise into the next partition is the first/last column that actually
+    // has real (Data or Routing - i.e. non-Stitch) content.
     let (min_x, max_x) = layout_graph
         .node_weights()
         .filter(|node| !matches!(node.role, NodeRole::Stitch(_)))
@@ -984,8 +965,8 @@ fn align_partition_to_origin(
         .into_option()
         .unwrap_or((0, 0));
 
-    let mean_y_left = mean_y_for_x(layout_graph, min_x);
-    let mean_y_right = mean_y_for_x(layout_graph, max_x);
+    let mean_y_left = mean_y_for_x(layout_graph, min_x).unwrap_or(0);
+    let mean_y_right = mean_y_for_x(layout_graph, max_x).unwrap_or(0);
 
     // Apply normalization offsets
     for node in layout_graph.node_weights_mut() {

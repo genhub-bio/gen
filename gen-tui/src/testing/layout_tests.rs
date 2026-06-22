@@ -159,34 +159,6 @@ fn make_snapshot_with_backward_edges(
         controller.viewport_state.viewport_bounds = area;
         let _ = controller.ensure_camera_coverage();
 
-        for idx in [6usize, 7, 8] {
-            if let Some(layout) = controller
-                .partition_controller
-                .partition_table
-                .get_layout(idx, controller.get_detail_level())
-            {
-                eprintln!("DEBUG layout partition {}:", idx);
-                for node_idx in layout.graph.node_indices() {
-                    let node = &layout.graph[node_idx];
-                    eprintln!(
-                        "  node {:?} role={:?} pos=({},{})",
-                        node_idx, node.role, node.pos.x, node.pos.y
-                    );
-                }
-                for edge in petgraph::visit::IntoEdgeReferences::edge_references(&layout.graph) {
-                    use petgraph::visit::EdgeRef;
-                    eprintln!(
-                        "  edge {:?} -> {:?} bundle={:?}",
-                        edge.source(),
-                        edge.target(),
-                        edge.weight().bundle
-                    );
-                }
-            } else {
-                eprintln!("DEBUG layout partition {}: NOT LOADED", idx);
-            }
-        }
-
         controller
             .rebuild_viewport_graph()
             .expect("Failed to rebuild viewport graph for snapshot generation");
