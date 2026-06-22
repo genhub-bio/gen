@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 use gen_core::{Strand, range::Range};
 use gen_models::{
@@ -17,7 +15,8 @@ use gen_models::{
 use thiserror::Error;
 
 use crate::graphs::combinatorial_library::{
-    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart, create_library,
+    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, PartNode, SequencePart,
+    create_library,
 };
 
 #[derive(Error, Debug)]
@@ -96,7 +95,14 @@ pub fn import_library(
     let (_chunk, part_nodes) =
         create_library(conn, new_block_group.id, library_name, parts_list, true)?;
 
-    create_part_annotations(conn, new_block_group.id, library_name, sample, &part_nodes)?;
+    create_part_annotations(
+        conn,
+        new_block_group.id,
+        None,
+        library_name,
+        sample,
+        &part_nodes,
+    )?;
 
     let mut files = vec![];
     if let Some(library_file_path) = library_file_path {
@@ -124,30 +130,25 @@ pub fn import_library(
 pub(crate) fn create_part_annotations(
     conn: &gen_models::db::GraphConnection,
     block_group_id: gen_core::HashId,
+    parent_accession_id: Option<gen_core::HashId>,
     group_name: &str,
     sample_name: &str,
-    part_nodes: &[(gen_core::HashId, SequencePart)],
+    part_nodes: &[PartNode],
 ) -> Result<(), BlockGroupError> {
     AnnotationGroupSample::create(conn, group_name, sample_name)?;
-    let mut name_counts: HashMap<String, usize> = HashMap::new();
-    for (node_id, part) in part_nodes {
-        let count = name_counts.entry(part.name.clone()).or_insert(0);
-        *count += 1;
-        let annotation_name = if *count == 1 {
-            part.name.clone()
-        } else {
-            format!("{}_{count}", part.name)
-        };
+    for part_node in part_nodes {
+        let part = &part_node.part;
+        let accession_name = format!("bucket-{}-variant-{}", part_node.bucket, part_node.variant);
         let ann_start = part.annotation_start.unwrap_or(0);
         let ann_end = part.annotation_end.unwrap_or(part.sequence_length);
         let accession = Accession::get_or_create(
             conn,
             &NewAccession {
-                name: annotation_name.clone(),
+                name: accession_name,
                 block_group_id,
-                parent_accession_id: None,
+                parent_accession_id,
                 spans: vec![AccessionSpan {
-                    node_id: *node_id,
+                    node_id: part_node.node_id,
                     range: Range {
                         start: ann_start,
                         end: ann_end,
@@ -171,20 +172,17 @@ pub(crate) fn create_part_annotations(
         } else {
             None
         };
-        Annotation::get_or_create(
-            conn,
-            &annotation_name,
-            group_name,
-            &accession.id,
-            extra.as_ref(),
-        )?;
+        Annotation::get_or_create(conn, &part.name, group_name, &accession.id, extra.as_ref())?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::PathBuf};
+    use std::{
+        collections::{HashMap, HashSet},
+        path::PathBuf,
+    };
 
     use gen_models::{
         accession::Accession, annotations::Annotation, block_group::BlockGroup, node::Node,
@@ -378,7 +376,7 @@ mod tests {
         let annotations = Annotation::query_by_group(conn, library_name).unwrap();
         let mut names: Vec<_> = annotations.iter().map(|a| a.name.as_str()).collect();
         names.sort();
-        assert_eq!(names, ["p1", "p1_2", "p2", "p2_2", "p3", "p3_2"]);
+        assert_eq!(names, ["p1", "p1", "p2", "p2", "p3", "p3"]);
 
         Ok(())
     }

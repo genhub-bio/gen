@@ -31,6 +31,18 @@ pub struct SequencePart {
     pub annotation_end: Option<i64>,
 }
 
+/// A part node placed into a library's assembled chunk, along with the
+/// bucket (column) and variant (alternative-within-column) indices it
+/// occupies, so callers can build accession identities that distinguish
+/// variants sharing identical content or position-relative offsets.
+#[derive(Clone, Debug)]
+pub struct PartNode {
+    pub node_id: HashId,
+    pub part: SequencePart,
+    pub bucket: usize,
+    pub variant: usize,
+}
+
 #[derive(Error, Debug)]
 pub enum CombinatorialLibraryParseError {
     #[error("Failed to parse fasta")]
@@ -191,7 +203,7 @@ pub fn create_library(
     library_name: &str,
     parts_list: Vec<Vec<SequencePart>>,
     create_block_group: bool,
-) -> Result<(BlockGroupChunk, Vec<(HashId, SequencePart)>), CombinatorialLibraryCreationError> {
+) -> Result<(BlockGroupChunk, Vec<PartNode>), CombinatorialLibraryCreationError> {
     if parts_list.is_empty() {
         return Err(CombinatorialLibraryCreationError::NoParts(
             "No parts provided for library creation.".to_string(),
@@ -229,9 +241,9 @@ pub fn create_library(
         sequence_lengths_by_node_id.insert(PATH_START_NODE_ID, 0);
     }
 
-    for (index, parts) in cleaned_parts_list.iter().enumerate() {
+    for (bucket, parts) in cleaned_parts_list.iter().enumerate() {
         let mut column_part_nodes = vec![];
-        for part in parts {
+        for (variant, part) in parts.iter().enumerate() {
             let part_hash = sequence_hashes_by_name.get(&part.name).ok_or_else(|| {
                 CombinatorialLibraryCreationError::CreationFailed(format!(
                     "Part {} missing.",
@@ -242,7 +254,7 @@ pub fn create_library(
                 conn,
                 part_hash,
                 &HashId::convert_str(&format!(
-                    "{library_name}:{part_name}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
+                    "{library_name}:{part_name}:{ref_start}-{ref_end}->{sequence_hash}-column-{bucket}",
                     part_name = part.name,
                     ref_start = 0,
                     ref_end = part.sequence_length,
@@ -251,7 +263,12 @@ pub fn create_library(
             )?;
             column_part_nodes.push(part_node_id);
             sequence_lengths_by_node_id.insert(part_node_id, part.sequence_length);
-            part_nodes.push((part_node_id, part.clone()));
+            part_nodes.push(PartNode {
+                node_id: part_node_id,
+                part: part.clone(),
+                bucket,
+                variant,
+            });
         }
         part_nodes_list.push(column_part_nodes);
     }
