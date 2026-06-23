@@ -284,6 +284,7 @@ impl Edge {
         for chunk in &edges_to_insert.iter().chunks(batch_size) {
             let mut rows = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            let mut inserted_edges_by_id = HashMap::new();
             for edge in chunk {
                 let id = edge.id_hash();
                 params.push(Box::new(id));
@@ -294,19 +295,35 @@ impl Edge {
                 params.push(Box::new(edge.target_coordinate));
                 params.push(Box::new(edge.target_strand));
                 rows.push("(?, ?, ?, ?, ?, ?, ?)");
+                inserted_edges_by_id.insert(
+                    id,
+                    Edge {
+                        id,
+                        source_node_id: edge.source_node_id,
+                        source_coordinate: edge.source_coordinate,
+                        source_strand: edge.source_strand,
+                        target_node_id: edge.target_node_id,
+                        target_coordinate: edge.target_coordinate,
+                        target_strand: edge.target_strand,
+                    },
+                );
             }
             let sql = format!(
-                "INSERT OR IGNORE INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES {} RETURNING *;",
+                "INSERT OR IGNORE INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES {} RETURNING id;",
                 rows.join(",")
             );
             let mut stmt = conn.prepare(&sql).unwrap();
-            let inserted_edges = stmt
+            let inserted_edge_ids = stmt
                 .query_map(rusqlite::params_from_iter(params), |row| {
-                    Ok(Edge::process_row(row))
+                    row.get::<_, HashId>(0)
                 })
                 .unwrap();
-            for edge in inserted_edges {
-                crate::operation_recorder::record_edge(edge.unwrap());
+            for edge_id in inserted_edge_ids {
+                let edge_id = edge_id.unwrap();
+                let edge = inserted_edges_by_id
+                    .remove(&edge_id)
+                    .expect("should have an edge for a returned inserted ID");
+                crate::operation_recorder::record_edge(edge);
             }
         }
         edge_ids

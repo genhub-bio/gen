@@ -95,7 +95,6 @@ CREATE TABLE edges (
   FOREIGN KEY(source_node_id) REFERENCES nodes(id),
   FOREIGN KEY(target_node_id) REFERENCES nodes(id)
 ) STRICT;
-CREATE UNIQUE INDEX edge_uidx ON edges(source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand);
 
 CREATE TABLE path_edges (
   id BLOB PRIMARY KEY NOT NULL,
@@ -117,7 +116,6 @@ CREATE TABLE block_group_edges (
   FOREIGN KEY(block_group_id) REFERENCES block_groups(id),
   FOREIGN KEY(edge_id) REFERENCES edges(id)
 ) STRICT;
-CREATE UNIQUE INDEX block_group_edges_uidx ON block_group_edges(block_group_id, edge_id, chromosome_index, phased);
 
 CREATE TABLE annotation_groups (
   name TEXT PRIMARY KEY NOT NULL

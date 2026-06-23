@@ -42,6 +42,8 @@ use crate::{
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
 
+const VCF_CHANGE_APPLY_CHUNK_SIZE: usize = 5_000;
+
 #[derive(Debug)]
 struct BlockGroupCache<'a> {
     pub cache: HashMap<BlockGroupData<'a>, Vec<HashId>>,
@@ -631,7 +633,7 @@ pub fn update_with_vcf(
     let mut tree_map: HashMap<(HashId, ResolvedRegionKind), IntervalTree<i64, NodeIntervalBlock>> =
         HashMap::new();
     for ((path, sample_name), path_changes) in changes {
-        for chunk in path_changes.chunks(1000) {
+        for chunk in path_changes.chunks(VCF_CHANGE_APPLY_CHUNK_SIZE) {
             if in_place {
                 let in_place_changes = chunk
                     .iter()

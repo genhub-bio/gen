@@ -142,6 +142,7 @@ impl BlockGroupEdge {
             );
             let mut rows_to_insert = vec![];
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            let mut inserted_block_group_edges_by_id = HashMap::new();
             let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
             for block_group_edge in chunk {
                 let hash = block_group_edge.id_hash();
@@ -152,22 +153,37 @@ impl BlockGroupEdge {
                 params.push(Box::new(block_group_edge.chromosome_index));
                 params.push(Box::new(block_group_edge.phased));
                 params.push(Box::new(timestamp));
+                inserted_block_group_edges_by_id.insert(
+                    hash,
+                    BlockGroupEdge {
+                        id: hash,
+                        block_group_id: block_group_edge.block_group_id,
+                        edge_id: block_group_edge.edge_id,
+                        chromosome_index: block_group_edge.chromosome_index,
+                        phased: block_group_edge.phased,
+                        created_on: timestamp,
+                    },
+                );
             }
             if rows_to_insert.is_empty() {
                 continue;
             }
 
             sql.push_str(&rows_to_insert.join(", "));
-            sql.push_str(" RETURNING *");
+            sql.push_str(" RETURNING id");
 
             let mut stmt = conn.prepare(&sql).unwrap();
-            let inserted_block_group_edges = stmt
+            let inserted_block_group_edge_ids = stmt
                 .query_map(rusqlite::params_from_iter(params), |row| {
-                    Ok(BlockGroupEdge::process_row(row))
+                    row.get::<_, HashId>(0)
                 })
                 .unwrap();
-            for block_group_edge in inserted_block_group_edges {
-                crate::operation_recorder::record_block_group_edge(block_group_edge.unwrap());
+            for block_group_edge_id in inserted_block_group_edge_ids {
+                let block_group_edge_id = block_group_edge_id.unwrap();
+                let block_group_edge = inserted_block_group_edges_by_id
+                    .remove(&block_group_edge_id)
+                    .expect("should have a block group edge for a returned inserted ID");
+                crate::operation_recorder::record_block_group_edge(block_group_edge);
             }
         }
     }
