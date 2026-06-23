@@ -243,6 +243,10 @@ fn resolve_parent_samples(
         .clone()
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, vcf_path, parent_samples))
+)]
 pub fn update_with_vcf(
     context: &DbContext,
     vcf_path: &String,

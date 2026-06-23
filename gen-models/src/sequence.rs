@@ -196,6 +196,10 @@ impl<'a> NewSequence<'a> {
         }
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(self, conn))
+    )]
     pub fn save(self, conn: &GraphConnection) -> Result<Sequence, SequenceError> {
         let mut length = 0;
         if self.sequence.is_none() && self.file_path.is_none() {

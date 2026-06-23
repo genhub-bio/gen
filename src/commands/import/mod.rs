@@ -27,6 +27,10 @@ pub enum Commands {
     Library(library::Command),
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(ctx, command))
+)]
 pub fn execute(ctx: &CliContext, command: Command) -> anyhow::Result<()> {
     match command.command {
         Commands::Fasta(cmd) => crate::commands::import::fasta::execute(ctx, cmd),
