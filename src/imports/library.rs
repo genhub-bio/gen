@@ -1,8 +1,5 @@
 use anyhow::Result;
-use gen_core::{Strand, range::Range};
 use gen_models::{
-    accession::{Accession, AccessionSpan, NewAccession},
-    annotations::{Annotation, AnnotationExtra, AnnotationGroupSample, PartExtra},
     block_group::{BlockGroup, NewBlockGroup},
     collection::Collection,
     db::DbContext,
@@ -12,12 +9,11 @@ use gen_models::{
     sample::Sample,
     session_operations,
 };
-use serde_json::from_str;
 use thiserror::Error;
 
 use crate::graphs::combinatorial_library::{
-    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, PartNode, SequencePart,
-    create_library,
+    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
+    create_library, create_part_annotations,
 };
 
 #[derive(Error, Debug)]
@@ -126,55 +122,6 @@ pub fn import_library(
     )?;
 
     Ok(op)
-}
-
-pub(crate) fn create_part_annotations(
-    conn: &gen_models::db::GraphConnection,
-    block_group_id: gen_core::HashId,
-    parent_accession_id: Option<gen_core::HashId>,
-    group_name: &str,
-    sample_name: &str,
-    part_nodes: &[PartNode],
-) -> Result<(), BlockGroupError> {
-    AnnotationGroupSample::create(conn, group_name, sample_name)?;
-    for part_node in part_nodes {
-        let part = &part_node.part;
-        let accession_name = format!("bucket-{}-variant-{}", part_node.bucket, part_node.variant);
-        let ann_start = part.annotation_start.unwrap_or(0);
-        let ann_end = part.annotation_end.unwrap_or(part.sequence_length);
-        let accession = Accession::get_or_create(
-            conn,
-            &NewAccession {
-                name: accession_name,
-                block_group_id,
-                parent_accession_id,
-                spans: vec![AccessionSpan {
-                    node_id: part_node.node_id,
-                    range: Range {
-                        start: ann_start,
-                        end: ann_end,
-                    },
-                    strand: Strand::Forward,
-                }],
-            },
-        )?;
-        let fasta = part.fasta_extra.clone();
-        let extra_part = part
-            .metadata
-            .as_deref()
-            .and_then(|s| from_str(s).ok().map(|v| PartExtra { metadata: Some(v) }));
-        let extra = if fasta.is_some() || extra_part.is_some() {
-            Some(AnnotationExtra {
-                fasta,
-                part: extra_part,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
-        Annotation::get_or_create(conn, &part.name, group_name, &accession.id, extra.as_ref())?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

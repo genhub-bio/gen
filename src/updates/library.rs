@@ -20,21 +20,37 @@ use crate::{
         BlockGroupChunk, NodePoint,
         combinatorial_library::{
             CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
-            create_library,
+            create_library, create_part_annotations,
         },
         operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
         stitch,
     },
-    imports::library::create_part_annotations,
     updates::resolve_update_region,
 };
 
-/// Creates a top-level accession anchored at a single node/coordinate,
-/// representing where a library update was spliced in. Each part placed by
-/// that update becomes a child accession (see `create_part_annotations`),
-/// so reusing a part name/sequence across separate update calls on the same
+/// Creates a top-level accession anchored at a single resolved graph
+/// position where a library update was spliced in. Each part placed by that
+/// update becomes a child accession (see `create_part_annotations`), so
+/// reusing a part name/sequence across separate update calls on the same
 /// block group never collides: siblings only need to be unique relative to
 /// this location accession, not block-group-wide.
+///
+/// This is anchored at a resolved graph position rather than built via
+/// `AccessionSpan::from_resolved_region`, because region bounds for
+/// Annotation/Accession-kind regions can extend past the region's own
+/// intervaltree (e.g. `foobar:-3-5`, 3bp upstream of annotation `foobar`),
+/// which only `find_graph_positions`' graph walk resolves correctly.
+///
+/// `find_graph_positions` can return more than one position when a splice
+/// site sits past a branch point, but at the zero offsets used by both call
+/// sites below it always resolves through `ResolvedGraph::resolve_anchor`,
+/// which already collapses same-coordinate branches down to a single
+/// arbitrary match before any walk happens — so taking `positions[0]` here
+/// doesn't lose anything beyond what's already lost upstream. See the
+/// "accessions with overflowed edges" discussion: fixing that collapse
+/// would mean changing `resolve_anchor` itself (pre-existing, merged,
+/// shared by every region resolution in the system), which is out of scope
+/// here.
 fn create_location_accession(
     conn: &gen_models::db::GraphConnection,
     block_group_id: gen_core::HashId,
