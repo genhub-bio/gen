@@ -19,12 +19,12 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 flate2 = "1.1.5"
-gen = { path = "..", version = "0.1.23" }
+gen = { path = "..", version = "0.1.31" }
 gen-annotations = { path = "../gen-annotations", version = "0.1.31" }
-gen-core = { path = "../gen-core", version = "0.1.23", features = ["python-bindings"] }
-gen-graph = { path = "../gen-graph", version = "0.1.23" }
-gen-models = { path = "../gen-models", version = "0.1.23" }
-gen-tui = { path = "../gen-tui", version = "0.1.30", default-features = false }
+gen-core = { path = "../gen-core", version = "0.1.31", features = ["python-bindings"] }
+gen-graph = { path = "../gen-graph", version = "0.1.31" }
+gen-models = { path = "../gen-models", version = "0.1.31" }
+gen-tui = { path = "../gen-tui", version = "0.1.31", default-features = false }
 log = "0.4.26"
 petgraph = "0.6.5"
 ratatui = { version = "0.30.0", default-features = false }
