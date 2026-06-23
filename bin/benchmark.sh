@@ -148,10 +148,6 @@ print_results() {
   printf "%-35s %-10s %-10s %-10s %-10s\n" "Task" "Time (ms)" "Total (MB)" "gen.db (MB)" "default.db (MB)"
   printf "%-35s %-10s %-10s %-10s %-10s\n" "---------------" "--------" "----------" "-----------" "--------------"
   printf "%s" "${RESULTS}"
-  echo "Profile reports"
-  printf "%-35s %s\n" "Task" "Report"
-  printf "%-35s %s\n" "---------------" "------"
-  printf "%s" "${PROFILE_RESULTS}"
 }
 
 
@@ -244,7 +240,6 @@ HG97_IMPORT=$(run_benchmark "HG00097 Update" --no-profile-record ${PROFILE_BIN} 
 SUM=$(echo "${HG96_IMPORT} + ${HG97_IMPORT}" | bc)
 read -r BOTH_SIZE BOTH_GEN_DB_SIZE BOTH_DEFAULT_DB_SIZE <<< "$(get_size)"
 record_result "HG00096 + HG00097 Update" "${SUM}" "${BOTH_SIZE}" "${BOTH_GEN_DB_SIZE}" "${BOTH_DEFAULT_DB_SIZE}"
-record_profile_result "HG00096 + HG00097 Update" "$(profile_path "HG00096 Update"), $(profile_path "HG00097 Update")"
 
 echo "switch branch benchmark"
 setup_hg_branch_switch_repo
