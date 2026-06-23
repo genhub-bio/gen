@@ -3,6 +3,7 @@ use std::{
     convert::TryInto,
     fs,
     io::Read,
+    mem,
     path::{Path as StdPath, PathBuf},
     str,
 };
@@ -19,7 +20,7 @@ use crate::{
     accession::{Accession, AccessionNode, AccessionSpan, NewAccession},
     annotations::{Annotation, AnnotationGroup, AnnotationGroupSample},
     block_group::{BlockGroup, NewBlockGroup},
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    block_group_edge::BlockGroupEdge,
     collection::Collection,
     db::GraphConnection,
     edge::{Edge, EdgeData},
@@ -33,8 +34,14 @@ use crate::{
     sample_lineage::SampleLineage,
     sequence::{NewSequence, Sequence},
     session_operations::DependencyModels,
-    traits::Query,
+    traits::{Query, max_rows_per_batch},
 };
+
+pub fn capnp_reader_options() -> capnp::message::ReaderOptions {
+    capnp::message::ReaderOptions::new()
+}
+
+const CHANGESET_CHUNK_MODEL_COUNT: usize = 50_000;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct DatabaseChangeset {
@@ -46,12 +53,15 @@ impl DatabaseChangeset {
     pub fn get_db_path(path: &StdPath) -> String {
         use capnp::serialize_packed;
 
-        let file = fs::File::open(path).unwrap();
+        let first_chunk_path = changeset_chunk_paths(path)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("No changeset chunks found for {path:?}"));
+        let file = fs::File::open(first_chunk_path).unwrap();
         let mut reader = std::io::BufReader::new(file);
 
         let message_reader =
-            serialize_packed::read_message(&mut reader, capnp::message::ReaderOptions::new())
-                .unwrap();
+            serialize_packed::read_message(&mut reader, capnp_reader_options()).unwrap();
         let root = message_reader
             .get_root::<database_changeset::Reader>()
             .unwrap();
@@ -94,6 +104,117 @@ pub struct ChangesetModels {
     pub annotation_groups: Vec<AnnotationGroup>,
     pub annotations: Vec<Annotation>,
     pub annotation_group_samples: Vec<AnnotationGroupSample>,
+}
+
+impl ChangesetModels {
+    fn append(&mut self, mut other: ChangesetModels) {
+        self.collections.append(&mut other.collections);
+        self.samples.append(&mut other.samples);
+        self.sequences.append(&mut other.sequences);
+        self.block_groups.append(&mut other.block_groups);
+        self.nodes.append(&mut other.nodes);
+        self.edges.append(&mut other.edges);
+        self.block_group_edges.append(&mut other.block_group_edges);
+        self.paths.append(&mut other.paths);
+        self.path_edges.append(&mut other.path_edges);
+        self.accessions.append(&mut other.accessions);
+        self.accession_nodes.append(&mut other.accession_nodes);
+        self.annotation_groups.append(&mut other.annotation_groups);
+        self.annotations.append(&mut other.annotations);
+        self.annotation_group_samples
+            .append(&mut other.annotation_group_samples);
+        self.sample_lineages.append(&mut other.sample_lineages);
+    }
+}
+
+fn push_field_chunks<T>(
+    field: &mut Vec<T>,
+    chunks: &mut Vec<ChangesetModels>,
+    mut assign: impl FnMut(&mut ChangesetModels, Vec<T>),
+) {
+    while !field.is_empty() {
+        let tail = if field.len() > CHANGESET_CHUNK_MODEL_COUNT {
+            field.split_off(CHANGESET_CHUNK_MODEL_COUNT)
+        } else {
+            Vec::new()
+        };
+        let values = mem::replace(field, tail);
+        let mut chunk = ChangesetModels::default();
+        assign(&mut chunk, values);
+        chunks.push(chunk);
+    }
+}
+
+fn changeset_chunks(changes: ChangesetModels) -> Vec<ChangesetModels> {
+    let mut changes = changes;
+    let mut chunks = vec![];
+    push_field_chunks(&mut changes.collections, &mut chunks, |chunk, values| {
+        chunk.collections = values;
+    });
+    push_field_chunks(&mut changes.samples, &mut chunks, |chunk, values| {
+        chunk.samples = values;
+    });
+    push_field_chunks(
+        &mut changes.sample_lineages,
+        &mut chunks,
+        |chunk, values| {
+            chunk.sample_lineages = values;
+        },
+    );
+    push_field_chunks(&mut changes.sequences, &mut chunks, |chunk, values| {
+        chunk.sequences = values;
+    });
+    push_field_chunks(&mut changes.block_groups, &mut chunks, |chunk, values| {
+        chunk.block_groups = values;
+    });
+    push_field_chunks(&mut changes.nodes, &mut chunks, |chunk, values| {
+        chunk.nodes = values;
+    });
+    push_field_chunks(&mut changes.edges, &mut chunks, |chunk, values| {
+        chunk.edges = values;
+    });
+    push_field_chunks(
+        &mut changes.block_group_edges,
+        &mut chunks,
+        |chunk, values| {
+            chunk.block_group_edges = values;
+        },
+    );
+    if !changes.paths.is_empty() || !changes.path_edges.is_empty() {
+        chunks.push(ChangesetModels {
+            paths: changes.paths,
+            path_edges: changes.path_edges,
+            ..Default::default()
+        });
+    }
+    if !changes.accessions.is_empty() || !changes.accession_nodes.is_empty() {
+        chunks.push(ChangesetModels {
+            accessions: changes.accessions,
+            accession_nodes: changes.accession_nodes,
+            ..Default::default()
+        });
+    }
+    push_field_chunks(
+        &mut changes.annotation_groups,
+        &mut chunks,
+        |chunk, values| {
+            chunk.annotation_groups = values;
+        },
+    );
+    push_field_chunks(&mut changes.annotations, &mut chunks, |chunk, values| {
+        chunk.annotations = values;
+    });
+    push_field_chunks(
+        &mut changes.annotation_group_samples,
+        &mut chunks,
+        |chunk, values| {
+            chunk.annotation_group_samples = values;
+        },
+    );
+    if chunks.is_empty() {
+        chunks.push(ChangesetModels::default());
+    }
+    chunks
 }
 
 impl<'a> Capnp<'a> for ChangesetModels {
@@ -794,6 +915,14 @@ pub fn apply_changeset(
     changeset: &ChangesetModels,
     dependencies: &DependencyModels,
 ) -> Result<(), ChangesetError> {
+    apply_changeset_dependencies(conn, dependencies)?;
+    apply_changeset_models(conn, changeset)
+}
+
+pub fn apply_changeset_dependencies(
+    conn: &GraphConnection,
+    dependencies: &DependencyModels,
+) -> Result<(), ChangesetError> {
     for collection in dependencies.collections.iter() {
         match Collection::create(conn, &collection.name) {
             Ok(_) => {}
@@ -866,6 +995,28 @@ pub fn apply_changeset(
         )?;
     }
 
+    Ok(())
+}
+
+pub fn apply_changeset_models(
+    conn: &GraphConnection,
+    changeset: &ChangesetModels,
+) -> Result<(), ChangesetError> {
+    apply_changeset_models_with_mode(conn, changeset, true)
+}
+
+fn replay_changeset_models(
+    conn: &GraphConnection,
+    changeset: &ChangesetModels,
+) -> Result<(), ChangesetError> {
+    apply_changeset_models_with_mode(conn, changeset, false)
+}
+
+fn apply_changeset_models_with_mode(
+    conn: &GraphConnection,
+    changeset: &ChangesetModels,
+    record_changes: bool,
+) -> Result<(), ChangesetError> {
     for collection in &changeset.collections {
         Collection::create(conn, &collection.name)?;
     }
@@ -900,26 +1051,10 @@ pub fn apply_changeset(
             },
         )?;
     }
-    for node in &changeset.nodes {
-        Node::create(conn, &node.sequence_hash, &node.id)?;
-    }
+    insert_existing_nodes(conn, &changeset.nodes, record_changes)?;
 
-    Edge::bulk_create(
-        conn,
-        &changeset
-            .edges
-            .iter()
-            .map(EdgeData::from)
-            .collect::<Vec<_>>(),
-    );
-    BlockGroupEdge::bulk_create(
-        conn,
-        &changeset
-            .block_group_edges
-            .iter()
-            .map(BlockGroupEdgeData::from)
-            .collect::<Vec<BlockGroupEdgeData>>(),
-    );
+    insert_existing_edges(conn, &changeset.edges, record_changes)?;
+    insert_existing_block_group_edges(conn, &changeset.block_group_edges, record_changes)?;
 
     for path in &changeset.paths {
         Path::create(conn, &path.name, &path.block_group_id, &[])?;
@@ -999,6 +1134,124 @@ pub fn apply_changeset(
                 ChangesetError::SerializationError(message)
             }
         })?;
+    }
+    Ok(())
+}
+
+fn insert_existing_nodes(
+    conn: &GraphConnection,
+    nodes: &[Node],
+    record_changes: bool,
+) -> Result<(), ChangesetError> {
+    let batch_size = max_rows_per_batch(conn, 2);
+    for chunk in nodes.chunks(batch_size) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut values = Vec::with_capacity(chunk.len());
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 2);
+        for node in chunk {
+            values.push("(?, ?)");
+            params.push(Box::new(node.id));
+            params.push(Box::new(node.sequence_hash));
+        }
+        let sql = format!(
+            "INSERT OR IGNORE INTO nodes (id, sequence_hash) VALUES {}",
+            values.join(",")
+        );
+        conn.execute(&sql, rusqlite::params_from_iter(params))?;
+        if record_changes {
+            for node in chunk {
+                crate::operation_recorder::record_node(crate::operation_recorder::NodeRecord {
+                    id: node.id,
+                    sequence_hash: node.sequence_hash,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn insert_existing_edges(
+    conn: &GraphConnection,
+    edges: &[Edge],
+    record_changes: bool,
+) -> Result<(), ChangesetError> {
+    let batch_size = max_rows_per_batch(conn, 7);
+    for chunk in edges.chunks(batch_size) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut values = Vec::with_capacity(chunk.len());
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 7);
+        for edge in chunk {
+            values.push("(?, ?, ?, ?, ?, ?, ?)");
+            params.push(Box::new(edge.id));
+            params.push(Box::new(edge.source_node_id));
+            params.push(Box::new(edge.source_coordinate));
+            params.push(Box::new(edge.source_strand));
+            params.push(Box::new(edge.target_node_id));
+            params.push(Box::new(edge.target_coordinate));
+            params.push(Box::new(edge.target_strand));
+        }
+        let sql = format!(
+            "INSERT OR IGNORE INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES {}",
+            values.join(",")
+        );
+        conn.execute(&sql, rusqlite::params_from_iter(params))?;
+        if record_changes {
+            for edge in chunk {
+                crate::operation_recorder::record_edge(edge.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn insert_existing_block_group_edges(
+    conn: &GraphConnection,
+    block_group_edges: &[BlockGroupEdge],
+    record_changes: bool,
+) -> Result<(), ChangesetError> {
+    let batch_size = max_rows_per_batch(conn, 6);
+    for chunk in block_group_edges.chunks(batch_size) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut values = Vec::with_capacity(chunk.len());
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 6);
+        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        for edge in chunk {
+            let created_on = if record_changes {
+                timestamp
+            } else {
+                edge.created_on
+            };
+            values.push("(?, ?, ?, ?, ?, ?)");
+            params.push(Box::new(edge.id));
+            params.push(Box::new(edge.block_group_id));
+            params.push(Box::new(edge.edge_id));
+            params.push(Box::new(edge.chromosome_index));
+            params.push(Box::new(edge.phased));
+            params.push(Box::new(created_on));
+        }
+        let sql = format!(
+            "INSERT OR IGNORE INTO block_group_edges (id, block_group_id, edge_id, chromosome_index, phased, created_on) VALUES {}",
+            values.join(",")
+        );
+        conn.execute(&sql, rusqlite::params_from_iter(params))?;
+        if record_changes {
+            for edge in chunk {
+                crate::operation_recorder::record_block_group_edge(BlockGroupEdge {
+                    id: edge.id,
+                    block_group_id: edge.block_group_id,
+                    edge_id: edge.edge_id,
+                    chromosome_index: edge.chromosome_index,
+                    phased: edge.phased,
+                    created_on: timestamp,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -1174,16 +1427,117 @@ pub fn revert_changeset(
 }
 
 pub fn get_changeset_from_path(path: PathBuf) -> DatabaseChangeset {
+    let mut chunk_paths = changeset_chunk_paths(&path);
+    let first_chunk = get_changeset_chunk_from_path(
+        chunk_paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("No changeset chunks found for {path:?}")),
+    );
+    let db_path = first_chunk.db_path;
+    let mut changes = first_chunk.changes;
+    for chunk_path in chunk_paths.drain(1..) {
+        changes.append(get_changeset_chunk_from_path(chunk_path).changes);
+    }
+    DatabaseChangeset { db_path, changes }
+}
+
+pub fn get_changeset_chunk_from_path(path: PathBuf) -> DatabaseChangeset {
     use capnp::serialize_packed;
     let file = fs::File::open(path).unwrap();
     let mut reader = std::io::BufReader::new(file);
 
     let message_reader =
-        serialize_packed::read_message(&mut reader, capnp::message::ReaderOptions::new()).unwrap();
+        serialize_packed::read_message(&mut reader, capnp_reader_options()).unwrap();
     let root = message_reader
         .get_root::<database_changeset::Reader>()
         .unwrap();
     DatabaseChangeset::read_capnp(root)
+}
+
+pub fn apply_changeset_from_path(
+    conn: &GraphConnection,
+    changeset_path: &StdPath,
+    dependencies: &DependencyModels,
+) -> Result<(), ChangesetError> {
+    apply_changeset_dependencies(conn, dependencies)?;
+    for chunk_path in checked_changeset_chunk_paths(changeset_path)? {
+        let chunk = get_changeset_chunk_from_path(chunk_path);
+        apply_changeset_models(conn, &chunk.changes)?;
+    }
+    Ok(())
+}
+
+pub fn replay_changeset_from_path(
+    conn: &GraphConnection,
+    changeset_path: &StdPath,
+    dependencies: &DependencyModels,
+) -> Result<(), ChangesetError> {
+    apply_changeset_dependencies(conn, dependencies)?;
+    for chunk_path in checked_changeset_chunk_paths(changeset_path)? {
+        let chunk = get_changeset_chunk_from_path(chunk_path);
+        replay_changeset_models(conn, &chunk.changes)?;
+    }
+    Ok(())
+}
+
+pub fn revert_changeset_from_path(
+    conn: &GraphConnection,
+    changeset_path: &StdPath,
+) -> Result<(), ChangesetError> {
+    let mut chunk_paths = checked_changeset_chunk_paths(changeset_path)?;
+    chunk_paths.reverse();
+    for chunk_path in chunk_paths {
+        let chunk = get_changeset_chunk_from_path(chunk_path);
+        revert_changeset(conn, &chunk.changes)?;
+    }
+    Ok(())
+}
+
+fn checked_changeset_chunk_paths(path: &StdPath) -> Result<Vec<PathBuf>, ChangesetError> {
+    let chunk_paths = changeset_chunk_paths(path);
+    if chunk_paths.is_empty() {
+        return Err(ChangesetError::SerializationError(format!(
+            "No changeset chunks found for {path:?}"
+        )));
+    }
+    Ok(chunk_paths)
+}
+
+pub fn changeset_chunk_path(path: &StdPath, index: usize) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| panic!("Changeset path {path:?} should have a filename"));
+    path.with_file_name(format!("{file_name}.{index:04}"))
+}
+
+pub fn changeset_chunk_paths(path: &StdPath) -> Vec<PathBuf> {
+    let parent = path
+        .parent()
+        .unwrap_or_else(|| panic!("Changeset path {path:?} should have a parent"));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| panic!("Changeset path {path:?} should have a filename"));
+    let prefix = format!("{file_name}.");
+    let mut paths = fs::read_dir(parent)
+        .unwrap_or_else(|_| panic!("Unable to read changeset directory {parent:?}"))
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry_path| {
+            entry_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.strip_prefix(&prefix).is_some_and(|suffix| {
+                        !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
 }
 
 pub fn get_changeset_dependencies_from_path(path: PathBuf) -> DependencyModels {
@@ -1192,7 +1546,7 @@ pub fn get_changeset_dependencies_from_path(path: PathBuf) -> DependencyModels {
     let file = fs::File::open(path).unwrap();
     let mut reader = std::io::BufReader::new(file);
     let message_reader =
-        serialize_packed::read_message(&mut reader, capnp::message::ReaderOptions::new()).unwrap();
+        serialize_packed::read_message(&mut reader, capnp_reader_options()).unwrap();
     let root = message_reader
         .get_root::<crate::gen_models_capnp::dependency_models::Reader>()
         .unwrap();
@@ -1266,8 +1620,23 @@ pub fn write_changeset(
     serialize_packed::write_message(&mut dependency_file, &message).unwrap();
 
     // Write changes using capnp
-    let mut file = fs::File::create_new(&change_path)
-        .unwrap_or_else(|_| panic!("Unable to open {change_path:?}"));
+    let db_path = changes.db_path;
+    for (index, chunk) in changeset_chunks(changes.changes).into_iter().enumerate() {
+        let chunk_path = changeset_chunk_path(&change_path, index);
+        write_database_changeset(
+            &chunk_path,
+            &DatabaseChangeset {
+                db_path: db_path.clone(),
+                changes: chunk,
+            },
+        );
+    }
+}
+
+fn write_database_changeset(path: &StdPath, changes: &DatabaseChangeset) {
+    use capnp::{message::Builder, serialize_packed};
+
+    let mut file = fs::File::create_new(path).unwrap_or_else(|_| panic!("Unable to open {path:?}"));
     let mut message = Builder::new_default();
     let mut change_root = message.init_root();
     changes.write_capnp(&mut change_root);
@@ -1406,10 +1775,7 @@ mod tests {
 
     #[test]
     fn test_database_changeset_get_db_path() {
-        use std::io::Write;
-
-        use capnp::{message::Builder, serialize_packed};
-        use tempfile::NamedTempFile;
+        use tempfile::tempdir;
 
         let expected_db_path = "/tmp/test_db_path";
         let changeset = DatabaseChangeset {
@@ -1433,14 +1799,9 @@ mod tests {
             },
         };
 
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let path = temp_file.path().to_path_buf();
-
-        let mut message = Builder::new_default();
-        let mut root = message.init_root();
-        changeset.write_capnp(&mut root);
-        serialize_packed::write_message(&mut temp_file, &message).unwrap();
-        temp_file.flush().unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("changeset");
+        write_database_changeset(&changeset_chunk_path(&path, 0), &changeset);
 
         let db_path = DatabaseChangeset::get_db_path(path.as_path());
 
@@ -1773,6 +2134,7 @@ mod tests {
     #[cfg(test)]
     mod changeset_dependencies {
         use super::*;
+        use crate::block_group_edge::BlockGroupEdgeData;
 
         #[test]
         fn test_tracks_nodes_and_sequences_from_previous_block_group_edges() {

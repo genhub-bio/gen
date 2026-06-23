@@ -9,7 +9,7 @@ use gen_core::{
     traits::Capnp,
 };
 use gen_models::{
-    changesets::{DatabaseChangeset, apply_changeset},
+    changesets::{DatabaseChangeset, apply_changeset, capnp_reader_options},
     db::DbContext,
     errors::{ChangesetError, OperationError},
     file_types::FileTypes,
@@ -283,11 +283,9 @@ where
         .map_err(|err| PatchError::Io(err.to_string()))?;
     drop(operation_patches_file);
 
-    let message = ::capnp::serialize_packed::read_message(
-        &mut buffer.as_slice(),
-        ::capnp::message::ReaderOptions::new(),
-    )
-    .map_err(|err| PatchError::DeserializationError(err.to_string()))?;
+    let message =
+        ::capnp::serialize_packed::read_message(&mut buffer.as_slice(), capnp_reader_options())
+            .map_err(|err| PatchError::DeserializationError(err.to_string()))?;
 
     let root = message
         .get_root::<operation_patches::Reader>()

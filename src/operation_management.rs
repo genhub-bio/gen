@@ -12,10 +12,15 @@ use gen_core::{
     errors::{ConfigError, ConnectionError},
     traits::Capnp,
 };
+#[cfg(test)]
+use gen_models::changesets::{apply_changeset, revert_changeset};
 use gen_models::{
     annotations::{AnnotationFile, AnnotationFileError},
     assets::LocalAssetUri,
-    changesets::{apply_changeset, revert_changeset},
+    changesets::{
+        DatabaseChangeset, apply_changeset_from_path, changeset_chunk_paths,
+        replay_changeset_from_path, revert_changeset_from_path,
+    },
     db::{DbContext, OperationsConnection},
     errors::{BranchError, ChangesetError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
@@ -215,12 +220,12 @@ pub fn apply(
     let operation = Operation::get_by_id(operation_conn, op_hash)
         .ok_or(OperationError::NoOperation(format!("{op_hash}")))?;
 
-    let changeset = operation.get_changeset(workspace);
+    let changeset_path = operation.get_changeset_path(workspace);
     let dependencies = operation.get_changeset_dependencies(workspace);
     let mut change_context = context.clone();
     if use_changeset_db {
         let repo_root = workspace.repo_root().map_err(ConnectionError::from)?;
-        let data_db_path = repo_root.join(&changeset.db_path);
+        let data_db_path = repo_root.join(DatabaseChangeset::get_db_path(&changeset_path));
         let graph_conn = get_connection(&data_db_path)?;
         change_context.set_graph(graph_conn);
     }
@@ -230,7 +235,7 @@ pub fn apply(
     operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let mut session = start_operation(conn);
-    match apply_changeset(conn, &changeset.changes, &dependencies) {
+    match apply_changeset_from_path(conn, &changeset_path, &dependencies) {
         Ok(_) => {}
         Err(e) => {
             conn.execute("ROLLBACK TRANSACTION;", [])?;
@@ -239,19 +244,18 @@ pub fn apply(
         }
     }
     let full_op_hash = operation.hash;
+    let operation_files = changeset_chunk_paths(&changeset_path)
+        .into_iter()
+        .map(|path| {
+            OperationFile::new(path.to_string_lossy().to_string())
+                .set_file_type(FileTypes::Changeset)
+        })
+        .collect::<Vec<_>>();
     match end_operation(
         &change_context,
         &mut session,
         &OperationInfo {
-            files: vec![
-                OperationFile::new(
-                    operation
-                        .get_changeset_path(workspace)
-                        .to_string_lossy()
-                        .to_string(),
-                )
-                .set_file_type(FileTypes::Changeset),
-            ],
+            files: operation_files,
             description: "changeset_application".to_string(),
         },
         &format!("Applied changeset {full_op_hash}."),
@@ -337,17 +341,17 @@ pub fn move_to(context: &DbContext, operation: &Operation) -> Result<(), MoveErr
                 println!("Reverting operation {operation_hash}");
                 let op_to_apply = Operation::get_by_id(operation_conn, operation_hash)
                     .ok_or(OperationError::NoOperation(format!("{operation_hash}")))?;
-                let changeset = op_to_apply.get_changeset(workspace);
+                let changeset_path = op_to_apply.get_changeset_path(workspace);
                 let mut change_context = context.clone();
                 let repo_root = workspace.repo_root().map_err(ConnectionError::from)?;
-                let data_db_path = repo_root.join(&changeset.db_path);
+                let data_db_path = repo_root.join(DatabaseChangeset::get_db_path(&changeset_path));
                 let graph_conn = get_connection(&data_db_path)?;
                 change_context.set_graph(graph_conn);
                 let conn = change_context.graph().conn();
 
                 conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-                match revert_changeset(conn, &changeset.changes) {
+                match revert_changeset_from_path(conn, &changeset_path) {
                     Ok(_) => {
                         conn.execute("END TRANSACTION", [])?;
                     }
@@ -361,18 +365,18 @@ pub fn move_to(context: &DbContext, operation: &Operation) -> Result<(), MoveErr
                 println!("Applying operation {next_op}");
                 let op_to_apply = Operation::get_by_id(operation_conn, next_op)
                     .ok_or(OperationError::NoOperation(format!("{operation_hash}")))?;
-                let changeset = op_to_apply.get_changeset(workspace);
+                let changeset_path = op_to_apply.get_changeset_path(workspace);
                 let dependencies = op_to_apply.get_changeset_dependencies(workspace);
 
                 let mut change_context = context.clone();
                 let repo_root = workspace.repo_root().map_err(ConnectionError::from)?;
-                let data_db_path = repo_root.join(&changeset.db_path);
+                let data_db_path = repo_root.join(DatabaseChangeset::get_db_path(&changeset_path));
                 let graph_conn = get_connection(&data_db_path)?;
                 change_context.set_graph(graph_conn);
                 let conn = change_context.graph().conn();
 
                 conn.execute("BEGIN TRANSACTION", [])?;
-                match apply_changeset(conn, &changeset.changes, &dependencies) {
+                match replay_changeset_from_path(conn, &changeset_path, &dependencies) {
                     Ok(_) => {
                         conn.execute("END TRANSACTION", [])?;
                     }
@@ -517,6 +521,50 @@ fn connect_file_remote(
 
     Ok((Workspace::new(remote_path), remote_op_conn))
 }
+
+fn copy_changeset_chunks(
+    source_changeset: &FilePath,
+    destination_changeset: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    let destination_dir = destination_changeset.parent().ok_or_else(|| {
+        RemoteOperationError::FileTransferError(
+            "changeset".to_string(),
+            source_changeset.to_string_lossy().to_string(),
+            destination_changeset.to_string_lossy().to_string(),
+        )
+    })?;
+    fs::create_dir_all(destination_dir)?;
+
+    let chunk_paths = changeset_chunk_paths(source_changeset);
+    if chunk_paths.is_empty() {
+        return Err(RemoteOperationError::FileTransferError(
+            "changeset".to_string(),
+            source_changeset.to_string_lossy().to_string(),
+            destination_changeset.to_string_lossy().to_string(),
+        ));
+    }
+
+    for chunk_path in chunk_paths {
+        let chunk_name = chunk_path.file_name().ok_or_else(|| {
+            RemoteOperationError::FileTransferError(
+                "changeset".to_string(),
+                chunk_path.to_string_lossy().to_string(),
+                destination_changeset.to_string_lossy().to_string(),
+            )
+        })?;
+        let destination = destination_dir.join(chunk_name);
+        fs::copy(&chunk_path, &destination).map_err(|_| {
+            RemoteOperationError::FileTransferError(
+                "changeset".to_string(),
+                chunk_path.to_string_lossy().to_string(),
+                destination.to_string_lossy().to_string(),
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn apply_operations_to_remote(
     local_context: &DbContext,
     remote_op_conn: &OperationsConnection,
@@ -536,13 +584,7 @@ fn apply_operations_to_remote(
         let changeset_dst = remote_workspace.changeset_path(op_hash);
         fs::create_dir_all(&changeset_dst)?;
 
-        fs::copy(&changeset_src, changeset_dst.join("changeset")).map_err(|_| {
-            RemoteOperationError::FileTransferError(
-                "changeset".to_string(),
-                changeset_src.to_string_lossy().to_string(),
-                changeset_dst.to_string_lossy().to_string(),
-            )
-        })?;
+        copy_changeset_chunks(&changeset_src, &changeset_dst.join("changeset"))?;
 
         let dependencies_src = operation.get_changeset_dependencies_path(workspace);
         fs::copy(&dependencies_src, changeset_dst.join("dependencies")).map_err(|_| {
@@ -642,10 +684,9 @@ fn apply_operations_to_remote(
             }
         }
 
-        let changeset = operation.get_changeset(workspace);
         let dependencies = operation.get_changeset_dependencies(workspace);
 
-        let remote_data_db = remote_base.join(changeset.db_path);
+        let remote_data_db = remote_base.join(DatabaseChangeset::get_db_path(&changeset_src));
         let new_db = !remote_data_db.exists();
         let remote_data_conn = &get_connection(&remote_data_db)?;
         if new_db {
@@ -653,7 +694,7 @@ fn apply_operations_to_remote(
         };
         let remote_db_uuid = get_db_uuid(remote_data_conn);
         remote_data_conn.execute("BEGIN TRANSACTION", [])?;
-        match apply_changeset(remote_data_conn, &changeset.changes, &dependencies) {
+        match replay_changeset_from_path(remote_data_conn, &changeset_src, &dependencies) {
             Ok(_) => {
                 remote_data_conn.execute("COMMIT TRANSACTION", [])?;
             }
@@ -1101,10 +1142,10 @@ fn ingest_manifest_operation(
     let operation_conn = context.operations().conn();
     let workspace = context.workspace();
     let operation = &manifest_operation.operation;
-    let changeset = operation.get_changeset(workspace);
+    let changeset_path = operation.get_changeset_path(workspace);
     let dependencies = operation.get_changeset_dependencies(workspace);
 
-    let data_db_path = repo_root.join(&changeset.db_path);
+    let data_db_path = repo_root.join(DatabaseChangeset::get_db_path(&changeset_path));
     let new_db = !data_db_path.exists();
     let data_conn = &get_connection(&data_db_path)?;
     if new_db {
@@ -1113,7 +1154,7 @@ fn ingest_manifest_operation(
     let db_uuid = get_db_uuid(data_conn);
 
     data_conn.execute("BEGIN TRANSACTION", [])?;
-    match apply_changeset(data_conn, &changeset.changes, &dependencies) {
+    match replay_changeset_from_path(data_conn, &changeset_path, &dependencies) {
         Ok(_) => {
             data_conn.execute("COMMIT TRANSACTION", [])?;
         }
@@ -1217,20 +1258,7 @@ fn copy_operation_from_remote_fs(
     let local_changeset_dst = manifest_operation
         .operation
         .get_changeset_path(local_workspace);
-    if !remote_changeset_src.exists() {
-        return Err(RemoteOperationError::FileTransferError(
-            "changeset".to_string(),
-            remote_changeset_src.to_string_lossy().to_string(),
-            local_changeset_dst.to_string_lossy().to_string(),
-        ));
-    }
-    fs::copy(&remote_changeset_src, &local_changeset_dst).map_err(|_| {
-        RemoteOperationError::FileTransferError(
-            "changeset".to_string(),
-            remote_changeset_src.to_string_lossy().to_string(),
-            local_changeset_dst.to_string_lossy().to_string(),
-        )
-    })?;
+    copy_changeset_chunks(&remote_changeset_src, &local_changeset_dst)?;
 
     let local_dependencies_dst = manifest_operation
         .operation
@@ -2510,7 +2538,7 @@ mod tests {
             for (index, m_op) in local_manifest.operations.iter().enumerate() {
                 let operation = m_op.operation.clone();
                 let remote_op_dir = remote_workspace.changeset_path(&operation.hash);
-                assert!(remote_op_dir.join("changeset").exists());
+                assert!(!changeset_chunk_paths(&remote_op_dir.join("changeset")).is_empty());
                 assert!(remote_op_dir.join("dependencies").exists());
                 assert!(remote_root.join(format!("test_file_{index}.fa")).exists());
 
@@ -2611,7 +2639,7 @@ mod tests {
             );
 
             let changeset_dir = local_workspace.changeset_path(&remote_operation.hash);
-            assert!(changeset_dir.join("changeset").exists());
+            assert!(!changeset_chunk_paths(&changeset_dir.join("changeset")).is_empty());
             assert!(changeset_dir.join("dependencies").exists());
 
             let local_ops = Operation::all(op_conn);
