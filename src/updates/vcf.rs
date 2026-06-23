@@ -42,6 +42,8 @@ use crate::{
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
 
+const VCF_CHANGE_APPLY_CHUNK_SIZE: usize = 5_000;
+
 #[derive(Debug)]
 struct BlockGroupCache<'a> {
     pub cache: HashMap<BlockGroupData<'a>, Vec<HashId>>,
@@ -140,9 +142,7 @@ impl<'a> SequenceCache<'_> {
 
 #[allow(clippy::too_many_arguments)]
 fn prepare_change(
-    conn: &GraphConnection,
-    sample_bg_id: &HashId,
-    sample_path: &Path,
+    mut region: ResolvedGenRegion,
     ids: Option<String>,
     ref_start: i64,
     ref_end: i64,
@@ -152,7 +152,9 @@ fn prepare_change(
     sequence_length: i64,
     node_id: HashId,
     preserve_edge: bool,
-) -> Result<BlockGroupChange, BlockGroupError> {
+) -> BlockGroupChange {
+    region.start = ref_start;
+    region.end = ref_end;
     let new_block = PathBlock {
         node_id,
         block_sequence,
@@ -162,15 +164,32 @@ fn prepare_change(
         path_end: ref_end,
         strand: Strand::Forward,
     };
-    let region =
-        ResolvedGenRegion::from_path(conn, *sample_bg_id, sample_path, ref_start, ref_end)?;
-    Ok(BlockGroupChange {
+    BlockGroupChange {
         region,
         path_accession: ids,
         block: new_block,
         chromosome_index,
         phased,
         preserve_edge,
+    }
+}
+
+fn lookup_path_region(
+    path_region_cache: &mut HashMap<Path, ResolvedGenRegion>,
+    conn: &GraphConnection,
+    sample_path: &Path,
+) -> Result<ResolvedGenRegion, BlockGroupError> {
+    Ok(match path_region_cache.entry(sample_path.clone()) {
+        Entry::Occupied(entry) => entry.get().clone(),
+        Entry::Vacant(entry) => entry
+            .insert(ResolvedGenRegion::from_path(
+                conn,
+                sample_path.block_group_id,
+                sample_path,
+                0,
+                0,
+            )?)
+            .clone(),
     })
 }
 
@@ -181,6 +200,7 @@ struct VcfEntry {
     path: Path,
     ids: Option<String>,
     ref_start: i64,
+    region: ResolvedGenRegion,
     alt_seq: String,
     chromosome_index: i64,
     phased: i64,
@@ -253,14 +273,13 @@ pub fn update_with_vcf(
     let mut path_cache = PathCache::new(conn);
     let mut sequence_cache = SequenceCache::new(conn);
     let mut accession_cache = HashMap::new();
+    let mut path_region_cache: HashMap<Path, ResolvedGenRegion> = HashMap::new();
 
     let mut changes: HashMap<(Path, String), Vec<BlockGroupChange>> = HashMap::new();
 
     let mut node_source_paths: HashMap<HashId, HashId> = HashMap::new();
     let mut resolved_parent_samples: HashMap<String, Vec<String>> = HashMap::new();
     let mut created_samples: HashSet<&str> = HashSet::new();
-
-    let mut path_lengths: HashMap<HashId, i64> = HashMap::new();
 
     let mut block_group_names = vec![];
     for parent_sample in &parent_samples {
@@ -372,21 +391,21 @@ pub fn update_with_vcf(
                         for sample_bg_id in &sample_bg_ids {
                             let sample_path =
                                 PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone())?;
-                            let path_length = match path_lengths.entry(sample_path.id) {
-                                Entry::Occupied(entry) => *entry.get(),
-                                Entry::Vacant(entry) => *entry.insert(sample_path.length(conn)?),
-                            };
+                            let path_region =
+                                lookup_path_region(&mut path_region_cache, conn, &sample_path)?;
 
-                            if ref_start > path_length {
+                            if ref_start > path_region.feature_length {
                                 return Err(VcfError::InvalidRecord(format!(
                                     "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
-                                    sample_path.name
+                                    sample_path.name,
+                                    path_length = path_region.feature_length
                                 )));
                             }
                             vcf_entries.push(VcfEntry {
                                 ids: allele_accession.clone(),
                                 ref_start,
                                 block_group_id: *sample_bg_id,
+                                region: path_region,
                                 path: sample_path.clone(),
                                 sample_name: fixed_sample.to_string(),
                                 alt_seq: alt_seq.clone(),
@@ -488,17 +507,17 @@ pub fn update_with_vcf(
                                             sample_bg_id,
                                             seq_name.clone(),
                                         )?;
-                                        let path_length = match path_lengths.entry(sample_path.id) {
-                                            Entry::Occupied(entry) => *entry.get(),
-                                            Entry::Vacant(entry) => {
-                                                *entry.insert(sample_path.length(conn)?)
-                                            }
-                                        };
+                                        let path_region = lookup_path_region(
+                                            &mut path_region_cache,
+                                            conn,
+                                            &sample_path,
+                                        )?;
 
-                                        if ref_start > path_length {
+                                        if ref_start > path_region.feature_length {
                                             return Err(VcfError::InvalidRecord(format!(
                                                 "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
-                                                sample_path.name
+                                                sample_path.name,
+                                                path_length = path_region.feature_length
                                             )));
                                         }
 
@@ -506,6 +525,7 @@ pub fn update_with_vcf(
                                             ids: allele_accession.clone(),
                                             block_group_id: *sample_bg_id,
                                             ref_start,
+                                            region: path_region,
                                             path: sample_path.clone(),
                                             sample_name: sample_name.to_string(),
                                             alt_seq: alt_seq.clone(),
@@ -578,9 +598,7 @@ pub fn update_with_vcf(
                 )),
             )?;
             let change = prepare_change(
-                conn,
-                &vcf_entry.block_group_id,
-                &vcf_entry.path,
+                vcf_entry.region.clone(),
                 vcf_entry.ids,
                 ref_start,
                 ref_end,
@@ -590,7 +608,7 @@ pub fn update_with_vcf(
                 sequence_string.len() as i64,
                 node_id,
                 vcf_entry.preserve_reference,
-            )?;
+            );
             changes
                 .entry((vcf_entry.path, vcf_entry.sample_name))
                 .or_default()
@@ -608,7 +626,7 @@ pub fn update_with_vcf(
     let mut tree_map: HashMap<(HashId, ResolvedRegionKind), IntervalTree<i64, NodeIntervalBlock>> =
         HashMap::new();
     for ((path, sample_name), path_changes) in changes {
-        for chunk in path_changes.chunks(1000) {
+        for chunk in path_changes.chunks(VCF_CHANGE_APPLY_CHUNK_SIZE) {
             if in_place {
                 let in_place_changes = chunk
                     .iter()
