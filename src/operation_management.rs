@@ -1274,6 +1274,10 @@ fn copy_operation_from_remote_fs(
     Ok(())
 }
 
+/// This is materializing the file in the directory. The nested
+/// file_addition.file_path field will always be the asset_dir path, while the
+/// top level file_path field can be like fastas/hg19.fa. So if we are not in
+/// the asset_dir, we copy it out
 fn materialize_operation_file(
     workspace: &Workspace,
     file_addition: &ManifestOperationFileAddition,
