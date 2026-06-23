@@ -3,9 +3,12 @@
 
 use std::hash::Hash;
 
-use petgraph::visit::{
-    EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
-    NodeCount, NodeIndexable, Visitable,
+use petgraph::{
+    graph::NodeIndex,
+    visit::{
+        EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
+        NodeCount, NodeIndexable, Visitable,
+    },
 };
 use ratatui::{
     style::{Color, Style},
@@ -20,6 +23,9 @@ use crate::{
     theme::Theme,
     viewport_graph::CroppedGraph,
 };
+
+/// Number of world-x units between direction markers on a backward-edge bypass.
+const ARROW_GAPS: i64 = 16;
 
 /// Line style for path highlighting
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,6 +513,11 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             }
         }
     }
+
+    // Mark the horizontal bypass of any rewired backward edge with direction arrows.
+    for &(source, target) in &viewport_graph.backward_edges {
+        draw_arrows(buffer, viewport_graph, source, target, ARROW_GAPS);
+    }
 }
 
 /// Returns true if both `point_a` and `point_b` lie on the axis-aligned segment
@@ -611,6 +622,67 @@ fn draw_edge_with_style(
             // Vertical edges take priority at crossings (normal, heavy, and dashed).
             if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┊')) {
                 buffer.set_char_styled(pos, h_ch, style);
+            }
+        }
+    }
+}
+
+/// Place direction markers on the horizontal bypass segment(s) of a backward edge
+/// rewired onto pin nodes by `PartitionTable::new_with_backward_edges`.
+///
+/// Only one backward edge is ever rewired at a time, and the rewiring always produces
+/// an unambiguous shape: a vertical leg on the source side, a single long horizontal
+/// bypass spanning the full graph width (always traveling right-to-left, by construction
+/// of `left_pin`/`right_pin`), and a vertical leg on the target side. So direction never
+/// needs to be computed - it's always `◀` - and only horizontal segments are marked;
+/// vertical legs are left untouched.
+fn draw_arrows(
+    buffer: &mut WorldBuffer,
+    viewport_graph: &CroppedGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    gaps: i64,
+) {
+    // The bypass may be split across several collinear segments (one per partition/
+    // bridge it crosses) that render as one continuous line. Collect them first and
+    // compute a single margin from their combined span, so the marker grid stays
+    // aligned across segment boundaries instead of each segment centering itself.
+    let mut segments: Vec<(WorldPos, WorldPos)> = Vec::new();
+    let mut span: Option<(i64, i64)> = None;
+    for (seg_a, seg_b, bundle) in viewport_graph.edges() {
+        if seg_a.y != seg_b.y || !bundle.contains(&(source, target)) {
+            continue;
+        }
+
+        let (lo, hi) = if seg_a.x <= seg_b.x {
+            (seg_a, seg_b)
+        } else {
+            (seg_b, seg_a)
+        };
+        segments.push((lo, hi));
+        span = Some(match span {
+            Some((min_x, max_x)) => (min_x.min(lo.x), max_x.max(hi.x)),
+            None => (lo.x, hi.x),
+        });
+    }
+
+    let Some((min_x, max_x)) = span else {
+        return;
+    };
+
+    // Center the markers across the full span: split the leftover space (total
+    // length mod gaps) evenly between both ends, so the first/last arrow sits the
+    // same distance from its endpoint as every other arrow sits from its neighbor.
+    let margin = (max_x - min_x).rem_euclid(gaps) / 2;
+
+    for (lo, hi) in segments {
+        for x in lo.x..=hi.x {
+            let pos = WorldPos::new(x, lo.y);
+            if (x - min_x - margin).rem_euclid(gaps) == 0
+                && matches!(buffer.get_char(pos), Some('─') | Some('━') | Some('┄'))
+                && let Some((_, style)) = buffer.get_char_styled(pos)
+            {
+                buffer.set_char_styled(pos, '◀', style);
             }
         }
     }

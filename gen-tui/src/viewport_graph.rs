@@ -46,6 +46,10 @@ pub struct CroppedGraph {
     /// Visual node positions that are dimmed: stored as world positions.
     /// Populated by apply_node_lowlights from domain-level node_lowlights on each rebuild.
     pub node_lowlights: Vec<WorldPos>,
+
+    /// Domain edges rewired onto pin nodes (see `PartitionTable::backward_edges`), copied
+    /// through so the plotter can mark the rendered bypass edge with direction arrows.
+    pub backward_edges: Vec<(NodeIndex, NodeIndex)>,
 }
 
 impl CroppedGraph {
@@ -64,6 +68,7 @@ impl CroppedGraph {
             cell_highlights: Vec::new(),
             edge_lowlights: Vec::new(),
             node_lowlights: Vec::new(),
+            backward_edges: Vec::new(),
         }
     }
 
@@ -208,6 +213,7 @@ impl CroppedGraph {
 
         // Divide the graph up in logical layers by grouping Data nodes by x-coordinate
         this.build_layers_from_coordinates();
+        this.backward_edges = partition_table.backward_edges.clone();
 
         this
     }

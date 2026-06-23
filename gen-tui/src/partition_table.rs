@@ -65,6 +65,11 @@ where
         (PartitionIndex, PartitionIndex),
         Vec<(NodeIndex<u32>, NodeIndex<u32>, EdgeIndex<u32>)>,
     >,
+    /// Domain edges rewired onto pin nodes by `new_with_backward_edges`, as
+    /// (source_domain_idx, target_domain_idx) pairs. Kept around so the plotter can mark
+    /// the rendered bypass edge with direction arrows after `prune_pin_stubs` has removed
+    /// the pin nodes themselves.
+    pub backward_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)>,
     metrics: Vec<UnifiedLayout>,
     anchor_partition_idx: PartitionIndex,
 }
@@ -528,6 +533,7 @@ where
         // their partitions, so each lands at the leftmost/rightmost rank automatically
         // once laid out - no explicit rank-forcing is needed.
         let last_partition_idx = num_partitions - 1;
+        let mut backward_domain_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = Vec::new();
         for &(source, target) in backward_edges {
             let (source_partition_idx, source_node_index) = node_map
                 .get(&source)
@@ -541,6 +547,7 @@ where
             let source_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, source));
             let target_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, target));
             let bundle = (source_domain_idx, target_domain_idx);
+            backward_domain_edges.push(bundle);
 
             let left_pin_idx = all_partitions[0].graph.add_node(PartitionNode::Pin);
             let right_pin_idx = all_partitions[last_partition_idx]
@@ -577,6 +584,7 @@ where
             partitions: all_partitions,
             node_map,
             inter_partition_edges,
+            backward_edges: backward_domain_edges,
             metrics: vec![
                 UnifiedLayout::new(num_partitions), // Minimal
                 UnifiedLayout::new(num_partitions), // Full

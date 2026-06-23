@@ -1,6 +1,5 @@
 ---
 source: gen-tui/src/testing/layout_tests.rs
-assertion_line: 2213
 expression: snapshot
 ---
 "                                                                                "
@@ -15,7 +14,7 @@ expression: snapshot
 "   ╭─█N0██─█N1██─█N2██─█N3██─╮                                                  "
 "   │ █████ █████ █████ █████ │                                                  "
 "   │                         │                                                  "
-"   ╰─────────────────────────╯                                                  "
+"   ╰────◀───────────────◀────╯                                                  "
 "                                                                                "
 "                                                                                "
 "                                                                                "
