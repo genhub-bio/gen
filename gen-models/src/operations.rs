@@ -111,6 +111,10 @@ pub enum HashParseError {
 }
 
 impl Operation {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, change_type, hash))
+    )]
     pub fn create(
         conn: &OperationsConnection,
         change_type: &str,
@@ -156,6 +160,17 @@ impl Operation {
         Ok(operation)
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(
+            workspace,
+            conn,
+            operation_hash,
+            file_addition,
+            filename,
+            file_path
+        ))
+    )]
     pub fn add_file(
         workspace: &Workspace,
         conn: &OperationsConnection,
@@ -177,6 +192,10 @@ impl Operation {
         Ok(())
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, operation_hash, db_uuid))
+    )]
     pub fn add_database(
         conn: &OperationsConnection,
         operation_hash: &HashId,
@@ -651,6 +670,10 @@ impl FileAddition {
             .unwrap_or(&self.asset_uri)
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(workspace, conn, file_path, file_type, checksum_override))
+    )]
     pub fn get_or_create(
         workspace: &Workspace,
         conn: &OperationsConnection,
@@ -729,6 +752,10 @@ impl FileAddition {
             })
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(self, workspace))
+    )]
     pub fn store_file(&self, workspace: &Workspace) -> Result<(), FileStoreError> {
         let asset_uri = <dyn AssetUri>::new(workspace, &self.asset_uri);
         asset_uri.store_file(self, workspace)
@@ -767,6 +794,10 @@ impl Query for OperationSummary {
 }
 
 impl OperationSummary {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, operation_hash, summary))
+    )]
     pub fn create(
         conn: &OperationsConnection,
         operation_hash: &HashId,
@@ -1319,6 +1350,10 @@ impl Defaults {
 pub struct OperationState {}
 
 impl OperationState {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, op_hash))
+    )]
     pub fn set_operation(conn: &OperationsConnection, op_hash: &HashId) {
         let mut stmt = conn
             .prepare(

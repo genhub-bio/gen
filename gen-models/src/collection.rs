@@ -57,6 +57,10 @@ impl Collection {
         stmt.exists([name]).unwrap()
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, name))
+    )]
     pub fn create(conn: &GraphConnection, name: &str) -> Result<Collection, CollectionError> {
         let mut stmt = match conn.prepare("INSERT INTO collections (name) VALUES (?1) RETURNING *;")
         {

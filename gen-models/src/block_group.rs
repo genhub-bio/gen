@@ -240,6 +240,10 @@ impl<'a> PathCache<'a> {
 }
 
 impl BlockGroup {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, new_block_group))
+    )]
     pub fn create(
         conn: &GraphConnection,
         new_block_group: NewBlockGroup<'_>,
@@ -368,6 +372,10 @@ impl BlockGroup {
         Ok(())
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, collection_name, sample_name, group_name, parent_samples))
+    )]
     pub fn get_or_create_sample_block_groups(
         conn: &GraphConnection,
         collection_name: &str,

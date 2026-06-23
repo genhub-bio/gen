@@ -215,6 +215,18 @@ pub enum EdgeError {
 
 impl Edge {
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(
+            conn,
+            source_node_id,
+            source_coordinate,
+            source_strand,
+            target_node_id,
+            target_coordinate,
+            target_strand
+        ))
+    )]
     pub fn create(
         conn: &GraphConnection,
         source_node_id: HashId,
@@ -272,6 +284,10 @@ impl Edge {
         }
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, edges))
+    )]
     pub fn bulk_create(conn: &GraphConnection, edges: &[EdgeData]) -> Vec<HashId> {
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let mut edges_to_insert = IndexSet::new();

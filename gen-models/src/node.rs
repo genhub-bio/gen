@@ -67,6 +67,10 @@ pub enum NodeError {
 }
 
 impl Node {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, sequence_hash, node_hash))
+    )]
     pub fn create(
         conn: &GraphConnection,
         sequence_hash: &HashId,

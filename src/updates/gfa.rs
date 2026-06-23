@@ -24,6 +24,10 @@ use crate::{
     gfa_reader::{Gfa, Segment},
 };
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, gfa_path))
+)]
 pub fn update_with_gfa(
     context: &DbContext,
     collection_name: &str,

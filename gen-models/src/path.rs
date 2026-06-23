@@ -131,6 +131,10 @@ pub struct Annotation {
 }
 
 impl Path {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, edge_ids, block_group_id))
+    )]
     pub fn validate_edges(conn: &GraphConnection, edge_ids: &[HashId], block_group_id: &HashId) {
         let edge_id_set = edge_ids.iter().copied().collect::<HashSet<HashId>>();
 
@@ -188,6 +192,10 @@ impl Path {
         }
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, name, block_group_id, edge_ids))
+    )]
     pub fn create(
         conn: &GraphConnection,
         name: &str,

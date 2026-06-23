@@ -86,6 +86,10 @@ impl Query for PathEdge {
 }
 
 impl PathEdge {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, path_id, index_in_path, edge_id))
+    )]
     pub fn create(
         conn: &GraphConnection,
         path_id: &HashId,
@@ -122,6 +126,10 @@ impl PathEdge {
         }
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, path_id, edge_ids))
+    )]
     pub fn bulk_create(
         conn: &GraphConnection,
         path_id: &HashId,

@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
     fs,
-    io::Read,
+    io::{Read, Write},
     mem,
     path::{Path as StdPath, PathBuf},
     str,
@@ -15,6 +15,7 @@ use rusqlite::{
     types::FromSql,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     accession::{Accession, AccessionNode, AccessionSpan, NewAccession},
@@ -107,6 +108,13 @@ pub struct ChangesetModels {
 }
 
 impl ChangesetModels {
+    pub fn hash(&self) -> HashId {
+        let mut hasher = Sha256::new();
+        let mut writer = HashWriter::new(&mut hasher);
+        postcard::to_io(self, &mut writer).unwrap();
+        HashId(hasher.finalize().into())
+    }
+
     fn append(&mut self, mut other: ChangesetModels) {
         self.collections.append(&mut other.collections);
         self.samples.append(&mut other.samples);
@@ -124,6 +132,27 @@ impl ChangesetModels {
         self.annotation_group_samples
             .append(&mut other.annotation_group_samples);
         self.sample_lineages.append(&mut other.sample_lineages);
+    }
+}
+
+struct HashWriter<'a> {
+    hasher: &'a mut Sha256,
+}
+
+impl<'a> HashWriter<'a> {
+    fn new(hasher: &'a mut Sha256) -> Self {
+        Self { hasher }
+    }
+}
+
+impl Write for HashWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.hasher.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -910,6 +939,10 @@ pub fn process_changesetiter(
     Ok((changeset_models, dependency_models))
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, changeset, dependencies))
+)]
 pub fn apply_changeset(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
@@ -919,6 +952,10 @@ pub fn apply_changeset(
     apply_changeset_models(conn, changeset)
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, dependencies))
+)]
 pub fn apply_changeset_dependencies(
     conn: &GraphConnection,
     dependencies: &DependencyModels,
@@ -998,6 +1035,10 @@ pub fn apply_changeset_dependencies(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, changeset))
+)]
 pub fn apply_changeset_models(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
@@ -1005,6 +1046,10 @@ pub fn apply_changeset_models(
     apply_changeset_models_with_mode(conn, changeset, true)
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, changeset))
+)]
 fn replay_changeset_models(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
@@ -1012,6 +1057,10 @@ fn replay_changeset_models(
     apply_changeset_models_with_mode(conn, changeset, false)
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, changeset))
+)]
 fn apply_changeset_models_with_mode(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
@@ -1138,6 +1187,10 @@ fn apply_changeset_models_with_mode(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, nodes))
+)]
 fn insert_existing_nodes(
     conn: &GraphConnection,
     nodes: &[Node],
@@ -1172,6 +1225,10 @@ fn insert_existing_nodes(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, edges))
+)]
 fn insert_existing_edges(
     conn: &GraphConnection,
     edges: &[Edge],
@@ -1208,6 +1265,10 @@ fn insert_existing_edges(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, block_group_edges))
+)]
 fn insert_existing_block_group_edges(
     conn: &GraphConnection,
     block_group_edges: &[BlockGroupEdge],
@@ -1426,6 +1487,10 @@ pub fn revert_changeset(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(path))
+)]
 pub fn get_changeset_from_path(path: PathBuf) -> DatabaseChangeset {
     let mut chunk_paths = changeset_chunk_paths(&path);
     let first_chunk = get_changeset_chunk_from_path(
@@ -1442,6 +1507,10 @@ pub fn get_changeset_from_path(path: PathBuf) -> DatabaseChangeset {
     DatabaseChangeset { db_path, changes }
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(path))
+)]
 pub fn get_changeset_chunk_from_path(path: PathBuf) -> DatabaseChangeset {
     use capnp::serialize_packed;
     let file = fs::File::open(path).unwrap();
@@ -1455,6 +1524,10 @@ pub fn get_changeset_chunk_from_path(path: PathBuf) -> DatabaseChangeset {
     DatabaseChangeset::read_capnp(root)
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, changeset_path, dependencies))
+)]
 pub fn apply_changeset_from_path(
     conn: &GraphConnection,
     changeset_path: &StdPath,
@@ -1468,6 +1541,10 @@ pub fn apply_changeset_from_path(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, changeset_path, dependencies))
+)]
 pub fn replay_changeset_from_path(
     conn: &GraphConnection,
     changeset_path: &StdPath,
@@ -1481,6 +1558,10 @@ pub fn replay_changeset_from_path(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, changeset_path))
+)]
 pub fn revert_changeset_from_path(
     conn: &GraphConnection,
     changeset_path: &StdPath,
@@ -1512,6 +1593,10 @@ pub fn changeset_chunk_path(path: &StdPath, index: usize) -> PathBuf {
     path.with_file_name(format!("{file_name}.{index:04}"))
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(path))
+)]
 pub fn changeset_chunk_paths(path: &StdPath) -> Vec<PathBuf> {
     let parent = path
         .parent()
@@ -1600,6 +1685,10 @@ fn block_groups_parent_first(block_groups: &[BlockGroup]) -> Vec<&BlockGroup> {
     ordered
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(workspace, operation, changes, dependencies))
+)]
 pub fn write_changeset(
     workspace: &Workspace,
     operation: &Operation,
@@ -1633,6 +1722,10 @@ pub fn write_changeset(
     }
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(path, changes))
+)]
 fn write_database_changeset(path: &StdPath, changes: &DatabaseChangeset) {
     use capnp::{message::Builder, serialize_packed};
 
@@ -1806,6 +1899,56 @@ mod tests {
         let db_path = DatabaseChangeset::get_db_path(path.as_path());
 
         assert_eq!(db_path, expected_db_path);
+    }
+
+    #[test]
+    fn test_changeset_models_hash_is_deterministic() {
+        let changeset = ChangesetModels {
+            collections: vec![crate::collection::Collection {
+                name: "test_collection".to_string(),
+            }],
+            samples: vec![crate::sample::Sample {
+                name: "test_sample".to_string(),
+                is_reference: false,
+            }],
+            sample_lineages: vec![SampleLineage {
+                parent_sample_name: "parent_sample".to_string(),
+                child_sample_name: "test_sample".to_string(),
+            }],
+            annotation_groups: vec![AnnotationGroup {
+                name: "gff3".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let hash = changeset.hash();
+        assert_eq!(hash, changeset.hash());
+
+        let mut changed = changeset;
+        changed.samples[0].is_reference = true;
+
+        assert_ne!(hash, changed.hash());
+
+        // Make sure we get the same hash again when reconstructing
+        let changeset = ChangesetModels {
+            collections: vec![crate::collection::Collection {
+                name: "test_collection".to_string(),
+            }],
+            samples: vec![crate::sample::Sample {
+                name: "test_sample".to_string(),
+                is_reference: false,
+            }],
+            sample_lineages: vec![SampleLineage {
+                parent_sample_name: "parent_sample".to_string(),
+                child_sample_name: "test_sample".to_string(),
+            }],
+            annotation_groups: vec![AnnotationGroup {
+                name: "gff3".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(hash, changeset.hash());
     }
 
     #[test]

@@ -132,6 +132,10 @@ impl Query for BlockGroupEdge {
 }
 
 impl BlockGroupEdge {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, block_group_edges))
+    )]
     pub fn bulk_create(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
         let batch_size = max_rows_per_batch(conn, 6);
 
@@ -196,6 +200,10 @@ impl BlockGroupEdge {
         BlockGroupEdge::delete_by_ids(conn, &hashes);
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, block_group_id))
+    )]
     pub fn edges_for_block_group(
         conn: &GraphConnection,
         block_group_id: &HashId,

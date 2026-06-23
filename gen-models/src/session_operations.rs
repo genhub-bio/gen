@@ -29,6 +29,10 @@ pub fn start_operation(_conn: &GraphConnection) -> OperationRecorder {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, session, operation_info, summary_str, force_hash))
+)]
 pub fn end_operation(
     context: &DbContext,
     session: &mut OperationRecorder,
@@ -50,7 +54,7 @@ pub fn end_operation(
         }
         let mut hasher = Sha256::new();
         hasher.update(&db_uuid[..]);
-        hasher.update(serde_json::to_vec(&changeset_models).unwrap());
+        hasher.update(changeset_models.hash().0);
         HashId(hasher.finalize().into())
     };
 
@@ -150,6 +154,10 @@ impl<'a> Capnp<'a> for DependencyModels {
     type Builder = dependency_models::Builder<'a>;
     type Reader = dependency_models::Reader<'a>;
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(self, builder))
+    )]
     fn write_capnp(&self, builder: &mut Self::Builder) {
         // Write collections
         let mut collections_builder = builder

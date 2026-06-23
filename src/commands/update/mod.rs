@@ -36,6 +36,10 @@ pub enum Commands {
     Vcf(vcf::Command),
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(ctx, command))
+)]
 pub fn execute(ctx: &CliContext, command: Command) -> anyhow::Result<()> {
     match command.command {
         Commands::Fasta(cmd) => crate::commands::update::fasta::execute(ctx, cmd),

@@ -200,6 +200,10 @@ pub fn get_file(path: &PathBuf, mode: FileMode) -> fs::File {
     file.unwrap()
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, op_hash))
+)]
 pub fn reset(context: &DbContext, op_hash: &HashId) -> Result<(), ResetError> {
     let operation_conn = context.operations().conn();
     let dest_operation = Operation::get_by_id(operation_conn, op_hash)
@@ -208,6 +212,10 @@ pub fn reset(context: &DbContext, op_hash: &HashId) -> Result<(), ResetError> {
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, op_hash, force_hash))
+)]
 pub fn apply(
     context: &DbContext,
     op_hash: &HashId,
@@ -274,6 +282,10 @@ pub fn apply(
     }
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, force_hash))
+)]
 pub fn merge<'a>(
     context: &DbContext,
     source_branch: i64,
@@ -319,6 +331,10 @@ pub fn merge<'a>(
     Ok(new_operations)
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, operation))
+)]
 pub fn move_to(context: &DbContext, operation: &Operation) -> Result<(), MoveError> {
     let operation_conn = context.operations().conn();
     let workspace = context.workspace();
@@ -392,6 +408,10 @@ pub fn move_to(context: &DbContext, operation: &Operation) -> Result<(), MoveErr
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, branch_name, operation_hash))
+)]
 pub fn checkout(
     context: &DbContext,
     branch_name: &Option<String>,
@@ -522,6 +542,10 @@ fn connect_file_remote(
     Ok((Workspace::new(remote_path), remote_op_conn))
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(source_changeset, destination_changeset))
+)]
 fn copy_changeset_chunks(
     source_changeset: &FilePath,
     destination_changeset: &FilePath,
@@ -565,6 +589,10 @@ fn copy_changeset_chunks(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(local_context, remote_op_conn, operations, remote_workspace))
+)]
 fn apply_operations_to_remote(
     local_context: &DbContext,
     remote_op_conn: &OperationsConnection,
@@ -855,6 +883,10 @@ fn push_to_file_remote(
 }
 
 // Pushes the current state of the local repo and branch to the corresponding remote repo and branch
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, remote))
+)]
 pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOperationError> {
     let operation_conn = context.operations().conn();
     let remote_name = &remote
@@ -991,6 +1023,10 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
     }
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, remote))
+)]
 pub fn pull(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOperationError> {
     let operation_conn = context.operations().conn();
     let remote_name = &remote
@@ -1134,6 +1170,10 @@ fn pull_from_remote_server(
     Ok(())
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, manifest_operation, repo_root))
+)]
 fn ingest_manifest_operation(
     context: &DbContext,
     manifest_operation: &ManifestOperation,

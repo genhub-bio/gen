@@ -80,6 +80,10 @@ impl Sample {
         SampleLineage::get_parents(conn, sample_name)
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, new_sample))
+    )]
     pub fn create(
         conn: &GraphConnection,
         new_sample: NewSample<'_>,
@@ -111,6 +115,10 @@ impl Sample {
         }
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, new_sample))
+    )]
     pub fn get_or_create(
         conn: &GraphConnection,
         new_sample: NewSample<'_>,
