@@ -45,12 +45,11 @@ use crate::{
 /// site sits past a branch point, but at the zero offsets used by both call
 /// sites below it always resolves through `ResolvedGraph::resolve_anchor`,
 /// which already collapses same-coordinate branches down to a single
-/// arbitrary match before any walk happens — so taking `positions[0]` here
-/// doesn't lose anything beyond what's already lost upstream. See the
-/// "accessions with overflowed edges" discussion: fixing that collapse
-/// would mean changing `resolve_anchor` itself (pre-existing, merged,
-/// shared by every region resolution in the system), which is out of scope
-/// here.
+/// arbitrary match before any walk happens — so taking `positions[0]` at
+/// those call sites doesn't lose anything beyond what's already lost
+/// upstream. Fixing that collapse would mean changing `resolve_anchor`
+/// itself (pre-existing, merged, shared by every region resolution in the
+/// system), which is out of scope here.
 fn create_location_accession(
     conn: &gen_models::db::GraphConnection,
     block_group_id: gen_core::HashId,
@@ -965,10 +964,7 @@ mod tests {
             None,
         )?;
 
-        // Same sample, a different locus, the same reused part name: the
-        // earlier name-based accession key collided here because both calls
-        // shared the same block group. Nesting part accessions under a
-        // per-call location accession should let this succeed.
+        // Same sample, a different locus, the same reused part name.
         update_with_library(
             &context,
             "test",
