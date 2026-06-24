@@ -34,6 +34,10 @@ pub struct Command {
     in_place: bool,
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(cli_context, cmd))
+)]
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with VCF called");
 

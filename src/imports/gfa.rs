@@ -53,6 +53,10 @@ pub enum GFAImportError {
     BlockGroupError(#[from] BlockGroupError),
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, gfa_path, collection_name, sample_name))
+)]
 pub fn import_gfa(
     context: &DbContext,
     gfa_path: &FilePath,

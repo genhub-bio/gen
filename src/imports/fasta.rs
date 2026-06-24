@@ -30,6 +30,10 @@ use crate::{
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, fasta, collection_name, sample))
+)]
 pub fn import_fasta(
     context: &DbContext,
     fasta: &String,

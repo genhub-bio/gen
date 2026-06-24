@@ -80,6 +80,10 @@ impl From<GenRegionError> for UpdateWithLibraryError {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(context, parts_list, library_file_path, parts_file_path))
+)]
 pub fn update_with_library(
     context: &DbContext,
     collection_name: &str,

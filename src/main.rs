@@ -11,6 +11,8 @@ use std::{
 
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
+#[cfg(all(debug_assertions, feature = "profiling"))]
+use r#gen::profiling::{Profiler, SamplingProfiler};
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{
@@ -74,6 +76,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(Commands::Clone { url }) = &cli.command {
         return r#gen::commands::clone::execute(url, &workspace);
+    }
+    #[cfg(all(debug_assertions, feature = "profiling"))]
+    if let Some(Commands::Profile(cmd)) = &cli.command {
+        return r#gen::commands::profile::execute(cmd.clone());
     }
 
     let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;
@@ -156,6 +162,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::Clone { .. }) => Ok(()),
+        #[cfg(all(debug_assertions, feature = "profiling"))]
+        Some(Commands::Profile(cmd)) => r#gen::commands::profile::execute(cmd.clone()),
         Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
         Some(Commands::Update(cmd)) => Ok(r#gen::commands::update::execute(&cli_context, cmd)?),
         Some(Commands::Export(cmd)) => Ok(r#gen::commands::export::execute(&cli_context, cmd)?),
@@ -876,7 +884,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start logger (gets log level from RUST_LOG environment variable, sends output to stderr)
     env_logger::init();
-    match call_cli() {
+    let result = if std::env::var_os("GEN_PROFILE").is_some() {
+        #[cfg(all(debug_assertions, feature = "profiling"))]
+        {
+            if std::env::var_os("GEN_PROFILE_SAMPLE").is_some() {
+                SamplingProfiler.run(call_cli)
+            } else {
+                Profiler::default().run(call_cli)
+            }
+        }
+        #[cfg(not(all(debug_assertions, feature = "profiling")))]
+        {
+            call_cli()
+        }
+    } else {
+        call_cli()
+    };
+    match result {
         Ok(_) => Ok(()),
         Err(e) => Err(anyhow!("{e}").into()),
     }

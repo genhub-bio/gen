@@ -31,6 +31,10 @@ pub struct Command {
     reference: Option<String>,
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(cli_context, cmd))
+)]
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Fasta import called");
 

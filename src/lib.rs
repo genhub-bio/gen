@@ -21,6 +21,8 @@ pub mod imports;
 
 pub mod operation_management;
 pub mod patch;
+#[cfg(all(debug_assertions, feature = "profiling"))]
+pub mod profiling;
 mod progress_bar;
 #[cfg(any(test, debug_assertions))]
 pub mod test_helpers;
