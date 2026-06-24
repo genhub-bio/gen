@@ -1,14 +1,14 @@
 [package]
 name = "gen-tui"
 description = "Graph visualization widget system for Gen"
-version = "0.1.31"
+version = "0.2.0"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
 [dependencies]
-gen-sugiyama = { path = "../gen-sugiyama", version = "0.1.31" }
+gen-sugiyama = { path = "../gen-sugiyama", version = "0.2.0" }
 itertools = "0.14.0"
 petgraph = { version = "0.6.5", features = ["serde-1"] }
 serde = { version = "1.0.219", features = ["derive"] }

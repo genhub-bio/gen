@@ -1,16 +1,16 @@
 [package]
 name = "gen-diff"
 description = "Diff algorithms for the gen sequence graph and version control system."
-version = "0.1.31"
+version = "0.2.0"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
 [dependencies]
-gen-core = { path = "../gen-core", version = "0.1.31" }
-gen-graph = { path = "../gen-graph", version = "0.1.31" }
-gen-models = { path = "../gen-models", version = "0.1.31" }
+gen-core = { path = "../gen-core", version = "0.2.0" }
+gen-graph = { path = "../gen-graph", version = "0.2.0" }
+gen-models = { path = "../gen-models", version = "0.2.0" }
 itertools = "0.14.0"
 petgraph = "0.6.5"
 rusqlite = { version = "0.32.1" }
