@@ -251,6 +251,25 @@ impl BlockGroup {
             new_block_group.parent_block_group_id,
         );
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let is_default = if new_block_group.is_default {
+            true
+        } else {
+            let existing_default = BlockGroup::try_query(
+                conn,
+                "SELECT * FROM block_groups \
+                 WHERE collection_name = ?1 \
+                   AND sample_name = ?2 \
+                   AND name = ?3 \
+                   AND is_default = 1",
+                params![
+                    new_block_group.collection_name,
+                    new_block_group.sample_name,
+                    new_block_group.name,
+                ],
+            )
+            .map_err(BlockGroupError::from)?;
+            existing_default.is_empty()
+        };
         let query = "INSERT INTO block_groups (
                 id,
                 collection_name,
@@ -271,7 +290,7 @@ impl BlockGroup {
             name: new_block_group.name.to_string(),
             created_on: timestamp,
             parent_block_group_id: new_block_group.parent_block_group_id.copied(),
-            is_default: new_block_group.is_default,
+            is_default,
         };
         match stmt.execute(params![
             hash,
@@ -280,7 +299,7 @@ impl BlockGroup {
             new_block_group.name,
             timestamp,
             new_block_group.parent_block_group_id,
-            new_block_group.is_default,
+            is_default,
         ]) {
             Ok(_) => Ok(bg),
             Err(rusqlite::Error::SqliteFailure(err, _details))

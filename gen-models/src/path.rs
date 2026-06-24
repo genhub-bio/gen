@@ -1087,6 +1087,11 @@ mod tests {
                 },
             )
             .unwrap();
+            conn.execute(
+                "UPDATE block_groups SET is_default = 0 WHERE id = ?1",
+                params![non_default_block_group.id],
+            )
+            .unwrap();
 
             let non_default_edge = Edge::create(
                 conn,
