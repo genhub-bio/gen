@@ -46,9 +46,9 @@ jobs:
         env:
           RELEASE_TYPE: ${{ github.event.inputs.release_type }}
         run: |
-          cargo set-version -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen --bump "$RELEASE_TYPE"
           cargo set-version --manifest-path gen-python/Cargo.toml --bump "$RELEASE_TYPE"
           cargo set-version --manifest-path gen-r/src/rust/Cargo.toml --bump "$RELEASE_TYPE"
+          cargo set-version -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen --bump "$RELEASE_TYPE"
           uv version --no-sync --bump "$RELEASE_TYPE"
           cargo update -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen
           cargo update --manifest-path gen-python/Cargo.toml -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen
