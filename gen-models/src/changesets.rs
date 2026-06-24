@@ -1682,6 +1682,46 @@ mod tests {
         assert_eq!(dependencies.samples[0].name, "parent");
     }
 
+    // Deleting a row cannot be recorded as an operation: changeset reconstruction reads
+    // new_value() for every column, which a DELETE changeset item does not carry, so
+    // end_operation panics. This documents that the operation layer is insert-only.
+    #[test]
+    #[should_panic(expected = "ApiMisuse")]
+    fn test_deleting_a_sample_cannot_be_tracked() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        // Created before the session, so removing it records a DELETE changeset item.
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "doomed",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+
+        let mut session = start_operation(conn);
+        conn.execute("DELETE FROM samples WHERE name = 'doomed'", [])
+            .unwrap();
+
+        // Panics inside process_changesetiter on a new_value() unwrap for the DELETE row.
+        let _ = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![],
+                description: "delete op".to_string(),
+            },
+            "delete op",
+            None,
+        );
+    }
+
     #[test]
     fn test_block_groups_parent_first() {
         let parent = BlockGroup {
