@@ -24,6 +24,8 @@ use crate::{
     sequence::Sequence,
 };
 
+const EDGE_LIST_CHUNK_SIZE: usize = 10_000;
+
 pub fn start_operation(conn: &GraphConnection) -> session::Session<'_> {
     let mut session = session::Session::new(conn).unwrap();
     attach_session(&mut session);
@@ -113,7 +115,7 @@ pub fn end_operation(
                     db_path: gen_db.path,
                     changes: changeset_models,
                 },
-                &dependencies,
+                dependencies,
             );
             OperationState::set_operation(operation_conn, &operation.hash);
             operation_conn
@@ -227,12 +229,7 @@ impl<'a> Capnp<'a> for DependencyModels {
             node.write_capnp(&mut node_builder);
         }
 
-        // Write edges
-        let mut edges_builder = builder.reborrow().init_edges(self.edges.len() as u32);
-        for (i, edge) in self.edges.iter().enumerate() {
-            let mut edge_builder = edges_builder.reborrow().get(i as u32);
-            edge.write_capnp(&mut edge_builder);
-        }
+        write_edge_chunks(builder, &self.edges, EDGE_LIST_CHUNK_SIZE);
 
         // Write paths
         let mut paths_builder = builder.reborrow().init_paths(self.paths.len() as u32);
@@ -295,12 +292,7 @@ impl<'a> Capnp<'a> for DependencyModels {
             nodes.push(Node::read_capnp(node_reader));
         }
 
-        // Read edges
-        let edges_reader = reader.get_edges().unwrap();
-        let mut edges = Vec::new();
-        for edge_reader in edges_reader.iter() {
-            edges.push(Edge::read_capnp(edge_reader));
-        }
+        let edges = read_edge_chunks(&reader);
 
         // Read paths
         let paths_reader = reader.get_paths().unwrap();
@@ -334,6 +326,42 @@ impl<'a> Capnp<'a> for DependencyModels {
             accession_nodes,
         }
     }
+}
+
+fn write_edge_chunks(
+    builder: &mut dependency_models::Builder<'_>,
+    edges: &[Edge],
+    chunk_size: usize,
+) {
+    let chunk_count = if edges.is_empty() {
+        0
+    } else {
+        (edges.len() - 1) / chunk_size + 1
+    };
+
+    let mut edge_chunks_builder = builder.reborrow().init_edge_chunks(chunk_count as u32);
+    for (chunk_index, chunk) in edges.chunks(chunk_size).enumerate() {
+        let mut edge_chunk_builder = edge_chunks_builder.reborrow().get(chunk_index as u32);
+        let mut values_builder = edge_chunk_builder
+            .reborrow()
+            .init_values(chunk.len() as u32);
+        for (value_index, edge) in chunk.iter().enumerate() {
+            let mut edge_builder = values_builder.reborrow().get(value_index as u32);
+            edge.write_capnp(&mut edge_builder);
+        }
+    }
+}
+
+fn read_edge_chunks(reader: &dependency_models::Reader<'_>) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    let edge_chunks_reader = reader.get_edge_chunks().unwrap();
+    for edge_chunk_reader in edge_chunks_reader.iter() {
+        let values_reader = edge_chunk_reader.get_values().unwrap();
+        for edge_reader in values_reader.iter() {
+            edges.push(Edge::read_capnp(edge_reader));
+        }
+    }
+    edges
 }
 
 #[cfg(test)]
@@ -420,6 +448,57 @@ mod tests {
         let deserialized = DependencyModels::read_capnp(root.into_reader());
 
         assert_eq!(dependency_models, deserialized);
+    }
+
+    #[test]
+    fn test_dependency_models_chunked_edge_serialization() {
+        let dependency_models = DependencyModels {
+            collections: vec![],
+            samples: vec![],
+            sequences: vec![],
+            block_group: vec![],
+            nodes: vec![],
+            edges: vec![
+                Edge {
+                    id: HashId::pad_str(1),
+                    source_node_id: HashId::convert_str("1"),
+                    source_coordinate: 0,
+                    source_strand: Strand::Forward,
+                    target_node_id: HashId::convert_str("2"),
+                    target_coordinate: 0,
+                    target_strand: Strand::Forward,
+                },
+                Edge {
+                    id: HashId::pad_str(2),
+                    source_node_id: HashId::convert_str("2"),
+                    source_coordinate: 0,
+                    source_strand: Strand::Forward,
+                    target_node_id: HashId::convert_str("3"),
+                    target_coordinate: 0,
+                    target_strand: Strand::Forward,
+                },
+                Edge {
+                    id: HashId::pad_str(3),
+                    source_node_id: HashId::convert_str("3"),
+                    source_coordinate: 0,
+                    source_strand: Strand::Forward,
+                    target_node_id: HashId::convert_str("4"),
+                    target_coordinate: 0,
+                    target_strand: Strand::Forward,
+                },
+            ],
+            paths: vec![],
+            accessions: vec![],
+            accession_nodes: vec![],
+        };
+
+        let mut message = TypedBuilder::<dependency_models::Owned>::new_default();
+        let mut root = message.init_root();
+        write_edge_chunks(&mut root, &dependency_models.edges, 2);
+
+        let deserialized = DependencyModels::read_capnp(root.into_reader());
+
+        assert_eq!(deserialized.edges, dependency_models.edges);
     }
 
     #[test]

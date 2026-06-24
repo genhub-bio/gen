@@ -606,7 +606,7 @@ pub fn add_files_operation(
             db_path: gen_db.path,
             changes: ChangesetModels::default(),
         },
-        &DependencyModels::default(),
+        DependencyModels::default(),
     );
 
     for file_addition in unique_file_additions

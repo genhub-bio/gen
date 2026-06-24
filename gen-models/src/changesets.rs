@@ -2,7 +2,8 @@ use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
     fs,
-    io::Read,
+    io::{BufRead, Read},
+    mem,
     path::{Path as StdPath, PathBuf},
     str,
 };
@@ -35,6 +36,8 @@ use crate::{
     session_operations::DependencyModels,
     traits::Query,
 };
+
+const EDGE_LIST_CHUNK_SIZE: usize = 10_000;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct DatabaseChangeset {
@@ -150,21 +153,8 @@ impl<'a> Capnp<'a> for ChangesetModels {
             node.write_capnp(&mut node_builder);
         }
 
-        // Write edges
-        let mut edges_builder = builder.reborrow().init_edges(self.edges.len() as u32);
-        for (i, edge) in self.edges.iter().enumerate() {
-            let mut edge_builder = edges_builder.reborrow().get(i as u32);
-            edge.write_capnp(&mut edge_builder);
-        }
-
-        // Write block group edges
-        let mut block_group_edges_builder = builder
-            .reborrow()
-            .init_block_group_edges(self.block_group_edges.len() as u32);
-        for (i, block_group_edge) in self.block_group_edges.iter().enumerate() {
-            let mut block_group_edge_builder = block_group_edges_builder.reborrow().get(i as u32);
-            block_group_edge.write_capnp(&mut block_group_edge_builder);
-        }
+        write_edge_chunks(builder, &self.edges, EDGE_LIST_CHUNK_SIZE);
+        write_block_group_edge_chunks(builder, &self.block_group_edges, EDGE_LIST_CHUNK_SIZE);
 
         // Write paths
         let mut paths_builder = builder.reborrow().init_paths(self.paths.len() as u32);
@@ -270,21 +260,9 @@ impl<'a> Capnp<'a> for ChangesetModels {
             nodes.push(Node::read_capnp(node_reader));
         }
 
-        // Read edges
-        let edges_reader = reader.get_edges().unwrap();
-        let mut edges = Vec::new();
-        for edge_reader in edges_reader.iter() {
-            edges.push(Edge::read_capnp(edge_reader));
-        }
+        let edges = read_edge_chunks(&reader);
 
-        // Read block group edges
-        let block_group_edges_reader = reader.get_block_group_edges().unwrap();
-        let mut block_group_edges = Vec::new();
-        for block_group_edge_reader in block_group_edges_reader.iter() {
-            block_group_edges.push(crate::block_group_edge::BlockGroupEdge::read_capnp(
-                block_group_edge_reader,
-            ));
-        }
+        let block_group_edges = read_block_group_edge_chunks(&reader);
 
         // Read paths
         let paths_reader = reader.get_paths().unwrap();
@@ -354,6 +332,82 @@ impl<'a> Capnp<'a> for ChangesetModels {
             annotation_group_samples,
         }
     }
+}
+
+fn write_edge_chunks(
+    builder: &mut changeset_models::Builder<'_>,
+    edges: &[Edge],
+    chunk_size: usize,
+) {
+    let chunk_count = if edges.is_empty() {
+        0
+    } else {
+        (edges.len() - 1) / chunk_size + 1
+    };
+
+    let mut edge_chunks_builder = builder.reborrow().init_edge_chunks(chunk_count as u32);
+    for (chunk_index, chunk) in edges.chunks(chunk_size).enumerate() {
+        let mut edge_chunk_builder = edge_chunks_builder.reborrow().get(chunk_index as u32);
+        let mut values_builder = edge_chunk_builder
+            .reborrow()
+            .init_values(chunk.len() as u32);
+        for (value_index, edge) in chunk.iter().enumerate() {
+            let mut edge_builder = values_builder.reborrow().get(value_index as u32);
+            edge.write_capnp(&mut edge_builder);
+        }
+    }
+}
+
+fn read_edge_chunks(reader: &changeset_models::Reader<'_>) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    let edge_chunks_reader = reader.get_edge_chunks().unwrap();
+    for edge_chunk_reader in edge_chunks_reader.iter() {
+        let values_reader = edge_chunk_reader.get_values().unwrap();
+        for edge_reader in values_reader.iter() {
+            edges.push(Edge::read_capnp(edge_reader));
+        }
+    }
+    edges
+}
+
+fn write_block_group_edge_chunks(
+    builder: &mut changeset_models::Builder<'_>,
+    block_group_edges: &[BlockGroupEdge],
+    chunk_size: usize,
+) {
+    let chunk_count = if block_group_edges.is_empty() {
+        0
+    } else {
+        (block_group_edges.len() - 1) / chunk_size + 1
+    };
+
+    let mut block_group_edge_chunks_builder = builder
+        .reborrow()
+        .init_block_group_edge_chunks(chunk_count as u32);
+    for (chunk_index, chunk) in block_group_edges.chunks(chunk_size).enumerate() {
+        let mut block_group_edge_chunk_builder = block_group_edge_chunks_builder
+            .reborrow()
+            .get(chunk_index as u32);
+        let mut values_builder = block_group_edge_chunk_builder
+            .reborrow()
+            .init_values(chunk.len() as u32);
+        for (value_index, block_group_edge) in chunk.iter().enumerate() {
+            let mut block_group_edge_builder = values_builder.reborrow().get(value_index as u32);
+            block_group_edge.write_capnp(&mut block_group_edge_builder);
+        }
+    }
+}
+
+fn read_block_group_edge_chunks(reader: &changeset_models::Reader<'_>) -> Vec<BlockGroupEdge> {
+    let mut block_group_edges = Vec::new();
+    let block_group_edge_chunks_reader = reader.get_block_group_edge_chunks().unwrap();
+    for block_group_edge_chunk_reader in block_group_edge_chunks_reader.iter() {
+        let values_reader = block_group_edge_chunk_reader.get_values().unwrap();
+        for block_group_edge_reader in values_reader.iter() {
+            block_group_edges.push(BlockGroupEdge::read_capnp(block_group_edge_reader));
+        }
+    }
+    block_group_edges
 }
 
 // Helper functions for parsing changeset items
@@ -1178,29 +1232,81 @@ pub fn revert_changeset(
 }
 
 pub fn get_changeset_from_path(path: PathBuf) -> DatabaseChangeset {
-    use capnp::serialize_packed;
     let file = fs::File::open(path).unwrap();
     let mut reader = std::io::BufReader::new(file);
+    let mut changeset = read_database_changeset_message(&mut reader);
 
-    let message_reader =
-        serialize_packed::read_message(&mut reader, capnp::message::ReaderOptions::new()).unwrap();
-    let root = message_reader
-        .get_root::<database_changeset::Reader>()
-        .unwrap();
-    DatabaseChangeset::read_capnp(root)
+    while !reader.fill_buf().unwrap().is_empty() {
+        let chunk = read_database_changeset_message(&mut reader);
+        changeset
+            .changes
+            .collections
+            .extend(chunk.changes.collections);
+        changeset.changes.samples.extend(chunk.changes.samples);
+        changeset
+            .changes
+            .sample_lineages
+            .extend(chunk.changes.sample_lineages);
+        changeset.changes.sequences.extend(chunk.changes.sequences);
+        changeset
+            .changes
+            .block_groups
+            .extend(chunk.changes.block_groups);
+        changeset.changes.nodes.extend(chunk.changes.nodes);
+        changeset.changes.edges.extend(chunk.changes.edges);
+        changeset
+            .changes
+            .block_group_edges
+            .extend(chunk.changes.block_group_edges);
+        changeset.changes.paths.extend(chunk.changes.paths);
+        changeset
+            .changes
+            .path_edges
+            .extend(chunk.changes.path_edges);
+        changeset
+            .changes
+            .accessions
+            .extend(chunk.changes.accessions);
+        changeset
+            .changes
+            .accession_nodes
+            .extend(chunk.changes.accession_nodes);
+        changeset
+            .changes
+            .annotation_groups
+            .extend(chunk.changes.annotation_groups);
+        changeset
+            .changes
+            .annotations
+            .extend(chunk.changes.annotations);
+        changeset
+            .changes
+            .annotation_group_samples
+            .extend(chunk.changes.annotation_group_samples);
+    }
+
+    changeset
 }
 
 pub fn get_changeset_dependencies_from_path(path: PathBuf) -> DependencyModels {
-    use capnp::serialize_packed;
-
     let file = fs::File::open(path).unwrap();
     let mut reader = std::io::BufReader::new(file);
-    let message_reader =
-        serialize_packed::read_message(&mut reader, capnp::message::ReaderOptions::new()).unwrap();
-    let root = message_reader
-        .get_root::<crate::gen_models_capnp::dependency_models::Reader>()
-        .unwrap();
-    DependencyModels::read_capnp(root)
+    let mut dependencies = read_dependency_models_message(&mut reader);
+
+    while !reader.fill_buf().unwrap().is_empty() {
+        let chunk = read_dependency_models_message(&mut reader);
+        dependencies.collections.extend(chunk.collections);
+        dependencies.samples.extend(chunk.samples);
+        dependencies.sequences.extend(chunk.sequences);
+        dependencies.block_group.extend(chunk.block_group);
+        dependencies.nodes.extend(chunk.nodes);
+        dependencies.edges.extend(chunk.edges);
+        dependencies.paths.extend(chunk.paths);
+        dependencies.accessions.extend(chunk.accessions);
+        dependencies.accession_nodes.extend(chunk.accession_nodes);
+    }
+
+    dependencies
 }
 
 // This sorts parents first so when creating blockgroups, we don't have foreign key issues when a child is made before a parent.
@@ -1258,32 +1364,157 @@ pub fn write_changeset(
     workspace: &Workspace,
     operation: &Operation,
     changes: DatabaseChangeset,
-    dependencies: &DependencyModels,
+    dependencies: DependencyModels,
 ) {
-    use capnp::{message::Builder, serialize_packed};
-
     let change_path = operation.get_changeset_path(workspace);
     let dependency_path = operation.get_changeset_dependencies_path(workspace);
 
-    // Write dependencies using capnp
     let mut dependency_file = fs::File::create_new(&dependency_path)
         .unwrap_or_else(|_| panic!("Unable to open {dependency_path:?}"));
-    let mut message = Builder::new_default();
-    let mut dep_root = message.init_root();
-    dependencies.write_capnp(&mut dep_root);
-    serialize_packed::write_message(&mut dependency_file, &message).unwrap();
+    write_chunked_dependency_models(&mut dependency_file, dependencies, EDGE_LIST_CHUNK_SIZE);
 
-    // Write changes using capnp
     let mut file = fs::File::create_new(&change_path)
         .unwrap_or_else(|_| panic!("Unable to open {change_path:?}"));
+    write_chunked_changeset(&mut file, changes, EDGE_LIST_CHUNK_SIZE);
+}
+
+fn read_database_changeset_message(reader: &mut impl BufRead) -> DatabaseChangeset {
+    use capnp::serialize_packed;
+
+    let message_reader =
+        serialize_packed::read_message(reader, capnp::message::ReaderOptions::new()).unwrap();
+    let root = message_reader
+        .get_root::<database_changeset::Reader>()
+        .unwrap();
+    DatabaseChangeset::read_capnp(root)
+}
+
+fn read_dependency_models_message(reader: &mut impl BufRead) -> DependencyModels {
+    use capnp::serialize_packed;
+
+    let message_reader =
+        serialize_packed::read_message(reader, capnp::message::ReaderOptions::new()).unwrap();
+    let root = message_reader
+        .get_root::<crate::gen_models_capnp::dependency_models::Reader>()
+        .unwrap();
+    DependencyModels::read_capnp(root)
+}
+
+fn write_chunked_changeset(file: &mut fs::File, changeset: DatabaseChangeset, chunk_size: usize) {
+    use capnp::{message::Builder, serialize_packed};
+
+    let DatabaseChangeset {
+        db_path,
+        mut changes,
+    } = changeset;
+    let edges = mem::take(&mut changes.edges);
+    let block_group_edges = mem::take(&mut changes.block_group_edges);
+
     let mut message = Builder::new_default();
-    let mut change_root = message.init_root();
-    changes.write_capnp(&mut change_root);
-    serialize_packed::write_message(&mut file, &message).unwrap();
+    let mut root = message.init_root();
+    DatabaseChangeset {
+        db_path: db_path.clone(),
+        changes,
+    }
+    .write_capnp(&mut root);
+    serialize_packed::write_message(&mut *file, &message).unwrap();
+
+    let chunk_count =
+        chunk_count(edges.len(), chunk_size).max(chunk_count(block_group_edges.len(), chunk_size));
+    for chunk_index in 0..chunk_count {
+        let mut message = Builder::new_default();
+        let mut root = message.init_root();
+        DatabaseChangeset {
+            db_path: db_path.clone(),
+            changes: chunked_changeset_models(&edges, &block_group_edges, chunk_index, chunk_size),
+        }
+        .write_capnp(&mut root);
+        serialize_packed::write_message(&mut *file, &message).unwrap();
+    }
+}
+
+fn write_chunked_dependency_models(
+    file: &mut fs::File,
+    dependencies: DependencyModels,
+    chunk_size: usize,
+) {
+    use capnp::{message::Builder, serialize_packed};
+
+    let mut dependencies = dependencies;
+    let edges = mem::take(&mut dependencies.edges);
+
+    let mut message = Builder::new_default();
+    let mut root = message.init_root();
+    dependencies.write_capnp(&mut root);
+    serialize_packed::write_message(&mut *file, &message).unwrap();
+
+    let chunk_count = chunk_count(edges.len(), chunk_size);
+    for chunk_index in 0..chunk_count {
+        let mut message = Builder::new_default();
+        let mut root = message.init_root();
+        DependencyModels {
+            collections: vec![],
+            samples: vec![],
+            sequences: vec![],
+            block_group: vec![],
+            nodes: vec![],
+            edges: chunk_slice(&edges, chunk_index, chunk_size).to_vec(),
+            paths: vec![],
+            accessions: vec![],
+            accession_nodes: vec![],
+        }
+        .write_capnp(&mut root);
+        serialize_packed::write_message(&mut *file, &message).unwrap();
+    }
+}
+
+fn chunk_count(length: usize, chunk_size: usize) -> usize {
+    if length == 0 {
+        0
+    } else {
+        (length - 1) / chunk_size + 1
+    }
+}
+
+fn chunk_slice<T>(items: &[T], chunk_index: usize, chunk_size: usize) -> &[T] {
+    let start = chunk_index * chunk_size;
+    if start >= items.len() {
+        &[]
+    } else {
+        let end = (start + chunk_size).min(items.len());
+        &items[start..end]
+    }
+}
+
+fn chunked_changeset_models(
+    edges: &[Edge],
+    block_group_edges: &[BlockGroupEdge],
+    chunk_index: usize,
+    chunk_size: usize,
+) -> ChangesetModels {
+    ChangesetModels {
+        collections: vec![],
+        samples: vec![],
+        sample_lineages: vec![],
+        sequences: vec![],
+        block_groups: vec![],
+        nodes: vec![],
+        edges: chunk_slice(edges, chunk_index, chunk_size).to_vec(),
+        block_group_edges: chunk_slice(block_group_edges, chunk_index, chunk_size).to_vec(),
+        paths: vec![],
+        path_edges: vec![],
+        accessions: vec![],
+        accession_nodes: vec![],
+        annotation_groups: vec![],
+        annotations: vec![],
+        annotation_group_samples: vec![],
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use chrono::Utc;
 
     use super::*;
@@ -1565,6 +1796,250 @@ mod tests {
         let deserialized = ChangesetModels::read_capnp(root.into_reader());
 
         assert_eq!(changeset_models, deserialized);
+    }
+
+    #[test]
+    fn test_changeset_models_chunked_edge_serialization() {
+        use capnp::message::TypedBuilder;
+        use gen_core::Strand;
+
+        let edges = vec![
+            Edge {
+                id: HashId::pad_str(1),
+                source_node_id: HashId::convert_str("1"),
+                source_coordinate: 0,
+                source_strand: Strand::Forward,
+                target_node_id: HashId::convert_str("2"),
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+            },
+            Edge {
+                id: HashId::pad_str(2),
+                source_node_id: HashId::convert_str("2"),
+                source_coordinate: 0,
+                source_strand: Strand::Forward,
+                target_node_id: HashId::convert_str("3"),
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+            },
+            Edge {
+                id: HashId::pad_str(3),
+                source_node_id: HashId::convert_str("3"),
+                source_coordinate: 0,
+                source_strand: Strand::Forward,
+                target_node_id: HashId::convert_str("4"),
+                target_coordinate: 0,
+                target_strand: Strand::Forward,
+            },
+        ];
+        let block_group_edges = vec![
+            crate::block_group_edge::BlockGroupEdge {
+                id: HashId::pad_str(11),
+                block_group_id: HashId::pad_str(1),
+                edge_id: HashId::pad_str(1),
+                chromosome_index: 0,
+                phased: 0,
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            },
+            crate::block_group_edge::BlockGroupEdge {
+                id: HashId::pad_str(12),
+                block_group_id: HashId::pad_str(1),
+                edge_id: HashId::pad_str(2),
+                chromosome_index: 1,
+                phased: 0,
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            },
+            crate::block_group_edge::BlockGroupEdge {
+                id: HashId::pad_str(13),
+                block_group_id: HashId::pad_str(1),
+                edge_id: HashId::pad_str(3),
+                chromosome_index: 2,
+                phased: 0,
+                created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            },
+        ];
+
+        let changeset_models = ChangesetModels {
+            collections: vec![],
+            samples: vec![],
+            sample_lineages: vec![],
+            sequences: vec![],
+            block_groups: vec![],
+            nodes: vec![],
+            edges: edges.clone(),
+            block_group_edges: block_group_edges.clone(),
+            paths: vec![],
+            path_edges: vec![],
+            accessions: vec![],
+            accession_nodes: vec![],
+            annotation_groups: vec![],
+            annotations: vec![],
+            annotation_group_samples: vec![],
+        };
+
+        let mut message = TypedBuilder::<changeset_models::Owned>::new_default();
+        let mut root = message.init_root();
+        write_edge_chunks(&mut root, &changeset_models.edges, 2);
+        write_block_group_edge_chunks(&mut root, &changeset_models.block_group_edges, 2);
+
+        let deserialized = ChangesetModels::read_capnp(root.into_reader());
+
+        assert_eq!(deserialized.edges, edges);
+        assert_eq!(deserialized.block_group_edges, block_group_edges);
+    }
+
+    #[test]
+    fn test_chunked_changeset_round_trip_across_multiple_messages() {
+        use tempfile::NamedTempFile;
+
+        fn make_changeset() -> DatabaseChangeset {
+            DatabaseChangeset {
+                db_path: "/tmp/test_db_path".to_string(),
+                changes: ChangesetModels {
+                    collections: vec![crate::collection::Collection {
+                        name: "test_collection".to_string(),
+                    }],
+                    samples: vec![],
+                    sample_lineages: vec![],
+                    sequences: vec![],
+                    block_groups: vec![],
+                    nodes: vec![],
+                    edges: vec![
+                        Edge {
+                            id: HashId::pad_str(1),
+                            source_node_id: HashId::convert_str("1"),
+                            source_coordinate: 0,
+                            source_strand: Strand::Forward,
+                            target_node_id: HashId::convert_str("2"),
+                            target_coordinate: 0,
+                            target_strand: Strand::Forward,
+                        },
+                        Edge {
+                            id: HashId::pad_str(2),
+                            source_node_id: HashId::convert_str("2"),
+                            source_coordinate: 0,
+                            source_strand: Strand::Forward,
+                            target_node_id: HashId::convert_str("3"),
+                            target_coordinate: 0,
+                            target_strand: Strand::Forward,
+                        },
+                        Edge {
+                            id: HashId::pad_str(3),
+                            source_node_id: HashId::convert_str("3"),
+                            source_coordinate: 0,
+                            source_strand: Strand::Forward,
+                            target_node_id: HashId::convert_str("4"),
+                            target_coordinate: 0,
+                            target_strand: Strand::Forward,
+                        },
+                    ],
+                    block_group_edges: vec![
+                        crate::block_group_edge::BlockGroupEdge {
+                            id: HashId::pad_str(11),
+                            block_group_id: HashId::pad_str(1),
+                            edge_id: HashId::pad_str(1),
+                            chromosome_index: 0,
+                            phased: 0,
+                            created_on: 1,
+                        },
+                        crate::block_group_edge::BlockGroupEdge {
+                            id: HashId::pad_str(12),
+                            block_group_id: HashId::pad_str(1),
+                            edge_id: HashId::pad_str(2),
+                            chromosome_index: 1,
+                            phased: 0,
+                            created_on: 2,
+                        },
+                        crate::block_group_edge::BlockGroupEdge {
+                            id: HashId::pad_str(13),
+                            block_group_id: HashId::pad_str(1),
+                            edge_id: HashId::pad_str(3),
+                            chromosome_index: 2,
+                            phased: 0,
+                            created_on: 3,
+                        },
+                    ],
+                    paths: vec![],
+                    path_edges: vec![],
+                    accessions: vec![],
+                    accession_nodes: vec![],
+                    annotation_groups: vec![],
+                    annotations: vec![],
+                    annotation_group_samples: vec![],
+                },
+            }
+        }
+
+        let changeset = make_changeset();
+        let expected = make_changeset();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        write_chunked_changeset(temp_file.as_file_mut(), changeset, 2);
+        temp_file.flush().unwrap();
+
+        let deserialized = get_changeset_from_path(temp_file.path().to_path_buf());
+
+        assert_eq!(deserialized, expected);
+    }
+
+    #[test]
+    fn test_chunked_dependency_models_round_trip_across_multiple_messages() {
+        use tempfile::NamedTempFile;
+
+        fn make_dependencies() -> DependencyModels {
+            DependencyModels {
+                collections: vec![crate::collection::Collection {
+                    name: "test_collection".to_string(),
+                }],
+                samples: vec![],
+                sequences: vec![],
+                block_group: vec![],
+                nodes: vec![],
+                edges: vec![
+                    Edge {
+                        id: HashId::pad_str(1),
+                        source_node_id: HashId::convert_str("1"),
+                        source_coordinate: 0,
+                        source_strand: Strand::Forward,
+                        target_node_id: HashId::convert_str("2"),
+                        target_coordinate: 0,
+                        target_strand: Strand::Forward,
+                    },
+                    Edge {
+                        id: HashId::pad_str(2),
+                        source_node_id: HashId::convert_str("2"),
+                        source_coordinate: 0,
+                        source_strand: Strand::Forward,
+                        target_node_id: HashId::convert_str("3"),
+                        target_coordinate: 0,
+                        target_strand: Strand::Forward,
+                    },
+                    Edge {
+                        id: HashId::pad_str(3),
+                        source_node_id: HashId::convert_str("3"),
+                        source_coordinate: 0,
+                        source_strand: Strand::Forward,
+                        target_node_id: HashId::convert_str("4"),
+                        target_coordinate: 0,
+                        target_strand: Strand::Forward,
+                    },
+                ],
+                paths: vec![],
+                accessions: vec![],
+                accession_nodes: vec![],
+            }
+        }
+
+        let dependencies = make_dependencies();
+        let expected = make_dependencies();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        write_chunked_dependency_models(temp_file.as_file_mut(), dependencies, 2);
+        temp_file.flush().unwrap();
+
+        let deserialized = get_changeset_dependencies_from_path(temp_file.path().to_path_buf());
+
+        assert_eq!(deserialized, expected);
     }
 
     #[test]

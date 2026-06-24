@@ -48,6 +48,10 @@ struct Edge {
   targetStrand @6 :Core.Strand;
 }
 
+struct EdgeChunk {
+  values @0 :List(Edge);
+}
+
 # Collection and sample models
 struct Collection {
   name @0 :Text;
@@ -84,6 +88,10 @@ struct BlockGroupEdge {
   chromosomeIndex @3 :Int64;
   phased @4 :Int64;
   createdOn @5 :Int64;
+}
+
+struct BlockGroupEdgeChunk {
+  values @0 :List(BlockGroupEdge);
 }
 
 # Path models
@@ -281,8 +289,8 @@ struct ChangesetModels {
   sequences @2 :List(Sequence);
   blockGroups @3 :List(BlockGroup);
   nodes @4 :List(Node);
-  edges @5 :List(Edge);
-  blockGroupEdges @6 :List(BlockGroupEdge);
+  edgeChunks @5 :List(EdgeChunk);
+  blockGroupEdgeChunks @6 :List(BlockGroupEdgeChunk);
   paths @7 :List(Path);
   pathEdges @8 :List(PathEdge);
   accessions @9 :List(Accession);
@@ -299,7 +307,7 @@ struct DependencyModels {
   sequences @2 :List(Sequence);
   blockGroup @3 :List(BlockGroup);
   nodes @4 :List(Node);
-  edges @5 :List(Edge);
+  edgeChunks @5 :List(EdgeChunk);
   paths @6 :List(Path);
   accessions @7 :List(Accession);
   accessionNodes @8 :List(AccessionNode);

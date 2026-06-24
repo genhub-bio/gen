@@ -779,7 +779,7 @@ pub fn add_annotation_file(
             db_path: gen_db.path,
             changes: ChangesetModels::default(),
         },
-        &DependencyModels::default(),
+        DependencyModels::default(),
     );
 
     if file_type != FileTypes::Changeset && file_type != FileTypes::None {

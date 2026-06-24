@@ -241,28 +241,28 @@ SUM=$(echo "${HG96_IMPORT} + ${HG97_IMPORT}" | bc)
 read -r BOTH_SIZE BOTH_GEN_DB_SIZE BOTH_DEFAULT_DB_SIZE <<< "$(get_size)"
 record_result "HG00096 + HG00097 Update" "${SUM}" "${BOTH_SIZE}" "${BOTH_GEN_DB_SIZE}" "${BOTH_DEFAULT_DB_SIZE}"
 
-# echo "switch branch benchmark"
-# setup_hg_branch_switch_repo
-# SWITCH_BRANCH=$(run_benchmark "Switch HG branch" ${PROFILE_BIN} profile checkout branch-b)
-# read -r SWITCH_BRANCH_SIZE SWITCH_BRANCH_GEN_DB_SIZE SWITCH_BRANCH_DEFAULT_DB_SIZE <<< "$(get_size)"
-# record_result "Switch HG branch" "${SWITCH_BRANCH}" "${SWITCH_BRANCH_SIZE}" "${SWITCH_BRANCH_GEN_DB_SIZE}" "${SWITCH_BRANCH_DEFAULT_DB_SIZE}"
+echo "switch branch benchmark"
+setup_hg_branch_switch_repo
+SWITCH_BRANCH=$(run_benchmark "Switch HG branch" ${PROFILE_BIN} profile checkout branch-b)
+read -r SWITCH_BRANCH_SIZE SWITCH_BRANCH_GEN_DB_SIZE SWITCH_BRANCH_DEFAULT_DB_SIZE <<< "$(get_size)"
+record_result "Switch HG branch" "${SWITCH_BRANCH}" "${SWITCH_BRANCH_SIZE}" "${SWITCH_BRANCH_GEN_DB_SIZE}" "${SWITCH_BRANCH_DEFAULT_DB_SIZE}"
 
-# echo "merge benchmark"
-# setup_hg_branch_apply_repo
-# MERGE_BRANCH=$(run_benchmark "Merge HG branch" ${PROFILE_BIN} profile merge branch-a)
-# read -r MERGE_BRANCH_SIZE MERGE_BRANCH_GEN_DB_SIZE MERGE_BRANCH_DEFAULT_DB_SIZE <<< "$(get_size)"
-# record_result "Merge HG branch" "${MERGE_BRANCH}" "${MERGE_BRANCH_SIZE}" "${MERGE_BRANCH_GEN_DB_SIZE}" "${MERGE_BRANCH_DEFAULT_DB_SIZE}"
+echo "merge benchmark"
+setup_hg_branch_apply_repo
+MERGE_BRANCH=$(run_benchmark "Merge HG branch" ${PROFILE_BIN} profile merge branch-a)
+read -r MERGE_BRANCH_SIZE MERGE_BRANCH_GEN_DB_SIZE MERGE_BRANCH_DEFAULT_DB_SIZE <<< "$(get_size)"
+record_result "Merge HG branch" "${MERGE_BRANCH}" "${MERGE_BRANCH_SIZE}" "${MERGE_BRANCH_GEN_DB_SIZE}" "${MERGE_BRANCH_DEFAULT_DB_SIZE}"
 
-# echo "apply benchmark"
-# setup_hg_branch_apply_repo
-# APPLY_OPERATION=$(run_benchmark "Apply HG operation" ${PROFILE_BIN} profile apply ${BRANCH_A_HASH})
-# read -r APPLY_OPERATION_SIZE APPLY_OPERATION_GEN_DB_SIZE APPLY_OPERATION_DEFAULT_DB_SIZE <<< "$(get_size)"
-# record_result "Apply HG operation" "${APPLY_OPERATION}" "${APPLY_OPERATION_SIZE}" "${APPLY_OPERATION_GEN_DB_SIZE}" "${APPLY_OPERATION_DEFAULT_DB_SIZE}"
+echo "apply benchmark"
+setup_hg_branch_apply_repo
+APPLY_OPERATION=$(run_benchmark "Apply HG operation" ${PROFILE_BIN} profile apply ${BRANCH_A_HASH})
+read -r APPLY_OPERATION_SIZE APPLY_OPERATION_GEN_DB_SIZE APPLY_OPERATION_DEFAULT_DB_SIZE <<< "$(get_size)"
+record_result "Apply HG operation" "${APPLY_OPERATION}" "${APPLY_OPERATION_SIZE}" "${APPLY_OPERATION_GEN_DB_SIZE}" "${APPLY_OPERATION_DEFAULT_DB_SIZE}"
 
-# echo "reset benchmark"
-# setup_hg_reset_repo
-# RESET_OPERATION=$(run_benchmark "Reset HG operation" ${PROFILE_BIN} profile reset ${RESET_HASH})
-# read -r RESET_OPERATION_SIZE RESET_OPERATION_GEN_DB_SIZE RESET_OPERATION_DEFAULT_DB_SIZE <<< "$(get_size)"
-# record_result "Reset HG operation" "${RESET_OPERATION}" "${RESET_OPERATION_SIZE}" "${RESET_OPERATION_GEN_DB_SIZE}" "${RESET_OPERATION_DEFAULT_DB_SIZE}"
+echo "reset benchmark"
+setup_hg_reset_repo
+RESET_OPERATION=$(run_benchmark "Reset HG operation" ${PROFILE_BIN} profile reset ${RESET_HASH})
+read -r RESET_OPERATION_SIZE RESET_OPERATION_GEN_DB_SIZE RESET_OPERATION_DEFAULT_DB_SIZE <<< "$(get_size)"
+record_result "Reset HG operation" "${RESET_OPERATION}" "${RESET_OPERATION_SIZE}" "${RESET_OPERATION_GEN_DB_SIZE}" "${RESET_OPERATION_DEFAULT_DB_SIZE}"
 
 print_results

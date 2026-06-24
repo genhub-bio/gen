@@ -425,7 +425,7 @@ mod tests {
                 db_path: "diff.db".to_string(),
                 changes: changeset,
             },
-            &dependencies,
+            dependencies,
         );
 
         let diffs = collect_operation_diff(workspace, op_conn, Some(base_op.hash), head.hash, None)
@@ -477,7 +477,7 @@ mod tests {
                 db_path: "diff.db".to_string(),
                 changes: changeset,
             },
-            &dependencies,
+            dependencies,
         );
 
         let diffs =
@@ -530,7 +530,7 @@ mod tests {
                 db_path: "diff.db".to_string(),
                 changes: changeset_one,
             },
-            &dependencies_one,
+            dependencies_one,
         );
 
         let bg_two = BlockGroup {
@@ -561,7 +561,7 @@ mod tests {
                 db_path: "diff.db".to_string(),
                 changes: changeset_two,
             },
-            &dependencies_two,
+            dependencies_two,
         );
 
         let diffs = collect_operation_diff(workspace, op_conn, Some(op1.hash), op3.hash, None)
@@ -626,7 +626,7 @@ mod tests {
                 db_path: "diff.db".to_string(),
                 changes: main_changeset,
             },
-            &main_deps,
+            main_deps,
         );
 
         let feature_branch = Branch::create_with_remote(op_conn, "feature", None).unwrap();
@@ -667,7 +667,7 @@ mod tests {
                 db_path: "diff.db".to_string(),
                 changes: feature_changeset,
             },
-            &feature_deps,
+            feature_deps,
         );
 
         let diffs = collect_operation_diff(
@@ -730,7 +730,7 @@ mod tests {
                 db_path: "db-one.db".to_string(),
                 changes: changeset_one,
             },
-            &deps_one,
+            deps_one,
         );
 
         let block_group_two = BlockGroup {
@@ -766,7 +766,7 @@ mod tests {
                 db_path: "db-two.db".to_string(),
                 changes: changeset_two,
             },
-            &deps_two,
+            deps_two,
         );
 
         let diffs = collect_operation_diff(
