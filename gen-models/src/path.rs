@@ -875,24 +875,40 @@ impl RegionResolver for Path {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = Path::query(
-            conn,
-            "SELECT paths.* \
+        let mut stmt = conn
+            .prepare(
+                "SELECT paths.*, block_groups.is_default \
              FROM paths \
              JOIN block_groups ON paths.block_group_id = block_groups.id \
              WHERE block_groups.collection_name = ?1 \
                AND block_groups.sample_name = ?2 \
                AND lower(paths.name) = lower(?3)",
-            params![collection_name, sample_name, region.name],
-        );
+            )
+            .map_err(PathError::DatabaseError)?;
+        let matches = stmt
+            .query_map(params![collection_name, sample_name, region.name], |row| {
+                Ok((Self::process_row(row), row.get::<_, bool>(4)?))
+            })
+            .map_err(PathError::DatabaseError)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PathError::DatabaseError)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),
-            1 => Ok(matches.into_iter().next().unwrap()),
-            _ => Err(RegionResolutionError::Ambiguous(format!(
-                "multiple paths named {}",
-                region.name
-            ))),
+            1 => Ok(matches.into_iter().next().unwrap().0),
+            _ => {
+                let default_matches = matches
+                    .into_iter()
+                    .filter(|(_, is_default)| *is_default)
+                    .collect::<Vec<_>>();
+                match default_matches.len() {
+                    1 => Ok(default_matches.into_iter().next().unwrap().0),
+                    _ => Err(RegionResolutionError::Ambiguous(format!(
+                        "multiple paths named {}",
+                        region.name
+                    ))),
+                }
+            }
         }
     }
 }
@@ -1046,6 +1062,160 @@ mod tests {
                 }],
             );
             let _ = Path::create(conn, "CHR1", &other_block_group.id, &[other_edge.id]).unwrap();
+
+            let region = Region::parse("chr1").unwrap();
+            let err = Path::resolve(&region, conn, "test collection", "test-sample").unwrap_err();
+            assert!(matches!(
+                err,
+                RegionResolutionError::Ambiguous(name) if name == "multiple paths named chr1"
+            ));
+        }
+
+        #[test]
+        fn resolves_default_block_group_when_multiple_paths_match() {
+            let conn = &get_connection(None).unwrap();
+            Collection::create(conn, "test collection").unwrap();
+            let non_default_block_group = create_test_block_group(conn);
+            let default_block_group = BlockGroup::create(
+                conn,
+                NewBlockGroup {
+                    collection_name: "test collection",
+                    sample_name: "test-sample",
+                    name: "default block group",
+                    is_default: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE block_groups SET is_default = 0 WHERE id = ?1",
+                params![non_default_block_group.id],
+            )
+            .unwrap();
+
+            let non_default_edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: non_default_block_group.id,
+                    edge_id: non_default_edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let non_default_path = Path::create(
+                conn,
+                "chr1",
+                &non_default_block_group.id,
+                &[non_default_edge.id],
+            )
+            .unwrap();
+
+            let default_edge = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: default_block_group.id,
+                    edge_id: default_edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let default_path =
+                Path::create(conn, "chr1", &default_block_group.id, &[default_edge.id]).unwrap();
+
+            let region = Region::parse("chr1").unwrap();
+            let resolved = Path::resolve(&region, conn, "test collection", "test-sample").unwrap();
+            assert_eq!(resolved.id, default_path.id);
+            assert_ne!(resolved.id, non_default_path.id);
+        }
+
+        #[test]
+        fn returns_ambiguous_for_multiple_default_block_groups() {
+            let conn = &get_connection(None).unwrap();
+            Collection::create(conn, "test collection").unwrap();
+            let default_block_group_a = create_bg(
+                conn,
+                "test collection",
+                "test-sample",
+                "default block group a",
+            );
+            let default_block_group_b = create_bg(
+                conn,
+                "test collection",
+                "test-sample",
+                "default block group b",
+            );
+            conn.execute(
+                "UPDATE block_groups SET is_default = 1 WHERE id = ?1",
+                params![default_block_group_a.id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE block_groups SET is_default = 1 WHERE id = ?1",
+                params![default_block_group_b.id],
+            )
+            .unwrap();
+
+            let edge_a = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: default_block_group_a.id,
+                    edge_id: edge_a.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let _ = Path::create(conn, "chr1", &default_block_group_a.id, &[edge_a.id]).unwrap();
+
+            let edge_b = Edge::create(
+                conn,
+                PATH_START_NODE_ID,
+                0,
+                Strand::Forward,
+                PATH_END_NODE_ID,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[BlockGroupEdgeData {
+                    block_group_id: default_block_group_b.id,
+                    edge_id: edge_b.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                }],
+            );
+            let _ = Path::create(conn, "chr1", &default_block_group_b.id, &[edge_b.id]).unwrap();
 
             let region = Region::parse("chr1").unwrap();
             let err = Path::resolve(&region, conn, "test collection", "test-sample").unwrap_err();
