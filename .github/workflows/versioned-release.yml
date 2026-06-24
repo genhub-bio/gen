@@ -52,7 +52,9 @@ jobs:
           cargo set-version -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen --bump "$RELEASE_TYPE"
           uv version --no-sync --bump "$RELEASE_TYPE"
           version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
-          OLD_VERSION="$old_version" VERSION="$version" perl -0pi -e 's/(gen(?:-[A-Za-z0-9_-]+)?\s*=\s*\{[^}\n]*\bversion\s*=\s*")\Q$ENV{OLD_VERSION}\E(")/$1$ENV{VERSION}$2/g' Cargo.toml gen-*/Cargo.toml gen-r/src/rust/Cargo.toml
+          old_version_pattern=${old_version//./\\.}
+          sed -E -i.bak "s/(gen(-[A-Za-z0-9_-]+)?[[:space:]]*=[[:space:]]*[{][^}]*version[[:space:]]*=[[:space:]]*\")${old_version_pattern}(\")/\\1${version}\\3/g" Cargo.toml gen-*/Cargo.toml gen-r/src/rust/Cargo.toml
+          rm -f Cargo.toml.bak gen-*/Cargo.toml.bak gen-r/src/rust/Cargo.toml.bak
           cargo update -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen
           cargo update --manifest-path gen-python/Cargo.toml -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen
           cargo update --manifest-path gen-r/src/rust/Cargo.toml -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen
