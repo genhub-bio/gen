@@ -14,7 +14,7 @@ use gen_models::{
     operations::{Operation, OperationFile, OperationInfo},
     path::Path,
     reference_alias::ReferenceAlias,
-    region::{ResolvedGenRegion, ResolvedRegionKind},
+    region::{Region, ResolvedGenRegion, ResolvedRegionKind, resolve_path},
     sample::Sample,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
@@ -152,9 +152,12 @@ fn prepare_change(
     sequence_length: i64,
     node_id: HashId,
     preserve_edge: bool,
-) -> BlockGroupChange {
-    region.start = ref_start;
-    region.end = ref_end;
+) -> Result<BlockGroupChange, BlockGroupError> {
+    let (start, end) = region
+        .offset_range(ref_start, ref_end)
+        .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?;
+    region.start = start;
+    region.end = end;
     let new_block = PathBlock {
         node_id,
         block_sequence,
@@ -164,47 +167,128 @@ fn prepare_change(
         path_end: ref_end,
         strand: Strand::Forward,
     };
-    BlockGroupChange {
+    Ok(BlockGroupChange {
         region,
         path_accession: ids,
         block: new_block,
         chromosome_index,
         phased,
         preserve_edge,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_vcf_entry(
+    path_region_cache: &mut HashMap<(HashId, String), ResolvedGenRegion>,
+    parent_bg_cache: &mut HashMap<HashId, Option<HashId>>,
+    sequence_cache: &mut SequenceCache<'_>,
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+    sample_bg_id: &HashId,
+    seq_name: &str,
+    ids: Option<String>,
+    ref_start: i64,
+    ref_end: i64,
+    chromosome_index: i64,
+    phased: i64,
+    alt_seq: String,
+    has_ref: bool,
+) -> Result<VcfEntry, VcfError> {
+    let path_region = lookup_path_region(
+        path_region_cache,
+        conn,
+        collection_name,
+        sample_name,
+        sample_bg_id,
+        seq_name,
+    )?;
+    let source_bg_id = lookup_parent_bg_id(parent_bg_cache, conn, sample_bg_id)?;
+    let source_region = lookup_path_region(
+        path_region_cache,
+        conn,
+        collection_name,
+        sample_name,
+        source_bg_id.as_ref().unwrap_or(sample_bg_id),
+        seq_name,
+    )?;
+    let sequence = SequenceCache::lookup(sequence_cache, "DNA", alt_seq)?;
+    let sequence_string = sequence.get_sequence(None, None)?;
+    let source_path_id = source_region.path.as_ref().unwrap().id;
+    let node_id = Node::create(
+        conn,
+        &sequence.hash,
+        &HashId::convert_str(&format!(
+            "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
+            path_id = source_path_id,
+            sequence_hash = sequence.hash
+        )),
+    )?;
+    let change = prepare_change(
+        path_region,
+        ids,
+        ref_start,
+        ref_end,
+        chromosome_index,
+        phased,
+        sequence_string.clone(),
+        sequence_string.len() as i64,
+        node_id,
+        has_ref,
+    )?;
+    Ok(VcfEntry {
+        sample_name: sample_name.to_string(),
+        change,
+    })
+}
+
+fn lookup_parent_bg_id(
+    parent_bg_cache: &mut HashMap<HashId, Option<HashId>>,
+    conn: &GraphConnection,
+    sample_bg_id: &HashId,
+) -> Result<Option<HashId>, VcfError> {
+    if let Some(parent_bg_id) = parent_bg_cache.get(sample_bg_id) {
+        return Ok(*parent_bg_id);
     }
+
+    let parent_bg_id = BlockGroup::get_by_id(conn, sample_bg_id)?.parent_block_group_id;
+    parent_bg_cache.insert(*sample_bg_id, parent_bg_id);
+    Ok(parent_bg_id)
 }
 
 fn lookup_path_region(
-    path_region_cache: &mut HashMap<Path, ResolvedGenRegion>,
+    path_region_cache: &mut HashMap<(HashId, String), ResolvedGenRegion>,
     conn: &GraphConnection,
-    sample_path: &Path,
+    collection_name: &str,
+    sample_name: &str,
+    block_group_id: &HashId,
+    seq_name: &str,
 ) -> Result<ResolvedGenRegion, BlockGroupError> {
-    Ok(match path_region_cache.entry(sample_path.clone()) {
+    let cache_key = (*block_group_id, seq_name.to_string());
+    Ok(match path_region_cache.entry(cache_key) {
         Entry::Occupied(entry) => entry.get().clone(),
         Entry::Vacant(entry) => entry
-            .insert(ResolvedGenRegion::from_path(
-                conn,
-                sample_path.block_group_id,
-                sample_path,
-                0,
-                0,
-            )?)
+            .insert(
+                resolve_path(
+                    &Region {
+                        name: seq_name.to_string(),
+                        start: None,
+                        end: None,
+                    },
+                    conn,
+                    collection_name,
+                    sample_name,
+                )
+                .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?,
+            )
             .clone(),
     })
 }
 
 #[derive(Debug)]
 struct VcfEntry {
-    block_group_id: HashId,
     sample_name: String,
-    path: Path,
-    ids: Option<String>,
-    ref_start: i64,
-    region: ResolvedGenRegion,
-    alt_seq: String,
-    chromosome_index: i64,
-    phased: i64,
-    preserve_reference: bool,
+    change: BlockGroupChange,
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -273,11 +357,11 @@ pub fn update_with_vcf(
     let mut path_cache = PathCache::new(conn);
     let mut sequence_cache = SequenceCache::new(conn);
     let mut accession_cache = HashMap::new();
-    let mut path_region_cache: HashMap<Path, ResolvedGenRegion> = HashMap::new();
+    let mut path_region_cache: HashMap<(HashId, String), ResolvedGenRegion> = HashMap::new();
+    let mut parent_bg_cache: HashMap<HashId, Option<HashId>> = HashMap::new();
 
     let mut changes: HashMap<(Path, String), Vec<BlockGroupChange>> = HashMap::new();
 
-    let mut node_source_paths: HashMap<HashId, HashId> = HashMap::new();
     let mut resolved_parent_samples: HashMap<String, Vec<String>> = HashMap::new();
     let mut created_samples: HashSet<&str> = HashSet::new();
 
@@ -388,31 +472,28 @@ pub fn update_with_vcf(
                             Phasing::Phased => 1,
                             Phasing::Unphased => 0,
                         };
+                        if alt_seq == "*" {
+                            continue;
+                        }
                         for sample_bg_id in &sample_bg_ids {
-                            let sample_path =
-                                PathCache::lookup(&mut path_cache, sample_bg_id, seq_name.clone())?;
-                            let path_region =
-                                lookup_path_region(&mut path_region_cache, conn, &sample_path)?;
-
-                            if ref_start > path_region.feature_length {
-                                return Err(VcfError::InvalidRecord(format!(
-                                    "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
-                                    sample_path.name,
-                                    path_length = path_region.feature_length
-                                )));
-                            }
-                            vcf_entries.push(VcfEntry {
-                                ids: allele_accession.clone(),
+                            let entry = prepare_vcf_entry(
+                                &mut path_region_cache,
+                                &mut parent_bg_cache,
+                                &mut sequence_cache,
+                                conn,
+                                collection_name,
+                                fixed_sample,
+                                sample_bg_id,
+                                &seq_name,
+                                allele_accession.clone(),
                                 ref_start,
-                                block_group_id: *sample_bg_id,
-                                region: path_region,
-                                path: sample_path.clone(),
-                                sample_name: fixed_sample.to_string(),
-                                alt_seq: alt_seq.clone(),
-                                chromosome_index: chromosome_index as i64,
+                                ref_end,
+                                chromosome_index as i64,
                                 phased,
-                                preserve_reference: has_ref,
-                            });
+                                alt_seq.clone(),
+                                has_ref,
+                            )?;
+                            vcf_entries.push(entry);
                         }
                     } else if let Some(ref_accession) = allele_accession {
                         for sample_bg_id in &sample_bg_ids {
@@ -501,38 +582,28 @@ pub fn update_with_vcf(
                                             alt_seq = alt_seq[1..].to_string();
                                         }
                                     }
+                                    if alt_seq == "*" {
+                                        continue;
+                                    }
                                     for sample_bg_id in &sample_bg_ids {
-                                        let sample_path = PathCache::lookup(
-                                            &mut path_cache,
-                                            sample_bg_id,
-                                            seq_name.clone(),
-                                        )?;
-                                        let path_region = lookup_path_region(
+                                        let entry = prepare_vcf_entry(
                                             &mut path_region_cache,
+                                            &mut parent_bg_cache,
+                                            &mut sequence_cache,
                                             conn,
-                                            &sample_path,
-                                        )?;
-
-                                        if ref_start > path_region.feature_length {
-                                            return Err(VcfError::InvalidRecord(format!(
-                                                "Invalid position found. Path {0} has length of {path_length}, change is in position {ref_start}.",
-                                                sample_path.name,
-                                                path_length = path_region.feature_length
-                                            )));
-                                        }
-
-                                        vcf_entries.push(VcfEntry {
-                                            ids: allele_accession.clone(),
-                                            block_group_id: *sample_bg_id,
+                                            collection_name,
+                                            sample_name,
+                                            sample_bg_id,
+                                            &seq_name,
+                                            allele_accession.clone(),
                                             ref_start,
-                                            region: path_region,
-                                            path: sample_path.clone(),
-                                            sample_name: sample_name.to_string(),
-                                            alt_seq: alt_seq.clone(),
-                                            chromosome_index: chromosome_index as i64,
+                                            ref_end,
+                                            chromosome_index as i64,
                                             phased,
-                                            preserve_reference: has_ref,
-                                        });
+                                            alt_seq.clone(),
+                                            has_ref,
+                                        )?;
+                                        vcf_entries.push(entry);
                                     }
                                 } else if let Some(ref_accession) = allele_accession {
                                     for sample_bg_id in &sample_bg_ids {
@@ -560,59 +631,13 @@ pub fn update_with_vcf(
         }
 
         for vcf_entry in vcf_entries {
-            // * indicates this allele is removed by another deletion in the sample
-            if vcf_entry.alt_seq == "*" {
-                continue;
-            }
-            let ref_start = vcf_entry.ref_start;
-            let sequence =
-                SequenceCache::lookup(&mut sequence_cache, "DNA", vcf_entry.alt_seq.to_string())?;
-            let sequence_string = sequence.get_sequence(None, None)?;
-
-            let source_path_id =
-                if let Some(source_path_id) = node_source_paths.get(&vcf_entry.path.id) {
-                    *source_path_id
-                } else {
-                    let block_group = BlockGroup::get_by_id(conn, &vcf_entry.block_group_id)?;
-                    if let Some(parent_block_group_id) = block_group.parent_block_group_id {
-                        let parent_path = PathCache::lookup(
-                            &mut path_cache,
-                            &parent_block_group_id,
-                            vcf_entry.path.name.clone(),
-                        )?;
-                        node_source_paths.insert(vcf_entry.path.id, parent_path.id);
-                        parent_path.id
-                    } else {
-                        node_source_paths.insert(vcf_entry.path.id, vcf_entry.path.id);
-                        vcf_entry.path.id
-                    }
-                };
-
-            let node_id = Node::create(
-                conn,
-                &sequence.hash,
-                &HashId::convert_str(&format!(
-                    "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                    path_id = source_path_id,
-                    sequence_hash = sequence.hash
-                )),
-            )?;
-            let change = prepare_change(
-                vcf_entry.region.clone(),
-                vcf_entry.ids,
-                ref_start,
-                ref_end,
-                vcf_entry.chromosome_index,
-                vcf_entry.phased,
-                sequence_string.clone(),
-                sequence_string.len() as i64,
-                node_id,
-                vcf_entry.preserve_reference,
-            );
             changes
-                .entry((vcf_entry.path, vcf_entry.sample_name))
+                .entry((
+                    vcf_entry.change.region.path.clone().unwrap(),
+                    vcf_entry.sample_name,
+                ))
                 .or_default()
-                .push(change);
+                .push(vcf_entry.change);
         }
         bar.inc(1);
     }
@@ -916,7 +941,12 @@ mod tests {
             vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
-        assert!(matches!(res, Err(VcfError::InvalidRecord(_))));
+        assert!(matches!(
+            res,
+            Err(VcfError::BlockGroupError(
+                BlockGroupError::ChangeOutOfBounds(_)
+            ))
+        ));
     }
 
     #[test]
