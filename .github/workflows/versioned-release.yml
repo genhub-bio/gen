@@ -46,10 +46,13 @@ jobs:
         env:
           RELEASE_TYPE: ${{ github.event.inputs.release_type }}
         run: |
+          old_version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
           cargo set-version --manifest-path gen-python/Cargo.toml --bump "$RELEASE_TYPE"
           cargo set-version --manifest-path gen-r/src/rust/Cargo.toml --bump "$RELEASE_TYPE"
           cargo set-version -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen --bump "$RELEASE_TYPE"
           uv version --no-sync --bump "$RELEASE_TYPE"
+          version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
+          OLD_VERSION="$old_version" VERSION="$version" perl -0pi -e 's/(gen(?:-[A-Za-z0-9_-]+)?\s*=\s*\{[^}\n]*\bversion\s*=\s*")\Q$ENV{OLD_VERSION}\E(")/$1$ENV{VERSION}$2/g' Cargo.toml gen-*/Cargo.toml gen-r/src/rust/Cargo.toml
           cargo update -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen
           cargo update --manifest-path gen-python/Cargo.toml -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen
           cargo update --manifest-path gen-r/src/rust/Cargo.toml -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models -p gen-sugiyama -p gen-tui -p gen
