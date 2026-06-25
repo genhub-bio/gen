@@ -7,8 +7,10 @@ use crate::errors::QueryError;
 
 /// Returns the SQLite variable parameter limit for the provided connection.
 pub fn sqlite_parameter_limit(conn: &Connection) -> usize {
-    let limit = conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER);
-    usize::try_from(limit).expect("SQLite parameter limit should be positive")
+    let limit = conn
+        .limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
+        .expect("should get SQLite parameter limit");
+    limit as usize
 }
 
 /// Computes how many rows can be inserted per batch given a parameter count.

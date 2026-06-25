@@ -75,7 +75,9 @@ pub fn track_database(
             let path = PathBuf::from(db_path);
             let mut rel_path = vec![];
             for component in path.ancestors() {
-                let component_name = component.file_name().unwrap();
+                let Some(component_name) = component.file_name() else {
+                    continue;
+                };
                 if component.join(".gen").exists() {
                     break;
                 }

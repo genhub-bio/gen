@@ -16,7 +16,7 @@ gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.2.0" }
 itertools = "0.14.0"
 capnp = { version = "0.24" }
 noodles = { version = "0.101.0", features = ["gff"] }
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { path = "../gen-doltlite-rs", version = "0.32.1", features = ["bundled"] }
 serde = {  version = "1.0.219", features = ["derive"] }
 thiserror = "1.0"
 sha2 = "0.10.9"
