@@ -194,6 +194,28 @@ impl Operation {
 
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, operation_hash, file_addition, filename, file_path))
+    )]
+    pub fn add_existing_file(
+        conn: &OperationsConnection,
+        operation_hash: &HashId,
+        file_addition: &FileAddition,
+        filename: &str,
+        file_path: &str,
+    ) -> Result<(), FileAdditionError> {
+        let query = "INSERT INTO operation_files (operation_hash, file_addition_id, filename, file_path) VALUES (?1, ?2, ?3, ?4)";
+        let mut stmt = conn.prepare(query)?;
+        stmt.execute(params![
+            operation_hash,
+            file_addition.id,
+            filename,
+            file_path
+        ])?;
+        Ok(())
+    }
+
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(conn, operation_hash, db_uuid))
     )]
     pub fn add_database(
@@ -2815,6 +2837,53 @@ mod tests {
             operation_files[0].asset_uri,
             LocalAssetUri::asset_uri(&format!(".gen/assets/{}.fa.bgz", file_addition.checksum)),
         );
+    }
+
+    #[test]
+    fn operation_add_existing_file_preserves_manifest_path() {
+        let context = setup_gen();
+        let operation_conn = context.operations().conn();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let source_path = repo_root.join("inputs").join("manifest.fa");
+
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, b">seq\nACGT\n").unwrap();
+
+        let file_addition = FileAddition::get_or_create(
+            context.workspace(),
+            operation_conn,
+            &source_path.to_string_lossy(),
+            FileTypes::Fasta,
+            None,
+        )
+        .unwrap();
+        let operation_hash = HashId(calculate_hash("existing-file-manifest-path"));
+        let operation = Operation::create_without_tracking(
+            operation_conn,
+            &operation_hash,
+            "add-file",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(file_addition.file_path().starts_with(".gen/assets/"));
+
+        Operation::add_existing_file(
+            operation_conn,
+            &operation.hash,
+            &file_addition,
+            "manifest.fa",
+            "inputs/manifest.fa",
+        )
+        .unwrap();
+
+        let operation_files =
+            OperationFile::get_files_for_operation(operation_conn, &operation.hash).unwrap();
+
+        assert_eq!(operation_files[0].filename, "manifest.fa");
+        assert_eq!(operation_files[0].file_path, "inputs/manifest.fa");
+        assert_eq!(operation_files[0].asset_uri, file_addition.asset_uri);
     }
 
     #[test]
