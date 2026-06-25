@@ -26,7 +26,7 @@ use gen_models::{
     metadata::get_db_uuid,
     operations::{
         Branch, Defaults, FileAddition, HashParseError, Operation, OperationFile, OperationInfo,
-        OperationState, Remote, parse_hash,
+        OperationState, Remote, calculate_file_checksum, parse_hash,
     },
     session_operations::{end_operation, start_operation},
     traits::*,
@@ -152,6 +152,14 @@ pub enum RemoteOperationError {
     FileAdditionError(#[from] FileAdditionError),
     #[error("Annotation File Error: {0}")]
     AnnotationFileError(#[from] AnnotationFileError),
+    #[error("Remote manifest response did not include asset {asset_path}")]
+    RemoteAssetMissing { asset_path: String },
+    #[error("Downloaded asset {asset_path} checksum {actual} did not match expected {expected}")]
+    RemoteAssetChecksumMismatch {
+        asset_path: String,
+        expected: HashId,
+        actual: HashId,
+    },
     #[error("Branch Error: {0}")]
     BranchNotSet(String),
     #[error("Branch Error: {0}")]
@@ -1460,27 +1468,49 @@ fn download_remote_file_addition_asset(
         return Ok(None);
     }
 
-    let Some(file) = remote_asset_response_file(files, stored_asset_path, manifest_asset_path)
-    else {
-        return Ok(None);
-    };
-
     let destination = LocalAssetUri::repo_relative_destination_path(workspace, stored_asset_path)
         .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
-    if !destination.exists() {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        download_binary(
-            client,
-            &file.url,
-            destination.as_path(),
-            Some(auth_token),
-            stored_asset_path,
-        )?;
+    if destination.exists() {
+        verify_downloaded_asset(file_addition, &destination)?;
+        return Ok(Some(destination));
     }
 
+    let Some(file) = remote_asset_response_file(files, stored_asset_path, manifest_asset_path)
+    else {
+        return Err(RemoteOperationError::RemoteAssetMissing {
+            asset_path: stored_asset_path.to_string(),
+        });
+    };
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    download_binary(
+        client,
+        &file.url,
+        destination.as_path(),
+        Some(auth_token),
+        stored_asset_path,
+    )?;
+    verify_downloaded_asset(file_addition, &destination)?;
+
     Ok(Some(destination))
+}
+
+fn verify_downloaded_asset(
+    file_addition: &FileAddition,
+    destination: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    let actual = calculate_file_checksum(destination)?;
+    if actual != file_addition.checksum {
+        return Err(RemoteOperationError::RemoteAssetChecksumMismatch {
+            asset_path: file_addition.file_path().to_string(),
+            expected: file_addition.checksum,
+            actual,
+        });
+    }
+
+    Ok(())
 }
 
 fn remote_asset_response_file<'a>(
@@ -3013,6 +3043,68 @@ mod tests {
                 .expect("should match annotation asset by stored filename");
 
             assert_eq!(matched.url, "https://example.com/annotation");
+        }
+
+        #[test]
+        fn test_download_remote_file_addition_asset_errors_when_asset_missing() {
+            let context = setup_gen();
+            let checksum = HashId::convert_str("missing-asset");
+            let asset_path = format!(".gen/assets/{checksum}.fa");
+            let file_addition = FileAddition {
+                id: HashId::random_str(),
+                asset_uri: LocalAssetUri::asset_uri(&asset_path),
+                file_type: FileTypes::Fasta,
+                checksum,
+            };
+            let client = Client::new();
+
+            let result = download_remote_file_addition_asset(
+                &client,
+                "token",
+                &[],
+                context.workspace(),
+                &file_addition,
+                None,
+            );
+
+            assert!(matches!(
+                result,
+                Err(RemoteOperationError::RemoteAssetMissing { asset_path: path })
+                    if path == asset_path
+            ));
+        }
+
+        #[test]
+        fn test_download_remote_file_addition_asset_verifies_existing_asset() {
+            let context = setup_gen();
+            let workspace = context.workspace();
+            let asset_path = ".gen/assets/corrupt.fa";
+            let destination = workspace.repo_root().unwrap().join(asset_path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(&destination, "corrupt").unwrap();
+
+            let file_addition = FileAddition {
+                id: HashId::random_str(),
+                asset_uri: LocalAssetUri::asset_uri(asset_path),
+                file_type: FileTypes::Fasta,
+                checksum: HashId::convert_str("expected"),
+            };
+            let client = Client::new();
+
+            let result = download_remote_file_addition_asset(
+                &client,
+                "token",
+                &[],
+                workspace,
+                &file_addition,
+                None,
+            );
+
+            assert!(matches!(
+                result,
+                Err(RemoteOperationError::RemoteAssetChecksumMismatch { asset_path: path, .. })
+                    if path == asset_path
+            ));
         }
     }
 }
