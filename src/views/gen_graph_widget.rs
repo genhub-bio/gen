@@ -14,7 +14,7 @@ use gen_tui::{
     plotter::{NodeRenderer, NodeSizer, PathStyle},
     theme::current_theme,
 };
-use petgraph::visit::NodeIndexable;
+use petgraph::{Direction, visit::{DfsEvent, NodeIndexable, depth_first_search}};
 use ratatui::style::Style;
 
 /// Labels for special start/end nodes
@@ -267,6 +267,49 @@ fn compute_inaccessible_nodes(
     graph.nodes().filter(|n| !reachable.contains(n)).collect()
 }
 
+/// Detect and extract backward edges so the layout engine sees an acyclic graph.
+///
+/// **Synthetic signal (preferred):** When `PATH_END → PATH_START` is present it is the
+/// authoritative circularity marker added by GFA import. Any direct edges from predecessors
+/// of PATH_END to successors of PATH_START (the raw GFA links that close the cycle) are
+/// removed from `graph` — they are fully represented by `... → PATH_END → PATH_START → ...`.
+/// Only the synthetic edge is returned for rendering as a single full-width loop.
+///
+/// **DFS fallback:** When no synthetic signal is found (e.g. GFA with explicit paths where
+/// the import doesn't add the PATH_END→PATH_START edge), a DFS back-edge scan is used to
+/// find all remaining cycle-closing edges and return them directly.
+fn extract_backward_edges(graph: &mut GenGraph) -> Vec<(GraphNode, GraphNode)> {
+    let end_node = graph.nodes().find(|n| is_end_node(n.node_id));
+    let start_node = graph.nodes().find(|n| is_start_node(n.node_id));
+
+    if let (Some(end_node), Some(start_node)) = (end_node, start_node) {
+        if graph.contains_edge(end_node, start_node) {
+            let preds: Vec<GraphNode> = graph
+                .neighbors_directed(end_node, Direction::Incoming)
+                .collect();
+            let succs: Vec<GraphNode> = graph
+                .neighbors_directed(start_node, Direction::Outgoing)
+                .collect();
+            for pred in &preds {
+                for succ in &succs {
+                    graph.remove_edge(*pred, *succ);
+                }
+            }
+            return vec![(end_node, start_node)];
+        }
+    }
+
+    let mut backward_edges = Vec::new();
+    let starts: Vec<GraphNode> = graph.nodes().collect();
+    depth_first_search(&*graph, starts, |event| {
+        if let DfsEvent::BackEdge(source, target) = event {
+            backward_edges.push((source, target));
+        }
+        petgraph::visit::Control::<()>::Continue
+    });
+    backward_edges
+}
+
 /// Create a configured GraphController for a GenGraph with the standard theme and settings.
 ///
 /// This is the standard way to initialize a graph controller for GenGraph visualization.
@@ -279,12 +322,17 @@ fn compute_inaccessible_nodes(
 /// # Returns
 /// A configured GraphController ready for use with `create_gen_graph_widget`
 pub fn create_gen_graph_controller(
-    graph: GenGraph,
+    mut graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
+    let backward_edges = extract_backward_edges(&mut graph);
     let pruned = compute_pruned_edges(&graph);
     let inaccessible = compute_inaccessible_nodes(&graph, &pruned);
     let node_sizer = GenGraphNodeSizer;
-    let mut controller = GraphController::new(graph, node_sizer);
+    let mut controller = if backward_edges.is_empty() {
+        GraphController::new(graph, node_sizer)
+    } else {
+        GraphController::new_with_backward_edges(graph, node_sizer, &backward_edges)
+    };
     for edge in pruned {
         controller.dim_edge(edge);
     }
@@ -434,6 +482,9 @@ pub fn highlight_match_range<S: NodeSizer<GenGraph>>(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use gen_models::{block_group::BlockGroup, sample::Sample};
     use gen_tui::{
         geometry::WorldPos,
         viewport_state::{ViewportState, WorldBuffer},
@@ -441,6 +492,31 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::{imports::gfa::import_gfa, test_helpers::setup_gen, track_database};
+
+    /// Importing a GFA cycle (no explicit path covering it) should not crash
+    /// `create_gen_graph_controller`. All back edges in the graph (the GFA link cycle plus
+    /// the synthetic `PATH_END -> PATH_START` edge added by import) must be detected and
+    /// rewired via `GraphController::new_with_backward_edges` so toposort sees an acyclic
+    /// graph.
+    #[test]
+    fn test_create_gen_graph_controller_handles_circular_genome() {
+        let mut gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        gfa_path.push("fixtures/gfa/cycle_no_path.gfa");
+        let collection_name = "cycle".to_string();
+        let context = setup_gen();
+        let conn = context.graph().conn();
+
+        track_database(conn, context.operations().conn()).unwrap();
+        import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME).unwrap();
+
+        let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
+        let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
+        let mut controller = create_gen_graph_controller(graph);
+        controller
+            .calculate_total_bounds()
+            .expect("layout should succeed on a circular genome instead of panicking in toposort");
+    }
 
     /// Test coordinate handling for very large genomic sequences
     ///
@@ -590,5 +666,55 @@ mod tests {
             .unwrap();
 
         insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
+    }
+
+    fn render_gfa_snapshot(gfa_fixture: &str, collection_name: &str) -> String {
+        use std::path::PathBuf;
+
+        use gen_models::{block_group::BlockGroup, sample::Sample};
+        use gen_tui::{graph_widget::GraphWidget, testing::create_test_terminal};
+        use ratatui::widgets::StatefulWidget as _;
+
+        use crate::{imports::gfa::import_gfa, test_helpers::setup_gen_on_disk, track_database};
+
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        track_database(conn, context.operations().conn()).unwrap();
+
+        let gfa_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(gfa_fixture);
+        import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME).unwrap();
+
+        let block_group_id =
+            BlockGroup::get_id(collection_name, Sample::DEFAULT_NAME, "", None);
+        let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
+        let mut controller = create_gen_graph_controller(graph);
+
+        let mut terminal = create_test_terminal(120, 30);
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                controller.viewport_state.viewport_bounds = area;
+                controller.ensure_camera_coverage().unwrap();
+                controller.rebuild_viewport_graph().unwrap();
+                GraphWidget::with_renderer(GenGraphNodeRenderer::new(conn)).render(
+                    area,
+                    f.buffer_mut(),
+                    &mut controller,
+                );
+            })
+            .unwrap();
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn snapshot_gfa_cycle_no_path() {
+        let snapshot = render_gfa_snapshot("fixtures/gfa/cycle_no_path.gfa", "cycle_no_path");
+        insta::assert_snapshot!("gfa_cycle_no_path", snapshot);
+    }
+
+    #[test]
+    fn snapshot_gfa_cycle_with_path() {
+        let snapshot = render_gfa_snapshot("fixtures/gfa/cycle_with_path.gfa", "cycle_with_path");
+        insta::assert_snapshot!("gfa_cycle_with_path", snapshot);
     }
 }
