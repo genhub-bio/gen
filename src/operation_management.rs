@@ -1411,47 +1411,86 @@ fn download_remote_operation_assets(
     )?;
 
     for file_addition in &manifest_operation.file_additions {
-        let stored_asset_path = file_addition.file_addition.file_path();
-        if !LocalAssetUri::is_asset_relative_path(&workspace, stored_asset_path)? {
-            continue;
-        }
-        let Some(file) = remote_asset_response_file(&asset_response.files, file_addition) else {
-            continue;
-        };
-        let destination =
-            LocalAssetUri::repo_relative_destination_path(&workspace, stored_asset_path)
-                .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
-        if !destination.exists() {
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            download_binary(
-                client,
-                &file.url,
-                destination.as_path(),
-                Some(auth_token),
-                stored_asset_path,
-            )?;
-        }
-
-        let stored_asset_actual_path = repo_root.join(file_addition.file_addition.file_path());
-        if stored_asset_actual_path.exists() {
+        if let Some(stored_asset_actual_path) = download_remote_file_addition_asset(
+            client,
+            auth_token,
+            &asset_response.files,
+            &workspace,
+            &file_addition.file_addition,
+            Some(file_addition.file_path.as_str()),
+        )? {
             materialize_operation_file(&workspace, file_addition, &stored_asset_actual_path)?;
+        }
+    }
+
+    for annotation_file in &manifest_operation.annotation_file_additions {
+        download_remote_file_addition_asset(
+            client,
+            auth_token,
+            &asset_response.files,
+            &workspace,
+            &annotation_file.file_addition,
+            None,
+        )?;
+        if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref() {
+            download_remote_file_addition_asset(
+                client,
+                auth_token,
+                &asset_response.files,
+                &workspace,
+                index_file_addition,
+                None,
+            )?;
         }
     }
 
     Ok(())
 }
 
+fn download_remote_file_addition_asset(
+    client: &Client,
+    auth_token: &str,
+    files: &[RemoteFileAsset],
+    workspace: &Workspace,
+    file_addition: &FileAddition,
+    manifest_asset_path: Option<&str>,
+) -> Result<Option<PathBuf>, RemoteOperationError> {
+    let stored_asset_path = file_addition.file_path();
+    if !LocalAssetUri::is_asset_relative_path(workspace, stored_asset_path)? {
+        return Ok(None);
+    }
+
+    let Some(file) = remote_asset_response_file(files, stored_asset_path, manifest_asset_path)
+    else {
+        return Ok(None);
+    };
+
+    let destination = LocalAssetUri::repo_relative_destination_path(workspace, stored_asset_path)
+        .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
+    if !destination.exists() {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        download_binary(
+            client,
+            &file.url,
+            destination.as_path(),
+            Some(auth_token),
+            stored_asset_path,
+        )?;
+    }
+
+    Ok(Some(destination))
+}
+
 fn remote_asset_response_file<'a>(
     files: &'a [RemoteFileAsset],
-    file_addition: &ManifestOperationFileAddition,
+    stored_asset_path: &str,
+    manifest_asset_path: Option<&str>,
 ) -> Option<&'a RemoteFileAsset> {
-    let stored_asset_path = file_addition.file_addition.file_path();
-    let manifest_asset_path = file_addition.file_path.as_str();
     let stored_asset_filename = FilePath::new(stored_asset_path).file_name();
     files.iter().find(|file| {
-        file.asset_path == manifest_asset_path
+        manifest_asset_path.is_some_and(|asset_path| file.asset_path == asset_path)
             || file.asset_path == stored_asset_path
             || FilePath::new(&file.asset_path).file_name() == stored_asset_filename
     })
@@ -2945,9 +2984,35 @@ mod tests {
                 url: "https://example.com/asset".to_string(),
             }];
 
-            let matched = remote_asset_response_file(&files, &file_addition).unwrap();
+            let matched = remote_asset_response_file(
+                &files,
+                file_addition.file_addition.file_path(),
+                Some(file_addition.file_path.as_str()),
+            )
+            .unwrap();
 
             assert_eq!(matched.url, "https://example.com/asset");
+        }
+
+        #[test]
+        fn test_remote_asset_response_file_matches_annotation_asset() {
+            let checksum = HashId::convert_str("annotation-asset");
+            let asset_path = format!(".gen/assets/{checksum}.gff3");
+            let file_addition = FileAddition {
+                id: HashId::random_str(),
+                asset_uri: LocalAssetUri::asset_uri(&asset_path),
+                file_type: FileTypes::Gff3,
+                checksum,
+            };
+            let files = vec![RemoteFileAsset {
+                asset_path: format!("assets/{checksum}.gff3"),
+                url: "https://example.com/annotation".to_string(),
+            }];
+
+            let matched = remote_asset_response_file(&files, file_addition.file_path(), None)
+                .expect("should match annotation asset by stored filename");
+
+            assert_eq!(matched.url, "https://example.com/annotation");
         }
     }
 }
