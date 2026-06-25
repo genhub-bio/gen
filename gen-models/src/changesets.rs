@@ -1280,6 +1280,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        errors::OperationError,
         file_types::FileTypes,
         operations::{OperationFile, OperationInfo},
         sample::{NewSample, Sample},
@@ -1682,12 +1683,10 @@ mod tests {
         assert_eq!(dependencies.samples[0].name, "parent");
     }
 
-    // Deleting a row cannot be recorded as an operation: changeset reconstruction reads
-    // new_value() for every column, which a DELETE changeset item does not carry, so
-    // end_operation panics. This documents that the operation layer is insert-only.
+    // Deletes a sample created in a prior operation.
     #[test]
     #[should_panic(expected = "ApiMisuse")]
-    fn test_deleting_a_sample_cannot_be_tracked() {
+    fn test_deleting_a_sample_created_in_a_prior_operation_cannot_be_tracked() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -1695,7 +1694,7 @@ mod tests {
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
 
-        // Created before the session, so removing it records a DELETE changeset item.
+        let mut first_session = start_operation(conn);
         let _ = Sample::create(
             conn,
             NewSample {
@@ -1704,15 +1703,26 @@ mod tests {
             },
         )
         .unwrap();
+        let _ = end_operation(
+            &context,
+            &mut first_session,
+            &OperationInfo {
+                files: vec![],
+                description: "create op".to_string(),
+            },
+            "create op",
+            None,
+        )
+        .unwrap();
 
-        let mut session = start_operation(conn);
+        let mut second_session = start_operation(conn);
         conn.execute("DELETE FROM samples WHERE name = 'doomed'", [])
             .unwrap();
 
         // Panics inside process_changesetiter on a new_value() unwrap for the DELETE row.
         let _ = end_operation(
             &context,
-            &mut session,
+            &mut second_session,
             &OperationInfo {
                 files: vec![],
                 description: "delete op".to_string(),
@@ -1720,6 +1730,43 @@ mod tests {
             "delete op",
             None,
         );
+    }
+
+    // If the insert and the delete both happen inside the same session, the sqlite session
+    // module nets them out to no change at all for that row, resultin in a no-change error.
+    #[test]
+    fn test_creating_and_deleting_a_sample_in_the_same_session_cancels_out() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        let mut session = start_operation(conn);
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "doomed",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+        conn.execute("DELETE FROM samples WHERE name = 'doomed'", [])
+            .unwrap();
+
+        let result = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![],
+                description: "create and delete op".to_string(),
+            },
+            "create and delete op",
+            None,
+        );
+
+        assert!(matches!(result, Err(OperationError::NoChanges)));
     }
 
     #[test]
