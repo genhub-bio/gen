@@ -789,6 +789,10 @@ pub fn process_changesetiter(
     Ok((changeset_models, dependency_models))
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(conn, changeset, dependencies))
+)]
 pub fn apply_changeset(
     conn: &GraphConnection,
     changeset: &ChangesetModels,
@@ -1246,6 +1250,10 @@ fn block_groups_parent_first(block_groups: &[BlockGroup]) -> Vec<&BlockGroup> {
     ordered
 }
 
+#[cfg_attr(
+    all(debug_assertions, feature = "profiling"),
+    tracing::instrument(skip(workspace, operation, changes, dependencies))
+)]
 pub fn write_changeset(
     workspace: &Workspace,
     operation: &Operation,

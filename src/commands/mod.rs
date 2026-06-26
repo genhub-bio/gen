@@ -7,6 +7,8 @@ pub mod derive;
 pub mod export;
 pub mod graph_operations;
 pub mod import;
+#[cfg(all(debug_assertions, feature = "profiling"))]
+pub mod profile;
 pub mod remote;
 pub mod update;
 
@@ -23,6 +25,10 @@ pub enum Commands {
         #[clap(index = 1)]
         url: String,
     },
+    #[cfg(all(debug_assertions, feature = "profiling"))]
+    /// Profile a command in a dev build and print cumulative per-function timings.
+    #[command(arg_required_else_help(true))]
+    Profile(profile::Command),
     /// Commands for importing
     Import(import::Command),
     /// Commands for updating

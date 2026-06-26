@@ -61,6 +61,10 @@ impl Query for GenDatabase {
 }
 
 impl GenDatabase {
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, db_uuid, name, path))
+    )]
     pub fn create(
         conn: &OperationsConnection,
         db_uuid: &str,
@@ -95,6 +99,10 @@ impl GenDatabase {
         )
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, db_uuid))
+    )]
     pub fn get_by_uuid(conn: &OperationsConnection, db_uuid: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn,
@@ -103,6 +111,10 @@ impl GenDatabase {
         )
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, path))
+    )]
     pub fn get_by_path(conn: &OperationsConnection, path: &str) -> SQLResult<GenDatabase> {
         GenDatabase::get(
             conn,
@@ -111,6 +123,10 @@ impl GenDatabase {
         )
     }
 
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, db_uuid, name, path))
+    )]
     pub fn get_or_create(
         conn: &OperationsConnection,
         db_uuid: &str,
