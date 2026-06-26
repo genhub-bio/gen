@@ -19,6 +19,7 @@ use crate::{
 
 const ORIGIN: &str = "origin";
 
+/// Workspace is meant to be the directory the clone is being executed in
 pub fn execute(url: &str, workspace: &Workspace) -> Result<(), Box<dyn std::error::Error>> {
     let repo_name = infer_repo_name(url)?;
     let repo_path = workspace.base_dir().join(&repo_name);

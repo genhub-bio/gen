@@ -241,8 +241,7 @@ impl Path {
         PathEdge::delete(conn, &path.id);
 
         let query = "DELETE FROM paths where name = ?1 AND block_group_id = ?2;";
-        conn.execute(query, params![name.to_string(), block_group_id])
-            .unwrap();
+        conn.execute(query, params![name, block_group_id]).unwrap();
     }
 
     pub fn get_by_id(conn: &GraphConnection, path_id: &HashId) -> Path {

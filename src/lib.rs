@@ -359,10 +359,6 @@ mod tests {
         let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
-        // Force write of the WAL file into the db so we can copy
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
-
         // Move database to different location within .gen directory
         let moved_db_path = context
             .workspace()
@@ -401,15 +397,11 @@ mod tests {
         let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
         let db_uuid1 = get_db_uuid(conn);
 
         let new_db_path = context.workspace().repo_root().unwrap().join("new.db");
         let conn = &crate::get_connection(new_db_path.clone()).unwrap();
         track_database(conn, op_conn).unwrap();
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
 
         let db_uuid2 = get_db_uuid(conn);
 
