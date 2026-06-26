@@ -12,6 +12,19 @@ use tracing_subscriber::{
     registry::{LookupSpan, Registry},
 };
 
+/// Collects tracing span durations and prints an exact report for every recorded call stack.
+///
+/// `Profiler` measures spans directly through a tracing subscriber, so it is useful when you
+/// want per-stack call counts, total wall-clock time, and average time from span enter/exit
+/// events. This will only measure code that has been instrumented with
+/// ```
+/// #[cfg_attr(
+///    all(debug_assertions, feature = "profiling"),
+///    tracing::instrument(...)
+/// )]
+/// ```
+///
+/// which means profiling is enabled as a feature, and it's a dev build.
 #[derive(Clone, Default)]
 pub struct Profiler {
     stats: Arc<Mutex<HashMap<String, Stat>>>,
@@ -53,6 +66,7 @@ impl Profiler {
             .iter()
             .map(|(stack, stat)| (stack_frames(stack), stat.calls, stat.total))
             .collect::<Vec<_>>();
+        // .2 is total duration of code, .0 is the stack frame names (method calls)
         rows.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
         let stack_width = rows
             .iter()
@@ -94,8 +108,8 @@ impl<S> Layer<S> for ProfilerLayer
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
-    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(id) {
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, context: Context<'_, S>) {
+        if let Some(span) = context.span(id) {
             let metadata = attrs.metadata();
             let current = format!("{}::{}", metadata.target(), metadata.name());
             let stack = match span.parent() {
@@ -114,8 +128,8 @@ where
         }
     }
 
-    fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(id) {
+    fn on_enter(&self, id: &Id, context: Context<'_, S>) {
+        if let Some(span) = context.span(id) {
             let mut extensions = span.extensions_mut();
             if let Some(state) = extensions.get_mut::<SpanState>() {
                 state.starts.push(Instant::now());
@@ -123,8 +137,8 @@ where
         }
     }
 
-    fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(id) {
+    fn on_exit(&self, id: &Id, context: Context<'_, S>) {
+        if let Some(span) = context.span(id) {
             let mut extensions = span.extensions_mut();
             let snapshot = extensions.get_mut::<SpanState>().and_then(|state| {
                 state
@@ -141,6 +155,12 @@ where
 }
 
 #[cfg(debug_assertions)]
+/// Collects periodic samples from a `pprof` guard and prints an approximate hot-path report.
+///
+/// `SamplingProfiler` better suited for broad performance inspection, but it reports sampled
+/// stacks. This means a snapshot of the code is taken every x intervals, and wherever the
+/// code is, is recorded. This means some code that is run may never show up if it is never
+/// sampled during its execution. But this likely means that code is fast and not a bottleneck.
 #[derive(Clone, Default)]
 pub struct SamplingProfiler;
 
