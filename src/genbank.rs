@@ -351,7 +351,7 @@ pub fn process_sequence(seq: Seq) -> Result<GenBankLocus, GenBankError> {
         }
     }
 
-    locus.changes.sort_unstable_by(|a, b| a.start.cmp(&b.start));
+    locus.changes.sort_unstable_by_key(|a| a.start);
     Ok(locus)
 }
 

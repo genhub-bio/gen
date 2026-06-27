@@ -153,7 +153,7 @@ pub fn derive_chunks(
             })
             .map(|x| x.value)
             .collect::<Vec<_>>();
-        blocks.sort_by(|a, b| a.start.cmp(&b.start));
+        blocks.sort_by_key(|a| a.start);
         let start_block = blocks[0];
         let start_node_coordinate =
             start_coordinate - start_block.start + start_block.sequence_start;

@@ -4049,7 +4049,7 @@ mod tests {
                 .query(Range { start: 15, end: 25 })
                 .map(|x| x.value)
                 .collect::<Vec<_>>();
-            blocks.sort_by(|a, b| a.start.cmp(&b.start));
+            blocks.sort_by_key(|a| a.start);
             let start_block = blocks[0];
             let start_node_coordinate = 15 - start_block.start + start_block.sequence_start;
             let end_block = blocks[blocks.len() - 1];
@@ -4272,7 +4272,7 @@ mod tests {
                 .query(Range { start: 15, end: 36 })
                 .map(|x| x.value)
                 .collect::<Vec<_>>();
-            blocks.sort_by(|a, b| a.start.cmp(&b.start));
+            blocks.sort_by_key(|a| a.start);
             let start_block = blocks[0];
             let start_node_coordinate = 15 - start_block.start + start_block.sequence_start;
             let end_block = blocks[blocks.len() - 1];
@@ -4555,7 +4555,7 @@ mod tests {
                 .query(Range { start: 15, end: 36 })
                 .map(|x| x.value)
                 .collect::<Vec<_>>();
-            blocks.sort_by(|a, b| a.start.cmp(&b.start));
+            blocks.sort_by_key(|a| a.start);
             let start_block = blocks[0];
             let start_node_coordinate = 15 - start_block.start + start_block.sequence_start;
             let end_block = blocks[blocks.len() - 1];

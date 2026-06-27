@@ -67,7 +67,7 @@ pub fn track_database(
     // with the same uuid having changes being made in parallel but not having the same content.
     let db_uuid = models::metadata::Metadata::get_db_uuid(conn);
     if let Some(db_path) = conn.path() {
-        if db_path.is_empty() {
+        if db_path.is_empty() || db_path == ":memory:" {
             GenDatabase::create(op_conn, &db_uuid, "memory", ":memory:").map_err(|e| {
                 core::errors::ConnectionError::DatabaseTracking(format!(
                     "Failed to create database tracking entry: {e}"
@@ -77,10 +77,14 @@ pub fn track_database(
             let path = PathBuf::from(db_path);
             let mut rel_path = vec![];
             for component in path.ancestors() {
-                let component_name = component.file_name().unwrap();
                 if component.join(".gen").exists() {
                     break;
                 }
+                let Some(component_name) = component.file_name() else {
+                    return Err(core::errors::ConnectionError::DatabaseTracking(format!(
+                        "Database path '{db_path}' is not inside a Gen repository"
+                    )));
+                };
                 rel_path.push(component_name);
             }
             let relative_path = rel_path.iter().rev().collect::<PathBuf>();
@@ -359,10 +363,6 @@ mod tests {
         let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
-        // Force write of the WAL file into the db so we can copy
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
-
         // Move database to different location within .gen directory
         let moved_db_path = context
             .workspace()
@@ -401,16 +401,11 @@ mod tests {
         let op_conn = context.operations().conn();
         track_database(conn, op_conn).unwrap();
 
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
         let db_uuid1 = get_db_uuid(conn);
 
         let new_db_path = context.workspace().repo_root().unwrap().join("new.db");
         let conn = &crate::get_connection(new_db_path.clone()).unwrap();
         track_database(conn, op_conn).unwrap();
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
-
         let db_uuid2 = get_db_uuid(conn);
 
         assert_ne!(db_uuid1, db_uuid2);

@@ -1977,13 +1977,13 @@ mod tests {
             BlockGroup::query(conn, "select * from block_groups;", rusqlite::params!())
                 .iter()
                 .map(|v| v.sample_name.clone())
-                .collect::<Vec<String>>(),
-            vec![
+                .collect::<HashSet<String>>(),
+            HashSet::from_iter([
                 Sample::DEFAULT_NAME.to_string(),
                 "unknown".to_string(),
                 "G1".to_string(),
                 "foo".to_string()
-            ]
+            ])
         );
 
         checkout(&context, &Some("branch-2".to_string()), None).unwrap();
@@ -2008,8 +2008,8 @@ mod tests {
             BlockGroup::query(conn, "select * from block_groups;", rusqlite::params!())
                 .iter()
                 .map(|v| v.sample_name.clone())
-                .collect::<Vec<String>>(),
-            vec![Sample::DEFAULT_NAME.to_string(), "foo".to_string()]
+                .collect::<HashSet<String>>(),
+            HashSet::from_iter([Sample::DEFAULT_NAME.to_string(), "foo".to_string()])
         );
 
         // apply changes from branch-1, it will be operation id 2

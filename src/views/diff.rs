@@ -212,12 +212,10 @@ pub fn view_diff(
                             }
                         }
                     }
-                    KeyCode::Down => {
-                        if selected + 1 < entries.len() {
-                            selected += 1;
-                            if let Some(entry) = entries.get(selected) {
-                                expanded_db = Some(entry.db_path.clone());
-                            }
+                    KeyCode::Down if selected + 1 < entries.len() => {
+                        selected += 1;
+                        if let Some(entry) = entries.get(selected) {
+                            expanded_db = Some(entry.db_path.clone());
                         }
                     }
                     _ => {}

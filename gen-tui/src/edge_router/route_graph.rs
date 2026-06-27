@@ -142,10 +142,9 @@ pub fn make_rectilinear(
                     let bundle = if let Some(edge_idx) = graph.find_edge(*node_index1, *node_index2)
                     {
                         graph.edge_weight(edge_idx).unwrap().bundle.clone()
-                    } else if let Some(edge_idx) = graph.find_edge(*node_index2, *node_index1) {
-                        graph.edge_weight(edge_idx).unwrap().bundle.clone()
                     } else {
-                        return None; // No edge exists
+                        let edge_idx = graph.find_edge(*node_index2, *node_index1)?;
+                        graph.edge_weight(edge_idx).unwrap().bundle.clone()
                     };
 
                     // Convert from NodeIndex to array indices for layout_layer

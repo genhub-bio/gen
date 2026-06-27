@@ -1129,7 +1129,7 @@ fn translate_from(
             let split = codon_count * 3;
             let mut amino_acids: Vec<u8> = Vec::with_capacity(codon_count);
             let mut is_terminal = false;
-            for codon in body[..split].chunks_exact(3) {
+            for codon in body[..split].as_chunks::<3>().0 {
                 let amino_acid = params.codon_table.translate_codon(codon);
                 if amino_acid == STOP_CODON {
                     // The first in-frame stop ends the walk; it gets its own shared

@@ -69,8 +69,8 @@ where
                     &sequence.hash,
                     &HashId::convert_str(&format!(
                         "{collection}.{contig}:{hash}",
-                        contig = &locus.name,
-                        collection = &collection.name,
+                        contig = locus.name,
+                        collection = collection.name,
                         hash = sequence.hash
                     )),
                 )?;
@@ -89,7 +89,7 @@ where
                     if !create_missing {
                         return Err(GenBankError::LookupError(format!(
                             "No block group named {contig} exists. Try importing first or pass --create-missing.",
-                            contig = &locus.name
+                            contig = locus.name
                         )));
                     }
                     BlockGroup::create(
@@ -113,7 +113,7 @@ where
                     if !create_missing {
                         return Err(GenBankError::LookupError(format!(
                             "No path named {contig} exists. Try importing first or pass --create-missing.",
-                            contig = &locus.name
+                            contig = locus.name
                         )));
                     }
                     let edge_into = Edge::create(
@@ -178,8 +178,8 @@ where
                                 &change_seq.hash,
                                 &HashId::convert_str(&format!(
                                     "{parent_hash}:{start}-{end}->{new_hash}",
-                                    parent_hash = &sequence.hash,
-                                    new_hash = &change_seq.hash,
+                                    parent_hash = sequence.hash,
+                                    new_hash = change_seq.hash,
                                 )),
                             )?;
                             BlockGroupChange {

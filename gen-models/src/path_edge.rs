@@ -142,12 +142,14 @@ impl PathEdge {
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for (index2, edge_id) in chunk.iter().enumerate() {
                 rows_to_insert.push("(?, ?, ?, ?)".to_string());
-                let index_in = index1 * 100000 + index2;
-                let hash = HashId(calculate_hash(&format!("{path_id}:{edge_id}:{index_in}")));
+                let index_in_path = (index1 * 100000 + index2) as i64;
+                let hash = HashId(calculate_hash(&format!(
+                    "{path_id}:{edge_id}:{index_in_path}"
+                )));
                 params.push(Box::new(hash));
                 params.push(Box::new(path_id));
                 params.push(Box::new(edge_id));
-                params.push(Box::new(index_in));
+                params.push(Box::new(index_in_path));
             }
 
             let sql = format!(

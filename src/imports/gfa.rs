@@ -496,7 +496,6 @@ fn edge_data_from_fields(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::traits::*;
     use rusqlite::params;
 
     use super::*;

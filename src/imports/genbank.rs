@@ -510,8 +510,8 @@ where
                     &sequence.hash,
                     &HashId::convert_str(&format!(
                         "{collection}.{contig}:{hash}",
-                        collection = &collection.name,
-                        contig = &locus.name,
+                        collection = collection.name,
+                        contig = locus.name,
                         hash = sequence.hash
                     )),
                 )?;
@@ -589,8 +589,8 @@ where
                                 &change_seq.hash,
                                 &HashId::convert_str(&format!(
                                     "{parent_hash}:{start}-{end}->{new_hash}",
-                                    parent_hash = &sequence.hash,
-                                    new_hash = &change_seq.hash,
+                                    parent_hash = sequence.hash,
+                                    new_hash = change_seq.hash,
                                 )),
                             )?;
                             (
@@ -1220,7 +1220,7 @@ mod tests {
                 seqs,
                 HashSet::from_iter([
                     seq.clone(),
-                    format!("{}{}", &seq[..1425].to_string(), &seq[2220..].to_string()).to_string()
+                    format!("{}{}", &seq[..1425], &seq[2220..]).to_string()
                 ])
             );
         }
@@ -1271,12 +1271,7 @@ mod tests {
                 seqs,
                 HashSet::from_iter([
                     seq.clone(),
-                    format!(
-                        "{}{deleted}{}",
-                        &seq[..765].to_string(),
-                        &seq[765..].to_string()
-                    )
-                    .to_string()
+                    format!("{}{deleted}{}", &seq[..765], &seq[765..]).to_string()
                 ])
             );
         }
@@ -1331,12 +1326,7 @@ mod tests {
                 seqs,
                 HashSet::from_iter([
                     seq.clone(),
-                    format!(
-                        "{}{deleted}{}",
-                        &seq[..766].to_string(),
-                        &seq[1557..].to_string()
-                    )
-                    .to_string()
+                    format!("{}{deleted}{}", &seq[..766], &seq[1557..]).to_string()
                 ])
             );
         }
@@ -1393,12 +1383,7 @@ mod tests {
                 seqs,
                 HashSet::from_iter([
                     seq.clone(),
-                    format!(
-                        "{}{deleted}{}",
-                        &seq[..766].to_string(),
-                        &seq[1557..].to_string()
-                    )
-                    .to_string()
+                    format!("{}{deleted}{}", &seq[..766], &seq[1557..]).to_string()
                 ])
             );
         }

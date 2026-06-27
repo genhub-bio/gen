@@ -7,7 +7,9 @@ use crate::errors::QueryError;
 
 /// Returns the SQLite variable parameter limit for the provided connection.
 pub fn sqlite_parameter_limit(conn: &Connection) -> usize {
-    let limit = conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER);
+    let limit = conn
+        .limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
+        .expect("SQLite parameter limit should be readable");
     usize::try_from(limit).expect("SQLite parameter limit should be positive")
 }
 

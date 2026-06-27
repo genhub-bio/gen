@@ -429,10 +429,8 @@ pub fn view_block_group(
                                 focus_zone = FocusZone::Canvas;
                                 tui_layout_change = true;
                             }
-                            KeyCode::Char('c') => {
-                                if panel_mode == PanelMode::Messages {
-                                    messages.clear();
-                                }
+                            KeyCode::Char('c') if panel_mode == PanelMode::Messages => {
+                                messages.clear();
                             }
                             _ => {}
                         },

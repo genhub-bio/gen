@@ -367,7 +367,7 @@ fn create_new_path_from_existing(
                 &sequence.hash,
                 &HashId::convert_str(&format!(
                     "{unmatched_path_name}_{segment_id}_{hash}",
-                    hash = &sequence.hash
+                    hash = sequence.hash
                 )),
             )?;
             let next_node_strand =

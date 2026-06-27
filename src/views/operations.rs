@@ -614,15 +614,15 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                                         );
                                     }
                                 }
-                                KeyCode::Down => {
-                                    if selected_diff_component + 1 < diff_components.len() {
-                                        selected_diff_component += 1;
-                                        graph_controller = build_graph_controller(
-                                            &diff_components,
-                                            selected_diff_component,
-                                            &empty_graph,
-                                        );
-                                    }
+                                KeyCode::Down
+                                    if selected_diff_component + 1 < diff_components.len() =>
+                                {
+                                    selected_diff_component += 1;
+                                    graph_controller = build_graph_controller(
+                                        &diff_components,
+                                        selected_diff_component,
+                                        &empty_graph,
+                                    );
                                 }
                                 _ => {}
                             }

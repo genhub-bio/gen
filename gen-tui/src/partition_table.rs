@@ -1179,10 +1179,7 @@ where
                 }
             }
 
-            // Reset heights array
-            for height in &mut scale_data.heights {
-                *height = 0;
-            }
+            scale_data.heights.fill(0);
         }
     }
 }

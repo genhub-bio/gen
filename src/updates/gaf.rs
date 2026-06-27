@@ -484,13 +484,12 @@ mod tests {
             let results = String::from_utf8(buffer).unwrap();
             assert_eq!(
                 results,
-                format!(
-                    "\
+                "\
             >extreme_left_left\n\
             aaa\n\
             >extreme_right_right\n\
             ggg\n"
-                )
+                    .to_string()
             );
         }
     }

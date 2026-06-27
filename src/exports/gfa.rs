@@ -83,7 +83,7 @@ pub fn export_gfa(
 
     let edges = edge_set.into_iter().collect::<Vec<_>>();
 
-    blocks.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    blocks.sort_by_key(|a| a.node_id);
 
     let (gen_graph, _edges_by_node_pair) = Edge::build_graph(&edges, &blocks);
 
@@ -298,7 +298,7 @@ fn get_paths(
         } else {
             println!(
                 "Path {name} is not translatable to current graph.",
-                name = &path.name
+                name = path.name
             );
         }
     }
