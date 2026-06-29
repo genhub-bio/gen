@@ -5,6 +5,65 @@ NULL
   if (is.null(x)) y else x
 }
 
+# Extract the genome string from a sequence container.
+# Supported: BSgenome, DNAStringSet (with metadata$genome set), FaFile, TwoBitFile.
+.container_genome <- function(container) {
+  if (inherits(container, "BSgenome")) {
+    return(unique(GenomeInfoDb::genome(GenomeInfoDb::seqinfo(container))))
+  }
+  meta <- S4Vectors::metadata(container)
+  meta[["genome"]] %||% stop(
+    "seq_container has no genome metadata. Set it with: metadata(x)$genome <- \"<assembly>\""
+  )
+}
+
+# Auto-generate coordinate-based names for a GRanges when names() are absent.
+.granges_names <- function(granges) {
+  nms <- names(granges)
+  if (!is.null(nms) && !any(is.na(nms)) && !any(nms == "")) {
+    return(nms)
+  }
+  paste0(
+    as.character(GenomeInfoDb::seqnames(granges)), ":",
+    BiocGenerics::start(granges), "-",
+    BiocGenerics::end(granges), ":",
+    as.character(BiocGenerics::strand(granges))
+  )
+}
+
+# Resolve every GRanges column in parts_list to a DNAStringSet using getSeq().
+# Non-GRanges columns pass through unchanged.
+.resolve_granges_columns <- function(parts_list, seq_containers) {
+  if (length(seq_containers) == 0L) {
+    return(parts_list)
+  }
+
+  container_genomes <- vapply(seq_containers, .container_genome, character(1))
+
+  lapply(parts_list, function(col) {
+    if (!inherits(col, "GRanges")) {
+      return(col)
+    }
+
+    col_genome <- unique(GenomeInfoDb::genome(GenomeInfoDb::seqinfo(col)))
+    if (length(col_genome) != 1L) {
+      stop("GRanges column spans multiple genome assemblies; split into one GRanges per assembly.")
+    }
+
+    idx <- match(col_genome, container_genomes)
+    if (is.na(idx)) {
+      stop(sprintf(
+        "No seq_container found for genome \"%s\". Available: %s",
+        col_genome, paste(container_genomes, collapse = ", ")
+      ))
+    }
+
+    seqs <- Biostrings::getSeq(seq_containers[[idx]], col)
+    names(seqs) <- .granges_names(col)
+    seqs
+  })
+}
+
 #' Construct a HashId
 #'
 #' Wraps a raw hash string as a typed \code{gen_hash_id} object used to
@@ -491,6 +550,56 @@ import_library <- function(repo, library_name, parts_list, sample = NULL, collec
 #' @export
 update_with_library <- function(repo, sample = NULL, new_sample_name, path_name,
                                 parts_list, collection = NULL) {
+  repo$update_with_library(sample, new_sample_name, path_name, parts_list, collection)
+}
+
+#' Import a combinatorial library from GRanges part definitions
+#'
+#' Like \code{import_library()}, but each column in \code{parts_list} may be a
+#' \code{GRanges} object.  Sequences are extracted via \code{Biostrings::getSeq()}
+#' using the matching \code{seq_containers} entry (matched by genome assembly name
+#' in the \code{Seqinfo} slot).  Named character vector and \code{DNAStringSet}
+#' columns pass through unchanged.
+#'
+#' If a \code{GRanges} column has no \code{names()}, part names are
+#' auto-generated from coordinates as \code{"<seqname>:<start>-<end>:<strand>"}.
+#'
+#' @param repo A \code{Repository}.
+#' @param library_name Character. Library name.
+#' @param parts_list List of part columns (named character vector, DNAStringSet, or GRanges).
+#' @param seq_containers List of sequence containers (BSgenome, FaFile, TwoBitFile, or
+#'   DNAStringSet with \code{metadata(x)$genome} set) used to resolve GRanges columns.
+#' @param sample Character or \code{NULL}.
+#' @param collection Character or \code{NULL}.
+#' @return The imported \code{SequenceGraph}.
+#' @export
+import_library_from_granges <- function(repo, library_name, parts_list,
+                                        seq_containers = list(),
+                                        sample = NULL, collection = NULL) {
+  parts_list <- .resolve_granges_columns(parts_list, seq_containers)
+  repo$import_library(library_name, parts_list, sample, collection)
+}
+
+#' Apply a library update from GRanges part definitions
+#'
+#' Like \code{update_with_library()}, but each column in \code{parts_list} may
+#' be a \code{GRanges} object.  See \code{\link{import_library_from_granges}}
+#' for details on \code{seq_containers} and automatic name generation.
+#'
+#' @param repo A \code{Repository}.
+#' @param sample Character or \code{NULL}. Source sample.
+#' @param new_sample_name Character. New sample name.
+#' @param path_name Character. Path to update.
+#' @param parts_list List of part columns (named character vector, DNAStringSet, or GRanges).
+#' @param seq_containers List of sequence containers for GRanges resolution.
+#' @param collection Character or \code{NULL}.
+#' @return The updated \code{gen_sample}.
+#' @export
+update_with_library_from_granges <- function(repo, sample = NULL, new_sample_name,
+                                             path_name, parts_list,
+                                             seq_containers = list(),
+                                             collection = NULL) {
+  parts_list <- .resolve_granges_columns(parts_list, seq_containers)
   repo$update_with_library(sample, new_sample_name, path_name, parts_list, collection)
 }
 

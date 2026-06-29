@@ -438,7 +438,10 @@ plot(cassette_sg)
 ```
 
 `DNAStringSet` columns work identically to named character vectors and
-can be mixed freely in the same `parts_list`.
+can be mixed freely in the same `parts_list`. For parts defined by
+genomic coordinates, use `import_library_from_granges()` with a
+`seq_containers` list; see the `library_from_granges.R` example in
+`inst/examples/` for the full pattern.
 
 #### Applying a library update to an existing sample
 
