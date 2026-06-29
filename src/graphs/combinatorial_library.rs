@@ -29,15 +29,15 @@ pub struct SequencePart {
 }
 
 /// A part node placed into a library's assembled chunk, along with the
-/// bucket (column) and variant (alternative-within-column) indices it
+/// slot (column) and option (alternative-within-slot) indices it
 /// occupies, so callers can build accession identities that distinguish
-/// variants sharing identical content or position-relative offsets.
+/// options sharing identical content or position-relative offsets.
 #[derive(Clone, Debug)]
 pub struct PartNode {
     pub node_id: HashId,
     pub part: SequencePart,
-    pub bucket: usize,
-    pub variant: usize,
+    pub slot: usize,
+    pub option: usize,
 }
 
 #[derive(Error, Debug)]
@@ -176,9 +176,9 @@ pub fn create_library(
         sequence_lengths_by_node_id.insert(PATH_START_NODE_ID, 0);
     }
 
-    for (bucket, parts) in cleaned_parts_list.into_iter().enumerate() {
+    for (slot, parts) in cleaned_parts_list.into_iter().enumerate() {
         let mut column_part_nodes = vec![];
-        for (variant, part) in parts.into_iter().enumerate() {
+        for (option, part) in parts.into_iter().enumerate() {
             let part_hash = sequence_hashes_by_name.get(&part.name).ok_or_else(|| {
                 CombinatorialLibraryCreationError::CreationFailed(format!(
                     "Part {} missing.",
@@ -189,7 +189,7 @@ pub fn create_library(
                 conn,
                 part_hash,
                 &HashId::convert_str(&format!(
-                    "{library_name}:{part_name}:{ref_start}-{ref_end}->{sequence_hash}-column-{bucket}",
+                    "{library_name}:{part_name}:{ref_start}-{ref_end}->{sequence_hash}-column-{slot}",
                     part_name = part.name,
                     ref_start = 0,
                     ref_end = part.sequence_length,
@@ -201,8 +201,8 @@ pub fn create_library(
             part_nodes.push(PartNode {
                 node_id: part_node_id,
                 part,
-                bucket,
-                variant,
+                slot,
+                option,
             });
         }
         part_nodes_list.push(column_part_nodes);
@@ -326,7 +326,7 @@ pub(crate) fn create_part_annotations(
     AnnotationGroupSample::create(conn, group_name, sample_name)?;
     for part_node in part_nodes {
         let part = &part_node.part;
-        let accession_name = format!("bucket-{}-variant-{}", part_node.bucket, part_node.variant);
+        let accession_name = format!("slot-{}-option-{}", part_node.slot, part_node.option);
         let accession = Accession::get_or_create(
             conn,
             &NewAccession {
