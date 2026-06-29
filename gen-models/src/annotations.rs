@@ -114,14 +114,6 @@ pub struct AnnotationExtra {
     pub genbank: Option<GenBankExtra>,
     pub gff: Option<GffExtra>,
     pub bed: Option<BedExtra>,
-    pub fasta: Option<FastaExtra>,
-    pub part: Option<PartExtra>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct PartExtra {
-    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -175,20 +167,6 @@ pub struct BedExtra {
     pub block_sizes: Option<Vec<i64>>,
     pub block_starts: Option<Vec<i64>>,
     pub other_fields: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct FastaModifier {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct FastaExtra {
-    pub description: Option<String>,
-    pub modifiers: Vec<FastaModifier>,
 }
 
 fn serialize_annotation_extra(extra: Option<&AnnotationExtra>) -> Result<String, AnnotationError> {

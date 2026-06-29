@@ -947,10 +947,6 @@ mod tests {
             name: "p1".to_string(),
             sequence: "AAAA".to_string(),
             sequence_length: 4,
-            fasta_extra: None,
-            metadata: None,
-            annotation_start: None,
-            annotation_end: None,
         };
 
         update_with_library(

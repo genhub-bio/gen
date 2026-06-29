@@ -376,29 +376,13 @@ fn parse_column(column: &Robj) -> std::result::Result<Vec<SequencePart>, String>
     if names.len() != sequences.len() {
         return Err("Library column names and sequences have different lengths.".to_string());
     }
-    let metadata_strings: Vec<Option<String>> = if is_xstringset(column) {
-        match call!(".gen_serialize_mcols", column)
-            .ok()
-            .and_then(|r| r.as_string_vector())
-        {
-            Some(v) => v.into_iter().map(Some).collect(),
-            None => vec![None; sequences.len()],
-        }
-    } else {
-        vec![None; sequences.len()]
-    };
     Ok(names
         .into_iter()
         .zip(sequences)
-        .zip(metadata_strings)
-        .map(|((name, sequence), metadata)| SequencePart {
+        .map(|(name, sequence)| SequencePart {
             sequence_length: sequence.len() as i64,
             name,
             sequence,
-            fasta_extra: None,
-            metadata,
-            annotation_start: None,
-            annotation_end: None,
         })
         .collect())
 }

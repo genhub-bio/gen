@@ -9,9 +9,7 @@ use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
-    annotations::{
-        Annotation, AnnotationExtra, AnnotationGroupSample, FastaExtra, FastaModifier, PartExtra,
-    },
+    annotations::{Annotation, AnnotationGroupSample},
     db::GraphConnection,
     errors::{BlockGroupError, NodeError, PathError, SequenceError},
     node::Node,
@@ -19,7 +17,6 @@ use gen_models::{
     sequence::Sequence,
 };
 use noodles::fasta;
-use serde_json::from_str;
 use thiserror::Error;
 
 use crate::graphs::{BlockGroupChunk, GraphError, NodePoint, stitch};
@@ -29,10 +26,6 @@ pub struct SequencePart {
     pub name: String,
     pub sequence: String,
     pub sequence_length: i64,
-    pub fasta_extra: Option<FastaExtra>,
-    pub metadata: Option<String>,
-    pub annotation_start: Option<i64>,
-    pub annotation_end: Option<i64>,
 }
 
 /// A part node placed into a library's assembled chunk, along with the
@@ -71,55 +64,6 @@ pub enum CombinatorialLibraryCreationError {
     SequenceError(#[from] SequenceError),
 }
 
-const GEN_ANNOTATION_START: &str = "GEN_annotation_start";
-const GEN_ANNOTATION_END: &str = "GEN_annotation_end";
-
-struct ParsedFastaDescription {
-    extra: FastaExtra,
-    annotation_start: Option<i64>,
-    annotation_end: Option<i64>,
-}
-
-fn parse_fasta_description(description_bytes: &[u8]) -> ParsedFastaDescription {
-    let raw = String::from_utf8_lossy(description_bytes);
-    let description = Some(raw.to_string());
-    let mut modifiers = vec![];
-    let mut annotation_start: Option<i64> = None;
-    let mut annotation_end: Option<i64> = None;
-    let mut rest = raw.as_ref();
-    while let Some(open) = rest.find('[') {
-        rest = &rest[open + 1..];
-        if let Some(close) = rest.find(']') {
-            let token = &rest[..close];
-            if let Some(eq) = token.find('=') {
-                let key = token[..eq].trim();
-                let value = token[eq + 1..].trim();
-                if key == GEN_ANNOTATION_START {
-                    annotation_start = value.parse().ok();
-                } else if key == GEN_ANNOTATION_END {
-                    annotation_end = value.parse().ok();
-                } else {
-                    modifiers.push(FastaModifier {
-                        key: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-            }
-            rest = &rest[close + 1..];
-        } else {
-            break;
-        }
-    }
-    ParsedFastaDescription {
-        extra: FastaExtra {
-            description,
-            modifiers,
-        },
-        annotation_start,
-        annotation_end,
-    }
-}
-
 pub fn parse_library(
     parts_filename: &str,
     design_filename: &str,
@@ -135,21 +79,11 @@ pub fn parse_library(
         let sequence = str::from_utf8(record.sequence().as_ref())
             .map_err(|e| CombinatorialLibraryParseError::FastaParseFailed(e.to_string()))?;
         let name = String::from_utf8(record.name().to_vec()).unwrap();
-        let mut part = SequencePart {
+        let part = SequencePart {
             name: name.to_string(),
             sequence: sequence.to_string(),
             sequence_length: sequence.len() as i64,
-            fasta_extra: None,
-            metadata: None,
-            annotation_start: None,
-            annotation_end: None,
         };
-        if let Some(description) = record.description() {
-            let parsed = parse_fasta_description(description.as_ref());
-            part.fasta_extra = Some(parsed.extra);
-            part.annotation_start = parsed.annotation_start;
-            part.annotation_end = parsed.annotation_end;
-        }
         sequence_parts_by_name.insert(name.clone(), part);
     }
 
@@ -393,8 +327,6 @@ pub(crate) fn create_part_annotations(
     for part_node in part_nodes {
         let part = &part_node.part;
         let accession_name = format!("bucket-{}-variant-{}", part_node.bucket, part_node.variant);
-        let ann_start = part.annotation_start.unwrap_or(0);
-        let ann_end = part.annotation_end.unwrap_or(part.sequence_length);
         let accession = Accession::get_or_create(
             conn,
             &NewAccession {
@@ -404,27 +336,14 @@ pub(crate) fn create_part_annotations(
                 spans: vec![AccessionSpan {
                     node_id: part_node.node_id,
                     range: Range {
-                        start: ann_start,
-                        end: ann_end,
+                        start: 0,
+                        end: part.sequence_length,
                     },
                     strand: Strand::Forward,
                 }],
             },
         )?;
-        let extra_part = part
-            .metadata
-            .as_deref()
-            .and_then(|s| from_str(s).ok().map(|v| PartExtra { metadata: Some(v) }));
-        let extra = if part.fasta_extra.is_some() || extra_part.is_some() {
-            Some(AnnotationExtra {
-                fasta: part.fasta_extra.clone(),
-                part: extra_part,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
-        Annotation::get_or_create(conn, &part.name, group_name, &accession.id, extra.as_ref())?;
+        Annotation::get_or_create(conn, &part.name, group_name, &accession.id, None)?;
     }
     Ok(())
 }
