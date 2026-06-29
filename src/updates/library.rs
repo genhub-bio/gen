@@ -1,7 +1,8 @@
 use core::ops::Range;
-use std::str;
 
+use gen_core::Strand;
 use gen_models::{
+    accession::{Accession, AccessionSpan, NewAccession},
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
@@ -19,13 +20,59 @@ use crate::{
         BlockGroupChunk, NodePoint,
         combinatorial_library::{
             CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
-            create_library,
+            create_library, create_part_annotations,
         },
         operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
         stitch,
     },
     updates::resolve_update_region,
 };
+
+/// Creates a top-level accession anchored at a single resolved graph
+/// position where a library update was spliced in. Each part placed by that
+/// update becomes a child accession (see `create_part_annotations`), so
+/// reusing a part name/sequence across separate update calls on the same
+/// block group never collides: siblings only need to be unique relative to
+/// this location accession, not block-group-wide.
+///
+/// This is anchored at a resolved graph position rather than built via
+/// `AccessionSpan::from_resolved_region`, because region bounds for
+/// Annotation/Accession-kind regions can extend past the region's own
+/// intervaltree (e.g. `foobar:-3-5`, 3bp upstream of annotation `foobar`),
+/// which only `find_graph_positions`' graph walk resolves correctly.
+///
+/// `find_graph_positions` can return more than one position when a splice
+/// site sits past a branch point, but at the zero offsets used by both call
+/// sites below it always resolves through `ResolvedGraph::resolve_anchor`,
+/// which already collapses same-coordinate branches down to a single
+/// arbitrary match before any walk happens — so taking `positions[0]` at
+/// those call sites doesn't lose anything beyond what's already lost
+/// upstream. Fixing that collapse would mean changing `resolve_anchor`
+/// itself (pre-existing, merged, shared by every region resolution in the
+/// system), which is out of scope here.
+fn create_location_accession(
+    conn: &gen_models::db::GraphConnection,
+    block_group_id: gen_core::HashId,
+    position: &gen_graph::GraphNodePosition,
+) -> Result<Accession, BlockGroupError> {
+    let coordinate = position.coordinate();
+    Ok(Accession::get_or_create(
+        conn,
+        &NewAccession {
+            name: format!("{}:{coordinate}", position.graph_node.node_id),
+            block_group_id,
+            parent_accession_id: None,
+            spans: vec![AccessionSpan {
+                node_id: position.graph_node.node_id,
+                range: gen_core::range::Range {
+                    start: coordinate,
+                    end: coordinate,
+                },
+                strand: Strand::Forward,
+            }],
+        },
+    )?)
+}
 
 #[derive(Error, Debug)]
 pub enum UpdateWithLibraryError {
@@ -260,12 +307,26 @@ fn update_path_library(
         false,
     )?;
 
-    let library_block_group_chunk = create_library(
+    let (library_block_group_chunk, part_nodes) = create_library(
         conn,
         target_block_group.id,
         new_sample_name,
         parts_list,
         false,
+    )?;
+
+    let resolved_with_positions = resolved_region
+        .find_graph_positions(conn, 0, 0)
+        .map_err(UpdateWithLibraryError::from)?;
+    let splice_point = &resolved_with_positions.start_anchors.unwrap()[0];
+    let location_accession = create_location_accession(conn, target_block_group.id, splice_point)?;
+    create_part_annotations(
+        conn,
+        target_block_group.id,
+        Some(location_accession.id),
+        new_sample_name,
+        new_sample_name,
+        &part_nodes,
     )?;
 
     let mut block_group_chunks = vec![];
@@ -337,13 +398,25 @@ fn update_graph_native_library(
         .map_err(UpdateWithLibraryError::from)?;
     let start_positions = resolved.start_anchors.as_ref().unwrap();
     let end_positions = resolved.end_anchors.as_ref().unwrap();
-    let library_chunk = create_library(
+    let (library_chunk, part_nodes) = create_library(
         conn,
         target_block_group.id,
         new_sample_name,
         parts_list,
         false,
     )?;
+
+    let location_accession =
+        create_location_accession(conn, target_block_group.id, &start_positions[0])?;
+    create_part_annotations(
+        conn,
+        target_block_group.id,
+        Some(location_accession.id),
+        new_sample_name,
+        new_sample_name,
+        &part_nodes,
+    )?;
+
     let start_chunk = BlockGroupChunk {
         entry_node_points: graph_node_positions_to_points(start_positions),
         exit_node_points: graph_node_positions_to_points(start_positions),
@@ -432,7 +505,9 @@ mod tests {
 
     use anyhow::Result;
     use gen_models::{
-        annotations::add_annotation, block_group::BlockGroup, path::Path,
+        annotations::{Annotation, add_annotation},
+        block_group::BlockGroup,
+        path::Path,
         sample_lineage::SampleLineage,
     };
 
@@ -845,6 +920,61 @@ mod tests {
                 .map(|x| x.to_string())
                 .collect()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reusing_a_part_name_at_a_different_locus_does_not_collide() -> Result<()> {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        let part = SequencePart {
+            name: "p1".to_string(),
+            sequence: "AAAA".to_string(),
+            sequence_length: 4,
+        };
+
+        update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "lib_sample",
+            "m123:5-10",
+            vec![vec![part.clone()]],
+            None,
+            None,
+        )?;
+
+        // Same sample, a different locus, the same reused part name.
+        update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "lib_sample",
+            "m123:20-25",
+            vec![vec![part]],
+            None,
+            None,
+        )?;
+
+        let annotations = Annotation::query_by_group(conn, "lib_sample").unwrap();
+        let names: Vec<_> = annotations.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["p1", "p1"]);
 
         Ok(())
     }

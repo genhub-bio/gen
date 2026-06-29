@@ -1,5 +1,3 @@
-use std::str;
-
 use anyhow::Result;
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
@@ -14,7 +12,8 @@ use gen_models::{
 use thiserror::Error;
 
 use crate::graphs::combinatorial_library::{
-    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart, create_library,
+    CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
+    create_library, create_part_annotations,
 };
 
 #[derive(Error, Debug)]
@@ -90,8 +89,17 @@ pub fn import_library(
         },
     )?;
 
-    let _block_group_boundaries =
+    let (_chunk, part_nodes) =
         create_library(conn, new_block_group.id, library_name, parts_list, true)?;
+
+    create_part_annotations(
+        conn,
+        new_block_group.id,
+        None,
+        library_name,
+        sample,
+        &part_nodes,
+    )?;
 
     let mut files = vec![];
     if let Some(library_file_path) = library_file_path {
@@ -120,7 +128,7 @@ pub fn import_library(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::block_group::BlockGroup;
+    use gen_models::{annotations::Annotation, block_group::BlockGroup};
 
     use super::*;
     use crate::{
@@ -274,6 +282,80 @@ mod tests {
                 .map(|x| x.to_string())
                 .collect()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotations_created_for_all_parts() -> Result<()> {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        let collection = "test";
+        let library_name = "m123";
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+
+        let binding =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/design_reusing_parts.csv");
+        let library_path = binding.to_str().unwrap();
+
+        let parts_list = parse_library(parts_path, library_path)?;
+
+        import_library(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            library_name,
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )?;
+
+        let annotations = Annotation::query_by_group(conn, library_name).unwrap();
+        let mut names: Vec<_> = annotations.iter().map(|a| a.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["p1", "p1", "p2", "p2", "p3", "p3"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotations_created_for_distinct_columns() -> Result<()> {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        let collection = "test";
+        let library_name = "m123";
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+
+        let binding =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
+        let library_path = binding.to_str().unwrap();
+
+        let parts_list = parse_library(parts_path, library_path)?;
+
+        import_library(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            library_name,
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )?;
+
+        let annotations = Annotation::query_by_group(conn, library_name).unwrap();
+        let mut names: Vec<_> = annotations.iter().map(|a| a.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["cds1", "cds2", "cds3", "p1", "p2", "p3"]);
 
         Ok(())
     }

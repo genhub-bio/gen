@@ -5,9 +5,12 @@ library(BSgenome.Hsapiens.UCSC.hg38)
 # Combinatorial library from genomic coordinates.
 #
 # Parts are defined as GRanges slices of an existing reference genome.
-# The seq_containers argument maps each GRanges to its source genome by
-# matching the 'genome' field in the GRanges Seqinfo slot against the
-# assembly metadata of each container.
+# The seq_containers argument maps each GRanges column to its source genome by
+# matching the 'genome' field in the GRanges Seqinfo slot against the assembly
+# metadata of each container.
+#
+# If names() are set on a GRanges column they become the part annotation names.
+# If names() are absent, names are auto-generated as "<seqname>:<start>-<end>:<strand>".
 #
 # Note: this approach extracts flat sequences via getSeq() under the hood.
 # A future iteration will instead store coordinate-based Node references,
@@ -45,14 +48,15 @@ rbs_variants <- GRanges(
 names(rbs_variants) <- c("rbs_strong", "rbs_weak")
 
 # Pass the genome container alongside the GRanges columns.
-# import_library matches each GRanges to the right container via the
-# 'genome' field: GRanges Seqinfo genome == container assembly genome.
-library_sg <- repo$import_library(
+# import_library_from_granges matches each GRanges to the right container via
+# the 'genome' field: GRanges Seqinfo genome == container assembly genome.
+library_sg <- import_library_from_granges(
+  repo            = repo,
   library_name    = "genomic-parts-library",
   parts_list      = list(promoters, rbs_variants),
   seq_containers  = list(BSgenome.Hsapiens.UCSC.hg38),
   sample          = "design-v1",
-  collection_name = "genomic-library"
+  collection      = "genomic-library"
 )
 
 plot(library_sg)

@@ -2,13 +2,12 @@
 % Please edit documentation in R/high_level.R
 \name{import_library}
 \alias{import_library}
-\title{Import a combinatorial library with optional GRanges part sequences}
+\title{Import a combinatorial library}
 \usage{
 import_library(
   repo,
   library_name,
   parts_list,
-  seq_containers = list(),
   sample = NULL,
   collection = NULL
 )
@@ -18,9 +17,7 @@ import_library(
 
 \item{library_name}{Character. Library name.}
 
-\item{parts_list}{Named list of part vectors (character or GRanges).}
-
-\item{seq_containers}{List of sequence containers for GRanges resolution.}
+\item{parts_list}{Named list of part vectors (named character vector or DNAStringSet).}
 
 \item{sample}{Character or \code{NULL}.}
 
@@ -30,6 +27,7 @@ import_library(
 The imported \code{SequenceGraph}.
 }
 \description{
-Thin wrapper around \code{repo$import_library()} that resolves any GRanges
-columns in \code{parts_list} before handing off to Rust.
+Thin wrapper around \code{repo$import_library()}.
+Each column in \code{parts_list} must be a named character vector or
+\code{DNAStringSet}; names become annotation names.
 }

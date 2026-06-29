@@ -188,10 +188,7 @@ pub fn draw_label_near_pos(
     for text in truncations(label) {
         let width = text.chars().count() as u16;
 
-        let below = (
-            center_x.saturating_sub(width / 2),
-            annotation_bottom.saturating_add(1),
-        );
+        let below = (center_x.saturating_sub(width / 2), annotation_bottom);
 
         if try_draw_label_at(buf, area, below.0, below.1, &text, color) {
             return Some(below);

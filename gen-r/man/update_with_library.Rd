@@ -2,7 +2,7 @@
 % Please edit documentation in R/high_level.R
 \name{update_with_library}
 \alias{update_with_library}
-\title{Apply a library update with optional GRanges part sequences}
+\title{Apply a library update}
 \usage{
 update_with_library(
   repo,
@@ -10,7 +10,6 @@ update_with_library(
   new_sample_name,
   path_name,
   parts_list,
-  seq_containers = list(),
   collection = NULL
 )
 }
@@ -23,9 +22,7 @@ update_with_library(
 
 \item{path_name}{Character. Path to update.}
 
-\item{parts_list}{Named list of part vectors (character or GRanges).}
-
-\item{seq_containers}{List of sequence containers for GRanges resolution.}
+\item{parts_list}{Named list of part vectors (named character vector or DNAStringSet).}
 
 \item{collection}{Character or \code{NULL}.}
 }
@@ -33,5 +30,5 @@ update_with_library(
 The updated \code{gen_sample}.
 }
 \description{
-Apply a library update with optional GRanges part sequences
+Apply a library update
 }

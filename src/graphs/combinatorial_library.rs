@@ -6,10 +6,12 @@ use std::{
 };
 
 use anyhow::Result;
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
 use gen_models::{
+    accession::{Accession, AccessionSpan, NewAccession},
+    annotations::{Annotation, AnnotationGroupSample},
     db::GraphConnection,
-    errors::{NodeError, PathError, SequenceError},
+    errors::{BlockGroupError, NodeError, PathError, SequenceError},
     node::Node,
     path::Path,
     sequence::Sequence,
@@ -24,6 +26,18 @@ pub struct SequencePart {
     pub name: String,
     pub sequence: String,
     pub sequence_length: i64,
+}
+
+/// A part node placed into a library's assembled chunk, along with the
+/// slot (column) and option (alternative-within-slot) indices it
+/// occupies, so callers can build accession identities that distinguish
+/// options sharing identical content or position-relative offsets.
+#[derive(Clone, Debug)]
+pub struct PartNode {
+    pub node_id: HashId,
+    pub part: SequencePart,
+    pub slot: usize,
+    pub option: usize,
 }
 
 #[derive(Error, Debug)]
@@ -65,14 +79,12 @@ pub fn parse_library(
         let sequence = str::from_utf8(record.sequence().as_ref())
             .map_err(|e| CombinatorialLibraryParseError::FastaParseFailed(e.to_string()))?;
         let name = String::from_utf8(record.name().to_vec()).unwrap();
-        sequence_parts_by_name.insert(
-            name.clone(),
-            SequencePart {
-                name: name.to_string(),
-                sequence: sequence.to_string(),
-                sequence_length: sequence.len() as i64,
-            },
-        );
+        let part = SequencePart {
+            name: name.to_string(),
+            sequence: sequence.to_string(),
+            sequence_length: sequence.len() as i64,
+        };
+        sequence_parts_by_name.insert(name.clone(), part);
     }
 
     let library_file = File::open(design_filename).map_err(|e| {
@@ -126,7 +138,7 @@ pub fn create_library(
     library_name: &str,
     parts_list: Vec<Vec<SequencePart>>,
     create_block_group: bool,
-) -> Result<BlockGroupChunk, CombinatorialLibraryCreationError> {
+) -> Result<(BlockGroupChunk, Vec<PartNode>), CombinatorialLibraryCreationError> {
     if parts_list.is_empty() {
         return Err(CombinatorialLibraryCreationError::NoParts(
             "No parts provided for library creation.".to_string(),
@@ -158,14 +170,15 @@ pub fn create_library(
 
     let mut part_nodes_list = vec![];
     let mut sequence_lengths_by_node_id = HashMap::new();
+    let mut part_nodes = vec![];
     if create_block_group {
         part_nodes_list.push(vec![PATH_START_NODE_ID]);
         sequence_lengths_by_node_id.insert(PATH_START_NODE_ID, 0);
     }
 
-    for (index, parts) in cleaned_parts_list.iter().enumerate() {
-        let mut part_nodes = vec![];
-        for part in parts {
+    for (slot, parts) in cleaned_parts_list.into_iter().enumerate() {
+        let mut column_part_nodes = vec![];
+        for (option, part) in parts.into_iter().enumerate() {
             let part_hash = sequence_hashes_by_name.get(&part.name).ok_or_else(|| {
                 CombinatorialLibraryCreationError::CreationFailed(format!(
                     "Part {} missing.",
@@ -176,17 +189,23 @@ pub fn create_library(
                 conn,
                 part_hash,
                 &HashId::convert_str(&format!(
-                    "{library_name}:{part_name}:{ref_start}-{ref_end}->{sequence_hash}-column-{index}",
+                    "{library_name}:{part_name}:{ref_start}-{ref_end}->{sequence_hash}-column-{slot}",
                     part_name = part.name,
                     ref_start = 0,
                     ref_end = part.sequence_length,
                     sequence_hash = part_hash
                 )),
             )?;
-            part_nodes.push(part_node_id);
+            column_part_nodes.push(part_node_id);
             sequence_lengths_by_node_id.insert(part_node_id, part.sequence_length);
+            part_nodes.push(PartNode {
+                node_id: part_node_id,
+                part,
+                slot,
+                option,
+            });
         }
-        part_nodes_list.push(part_nodes);
+        part_nodes_list.push(column_part_nodes);
     }
 
     if create_block_group {
@@ -293,7 +312,40 @@ pub fn create_library(
         )?;
     }
 
-    Ok(result_block_group_chunk)
+    Ok((result_block_group_chunk, part_nodes))
+}
+
+pub(crate) fn create_part_annotations(
+    conn: &GraphConnection,
+    block_group_id: HashId,
+    parent_accession_id: Option<HashId>,
+    group_name: &str,
+    sample_name: &str,
+    part_nodes: &[PartNode],
+) -> Result<(), BlockGroupError> {
+    AnnotationGroupSample::create(conn, group_name, sample_name)?;
+    for part_node in part_nodes {
+        let part = &part_node.part;
+        let accession_name = format!("slot-{}-option-{}", part_node.slot, part_node.option);
+        let accession = Accession::get_or_create(
+            conn,
+            &NewAccession {
+                name: accession_name,
+                block_group_id,
+                parent_accession_id,
+                spans: vec![AccessionSpan {
+                    node_id: part_node.node_id,
+                    range: Range {
+                        start: 0,
+                        end: part.sequence_length,
+                    },
+                    strand: Strand::Forward,
+                }],
+            },
+        )?;
+        Annotation::get_or_create(conn, &part.name, group_name, &accession.id, None)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

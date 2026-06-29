@@ -1,6 +1,5 @@
 use pyo3::{prelude::*, pyclass};
 
-/// Exposes a SequencePart to Python.
 #[pyclass(name = "SequencePart")]
 #[derive(Clone)]
 pub struct PySequencePart {
@@ -12,11 +11,12 @@ pub struct PySequencePart {
 #[pymethods]
 impl PySequencePart {
     #[new]
+    #[pyo3(signature = (name, sequence))]
     fn new(name: String, sequence: String) -> Self {
         PySequencePart {
-            name,
-            sequence: sequence.clone(),
             sequence_length: sequence.len() as i64,
+            name,
+            sequence,
         }
     }
 }
