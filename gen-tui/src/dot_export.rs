@@ -52,40 +52,21 @@ pub fn export_to_dot(viewport_graph: &CroppedGraph, filename: &str) -> Result<()
             },
         };
 
-        // Shape and color based on node role
-        let (shape, color) = match &node.role {
-            NodeRole::Data(_) => ("box", "lightblue"),
-            NodeRole::Routing | NodeRole::Pin => ("point", "red"),
-            NodeRole::Stitch(_) => ("diamond", "orange"),
+        // Color based on node role
+        let color = match &node.role {
+            NodeRole::Data(_) => "lightblue",
+            NodeRole::Routing => "red",
+            NodeRole::Pin => "purple",
+            NodeRole::Stitch(_) => "orange",
         };
 
-        // Adjust font size and size based on node size
-        let (width, height) = node.size;
-        let fontsize = (width / 10).clamp(8, 16);
-        let width_inches = width as f64 / 72.0; // Convert to inches
-        let height_inches = height as f64 / 72.0;
-
-        // Include pos attribute for all nodes
-        match &node.role {
-            NodeRole::Routing => {
-                // Point shape doesn't use width/height attributes, no label but include coordinates as custom attribute
-                writeln!(
-                    &mut dot,
-                    "    n{} [label=\"\", pos=\"{},{}!\", shape=\"{}\", fillcolor=\"{}\", style=\"filled\", pin=true, coords=\"({},{})\"];",
-                    node_id, x, y, shape, color, x, y
-                )
-                .unwrap();
-            }
-            _ => {
-                // Regular nodes with width and height
-                writeln!(
-                    &mut dot,
-                    "    n{} [label=\"{}\", pos=\"{},{}!\", shape=\"{}\", fillcolor=\"{}\", style=\"filled\", pin=true, fontsize=\"{}\", width=\"{}\", height=\"{}\"];",
-                    node_id, label, x, y, shape, color, fontsize, width_inches, height_inches
-                )
-                .unwrap();
-            }
-        }
+        // All nodes rendered as boxes with coordinates as label so positions are readable.
+        writeln!(
+            &mut dot,
+            "    n{} [label=\"{}\\n({},{})\", pos=\"{},{}!\", shape=\"box\", fillcolor=\"{}\", style=\"filled\", pin=true, fontsize=\"8\"];",
+            node_id, label, x, y, x, y, color
+        )
+        .unwrap();
     }
 
     // Write edges (with bundle information as custom attributes)
@@ -203,11 +184,11 @@ pub fn export_layout_graph_to_dot(
 
         writeln!(
             &mut dot,
-            "    n{} [label=\"{}\\n{}x{}\", pos=\"{},{}!\", shape=\"box\", fixedsize=\"true\", width=\"{}\", height=\"{}\", fontsize=\"8\", fillcolor=\"{}\", style=\"filled\", pin=true];",
+            "    n{} [label=\"{}\\n({},{})\", pos=\"{},{}!\", shape=\"box\", fixedsize=\"true\", width=\"{}\", height=\"{}\", fontsize=\"8\", fillcolor=\"{}\", style=\"filled\", pin=true];",
             node_idx.index(),
             label,
-            width,
-            height,
+            node.pos.x,
+            node.pos.y,
             x,
             y,
             width_inches,

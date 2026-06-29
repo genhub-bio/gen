@@ -1,0 +1,35 @@
+graph {
+    layout=neato;
+    overlap=false;
+    rankdir=LR;
+    n0 [label="D0\n(0,0)", pos="0,-0!", shape="box", fixedsize="true", width="1.5", height="0.8999999999999999", fontsize="8", fillcolor="lightblue", style="filled", pin=true];
+    n1 [label="PIN\n(0,5)", pos="0,-1.5!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="purple", style="filled", pin=true];
+    n2 [label="D1\n(10,0)", pos="3,-0!", shape="box", fixedsize="true", width="1.5", height="0.8999999999999999", fontsize="8", fillcolor="lightblue", style="filled", pin=true];
+    n4 [label="R\n(4,3)", pos="1.2,-0.8999999999999999!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="red", style="filled", pin=true];
+    n5 [label="R\n(4,5)", pos="1.2,-1.5!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="red", style="filled", pin=true];
+    n6 [label="R\n(6,3)", pos="1.7999999999999998,-0.8999999999999999!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="red", style="filled", pin=true];
+    n7 [label="R\n(6,0)", pos="1.7999999999999998,-0!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="red", style="filled", pin=true];
+    n8 [label="D2\n(16,0)", pos="4.8,-0!", shape="box", fixedsize="true", width="1.5", height="0.8999999999999999", fontsize="8", fillcolor="lightblue", style="filled", pin=true];
+    n10 [label="D3\n(22,0)", pos="6.6,-0!", shape="box", fixedsize="true", width="1.5", height="0.8999999999999999", fontsize="8", fillcolor="lightblue", style="filled", pin=true];
+    n12 [label="D4\n(32,0)", pos="9.6,-0!", shape="box", fixedsize="true", width="1.5", height="0.8999999999999999", fontsize="8", fillcolor="lightblue", style="filled", pin=true];
+    n13 [label="PIN\n(32,5)", pos="9.6,-1.5!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="purple", style="filled", pin=true];
+    n14 [label="R\n(26,0)", pos="7.8,-0!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="red", style="filled", pin=true];
+    n15 [label="R\n(26,3)", pos="7.8,-0.8999999999999999!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="red", style="filled", pin=true];
+    n16 [label="R\n(28,5)", pos="8.4,-1.5!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="red", style="filled", pin=true];
+    n17 [label="R\n(28,3)", pos="8.4,-0.8999999999999999!", shape="box", fixedsize="true", width="0.3", height="0.3", fontsize="8", fillcolor="red", style="filled", pin=true];
+    n0 -- n7 [label="(0,1)"];
+    n4 -- n5 [label="(3,1)"];
+    n4 -- n6 [label="(3,1)"];
+    n5 -- n16 [label="(3,1)"];
+    n7 -- n2 [label="(0,1),(3,1)"];
+    n7 -- n6 [label="(3,1)"];
+    n1 -- n5 [label="(3,1)"];
+    n2 -- n8 [label="(1,2)"];
+    n8 -- n10 [label="(2,3)"];
+    n15 -- n14 [label="(3,1)"];
+    n12 -- n14 [label="(3,4)"];
+    n15 -- n17 [label="(3,1)"];
+    n10 -- n14 [label="(3,4),(3,1)"];
+    n16 -- n13 [label="(3,1)"];
+    n16 -- n17 [label="(3,1)"];
+}

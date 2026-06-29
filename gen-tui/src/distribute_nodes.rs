@@ -367,7 +367,16 @@ fn solve_axis(
             end: a.start.max(b.start) - 1,
         };
         if line.start <= line.end {
-            segments[seg_of[&edge.source()]].spans.push((line, 1));
+            let seg = seg_of[&edge.source()];
+            // For Y-axis, a horizontal wire spans the full row height; using the
+            // segment's max_size lets wide data rows push routing stubs out to a
+            // position outside the data node's visual extent.
+            let obstacle_size = if matches!(axis, Axis::Y) {
+                segments[seg].max_size
+            } else {
+                1
+            };
+            segments[seg].spans.push((line, obstacle_size));
         }
     }
 
@@ -376,6 +385,47 @@ fn solve_axis(
     }
 
     let mut constraints = sweep_constraints(&segments, min_gap);
+
+    // Stitch nodes mark partition boundaries. Their y-span is tiny (1×1 dummy
+    // size), so sweep_constraints misses pairs where the stitch row and the
+    // data row don't share any perpendicular cells. Force full x-clearance
+    // between every stitch segment and every other segment.
+    if matches!(axis, Axis::X) {
+        // Accumulate the maximum required gap per ordered (from, to) pair so we
+        // emit one constraint per pair rather than one per node combination.
+        let mut stitch_gaps: HashMap<(usize, usize), i64> = HashMap::new();
+        for &stitch_idx in &nodes {
+            if !matches!(graph[stitch_idx].role, NodeRole::Stitch(_)) {
+                continue;
+            }
+            let stitch_seg = seg_of[&stitch_idx];
+            let stitch_x = axis.pos(&graph[stitch_idx]);
+            let stitch_w = axis.size(&graph[stitch_idx]);
+            for &other_idx in &nodes {
+                let other_seg = seg_of[&other_idx];
+                if other_seg == stitch_seg {
+                    continue;
+                }
+                let other_x = axis.pos(&graph[other_idx]);
+                if other_x == stitch_x {
+                    continue;
+                }
+                let gap = base_step(stitch_w, axis.size(&graph[other_idx])) + min_gap;
+                let (from, to) = if stitch_x < other_x {
+                    (stitch_seg, other_seg)
+                } else {
+                    (other_seg, stitch_seg)
+                };
+                stitch_gaps
+                    .entry((from, to))
+                    .and_modify(|g| *g = (*g).max(gap))
+                    .or_insert(gap);
+            }
+        }
+        for ((from, to), gap) in stitch_gaps {
+            constraints.push(Constraint { from, to, gap });
+        }
+    }
 
     // Diagonal edges (direct stitch connections that skipped rectilinear
     // routing) carry no spacing requirement, but their endpoint order on each

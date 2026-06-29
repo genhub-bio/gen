@@ -165,6 +165,36 @@ fn make_snapshot_with_backward_edges(
         let viewport_graph = controller.get_viewport_graph();
         let detail_level = controller.get_detail_level();
 
+        if std::env::var("RUST_LOG")
+            .map(|v| v.contains("debug"))
+            .unwrap_or(false)
+        {
+            let current_thread = std::thread::current();
+            let test_name = current_thread.name().unwrap_or("unknown_test");
+            let vp_filename = format!("{}_viewport.dot", test_name);
+            if let Err(e) = crate::dot_export::export_to_dot(viewport_graph, &vp_filename) {
+                eprintln!("Failed to export viewport dot {}: {}", vp_filename, e);
+            }
+            for (partition_idx, partition) in controller
+                .partition_controller
+                .partition_table
+                .partitions
+                .iter()
+                .enumerate()
+            {
+                if let Some(layout) = partition.layouts[detail_level.as_index()].as_ref() {
+                    let layout_filename =
+                        format!("{}_partition{}_layout.dot", test_name, partition_idx);
+                    if let Err(e) = crate::dot_export::export_layout_graph_to_dot(
+                        &layout.graph,
+                        &layout_filename,
+                    ) {
+                        eprintln!("Failed to export layout dot {}: {}", layout_filename, e);
+                    }
+                }
+            }
+        }
+
         let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
         plot_viewport_graph(
             viewport_graph,
@@ -2201,4 +2231,195 @@ fn viewport_visual_regression_circular_genome_loop_multi_partition() {
     );
 
     insta::assert_snapshot!("circular_genome_loop_multi_partition", snapshot);
+}
+
+#[test]
+fn backward_edge_pin_layer_insertion_single_partition() {
+    let _ = env_logger::try_init();
+    // Linear chain 0→1→2→3→4 with a backward edge (4, 0) closing the loop,
+    // forced into one partition (layer_count=1000) so the pin/dummy/data interplay
+    // is exercised in the simplest possible subgraph.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..5).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..4 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        100,
+        20,
+        1000,
+        usize::MAX,
+        &[(nodes[4], nodes[0])],
+    );
+
+    insta::assert_snapshot!(
+        "backward_edge_pin_layer_insertion_single_partition",
+        snapshot
+    );
+}
+
+#[test]
+fn backward_edge_pin_layer_insertion_multi_partition() {
+    let _ = env_logger::try_init();
+    // Same graph split across multiple partitions (layer_count=2) so the dummy-relay
+    // path through intermediate stitch chains is also exercised.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..5).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..4 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        160,
+        20,
+        2,
+        usize::MAX,
+        &[(nodes[4], nodes[0])],
+    );
+
+    insta::assert_snapshot!(
+        "backward_edge_pin_layer_insertion_multi_partition",
+        snapshot
+    );
+}
+
+#[test]
+fn backward_edge_minimal_triangle() {
+    let _ = env_logger::try_init();
+    // Smallest possible cycle: 3 nodes, backward edge 2 → 0.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..3).map(|_| domain_graph.add_node(())).collect();
+    domain_graph.add_edge(nodes[0], nodes[1], ());
+    domain_graph.add_edge(nodes[1], nodes[2], ());
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        80,
+        20,
+        usize::MAX,
+        usize::MAX,
+        &[(nodes[2], nodes[0])],
+    );
+
+    insta::assert_snapshot!("backward_edge_minimal_triangle", snapshot);
+}
+
+#[test]
+fn backward_edge_six_node_cycle() {
+    let _ = env_logger::try_init();
+    // 6-node cycle mirroring the cycle_no_path.gfa fixture from the view-cycles branch.
+    // Forward: 0 → 1 → 2 → 3 → 4 → 5, backward edge 5 → 0.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..6).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..5 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        120,
+        20,
+        usize::MAX,
+        usize::MAX,
+        &[(nodes[5], nodes[0])],
+    );
+
+    insta::assert_snapshot!("backward_edge_six_node_cycle", snapshot);
+}
+
+#[test]
+fn backward_edge_six_node_cycle_multi_partition() {
+    let _ = env_logger::try_init();
+    // Same 6-node cycle as backward_edge_six_node_cycle, but split across partitions
+    // (layer_count=2), exercising the pin-relay path across partition boundaries.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..6).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..5 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        160,
+        20,
+        2,
+        usize::MAX,
+        &[(nodes[5], nodes[0])],
+    );
+
+    insta::assert_snapshot!("backward_edge_six_node_cycle_multi_partition", snapshot);
+}
+
+#[test]
+fn backward_edge_partial_loop() {
+    let _ = env_logger::try_init();
+    // Backward edge that doesn't close to the start node.
+    // Chain: 0 → 1 → 2 → 3 → 4, backward edge 3 → 1 creates an inner loop.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..5).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..4 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        100,
+        20,
+        usize::MAX,
+        usize::MAX,
+        &[(nodes[3], nodes[1])],
+    );
+
+    insta::assert_snapshot!("backward_edge_partial_loop", snapshot);
+}
+
+#[test]
+fn backward_edge_diamond_loop() {
+    let _ = env_logger::try_init();
+    // Diamond 0 → {1, 2} → 3 with a backward edge 3 → 0 creating a loop
+    // around the entire structure.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..4).map(|_| domain_graph.add_node(())).collect();
+    domain_graph.add_edge(nodes[0], nodes[1], ());
+    domain_graph.add_edge(nodes[0], nodes[2], ());
+    domain_graph.add_edge(nodes[1], nodes[3], ());
+    domain_graph.add_edge(nodes[2], nodes[3], ());
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        100,
+        20,
+        usize::MAX,
+        usize::MAX,
+        &[(nodes[3], nodes[0])],
+    );
+
+    insta::assert_snapshot!("backward_edge_diamond_loop", snapshot);
+}
+
+#[test]
+fn backward_edge_branched_cycle() {
+    let _ = env_logger::try_init();
+    // Main chain with an external branch that merges in mid-cycle.
+    // Chain: 0 → 1 → 2 → 3 → 4, branch: 5 → 2, backward edge 4 → 0.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..6).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..4 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+    domain_graph.add_edge(nodes[5], nodes[2], ());
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        120,
+        25,
+        usize::MAX,
+        usize::MAX,
+        &[(nodes[4], nodes[0])],
+    );
+
+    insta::assert_snapshot!("backward_edge_branched_cycle", snapshot);
 }

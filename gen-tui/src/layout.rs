@@ -911,15 +911,21 @@ fn count_connected_components<N, E>(graph: &StableDiGraph<N, E, u32>) -> usize {
     components
 }
 
-/// Mean y of every Data or Routing node in column `x`. Stitch is excluded even though
-/// it's never part of `min_x`/`max_x` (see `align_partition_to_origin`), because a stitch
-/// can still end up sharing a column with real content - `make_rectilinear` skips
-/// rectilinear routing for any layer pair touching a stitch (wiring the edge straight
-/// across instead; see `route_graph.rs`'s `has_stitch` check), leaving that edge
-/// "diagonal" by the time it reaches `distribute_nodes.rs`'s compaction solver, which
-/// gives diagonal edges a zero-gap constraint - free to collapse onto whatever column its
-/// neighbor lands on. A stitch's position is just wherever that left it, not a meaningful
-/// anchor.
+/// Mean y of every Data or Routing node in column `x`. Stitch and Pin are excluded:
+///
+/// Stitch is excluded even though it's never part of `min_x`/`max_x` (see
+/// `align_partition_to_origin`), because a stitch can still end up sharing a column with
+/// real content - `make_rectilinear` skips rectilinear routing for any layer pair touching
+/// a stitch (wiring the edge straight across instead; see `route_graph.rs`'s `has_stitch`
+/// check), leaving that edge "diagonal" by the time it reaches `distribute_nodes.rs`'s
+/// compaction solver, which gives diagonal edges a zero-gap constraint - free to collapse
+/// onto whatever column its neighbor lands on. A stitch's position is just wherever that
+/// left it, not a meaningful anchor.
+///
+/// Pin is excluded for the same reason: its y-position is set by the bypass arc height
+/// (typically several rows above or below baseline), not by the data content of the column.
+/// Including it would tilt the mean away from the actual data row and cause a spurious
+/// vertical shift of the entire partition.
 ///
 /// Routing nodes are counted alongside Data: a bypass edge that re-converges on baseline
 /// before exiting through this column (e.g. a long spanning edge) is exactly as much a
@@ -935,7 +941,9 @@ fn mean_y_for_x(
 ) -> Option<i64> {
     let ys: Vec<i64> = layout_graph
         .node_weights()
-        .filter(|node| node.pos.x == x && !matches!(node.role, NodeRole::Stitch(_)))
+        .filter(|node| {
+            node.pos.x == x && !matches!(node.role, NodeRole::Stitch(_) | NodeRole::Pin)
+        })
         .map(|node| node.pos.y)
         .collect();
     if ys.is_empty() {
