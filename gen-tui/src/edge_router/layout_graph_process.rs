@@ -267,10 +267,18 @@ fn prune_pin(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>, pin_in
                     current = *only;
                 }
                 [a, b] => {
-                    // Reached the T-junction - remove it too, splicing its other two
-                    // neighbors together with the bundle carried from the pin.
-                    to_remove.push(current);
-                    splice = Some((*a, *b, bundle));
+                    let jpos = graph[current].pos;
+                    let apos = graph[*a].pos;
+                    let bpos = graph[*b].pos;
+                    let colinear = (jpos.x == apos.x && jpos.x == bpos.x)
+                        || (jpos.y == apos.y && jpos.y == bpos.y);
+                    if colinear {
+                        // Straight pass-through junction: remove it and splice
+                        // its two remaining neighbors together.
+                        to_remove.push(current);
+                        splice = Some((*a, *b, bundle));
+                    }
+                    // Perpendicular: the junction is a corner, leave it in place.
                     break;
                 }
                 _ => break, // dead end or a true 3+-way junction - leave it in place.
