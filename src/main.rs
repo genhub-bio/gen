@@ -29,7 +29,7 @@ use r#gen::{
     track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
+        block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
         diff::view_diff, operations::view_operations, patch::view_patches,
         tui_runtime::install_global_panic_hook,
     },
@@ -191,15 +191,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
                 match block_group {
                     Ok(bg) => {
-                        let block_graph = BlockGroup::get_graph(graph_conn, &bg.id)?;
                         let current_path = BlockGroup::get_current_path(graph_conn, &bg.id)?;
                         // Use a default height of 10 for now
-                        match show_inline_gen_graph_widget(
+                        match show_inline_block_group_widget(
                             graph_conn,
-                            &block_graph,
+                            bg.id,
                             vec![current_path],
                             10,
-                            Some(bg.id),
                         ) {
                             Ok(true) => {
                                 // User requested upgrade to full TUI

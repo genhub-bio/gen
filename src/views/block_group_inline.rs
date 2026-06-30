@@ -216,11 +216,14 @@ impl<'a> InlineGenGraphState<'a> {
     }
 }
 
-/// Display an inline GenGraph widget with interactive controls
+/// Display an inline widget for a generic GenGraph with interactive controls
 ///
 /// This function creates an interactive inline terminal widget that displays a GenGraph
 /// with full navigation and zoom controls. The widget appears inline in the terminal
 /// without taking over the entire screen.
+///
+/// Use [`show_inline_block_group_widget`] instead when the graph belongs to a `BlockGroup`,
+/// so that annotations can be loaded.
 ///
 /// # Controls
 /// * Arrow keys: Navigate cursor between nodes and pan the view
@@ -238,6 +241,28 @@ impl<'a> InlineGenGraphState<'a> {
 /// * `Ok(false)` if completed successfully and exited
 ///
 pub fn show_inline_gen_graph_widget(
+    conn: &GraphConnection,
+    graph: &GenGraph,
+    paths: Vec<Path>,
+    height: u16,
+) -> Result<bool> {
+    show_inline_widget(conn, graph, paths, height, None)
+}
+
+/// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
+///
+/// See [`show_inline_gen_graph_widget`] for controls and return value.
+pub fn show_inline_block_group_widget(
+    conn: &GraphConnection,
+    block_group_id: HashId,
+    paths: Vec<Path>,
+    height: u16,
+) -> Result<bool> {
+    let graph = BlockGroup::get_graph(conn, &block_group_id).map_err(Error::other)?;
+    show_inline_widget(conn, &graph, paths, height, Some(block_group_id))
+}
+
+fn show_inline_widget(
     conn: &GraphConnection,
     graph: &GenGraph,
     paths: Vec<Path>,
