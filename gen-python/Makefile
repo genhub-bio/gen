@@ -24,8 +24,8 @@ pyenv-test:
 notebook-clear-output:
 	$(VENV_JUPYTER) nbconvert --clear-output --inplace examples/*.ipynb
 
-notebook-test: notebook-clear-output
+notebook-test:
 	$(VENV_MATURIN) develop
 	$(VENV_PYTEST) --nbmake --nbmake-timeout=120 examples/
 
-test: pyenv-test notebook-test
+test: notebook-clear-output pyenv-test notebook-test
