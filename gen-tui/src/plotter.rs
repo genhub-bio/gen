@@ -360,7 +360,9 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     }
                 }
 
-                // Check if this node is highlighted
+                // TODO: when multiple highlights cover this node, render the cell with an
+                // underline modifier instead of silently discarding earlier highlights.
+                // Detect via: node_highlights.iter().filter(|(pos,_)| pos == world_pos).count() > 1
                 let highlighted_style = node_highlights
                     .iter()
                     .filter(|(pos, _)| pos == world_pos)

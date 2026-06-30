@@ -64,11 +64,9 @@ where
     }
     match op(context) {
         Ok(val) => {
-            if managed {
-                if let Err(e) = tx_commit(context) {
-                    tx_rollback(context);
-                    return Err(e);
-                }
+            if managed && let Err(e) = tx_commit(context) {
+                tx_rollback(context);
+                return Err(e);
             }
             Ok(val)
         }
@@ -303,7 +301,7 @@ impl PyRepository {
     // Plot
     // -------------------------------------------------------------------------
 
-    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None))]
+    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None, colors=None))]
     fn plot(
         &self,
         py: Python<'_>,
@@ -311,13 +309,14 @@ impl PyRepository {
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
+        colors: Option<PyObject>,
     ) -> PyResult<PyObject> {
         let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph)?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
         let ctrl = Py::new(py, ctrl)?;
-        build_widget(py, ctrl, rows, cols)
+        build_widget(py, ctrl, rows, cols, colors)
     }
 
     fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {

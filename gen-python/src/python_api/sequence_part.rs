@@ -10,6 +10,16 @@ pub struct PySequencePart {
 
 #[pymethods]
 impl PySequencePart {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn sequence(&self) -> &str {
+        &self.sequence
+    }
+
     #[new]
     #[pyo3(signature = (name, sequence))]
     fn new(name: String, sequence: String) -> Self {

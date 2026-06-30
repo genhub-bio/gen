@@ -29,13 +29,17 @@ use r#gen::{
         annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
         annotation_track::{
             AnnotationSegment as ViewAnnotationSegment, AnnotationSpan, AnnotationTrack,
-            graph_locus_from_annotation_span,
+            graph_locus_from_annotation_span, span_covered_by_later,
         },
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
             parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
         },
-        gen_graph_widget::{GenGraphNodeRenderer, GenGraphNodeSizer, highlight_match_range},
+        gen_graph_widget::{
+            GenGraphNodeRenderer, GenGraphNodeSizer, highlight_locus, locus_label_bounds,
+            viewport_pos_map,
+        },
+        inline_label_placement::draw_label_near_pos,
     },
 };
 use gen_annotations::{
@@ -57,12 +61,13 @@ use gen_models::{
 };
 use gen_tui::{
     LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    plotter::PathStyle,
+    plotter::PathStyle, theme::current_theme,
 };
 use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
 use rusqlite::{Connection, types::ValueRef};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 fn nullable_string_to_option(value: Nullable<String>) -> Option<String> {
     match value {
@@ -187,6 +192,26 @@ fn gen_annotation_record_id(obj: &Robj) -> std::result::Result<Option<HashId>, E
 }
 
 /// Build a `gen_annotation` R record (id, name, group, kind, segments, length, locus).
+fn json_value_to_robj(v: &JsonValue) -> Robj {
+    match v {
+        JsonValue::Null => r!(NULL),
+        JsonValue::Bool(b) => r!(*b),
+        JsonValue::Number(n) => r!(n.as_f64().unwrap_or(f64::NAN)),
+        JsonValue::String(s) => r!(s.as_str()),
+        JsonValue::Array(arr) => {
+            let items: Vec<Robj> = arr.iter().map(json_value_to_robj).collect();
+            r!(List::from_values(items))
+        }
+        JsonValue::Object(obj) => {
+            let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+            let vals: Vec<Robj> = obj.values().map(json_value_to_robj).collect();
+            let mut list = r!(List::from_values(vals));
+            list.set_names(keys).unwrap();
+            list
+        }
+    }
+}
+
 fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &GenGraph) -> Robj {
     let segments = annotation_segments(conn, annotation);
     let span = AnnotationSpan {
@@ -536,13 +561,12 @@ fn load_tracks_from_specs(
         return Vec::new();
     }
 
-    let node_ranges: HashMap<HashId, Vec<(i64, i64)>> = controller
+    let node_filter: HashSet<HashId> = controller
         .graph()
         .nodes()
         .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
-        .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
+        .map(|n| n.node_id)
         .collect();
-    let node_filter: HashSet<HashId> = node_ranges.keys().copied().collect();
 
     let mut tracks = Vec::new();
     for spec in specs {
@@ -560,7 +584,7 @@ fn load_tracks_from_specs(
                         conn,
                         current_block_group: &bg,
                         entry: &entry,
-                        visible_ranges_by_node: &node_ranges,
+                        node_ids: &node_filter,
                     };
                     if let Ok(spans) = load_annotations_for_group(&request) {
                         tracks.push(AnnotationTrack::new(name, spans));
@@ -832,7 +856,7 @@ fn apply_graph_ops(
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        highlight_match_range(controller, &locus, style);
+        highlight_locus(controller, &locus, style);
     }
 
     Ok(())
@@ -2007,6 +2031,7 @@ impl Repository {
         rows: i32,
         ops: String,
         tracks_json: String,
+        annotation_colors_json: String,
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
@@ -2015,21 +2040,132 @@ impl Repository {
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
         controller.hide_cursor();
-        apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
 
         let area = Rect::new(0, 0, cols as u16, rows as u16);
         let mut buf = Buffer::empty(area);
+
+        let tracks = load_tracks_from_specs(conn, &controller, &bg_id, &tracks_json);
+
+        // Step 1: Apply annotation highlights before graph render.
+        // Sort spans longest-first so shorter annotations paint on top.
+        let mut all_spans: Vec<&AnnotationSpan> =
+            tracks.iter().flat_map(|t| t.annotations.iter()).collect();
+        all_spans.sort_by_key(|s| {
+            -(s.segments
+                .iter()
+                .map(|seg| seg.end - seg.start)
+                .sum::<i64>())
+        });
+        // Parse the caller-supplied color map: id_hex → Some(color) to use that
+        // color, None to hide the annotation entirely. Empty map means use the
+        // default theme cycle for every annotation.
+        let color_overrides: HashMap<String, Option<String>> =
+            serde_json::from_str(&annotation_colors_json).unwrap_or_default();
+        let use_overrides = !color_overrides.is_empty();
+
+        // Resolve per-span colors. None means the span should be hidden.
+        let annotation_colors: Vec<Option<ratatui::style::Color>> = {
+            let theme = current_theme();
+            let mut theme_idx = 0usize;
+            all_spans
+                .iter()
+                .map(|span| {
+                    let id_hex = span.id.to_string();
+                    if use_overrides {
+                        match color_overrides.get(&id_hex) {
+                            Some(Some(hex)) => parse_op_color(hex).ok(),
+                            Some(None) => None,
+                            // Unknown span (e.g. from a file track) → theme cycle
+                            None => {
+                                let c = theme[0x08 + (theme_idx % 8)];
+                                theme_idx += 1;
+                                Some(c)
+                            }
+                        }
+                    } else {
+                        let c = theme[0x08 + (theme_idx % 8)];
+                        theme_idx += 1;
+                        Some(c)
+                    }
+                })
+                .collect()
+        };
+        {
+            let loci: Vec<Option<_>> = all_spans
+                .iter()
+                .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
+                .collect();
+            for (locus, color_opt) in loci.iter().zip(annotation_colors.iter()) {
+                let Some(color) = color_opt else { continue };
+                if let Some(l) = locus {
+                    highlight_locus(&mut controller, l, PathStyle::new(*color));
+                }
+            }
+        }
+
+        // Apply match highlights after annotations so they render on top.
+        apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
+
+        // Render graph with highlights applied.
         let renderer = GenGraphNodeRenderer::new(conn);
         GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut controller);
 
-        let tracks = load_tracks_from_specs(conn, &controller, &bg_id, &tracks_json);
-        let mut remaining = area;
-        for track in tracks.iter().rev() {
-            let height = track.draw(&mut buf, remaining, &controller);
-            if height == 0 {
-                break;
+        // Step 2: Draw floating labels after graph render.
+        let pos_map = viewport_pos_map(&controller);
+        let detail_level = controller.get_detail_level();
+        let mut not_shown_count: u32 = 0;
+        {
+            let loci: Vec<Option<_>> = all_spans
+                .iter()
+                .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
+                .collect();
+            for (idx, ((span, color_opt), locus)) in all_spans
+                .iter()
+                .zip(annotation_colors.iter())
+                .zip(loci.iter())
+                .enumerate()
+            {
+                let Some(&color) = color_opt.as_ref() else {
+                    continue;
+                };
+                if span.name.is_empty() {
+                    continue;
+                }
+                // Count spans whose every segment is covered by a later (shorter) span.
+                if locus.is_some() && span_covered_by_later(span, idx, &all_spans) {
+                    not_shown_count += 1;
+                    continue;
+                }
+                let Some(l) = locus else {
+                    continue;
+                };
+                let Some(bounds) =
+                    locus_label_bounds(l, &pos_map, detail_level, &controller.viewport_state)
+                else {
+                    continue;
+                };
+                if draw_label_near_pos(
+                    &mut buf,
+                    area,
+                    bounds,
+                    &span.name,
+                    color,
+                    &controller.viewport_state,
+                    5,
+                )
+                .is_none()
+                {
+                    not_shown_count += 1;
+                }
             }
-            remaining.height = remaining.height.saturating_sub(height);
+        }
+        if not_shown_count > 0 {
+            let note = format!(" +{not_shown_count} not labeled ");
+            let note_style = ratatui::style::Style::default()
+                .fg(current_theme()[0x09])
+                .bg(current_theme()[0x00]);
+            let y = area.bottom().saturating_sub(1);
+            buf.set_string(area.x, y, &note, note_style);
         }
 
         serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))

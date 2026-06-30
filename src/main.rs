@@ -199,6 +199,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                             &block_graph,
                             vec![current_path],
                             10,
+                            Some(bg.id),
                         ) {
                             Ok(true) => {
                                 // User requested upgrade to full TUI

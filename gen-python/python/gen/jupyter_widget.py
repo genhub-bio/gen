@@ -97,13 +97,23 @@ class GraphWidget(anywidget.AnyWidget):
     # pager indicator.
     page_index: int = traitlets.Int(0).tag(sync=True)
 
-    def __init__(self, controller, **kwargs):
+    def __init__(self, controller, *, colors=None, **kwargs):
         """
         Parameters
         ----------
         controller:
             A ``gen.PyGraphController`` instance.  Normally obtained via
             ``repo.plot(sg)``, ``sg.plot()``, or ``sample.plot()``.
+        colors : callable | dict | list, optional
+            Controls annotation colours loaded from the repository.
+
+            - **callable** ``(ann: Annotation) -> str | None`` — called once per
+              annotation; return a CSS hex colour to paint it, or ``None`` to hide it.
+            - **dict** ``{name: color}`` — maps ``ann.name`` to a colour; annotations
+              absent from the dict are hidden.
+            - **list** ``[color, ...]`` — assigns colours from the list cyclically.
+
+            When omitted the theme accent palette is used automatically.
         """
         kwargs.setdefault("page_count", controller.page_count)
         super().__init__(**kwargs)
@@ -117,6 +127,9 @@ class GraphWidget(anywidget.AnyWidget):
 
         # Handle custom messages from the frontend (keyboard / mouse).
         self.on_msg(self._on_frontend_msg)
+
+        # Load annotation groups (skipped if controller is a clone with groups already loaded).
+        self._load_initial_annotations(colors)
 
         # Initial render.
         self._render()
@@ -170,6 +183,49 @@ class GraphWidget(anywidget.AnyWidget):
         snapshot._display_handle = display(data, raw=True, display_id=True)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _load_initial_annotations(self, colors) -> None:
+        """Load annotation groups from the repository, applying the colors mapping.
+
+        Skips if the controller already has groups loaded (e.g. it is a clone).
+        """
+        if self._controller.annotations_loaded:
+            return
+
+        if colors is None:
+            self._controller.trigger_auto_load()
+            return
+
+        color_fn = self._build_color_fn(colors)
+        annotations = self._controller.list_annotations()
+        color_map = {ann.id: color_fn(ann) for ann in annotations}
+        self._controller.load_annotation_groups_with_colors(color_map)
+
+    @staticmethod
+    def _build_color_fn(colors):
+        """Return a callable ``(Annotation) -> str | None`` from any supported colors value."""
+        if callable(colors):
+            return colors
+        if isinstance(colors, dict):
+            return lambda ann: colors.get(ann.name)
+        if isinstance(colors, list):
+            palette = list(colors)
+            n = len(palette)
+            if n == 0:
+                raise ValueError("colors list must not be empty")
+            assigned: dict = {}
+            counter = [0]
+
+            def _cyclic(ann):
+                if ann.id not in assigned:
+                    assigned[ann.id] = palette[counter[0] % n]
+                    counter[0] += 1
+                return assigned[ann.id]
+
+            return _cyclic
+        raise TypeError(
+            f"colors must be a callable, dict, or list; got {type(colors).__name__}"
+        )
 
     def _render(self) -> None:
         """Ask Rust to render a frame and push it to the frontend."""
@@ -458,7 +514,7 @@ class GraphWidget(anywidget.AnyWidget):
         from_sample: str | None = None,
         filter=None,
     ) -> None:
-        """Add an annotation track panel below the graph.
+        """Add annotations as inline graph highlights with floating labels.
 
         Exactly one of *annotations*, *file*, or *group* must be supplied.
 
@@ -475,7 +531,7 @@ class GraphWidget(anywidget.AnyWidget):
         group : str, optional
             Annotation group name stored in the repository.
         name : str, optional
-            Track panel label.  Required when *annotations* is supplied.
+            Display label for this annotation track.  Required when *annotations* is supplied.
         from_sample : str, optional
             Sample whose coordinate space the file uses (file tracks only).
             Defaults to ``"reference"``.
@@ -525,30 +581,22 @@ class GraphWidget(anywidget.AnyWidget):
         return tmp.name
 
     def annotation_tracks(self) -> list:
-        """Return list of loaded track-panel annotation names."""
+        """Return list of annotation track names currently loaded."""
         return json.loads(self._controller.get_track_names())
 
     def remove_annotation_track(self, name: str) -> None:
-        """Remove an annotation track panel by name."""
+        """Remove an annotation track by name."""
         if self._frozen:
             return
         self._controller.remove_track(name)
         self._render()
 
     def clear_all_annotations(self) -> None:
-        """Clear all annotation track panels and inline annotations."""
+        """Clear all annotations from the graph."""
         if self._frozen:
             return
         self._controller.clear_all_annotations()
-        self._controller.clear_all_inline_annotations()
         self._render()
-
-    # ── Inline annotation API ─────────────────────────────────────────────────
-    #
-    # Inline annotations are rendered directly on the graph — each annotation
-    # is tinted on the nodes it covers and labelled below its bounding box.
-    # Use add_annotation_track() for grouped annotations in a separate aligned
-    # panel below the graph.
 
     def add_annotation(self, annotation) -> None:
         """Render an annotation inline on the graph canvas.
@@ -564,15 +612,15 @@ class GraphWidget(anywidget.AnyWidget):
         """
         if self._frozen:
             return
-        self._controller.add_inline_annotation([annotation], annotation.name)
+        self._controller.add_annotation([annotation], annotation.name)
         self._render()
 
-    def inline_annotations(self) -> list:
-        """Return list of inline annotation names currently displayed."""
-        return json.loads(self._controller.get_inline_annotation_names())
+    def annotations(self) -> list:
+        """Return list of annotation names currently displayed."""
+        return json.loads(self._controller.get_annotation_names())
 
     def list_annotations(self) -> list:
-        """Return all loaded annotations (track and inline) as ``Annotation`` objects.
+        """Return all annotations loaded into the widget as ``Annotation`` objects.
 
         Example
         -------
@@ -585,19 +633,12 @@ class GraphWidget(anywidget.AnyWidget):
         return self._controller.list_annotations()
 
     def remove_annotation(self, name: str) -> None:
-        """Remove all inline annotations with the given name.
+        """Remove all annotations with the given name.
 
         If ``add_annotation`` was called more than once with annotations
         sharing the same name, every copy is removed.
         """
         if self._frozen:
             return
-        self._controller.remove_inline_annotation(name)
-        self._render()
-
-    def clear_all_inline_annotations(self) -> None:
-        """Clear all inline annotations from the graph."""
-        if self._frozen:
-            return
-        self._controller.clear_all_inline_annotations()
+        self._controller.remove_annotation(name)
         self._render()

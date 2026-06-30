@@ -5,6 +5,15 @@ NULL
   if (is.null(x)) y else x
 }
 
+.gen_serialize_mcols <- function(xss) {
+  mc <- tryCatch(S4Vectors::mcols(xss), error = function(e) NULL)
+  if (is.null(mc) || ncol(mc) == 0L) return(NULL)
+  df <- as.data.frame(mc)
+  vapply(seq_len(nrow(df)), function(i) {
+    jsonlite::toJSON(as.list(df[i, , drop = FALSE]), auto_unbox = TRUE)
+  }, character(1))
+}
+
 # Extract the genome string from a sequence container.
 # Supported: BSgenome, DNAStringSet (with metadata$genome set), FaFile, TwoBitFile.
 .container_genome <- function(container) {
@@ -113,6 +122,17 @@ print.gen_locus <- function(x, ...) {
 #'   \code{"compressed"}.
 #' @param rows Integer or \code{NULL}. Canvas height in terminal rows (default 24).
 #' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 72).
+#' @param colors Annotation colors. Three forms are accepted:
+#'   \itemize{
+#'     \item \code{NULL} (default) — use the built-in theme cycle.
+#'     \item A named character vector such as \code{c(TEF1p = "#4393c3")} — maps
+#'       annotation names to hex colors; annotations not in the vector are hidden.
+#'     \item An unnamed character vector such as \code{c("#4393c3", "#1a9850")} — a
+#'       cyclic palette assigned in encounter order.
+#'     \item A function \code{function(ann) ...} that receives each annotation
+#'       (a list with \code{id}, \code{name}, \code{group}, \code{metadata}, etc.)
+#'       and returns a hex color string or \code{NULL} to hide that annotation.
+#'   }
 #' @return A \code{gen_plot} environment with methods:
 #'   \describe{
 #'     \item{\code{zoom_in()}}{Step one zoom level in. Returns self invisibly.}
@@ -122,15 +142,15 @@ print.gen_locus <- function(x, ...) {
 #'     \item{\code{set_detail(detail)}}{Change node detail level (\code{"normal"}, \code{"compressed"}, or \code{"full"}). Returns self invisibly.}
 #'     \item{\code{render_frame(cols, rows)}}{Render to JSON string (used internally by the widget).}
 #'     \item{\code{goto_match(match_locus)}}{Center the viewport on a search result locus. Sets detail to \code{"full"}. Returns self invisibly.}
-#'     \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be any named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}). Returns self invisibly.}
+#'     \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be a named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}) or a CSS hex string (e.g. \code{"#4393c3"}). Returns self invisibly.}
 #'     \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
-#'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file as an annotation track panel below the graph. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
-#'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as a track panel below the graph.}
+#'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file and render annotations as inline graph highlights with floating labels. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
+#'     \item{\code{add_track_group(group)}}{Add a DB-stored annotation group as inline graph highlights with floating labels.}
 #'     \item{\code{list_annotations()}}{Return a list of \code{gen_annotation} records from the database. Each record has \code{id}, \code{name}, \code{group}, \code{kind}, \code{segments}, \code{length}, and \code{locus} fields.}
 #'     \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 #'   }
 #' @export
-GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, cols = NULL) {
+GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, cols = NULL, colors = NULL) {
   ctrl <- new.env(parent = emptyenv())
   ctrl$repo <- .RepositoryClass$new(dirname(dirname(db_path)))
   ctrl$sequence_graph_id <- if (inherits(sequence_graph_id, "gen_hash_id")) sequence_graph_id$hash_id else as.character(sequence_graph_id)
@@ -142,6 +162,31 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
   }, error = function(e) list())
   ctrl$rows <- rows %||% 24L
   ctrl$cols <- cols %||% 72L
+  ctrl$colors_arg <- colors
+  ctrl$color_map_json <- NULL
+
+  ctrl$.build_color_map_json <- function() {
+    if (is.null(ctrl$colors_arg)) {
+      return("{}")
+    }
+    anns <- ctrl$repo$list_annotations(ctrl$sequence_graph_id)
+    color_map <- list()
+    if (is.function(ctrl$colors_arg)) {
+      for (ann in anns) {
+        color_map[[ann$id]] <- tryCatch(ctrl$colors_arg(ann), error = function(e) NULL)
+      }
+    } else if (is.character(ctrl$colors_arg) && !is.null(names(ctrl$colors_arg))) {
+      for (ann in anns) {
+        color_map[[ann$id]] <- ctrl$colors_arg[[ann$name]] %||% NULL
+      }
+    } else if (is.character(ctrl$colors_arg)) {
+      palette <- ctrl$colors_arg
+      for (i in seq_along(anns)) {
+        color_map[[anns[[i]]$id]] <- palette[[(i - 1L) %% length(palette) + 1L]]
+      }
+    }
+    jsonlite::toJSON(color_map, auto_unbox = TRUE, null = "null")
+  }
 
   ctrl$set_detail <- function(detail) {
     ctrl$detail <- detail
@@ -151,7 +196,10 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
   ctrl$render_frame <- function(cols = ctrl$cols, rows = ctrl$rows) {
     ctrl$cols <- cols
     ctrl$rows <- rows
-    ctrl$repo$render_frame(ctrl$sequence_graph_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE))
+    if (is.null(ctrl$color_map_json)) {
+      ctrl$color_map_json <- ctrl$.build_color_map_json()
+    }
+    ctrl$repo$render_frame(ctrl$sequence_graph_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE), ctrl$color_map_json)
   }
 
   ctrl$add_track_group <- function(group) {
@@ -479,8 +527,8 @@ get_node_sequence <- function(obj, node) {
 }
 
 #' @export
-plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = "normal", ...) {
-  GenPlot(x$db_path(), x$id(), detail = detail, rows = rows, cols = cols)
+plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = "normal", colors = NULL, ...) {
+  GenPlot(x$db_path(), x$id(), detail = detail, rows = rows, cols = cols, colors = colors)
 }
 
 #' The sequence graphs produced by a single import/update/derive call
@@ -637,7 +685,7 @@ Repository <- function(path = NULL) {
   repo$build_index    <- function(ids = character(), sequence_kind = "dna", k = 16L) inner$build_index(ids, sequence_kind, as.integer(k))
   repo$search         <- function(query, ids = character(), sequence_kind = "dna") inner$search(query, ids, sequence_kind)
   repo$clear_index    <- function(ids = character()) inner$clear_index(ids)
-  repo$render_frame   <- function(sg_id, detail, cols, rows, ops, tracks_json) inner$render_frame(sg_id, detail, cols, rows, ops, tracks_json)
+  repo$render_frame   <- function(sg_id, detail, cols, rows, ops, tracks_json, annotation_colors_json = "{}") inner$render_frame(sg_id, detail, cols, rows, ops, tracks_json, annotation_colors_json)
   repo$handle_click   <- function(sg_id, detail, ops, col, row) inner$handle_click(sg_id, detail, ops, col, row)
   repo$list_annotations           <- function(sg_id) inner$list_annotations(sg_id)
   repo$auto_load_annotation_groups <- function(sg_id) inner$auto_load_annotation_groups(sg_id)

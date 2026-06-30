@@ -1,12 +1,14 @@
 use std::{
+    collections::HashSet,
     io::{Error, Result},
     panic,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use gen_core::HashId;
 use gen_graph::GenGraph;
-use gen_models::{db::GraphConnection, path::Path};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_controller::GraphController,
     layout::VisualDetail,
@@ -16,10 +18,21 @@ use gen_tui::{
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
+    style::Color,
     widgets::{Block, Borders},
 };
 
-use crate::views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget};
+use crate::views::{
+    annotation_groups::load_annotation_group_entries,
+    annotation_track::{AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later},
+    annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
+    block_group::extract_viewport_node_ids,
+    gen_graph_widget::{
+        GenGraphNodeSizer, create_gen_graph_widget, highlight_locus, locus_label_bounds,
+        viewport_pos_map,
+    },
+    inline_label_placement::draw_label_near_pos,
+};
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
 fn get_path_nodes(
@@ -119,19 +132,29 @@ pub struct InlineGenGraphState<'a> {
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     conn: &'a GraphConnection,
     paths: Vec<Vec<gen_graph::GraphNode>>,
+    block_group_id: Option<HashId>,
+    /// Annotation spans with their assigned colors, ready for highlight + label rendering.
+    annotation_spans: Vec<(AnnotationSpan, Color)>,
+    annotation_groups_loaded: bool,
 }
 
 impl<'a> InlineGenGraphState<'a> {
-    pub fn new(graph: &GenGraph, conn: &'a GraphConnection) -> Self {
+    pub fn new(
+        graph: &GenGraph,
+        conn: &'a GraphConnection,
+        block_group_id: Option<HashId>,
+    ) -> Self {
         let node_sizer = GenGraphNodeSizer;
         let mut graph_controller = GraphController::new(graph.clone(), node_sizer);
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
-        let paths = Vec::new();
         Self {
             controller: graph_controller,
             conn,
-            paths,
+            paths: Vec::new(),
+            block_group_id,
+            annotation_spans: Vec::new(),
+            annotation_groups_loaded: false,
         }
     }
 
@@ -140,6 +163,56 @@ impl<'a> InlineGenGraphState<'a> {
         let path_nodes = get_path_nodes(conn, path, self.controller.graph())?;
         self.paths.push(path_nodes);
         Ok(())
+    }
+
+    fn load_annotation_groups(&mut self, node_ids: &HashSet<HashId>) {
+        let (Some(block_group_id), conn) = (self.block_group_id, self.conn) else {
+            return;
+        };
+        let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id) else {
+            return;
+        };
+        let theme = current_theme();
+        let mut spans: Vec<(AnnotationSpan, Color)> = Vec::new();
+        for entry in load_annotation_group_entries(conn, &block_group) {
+            let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
+                conn,
+                current_block_group: &block_group,
+                entry: &entry,
+                node_ids,
+            }) else {
+                continue;
+            };
+            for span in entry_spans {
+                let color = theme[0x08 + (spans.len() % 8)];
+                spans.push((span, color));
+            }
+        }
+        // Sort longest-first so shorter (inner) spans paint on top.
+        spans.sort_by_key(|(s, _)| {
+            -(s.segments
+                .iter()
+                .map(|seg| seg.end - seg.start)
+                .sum::<i64>())
+        });
+        self.annotation_spans = spans;
+    }
+
+    fn reapply_highlights(&mut self) {
+        let loci_and_styles: Vec<_> = self
+            .annotation_spans
+            .iter()
+            .filter_map(|(span, color)| {
+                let locus = graph_locus_from_annotation_span(span, self.controller.graph())?;
+                Some((locus, PathStyle::new(*color)))
+            })
+            .collect();
+        for (_, style) in &loci_and_styles {
+            self.controller.clear_highlight(style);
+        }
+        for (locus, style) in &loci_and_styles {
+            highlight_locus(&mut self.controller, locus, *style);
+        }
     }
 }
 
@@ -169,6 +242,7 @@ pub fn show_inline_gen_graph_widget(
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
+    block_group_id: Option<HashId>,
 ) -> Result<bool> {
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
@@ -178,7 +252,7 @@ pub fn show_inline_gen_graph_widget(
 
     match terminal_result {
         Ok(mut terminal) => {
-            let mut state = InlineGenGraphState::new(graph, conn);
+            let mut state = InlineGenGraphState::new(graph, conn, block_group_id);
             for path in paths {
                 state.add_path(&path, conn)?;
             }
@@ -197,6 +271,9 @@ pub fn show_inline_gen_graph_widget(
                             let now = Instant::now();
                             let frame_delta = now.duration_since(last_frame_time);
                             last_frame_time = now;
+
+                            // Re-apply stored annotation highlights before drawing.
+                            state.reapply_highlights();
 
                             // Draw the frame
                             terminal.draw(|frame| {
@@ -217,6 +294,20 @@ pub fn show_inline_gen_graph_widget(
 
                                 render_inline(frame, &mut state);
                             })?;
+
+                            // After the first draw the viewport is populated. Load (or reload)
+                            // annotation groups using the viewport node IDs. On subsequent frames,
+                            // invalidate when the camera has moved far enough to change the node set.
+                            if state.controller.detect_motion() {
+                                state.annotation_groups_loaded = false;
+                            }
+                            if !state.annotation_groups_loaded {
+                                let node_ids = extract_viewport_node_ids(&state.controller);
+                                if !node_ids.is_empty() {
+                                    state.load_annotation_groups(&node_ids);
+                                    state.annotation_groups_loaded = true;
+                                }
+                            }
                         }
                         AppEvent::KeyPress(key) => {
                             // Intercept quit signal and path highlighting
@@ -313,6 +404,55 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
 
     // Render the graph widget
     frame.render_stateful_widget(widget, inner_area, &mut state.controller);
+
+    // Draw floating annotation labels after the graph.
+    if !state.annotation_spans.is_empty() {
+        let pos_map = viewport_pos_map(&state.controller);
+        let span_refs: Vec<&AnnotationSpan> =
+            state.annotation_spans.iter().map(|(s, _)| s).collect();
+        let mut not_shown_count: u32 = 0;
+        for (idx, (span, color)) in state.annotation_spans.iter().enumerate() {
+            if span.name.is_empty() || span_covered_by_later(span, idx, &span_refs) {
+                not_shown_count += 1;
+                continue;
+            }
+            let locus = graph_locus_from_annotation_span(span, state.controller.graph());
+            let Some(locus) = locus else { continue };
+            let Some(bounds) = locus_label_bounds(
+                &locus,
+                &pos_map,
+                detail_level,
+                &state.controller.viewport_state,
+            ) else {
+                continue;
+            };
+            if draw_label_near_pos(
+                frame.buffer_mut(),
+                inner_area,
+                bounds,
+                &span.name,
+                *color,
+                &state.controller.viewport_state,
+                5,
+            )
+            .is_none()
+            {
+                not_shown_count += 1;
+            }
+        }
+        if not_shown_count > 0 {
+            let theme = current_theme();
+            let note = format!(" +{not_shown_count} not labeled ");
+            let note_style = ratatui::style::Style::default()
+                .fg(theme[0x09])
+                .bg(theme[0x00]);
+            let y = inner_area.bottom().saturating_sub(1);
+            frame
+                .buffer_mut()
+                .set_string(inner_area.x, y, &note, note_style);
+        }
+    }
+
     draw_controls_help(frame, main_layout[1], state);
 }
 
@@ -370,7 +510,7 @@ mod tests {
         };
         graph.add_node(node);
 
-        let state = InlineGenGraphState::new(&graph, &conn);
+        let state = InlineGenGraphState::new(&graph, &conn, None);
         assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
     }
 }

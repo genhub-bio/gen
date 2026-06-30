@@ -1537,6 +1537,7 @@ dependencies = [
  "noodles",
  "opendal",
  "petgraph",
+ "postcard",
  "rusqlite",
  "rusqlite_migration",
  "serde",

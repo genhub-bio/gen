@@ -7,6 +7,7 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
+    ViewportState,
     geometry::{WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
@@ -323,12 +324,16 @@ pub fn viewport_pos_map<S: NodeSizer<GenGraph>>(
 ///
 /// Column offsets are clamped with `clamp_col` so they map correctly in every
 /// detail level (e.g. truncated nodes collapse interior columns to the `...` cell).
+/// The x bounds are clipped to the visible camera rect so viewport-spanning annotations
+/// place their label near the visible portion rather than off-screen.
 ///
-/// Returns `None` if no block in the locus is present in `pos_map` (all off-screen).
+/// Returns `None` if no block in the locus is present in `pos_map` (all off-screen),
+/// or if the annotation's x span is entirely outside the camera rect.
 pub fn locus_label_bounds(
     locus: &GraphLocus,
     pos_map: &HashMap<GraphNode, (WorldPos, (u64, u64))>,
     detail_level: VisualDetail,
+    viewport_state: &ViewportState,
 ) -> Option<(WorldPos, WorldPos)> {
     let block_world_pos = |block: GraphNode, col_raw: i64| -> Option<WorldPos> {
         let &(center, size) = pos_map.get(&block)?;
@@ -367,8 +372,15 @@ pub fn locus_label_bounds(
         return None;
     }
 
-    let left_pos = WorldPos::new(left_pos.x, y_max);
-    let right_pos = WorldPos::new(right_pos.x, y_min);
+    let cam = viewport_state.camera_rect();
+    let clipped_left_x = left_pos.x.max(cam.min.x);
+    let clipped_right_x = right_pos.x.min(cam.max.x);
+    if clipped_right_x < clipped_left_x {
+        return None;
+    }
+
+    let left_pos = WorldPos::new(clipped_left_x, y_max);
+    let right_pos = WorldPos::new(clipped_right_x, y_min);
 
     Some((left_pos, right_pos))
 }
@@ -409,7 +421,7 @@ fn clamp_truncated_col(value: i64, block_seq_len: i64) -> i64 {
 ///
 /// In `Truncated` detail level the column offsets are clamped so that interior
 /// positions map to the `...` cell rather than a precise (wrong) location.
-pub fn highlight_match_range<S: NodeSizer<GenGraph>>(
+pub fn highlight_locus<S: NodeSizer<GenGraph>>(
     controller: &mut GraphController<GenGraph, S>,
     m: &GraphLocus,
     style: PathStyle,
