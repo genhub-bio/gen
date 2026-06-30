@@ -68,7 +68,6 @@ impl PySample {
     /// skipped and only the widget is returned.
     ///
     /// Parameters
-    /// ----------
     /// rows : int, optional
     ///     Initial viewport height in terminal rows.
     /// cols : int, optional

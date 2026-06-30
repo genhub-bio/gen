@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     time::{Duration, Instant},
 };
@@ -179,10 +179,10 @@ pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
 
 fn load_annotation_groups_for_viewport(
     conn: &GraphConnection,
-    block_group: &gen_models::block_group::BlockGroup,
+    block_group: &BlockGroup,
     node_ids: &HashSet<HashId>,
     explorer_state: &mut CollectionExplorerState,
-    annotation_group_tracks: &mut std::collections::HashMap<String, AnnotationTrack>,
+    annotation_group_tracks: &mut HashMap<String, AnnotationTrack>,
     messages: &mut crate::views::messages::MessageBuffer,
 ) {
     for entry in load_annotation_group_entries(conn, block_group) {
@@ -1035,7 +1035,7 @@ pub fn view_block_group(
                 all_spans.sort_by_key(|s| {
                     -(s.segments.iter().map(|seg| seg.end - seg.start).sum::<i64>())
                 });
-                let annotation_colors: Vec<ratatui::style::Color> = {
+                let annotation_colors: Vec<Color> = {
                     let theme = current_theme();
                     (0..all_spans.len())
                         .map(|i| theme[0x08 + (i % 8)])

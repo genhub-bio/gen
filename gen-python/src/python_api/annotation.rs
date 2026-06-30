@@ -2,6 +2,7 @@ use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
 use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
+use serde_json::{Map, Value, to_string as json_to_string, to_value as json_to_value};
 
 use super::graph_search::PyGraphLocus;
 
@@ -29,7 +30,6 @@ impl PyAnnotation {
     /// Create an ephemeral annotation from a search-result locus.
     ///
     /// Parameters
-    /// ----------
     /// locus : Locus
     ///     A ``Locus`` returned by ``SequenceGraph.search()``.
     /// name : str
@@ -113,7 +113,6 @@ impl PyAnnotation {
     /// annotation, so there are no key collisions.
     ///
     /// Example
-    /// -------
     /// ::
     ///
     ///     for ann in widget.list_annotations():
@@ -126,12 +125,11 @@ impl PyAnnotation {
         };
 
         // GenBank / GFF / BED: flat-merge the non-null source sub-dicts.
-        let top =
-            serde_json::to_value(extra).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let mut merged = serde_json::Map::new();
-        if let serde_json::Value::Object(map) = top {
+        let top = json_to_value(extra).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut merged = Map::new();
+        if let Value::Object(map) = top {
             for (_, child) in map {
-                if let serde_json::Value::Object(child_map) = child {
+                if let Value::Object(child_map) = child {
                     merged.extend(child_map);
                 }
             }
@@ -140,7 +138,7 @@ impl PyAnnotation {
             return Ok(None);
         }
         let json_str =
-            serde_json::to_string(&merged).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            json_to_string(&merged).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Some(py.import("json")?.call_method1("loads", (json_str,))?))
     }
 

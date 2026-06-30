@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet}, // HashMap used by GFF/BED parsers below
+    collections::{HashMap, HashSet},
     error::Error,
     fs::File,
     io::{BufRead, BufReader, Cursor},

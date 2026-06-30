@@ -125,7 +125,6 @@ impl PySequenceGraph {
     /// ``Repository``.
     ///
     /// Parameters
-    /// ----------
     /// rows : int, optional
     ///     Initial viewport height in terminal rows.
     /// cols : int, optional
@@ -170,7 +169,6 @@ impl PySequenceGraph {
     ///   - `.slices` → `list[NodeSlice]`
     ///
     /// Parameters
-    /// ----------
     /// query : str
     ///     The sequence to search for.
     /// sequence_kind : {"exact", "dna", "ssdna", "protein"}, optional
@@ -232,7 +230,6 @@ impl PySequenceGraph {
     /// ``Repository``.
     ///
     /// Parameters
-    /// ----------
     /// sequence_kind : {"exact", "dna", "ssdna", "protein"}, optional
     ///     Biological interpretation of the sequences (default: ``"dna"``).
     ///     ``"exact"`` builds a case-sensitive index; must match the value
@@ -291,7 +288,6 @@ impl PySequenceGraph {
     /// Return the sequence for a graph node.
     ///
     /// Parameters
-    /// ----------
     /// node : Node
     ///     A ``Node`` obtained from ``to_dict()["nodes"]``, ``search()`` results,
     ///     or any other API that returns graph nodes.
@@ -443,7 +439,6 @@ impl PySequenceGraph {
     /// Export all sequence graphs in this sequence graph's sample to FASTA.
     ///
     /// Parameters
-    /// ----------
     /// filename : str
     ///     Output file path.
     fn export_fasta(&self, filename: String) -> PyResult<()> {
@@ -461,7 +456,6 @@ impl PySequenceGraph {
     /// Export all sequence graphs in this sequence graph's sample to GFA.
     ///
     /// Parameters
-    /// ----------
     /// filename : str
     ///     Output file path.
     /// node_max : int, optional
@@ -483,7 +477,6 @@ impl PySequenceGraph {
     /// Export all sequence graphs in this sequence graph's sample to GenBank.
     ///
     /// Parameters
-    /// ----------
     /// filename : str
     ///     Output file path.
     fn export_genbank(&self, filename: String) -> PyResult<()> {
@@ -500,7 +493,6 @@ impl PySequenceGraph {
     /// Return all gene annotations associated with this sequence graph.
     ///
     /// Returns
-    /// -------
     /// list[GeneAnnotation]
     fn list_annotations(&self) -> PyResult<Vec<PyAnnotation>> {
         let ctx = self.require_context("list_annotations()")?;
@@ -533,7 +525,6 @@ impl PySequenceGraph {
     /// searched. The protein sequence graph is created in this graph's sample.
     ///
     /// Parameters
-    /// ----------
     /// region : str or Annotation, optional
     ///     - ``str``: a path name or annotation name scoped to this sequence
     ///       graph. Path names take priority over annotation names.
@@ -669,7 +660,6 @@ impl PySequenceGraph {
     /// Derive a coordinate-bounded subgraph from this sequence graph.
     ///
     /// Parameters
-    /// ----------
     /// new_sample : str
     ///     Sample name for the derived sequence graph.
     /// start : int
@@ -712,7 +702,6 @@ impl PySequenceGraph {
     /// Split this sequence graph into coordinate-bounded subgraphs.
     ///
     /// Parameters
-    /// ----------
     /// new_sample : str
     ///     Sample name for the derived sequence graphs.
     /// breakpoints : str, optional

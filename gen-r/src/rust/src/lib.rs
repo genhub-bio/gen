@@ -64,10 +64,15 @@ use gen_tui::{
     plotter::PathStyle, theme::current_theme,
 };
 use petgraph::{graph::NodeIndex, visit::NodeIndexable};
-use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    widgets::StatefulWidget,
+};
 use rusqlite::{Connection, types::ValueRef};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, from_str as json_from_str};
 
 fn nullable_string_to_option(value: Nullable<String>) -> Option<String> {
     match value {
@@ -2060,11 +2065,11 @@ impl Repository {
         // color, None to hide the annotation entirely. Empty map means use the
         // default theme cycle for every annotation.
         let color_overrides: HashMap<String, Option<String>> =
-            serde_json::from_str(&annotation_colors_json).unwrap_or_default();
+            json_from_str(&annotation_colors_json).unwrap_or_default();
         let use_overrides = !color_overrides.is_empty();
 
         // Resolve per-span colors. None means the span should be hidden.
-        let annotation_colors: Vec<Option<ratatui::style::Color>> = {
+        let annotation_colors: Vec<Option<Color>> = {
             let theme = current_theme();
             let mut theme_idx = 0usize;
             all_spans
@@ -2161,7 +2166,7 @@ impl Repository {
         }
         if not_shown_count > 0 {
             let note = format!(" +{not_shown_count} not labeled ");
-            let note_style = ratatui::style::Style::default()
+            let note_style = Style::default()
                 .fg(current_theme()[0x09])
                 .bg(current_theme()[0x00]);
             let y = area.bottom().saturating_sub(1);

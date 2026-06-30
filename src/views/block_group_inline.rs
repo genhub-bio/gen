@@ -443,9 +443,7 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
         if not_shown_count > 0 {
             let theme = current_theme();
             let note = format!(" +{not_shown_count} not labeled ");
-            let note_style = ratatui::style::Style::default()
-                .fg(theme[0x09])
-                .bg(theme[0x00]);
+            let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
             let y = inner_area.bottom().saturating_sub(1);
             frame
                 .buffer_mut()

@@ -430,7 +430,8 @@ impl GraphPage {
             .filter_map(|span| {
                 let id_hex = span.id.to_string();
                 match color_map.get(&id_hex) {
-                    Some(None) => None, // caller requested this annotation be hidden
+                    // None map value means the caller requested this annotation be hidden.
+                    Some(None) => None,
                     Some(Some(hex)) => {
                         let color = parse_hex_color(hex)
                             .unwrap_or_else(|_| theme[0x08 + ((accent_base + accent_offset) % 8)]);
@@ -575,9 +576,7 @@ impl GraphPage {
             }
             if not_shown_count > 0 {
                 let note = format!(" +{not_shown_count} not labeled ");
-                let note_style = ratatui::style::Style::default()
-                    .fg(theme[0x09])
-                    .bg(theme[0x00]);
+                let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
                 let y = graph_area.bottom().saturating_sub(1);
                 buf.set_string(graph_area.x, y, &note, note_style);
             }
@@ -652,7 +651,6 @@ impl GraphPage {
     /// Set the level of node detail.
     ///
     /// Parameters
-    /// ----------
     /// detail : {"normal", "full", "minimal"}
     ///     ``"normal"`` shows truncated labels (default); ``"full"`` shows
     ///     complete labels; ``"minimal"`` shows the smallest representation.
@@ -796,7 +794,6 @@ impl GraphPage {
     /// Highlight the most recent path associated with this sequence graph.
     ///
     /// Parameters
-    /// ----------
     /// color : str, optional
     ///     Colour for the highlight.  Accepts named colours
     ///     (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -804,7 +801,6 @@ impl GraphPage {
     ///     colour is chosen automatically.
     ///
     /// Raises
-    /// ------
     /// RuntimeError
     ///     If no sequence graph is associated with this widget, or if no path
     ///     exists for the sequence graph.
@@ -1147,9 +1143,7 @@ impl GraphPage {
     }
 }
 
-// --------------------------------------------------------------------------
 // File loading helper
-// --------------------------------------------------------------------------
 
 /// Parse a translated GFF3 or BED file into an `AnnotationTrack`.
 ///
@@ -1330,7 +1324,6 @@ impl PyGraphController {
     /// Load annotation groups applying per-annotation colours from a Python-resolved map.
     ///
     /// Parameters
-    /// ----------
     /// color_map : dict[str, str | None]
     ///     Maps annotation ID hex strings to a CSS hex colour string (e.g.
     ///     ``"#ff4444"``) or ``None`` to hide that annotation entirely.
@@ -1349,7 +1342,6 @@ impl PyGraphController {
     /// Set the level of node detail.
     ///
     /// Parameters
-    /// ----------
     /// detail : {"normal", "full", "minimal"}
     ///     ``"normal"`` shows truncated labels (default); ``"full"`` shows
     ///     complete labels; ``"minimal"`` shows the smallest representation.
@@ -1429,7 +1421,6 @@ impl PyGraphController {
     /// Highlight the most recent path associated with this sequence graph.
     ///
     /// Parameters
-    /// ----------
     /// color : str, optional
     ///     Colour for the highlight.  Accepts named colours
     ///     (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -1437,7 +1428,6 @@ impl PyGraphController {
     ///     colour is chosen automatically.
     ///
     /// Raises
-    /// ------
     /// RuntimeError
     ///     If no sequence graph is associated with this widget, or if no path
     ///     exists for the sequence graph.
@@ -1591,8 +1581,6 @@ impl PyGraphController {
         self.current_index
     }
 }
-
-// --------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

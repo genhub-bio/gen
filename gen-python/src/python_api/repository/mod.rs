@@ -192,9 +192,7 @@ impl PyRepository {
         path_to_py_path(py, &path)
     }
 
-    // -------------------------------------------------------------------------
     // Transaction context manager
-    // -------------------------------------------------------------------------
 
     /// Returns self so that Python's `with` statement calls `__enter__`/`__exit__`
     /// on this repository, batching multiple operations into one transaction.
@@ -229,9 +227,7 @@ impl PyRepository {
         Ok(false)
     }
 
-    // -------------------------------------------------------------------------
     // Raw database access
-    // -------------------------------------------------------------------------
 
     fn execute(&self, query: &str) -> PyResult<()> {
         self.context
@@ -246,9 +242,7 @@ impl PyRepository {
         py_query(py, self.context.graph().conn(), query)
     }
 
-    // -------------------------------------------------------------------------
     // SequenceGraph queries
-    // -------------------------------------------------------------------------
 
     fn get_sequence_graph_by_id(&self, id: &PyHashId) -> PyResult<PySequenceGraph> {
         let conn = self.context.graph().conn();
@@ -297,9 +291,7 @@ impl PyRepository {
         Ok(samples)
     }
 
-    // -------------------------------------------------------------------------
     // Plot
-    // -------------------------------------------------------------------------
 
     #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None, colors=None))]
     fn plot(

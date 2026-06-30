@@ -337,7 +337,6 @@ impl Router {
     }
 
     // Step 1: Make feasible top and bottom connections in minimal manner
-    // ------------------------------------------------------------------
     fn add_vertical_wire(
         &self,
         net: u64,
@@ -557,7 +556,6 @@ impl Router {
     }
 
     // Step 2: Free as many tracks as possible by collapsing split nets
-    // ----------------------------------------------------------------
     fn generate_jog_patterns(
         &self,
         tracks_by_net: &mut HashMap<u64, HashSet<i64>>,
@@ -913,7 +911,6 @@ impl Router {
     }
 
     // Step 3: Add jogs to reduce the range of split nets
-    // --------------------------------------------------
     fn occupied_tracks(&self, tracks_by_net: &HashMap<u64, HashSet<i64>>) -> HashSet<i64> {
         let mut result = HashSet::new();
         for tracks in tracks_by_net.values() {
@@ -1040,7 +1037,6 @@ impl Router {
     }
 
     // Step 4: Add jogs to raise rising nets and lower falling nets
-    // ------------------------------------------------------------
     fn push_unsplit_nets(
         &mut self,
         tracks_by_net: &HashMap<u64, HashSet<i64>>,
@@ -1114,7 +1110,6 @@ impl Router {
     }
 
     // Step 5: Widen channel if needed to make previously not feasible top or bottom connections
-    // -----------------------------------------------------------------------------------------
     fn widen_channel(
         &mut self,
         tracks_by_net: &mut HashMap<u64, HashSet<i64>>,
