@@ -1497,6 +1497,8 @@ fn download_remote_file_addition_asset(
     Ok(Some(destination))
 }
 
+// TODO: Add a parameter to force overwrite the local with the remote, in case
+// the user gets stuck and wants to get the remote copy
 fn verify_downloaded_asset(
     file_addition: &FileAddition,
     destination: &FilePath,
