@@ -29,7 +29,8 @@ use r#gen::{
         annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
         annotation_track::{
             AnnotationSegment as ViewAnnotationSegment, AnnotationSpan, AnnotationTrack,
-            graph_locus_from_annotation_span, span_covered_by_later,
+            graph_locus_from_annotation_span, span_covered_by_later, span_is_single_node,
+            span_label_text,
         },
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
@@ -39,7 +40,7 @@ use r#gen::{
             GenGraphNodeRenderer, GenGraphNodeSizer, highlight_locus, locus_label_bounds,
             viewport_pos_map,
         },
-        inline_label_placement::draw_label_near_pos,
+        inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
     },
 };
 use gen_annotations::{
@@ -2118,7 +2119,8 @@ impl Repository {
         // Step 2: Draw floating labels after graph render.
         let pos_map = viewport_pos_map(&controller);
         let detail_level = controller.get_detail_level();
-        let mut not_shown_count: u32 = 0;
+        let mut named_count: usize = 0;
+        let mut hidden_count: usize = 0;
         {
             let loci: Vec<Option<_>> = all_spans
                 .iter()
@@ -2136,9 +2138,14 @@ impl Repository {
                 if span.name.is_empty() {
                     continue;
                 }
+                named_count += 1;
                 // Count spans whose every segment is covered by a later (shorter) span.
                 if locus.is_some() && span_covered_by_later(span, idx, &all_spans) {
-                    not_shown_count += 1;
+                    hidden_count += 1;
+                    continue;
+                }
+                if detail_level == VisualDetail::Truncated && span_is_single_node(span) {
+                    hidden_count += 1;
                     continue;
                 }
                 let Some(l) = locus else {
@@ -2149,29 +2156,33 @@ impl Repository {
                 else {
                     continue;
                 };
+                let label = span_label_text(span);
                 if draw_label_near_pos(
                     &mut buf,
                     area,
                     bounds,
-                    &span.name,
+                    &label,
                     color,
                     &controller.viewport_state,
                     5,
                 )
                 .is_none()
                 {
-                    not_shown_count += 1;
+                    hidden_count += 1;
                 }
             }
         }
-        if not_shown_count > 0 {
-            let note = format!(" +{not_shown_count} not labeled ");
-            let note_style = Style::default()
-                .fg(current_theme()[0x09])
-                .bg(current_theme()[0x00]);
-            let y = area.bottom().saturating_sub(1);
-            buf.set_string(area.x, y, &note, note_style);
-        }
+        let note_style = Style::default()
+            .fg(current_theme()[0x09])
+            .bg(current_theme()[0x00]);
+        draw_annotation_overflow_note(
+            &mut buf,
+            area,
+            named_count,
+            hidden_count,
+            note_style,
+            detail_level != VisualDetail::Full,
+        );
 
         serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))
             .map_err(|err| Error::Other(err.to_string()))

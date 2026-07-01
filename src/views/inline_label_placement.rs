@@ -216,3 +216,28 @@ pub fn draw_label_near_pos(
 
     None
 }
+
+/// Render a footer note summarizing annotations that didn't get an inline label.
+///
+/// Reports the total annotation count loaded (not just the hidden count) so the
+/// note reads as informational rather than as an error.
+pub fn draw_annotation_overflow_note(
+    buf: &mut Buffer,
+    area: Rect,
+    total_count: usize,
+    hidden_count: usize,
+    style: Style,
+    zoom_hint: bool,
+) {
+    if hidden_count == 0 {
+        return;
+    }
+
+    let header = if zoom_hint {
+        format!(" {total_count} annotations loaded, zoom in to see {hidden_count} more ")
+    } else {
+        format!(" {total_count} annotations loaded, {hidden_count} hidden")
+    };
+    let footer_y = area.bottom().saturating_sub(1);
+    buf.set_string(area.x, footer_y, &header, style);
+}

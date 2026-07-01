@@ -9,7 +9,8 @@ use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{
-    LineStyle, graph_controller::GraphController, plotter::PathStyle, theme::current_theme,
+    LineStyle, graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle,
+    theme::current_theme,
 };
 use log::{info, warn};
 use ratatui::{
@@ -26,7 +27,7 @@ use crate::{
         annotation_groups::load_annotation_group_entries,
         annotation_track::{
             AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span,
-            span_covered_by_later,
+            span_covered_by_later, span_is_single_node, span_label_text,
         },
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
@@ -37,7 +38,7 @@ use crate::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
             highlight_locus, locus_label_bounds, viewport_pos_map,
         },
-        inline_label_placement::draw_label_near_pos,
+        inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
         panels::{render_status_bar, render_with_optional_clear},
         tui_runtime::TuiSession,
     },
@@ -1061,13 +1062,15 @@ pub fn view_block_group(
                 // Step 2: Draw floating labels after graph render.
                 let pos_map = viewport_pos_map(&graph_controller);
                 let detail_level = graph_controller.get_detail_level();
-                let mut not_shown_count: u32 = 0;
+                let mut named_count: usize = 0;
+                let mut hidden_count: usize = 0;
                 for (idx, (span, &color)) in
                     all_spans.iter().zip(annotation_colors.iter()).enumerate()
                 {
                     if span.name.is_empty() {
                         continue;
                     }
+                    named_count += 1;
                     let locus =
                         graph_locus_from_annotation_span(span, graph_controller.graph());
                     let Some(locus) = locus else {
@@ -1075,7 +1078,11 @@ pub fn view_block_group(
                     };
                     // Skip spans whose every segment is covered by a shorter annotation on top.
                     if span_covered_by_later(span, idx, &all_spans) {
-                        not_shown_count += 1;
+                        hidden_count += 1;
+                        continue;
+                    }
+                    if detail_level == VisualDetail::Truncated && span_is_single_node(span) {
+                        hidden_count += 1;
                         continue;
                     }
                     let Some(bounds) = locus_label_bounds(
@@ -1086,27 +1093,31 @@ pub fn view_block_group(
                     ) else {
                         continue;
                     };
+                    let label = span_label_text(span);
                     if draw_label_near_pos(
                         frame.buffer_mut(),
                         canvas_area,
                         bounds,
-                        &span.name,
+                        &label,
                         color,
                         &graph_controller.viewport_state,
                         5,
                     )
                     .is_none()
                     {
-                        not_shown_count += 1;
+                        hidden_count += 1;
                     }
                 }
-                if not_shown_count > 0 {
-                    let note = format!(" +{not_shown_count} not labeled ");
-                    let note_style =
-                        Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]);
-                    let y = canvas_area.bottom().saturating_sub(1);
-                    frame.buffer_mut().set_string(canvas_area.x, y, &note, note_style);
-                }
+                let note_style =
+                    Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]);
+                draw_annotation_overflow_note(
+                    frame.buffer_mut(),
+                    canvas_area,
+                    named_count,
+                    hidden_count,
+                    note_style,
+                    detail_level != VisualDetail::Full,
+                );
             }
 
             // Panel
@@ -1129,7 +1140,6 @@ pub fn view_block_group(
 
                 let panel_text = match panel_mode {
                     PanelMode::Details => {
-                        use gen_tui::layout::VisualDetail;
                         use petgraph::visit::NodeIndexable;
 
                         let mut lines = vec![];

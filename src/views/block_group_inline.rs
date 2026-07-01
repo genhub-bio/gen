@@ -24,14 +24,17 @@ use ratatui::{
 
 use crate::views::{
     annotation_groups::load_annotation_group_entries,
-    annotation_track::{AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later},
+    annotation_track::{
+        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later,
+        span_is_single_node, span_label_text,
+    },
     annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
     block_group::extract_viewport_node_ids,
     gen_graph_widget::{
         GenGraphNodeSizer, create_gen_graph_widget, highlight_locus, locus_label_bounds,
         viewport_pos_map,
     },
-    inline_label_placement::draw_label_near_pos,
+    inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -435,10 +438,19 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
         let pos_map = viewport_pos_map(&state.controller);
         let span_refs: Vec<&AnnotationSpan> =
             state.annotation_spans.iter().map(|(s, _)| s).collect();
-        let mut not_shown_count: u32 = 0;
+        let mut named_count: usize = 0;
+        let mut hidden_count: usize = 0;
         for (idx, (span, color)) in state.annotation_spans.iter().enumerate() {
-            if span.name.is_empty() || span_covered_by_later(span, idx, &span_refs) {
-                not_shown_count += 1;
+            if span.name.is_empty() {
+                continue;
+            }
+            named_count += 1;
+            if span_covered_by_later(span, idx, &span_refs) {
+                hidden_count += 1;
+                continue;
+            }
+            if detail_level == VisualDetail::Truncated && span_is_single_node(span) {
+                hidden_count += 1;
                 continue;
             }
             let locus = graph_locus_from_annotation_span(span, state.controller.graph());
@@ -451,29 +463,31 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
             ) else {
                 continue;
             };
+            let label = span_label_text(span);
             if draw_label_near_pos(
                 frame.buffer_mut(),
                 inner_area,
                 bounds,
-                &span.name,
+                &label,
                 *color,
                 &state.controller.viewport_state,
                 5,
             )
             .is_none()
             {
-                not_shown_count += 1;
+                hidden_count += 1;
             }
         }
-        if not_shown_count > 0 {
-            let theme = current_theme();
-            let note = format!(" +{not_shown_count} not labeled ");
-            let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
-            let y = inner_area.bottom().saturating_sub(1);
-            frame
-                .buffer_mut()
-                .set_string(inner_area.x, y, &note, note_style);
-        }
+        let theme = current_theme();
+        let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
+        draw_annotation_overflow_note(
+            frame.buffer_mut(),
+            inner_area,
+            named_count,
+            hidden_count,
+            note_style,
+            detail_level != VisualDetail::Full,
+        );
     }
 
     draw_controls_help(frame, main_layout[1], state);

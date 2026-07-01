@@ -79,6 +79,40 @@ pub fn graph_locus_from_annotation_span(
     Some(GraphLocus { slices: slices? })
 }
 
+/// Compute the display label for a span, appending a strand arrow when all
+/// segments share a single non-ambiguous strand.
+pub fn span_label_text(span: &AnnotationSpan) -> String {
+    let strand = match span.segments.first() {
+        Some(seg)
+            if !Strand::is_ambiguous(seg.strand)
+                && span.segments.iter().all(|s| s.strand == seg.strand) =>
+        {
+            Some(seg.strand)
+        }
+        _ => None,
+    };
+    match strand {
+        Some(Strand::Forward) => format!("{}›", span.name),
+        Some(Strand::Reverse) => format!("‹{}", span.name),
+        _ => span.name.clone(),
+    }
+}
+
+/// Return `true` if every segment of `span` lies on the same node, i.e. the
+/// annotation does not cross a node boundary.
+///
+/// In `Truncated` detail level, single-node spans are dropped from the inline
+/// overlay entirely: their label only adds clutter since the same information
+/// already fits inside the (possibly collapsed) node itself, and dropping them
+/// leaves room for the cross-node spans that the truncated view actually needs
+/// to communicate.
+pub fn span_is_single_node(span: &AnnotationSpan) -> bool {
+    match span.segments.first() {
+        Some(first) => span.segments.iter().all(|s| s.node_id == first.node_id),
+        None => true,
+    }
+}
+
 /// Return `true` if every segment of `span` at `idx` is fully contained within
 /// at least one segment from a later span (higher index = shorter = painted on top).
 /// Used to count annotations that are completely obscured by other highlights.
@@ -193,5 +227,103 @@ mod tests {
         };
         let span = annotation_span_from_graph_locus(&locus, "");
         assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
+    }
+
+    fn make_segment(node_id: &str, start: i64, end: i64, strand: Strand) -> AnnotationSegment {
+        AnnotationSegment {
+            node_id: HashId::convert_str(node_id),
+            start,
+            end,
+            strand,
+        }
+    }
+
+    #[test]
+    fn span_label_text_appends_forward_arrow() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "my_gene".into(),
+            segments: vec![make_segment("n1", 0, 10, Strand::Forward)],
+        };
+        assert_eq!(span_label_text(&span), "my_gene›");
+    }
+
+    #[test]
+    fn span_label_text_prepends_reverse_arrow() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "my_gene".into(),
+            segments: vec![make_segment("n1", 0, 10, Strand::Reverse)],
+        };
+        assert_eq!(span_label_text(&span), "‹my_gene");
+    }
+
+    #[test]
+    fn span_label_text_omits_arrow_when_segments_disagree_on_strand() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "my_gene".into(),
+            segments: vec![
+                make_segment("n1", 0, 10, Strand::Forward),
+                make_segment("n2", 0, 10, Strand::Reverse),
+            ],
+        };
+        assert_eq!(span_label_text(&span), "my_gene");
+    }
+
+    #[test]
+    fn span_label_text_omits_arrow_for_empty_segments() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "my_gene".into(),
+            segments: vec![],
+        };
+        assert_eq!(span_label_text(&span), "my_gene");
+    }
+
+    #[test]
+    fn span_is_single_node_true_for_one_segment() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![make_segment("n1", 0, 10, Strand::Forward)],
+        };
+        assert!(span_is_single_node(&span));
+    }
+
+    #[test]
+    fn span_is_single_node_true_when_all_segments_share_node() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![
+                make_segment("n1", 0, 10, Strand::Forward),
+                make_segment("n1", 10, 20, Strand::Forward),
+            ],
+        };
+        assert!(span_is_single_node(&span));
+    }
+
+    #[test]
+    fn span_is_single_node_false_when_segments_span_multiple_nodes() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![
+                make_segment("n1", 0, 10, Strand::Forward),
+                make_segment("n2", 0, 10, Strand::Forward),
+            ],
+        };
+        assert!(!span_is_single_node(&span));
+    }
+
+    #[test]
+    fn span_is_single_node_true_for_empty_segments() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![],
+        };
+        assert!(span_is_single_node(&span));
     }
 }

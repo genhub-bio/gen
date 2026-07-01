@@ -11,14 +11,15 @@ use r#gen::{
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
         annotation_track::{
             AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
-            graph_locus_from_annotation_span, span_covered_by_later,
+            graph_locus_from_annotation_span, span_covered_by_later, span_is_single_node,
+            span_label_text,
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
             GenGraphNodeRenderer, GenGraphNodeSizer, highlight_locus, locus_label_bounds,
             viewport_pos_map,
         },
-        inline_label_placement::draw_label_near_pos,
+        inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
     },
 };
 use gen_annotations::projection::annotation_segments;
@@ -536,14 +537,20 @@ impl GraphPage {
             let theme = current_theme();
             let pos_map = viewport_pos_map(&self.controller);
             let detail_level = self.controller.get_detail_level();
-            let mut not_shown_count: u32 = 0;
+            let mut hidden_count: usize = 0;
             for (idx, overlay) in labeled_overlays.iter().enumerate() {
                 let color = match overlay.style.color {
                     ratatui::style::Color::Reset => theme[0x06],
                     c => c,
                 };
                 if span_covered_by_later(&overlay.span, idx, &span_refs) {
-                    not_shown_count += 1;
+                    hidden_count += 1;
+                    continue;
+                }
+                if detail_level == gen_tui::layout::VisualDetail::Truncated
+                    && span_is_single_node(&overlay.span)
+                {
+                    hidden_count += 1;
                     continue;
                 }
                 let locus = locus_from_span_and_pos_map(&overlay.span, &pos_map);
@@ -560,26 +567,30 @@ impl GraphPage {
                 } else {
                     5
                 };
+                let label = span_label_text(&overlay.span);
                 if draw_label_near_pos(
                     buf,
                     graph_area,
                     (left_pos, right_pos),
-                    &overlay.span.name,
+                    &label,
                     color,
                     &self.controller.viewport_state,
                     max_distance,
                 )
                 .is_none()
                 {
-                    not_shown_count += 1;
+                    hidden_count += 1;
                 }
             }
-            if not_shown_count > 0 {
-                let note = format!(" +{not_shown_count} not labeled ");
-                let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
-                let y = graph_area.bottom().saturating_sub(1);
-                buf.set_string(graph_area.x, y, &note, note_style);
-            }
+            let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
+            draw_annotation_overflow_note(
+                buf,
+                graph_area,
+                labeled_overlays.len(),
+                hidden_count,
+                note_style,
+                detail_level != gen_tui::layout::VisualDetail::Full,
+            );
         }
 
         Ok(())
