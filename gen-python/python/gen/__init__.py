@@ -26,13 +26,15 @@ from .gen import (
 
 # Jupyter widget — only available with `pip install gen[jupyter]`
 try:
-    from .jupyter_widget import GraphWidget
+    from .jupyter_widget import GraphWidget, freeze_all_widgets
 except ImportError:
     GraphWidget = None
+    freeze_all_widgets = None
 
 __all__ = [
     "Annotation",
     "GraphWidget",
+    "freeze_all_widgets",
     "HashId",
     "Locus",
     "Node",
