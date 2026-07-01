@@ -370,6 +370,9 @@ pub fn locus_label_bounds(
         Some(WorldPos::new(rect.min.x + col, center.y))
     };
 
+    if locus.slices.is_empty() {
+        return None;
+    }
     let last = locus.slices.len() - 1;
 
     let left_pos = locus.slices.iter().enumerate().find_map(|(i, s)| {
