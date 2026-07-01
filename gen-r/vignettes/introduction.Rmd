@@ -32,7 +32,7 @@ always queryable.
 
 This vignette walks through a concrete lab scenario that shows where
 that design pays off: you design an edit, apply it, confirm it with
-search, export for sequencing — and then discover an unintended mutation
+search, export for sequencing, and then discover an unintended mutation
 in the result.
 
 ## Setup
@@ -40,7 +40,7 @@ in the result.
 Install and load the package, then initialise a workspace and open a
 repository handle.
 
-```{r setup}
+```{r setup, message=FALSE, warning=FALSE}
 library(genr)
 
 # Create a fresh workspace directory and open a repository handle.
@@ -86,7 +86,7 @@ The viewer renders a static snapshot of the sequence graph. Annotations
 from the GenBank file (lacZα, bla, the MCS) appear as coloured tracks
 below the sequence. `sg_wt$list_annotations()` returns all named features in
 the database; passing one to `go_to()` centres the viewport on that
-feature — no coordinate look-up required.
+feature with no coordinate look-up required.
 
 For a fully interactive, pannable, zoomable view, run `gen view` from
 the command line in the same workspace.
@@ -95,7 +95,7 @@ the command line in the same workspace.
 
 The pUC19 multiple cloning site (MCS, positions 396–452) contains a set
 of traditional type-II restriction sites. We want to replace it with a
-minimal Golden Gate entry site — two BsaI recognition sequences (GGTCTC)
+minimal Golden Gate entry site: two BsaI recognition sequences (GGTCTC)
 flanking a stuffer, oriented to cut inward and expose compatible 4-nt
 overhangs for assembly.
 
@@ -163,7 +163,7 @@ wt_count <- if (length(hits_wt) > 0) length(hits_wt[[1]]$matches) else 0L
 cat("BsaI sites in wild-type:", wt_count, "\n")   # 1
 ```
 
-The wild-type already carries one BsaI site — on the reverse strand at
+The wild-type already carries one BsaI site on the reverse strand at
 position 1765, inside the **bla** coding sequence. The design added
 exactly two new sites (3 − 1 = 2), so the flanking Golden Gate sites are
 present and correctly oriented. The pre-existing site is the problem: if
@@ -175,7 +175,7 @@ The `search()` method also accepts degenerate IUPAC codes, so you can
 query by recognition sequence directly without pre-computing all
 variants. For example, EcoRI's sequence `GAATTC` is unambiguous, but a
 site like HincII (`GTYRAC`, where Y = C/T and R = A/G) expands to four
-possible hexamers — pass the IUPAC string and `search()` matches all of
+possible hexamers; pass the IUPAC string and `search()` matches all of
 them:
 
 ```{r search-iupac}
@@ -196,7 +196,7 @@ it instead), and to `highlight_match` to colour it on the canvas.
 
 The convenience method `go_to()` accepts both search match loci and
 annotation records returned by `list_annotations()`. Annotations from
-one sample can be used to navigate a plot of a different sample — this
+one sample can be used to navigate a plot of a different sample. This
 is safe and stable because annotations are stored as references to graph
 nodes, not as linear sequence coordinates. Nodes are shared across
 samples in the same repository, so an annotation created for the "wt"
@@ -230,7 +230,7 @@ repo$export_fasta("pUC19_gg_design.fa", sample = "gg_design")
 You send `pUC19_gg_design.fa` to your synthesis provider. A few days
 later sequencing results arrive as a VCF.
 
-## Import the sequencing result — and find a surprise
+## Import the sequencing result and find a surprise
 
 ```{r update-vcf}
 vcf_path <- system.file("extdata", "puc19_sequenced.vcf", package = "genr")
@@ -254,7 +254,7 @@ p_seq <- plot(sg_seq)
 p_seq
 ```
 
-The graph now shows a branch at position 1904 — outside the MCS, inside
+The graph now shows a branch at position 1904, outside the MCS and inside
 the **bla** (β-lactamase / AmpR) coding sequence. The sequencing run
 picked up a C→T substitution that was not in the design. Because Gen
 stores every sample as a path through the same graph, the mutation shows
@@ -287,7 +287,7 @@ how the paths diverged.
 
 The R bindings and the CLI share the same database, so you can design a
 construct in R, push it from the terminal, and a colleague can pull the
-graph and visualise it in their own R session — with the full annotation
+graph and visualise it in their own R session, with the full annotation
 and variant history intact.
 
 To learn more about the CLI, run `gen --help` or visit the project
@@ -321,28 +321,13 @@ repo$export_gfa("output.gfa", sample = "assembly", node_max = 1000L)
 #### Reference FASTA
 
 `import_reference_fasta()` differs from `import_fasta()` in that it
-marks the imported sample as a *reference* in the database. This is the
+marks the imported sample as a reference in the database. This is the
 right starting point when you plan to call variants relative to an
 external aligner's reference: subsequent `update_with_vcf()` calls can
 name this sample in the `reference` argument without ambiguity.
 
 ```{r import-ref-fasta, eval=FALSE}
 repo$import_reference_fasta("hg38.fa", reference = "hg38")
-```
-
-#### GenBank updates and export
-
-`update_with_genbank()` applies sequence edits and annotation changes
-encoded in a GenBank file to an existing sample. Set
-`create_missing = TRUE` to auto-create block groups for features not yet
-in the database:
-
-```{r update-genbank, eval=FALSE}
-repo$update_with_genbank(
-  "corrected_annotation.gb",
-  sample         = "wt",
-  create_missing = TRUE
-)
 ```
 
 Export any sample's annotations and sequence to GenBank format:
@@ -372,7 +357,7 @@ import_bioconductor(seqs, sample = "constructs", repo = repo)
 
 #### Genomic regions (GRanges)
 
-`import_granges()` imports a list of genomic intervals as block groups.
+`import_granges()` imports a list of genomic intervals as sequence graphs.
 Coordinates follow Bioconductor convention (1-based, closed start-end)
 and are converted to 0-based half-open storage internally. Each unique
 reference sequence is stored once as a shared node, so overlapping
@@ -398,14 +383,15 @@ import_granges(gr, genome, sample = "hg38", repo = repo)
 
 ### Combinatorial library design
 
-`import_library()` builds a combinatorial block group from a list of
+`import_library()` builds a combinatorial sequence graph from a list of
 named part vectors. Each element of `parts_list` is one column of the
 design: a named character vector (or `DNAStringSet`) where each name is
-a part label and each value its sequence. Every combination of one part
-per column becomes a path through the resulting graph.
+a part label and each value its sequence. Parts are stored as shared
+nodes in a compact graph; `search()` screens every junction
+simultaneously without enumerating individual combinations.
 
 The example below designs an expression cassette with three promoters,
-three RBS variants, and two CDSes — 18 unique combinations:
+three RBS variants, and two CDSes (18 unique combinations):
 
 ```{r import-library, eval=FALSE}
 upstream <- c(upstream = "AATTCGGATCCAAGCTT")
@@ -466,7 +452,7 @@ repo$update_with_library(
 
 #### Subgraphs
 
-`derive_subgraph()` creates a new block group that is a coordinate slice
+`derive_subgraph()` creates a new sequence graph that is a coordinate slice
 of an existing one. The `region` argument uses `"<name>:<start>-<end>"`
 (0-based half-open) or just `"<name>"` for the full sequence:
 
@@ -516,7 +502,7 @@ chunks in-place and returns the resulting sample directly.
 ### Annotation tracks
 
 Any `gen_plot` can display additional annotation panels below the
-sequence graph. Add a GFF3 or BED file as a named track — the `sample`
+sequence graph. Add a GFF3 or BED file as a named track; the `sample`
 argument selects which sample's path defines the coordinate space:
 
 ```{r add-track-file, eval=FALSE}
