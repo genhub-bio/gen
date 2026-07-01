@@ -12,11 +12,14 @@ Architecture
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 import tempfile
+import warnings
 
 import anywidget
+import ipywidgets
 import traitlets
 
 # Default viewport dimensions (terminal columns × rows).
@@ -47,8 +50,6 @@ def _transform(text: str, highlighted: bool) -> str:
 
 _ESM = pathlib.Path(__file__).parent / "static" / "jupyter_widget.js"
 
-# All live widget instances, so that module-level helpers can operate on them.
-
 
 class GraphWidget(anywidget.AnyWidget):
     """Jupyter widget that displays a Gen graph using the native Rust renderer.
@@ -66,16 +67,23 @@ class GraphWidget(anywidget.AnyWidget):
         repo   = gen.Repository()
         sg     = repo.get_sequence_graphs()[0]
         widget = repo.plot(sg)   # or sg.plot()
-        widget  # display in Jupyter cell
 
-        # Optionally send commands from Python afterwards:
+        # Configure before displaying: each display below clones the
+        # controller's *current* state, so commands compose into whatever
+        # is shown next.
         widget.scroll_left()
         widget.zoom_in()
+        widget  # display in Jupyter cell
+
+        # A cell's displayed output is an independent snapshot from this
+        # point on. Calling commands on `widget` again will not change what
+        # that cell already shows -- it only affects a later display of
+        # `widget`, e.g. if it is shown again in a subsequent cell.
 
         sample = repo.import_fasta(...)
         sample_widget = sample.plot()
         sample_widget.next_page()
-        sample_widget.prev_page()
+        sample_widget  # display in Jupyter cell
     """
 
     _esm = _ESM
@@ -238,6 +246,24 @@ class GraphWidget(anywidget.AnyWidget):
         # to re-render; the new cols/rows values are read directly from self.
         self._render()
 
+    def _freeze(self) -> None:
+        """Ask the frontend to replace the live canvas with a static PNG.
+
+        Only meaningful on the actual displayed clone (``_display_handle is
+        not None``): unlike the zoom/pan/page commands, which mutate the
+        controller state a future display will clone, freezing has nothing
+        to compose into for an object that hasn't been displayed yet — the
+        object a user's own variable holds is never that clone (see
+        ``_ipython_display_``), so this is kept internal and reached only
+        through ``freeze_all_widgets()``, which already holds the actual
+        displayed instances. Once the frontend confirms, the canvas is
+        swapped for a plain ``<img>`` and the widget is closed, since a
+        frozen widget can no longer be interacted with anyway.
+        """
+        if self._frozen:
+            return
+        self.send({"type": "freeze"})
+
     def _on_frontend_msg(self, widget, msg: dict, buffers) -> None:
         """Dispatch a message from the frontend to the Rust controller."""
         # widget and buffers are required by the anywidget on_msg protocol;
@@ -279,6 +305,10 @@ class GraphWidget(anywidget.AnyWidget):
                         f'<img src="{data_url}" style="display:block;font-family:monospace{size}" />'
                     )
                 )
+            # A frozen widget is inert (every mutating method below early-returns
+            # on self._frozen), so nothing is lost by releasing the controller
+            # and comm now instead of waiting for the kernel to shut down.
+            self.close()
             return
 
         if msg_type == "mouse_click":
@@ -649,3 +679,60 @@ class GraphWidget(anywidget.AnyWidget):
             return
         self._controller.remove_annotation(name)
         self._render()
+
+
+async def freeze_all_widgets(timeout: float = 10.0, quiet: float = 1.0) -> None:
+    """Freeze every constructed, not-yet-frozen ``GraphWidget`` that has a live view.
+
+    ``ipywidgets`` already keeps a strong reference to every widget it has
+    ever constructed (``Widget.widgets``), including any per-cell clones
+    ``_ipython_display_`` creates for classic Jupyter — so no separate
+    bookkeeping is needed to find them. Not every host renders through that
+    clone-and-display path, though: marimo, for example, dispatches on
+    ``isinstance(obj, anywidget.AnyWidget)`` directly rather than calling
+    ``_ipython_display_``, so under marimo the object a user's own variable
+    holds *is* the one with a live view, and no clone ever exists. This
+    freezes every widget with an open comm rather than trying to detect
+    "was actually displayed" per host.
+
+    That means some widgets in the set (a Jupyter clone's own now-orphaned
+    original, something constructed but never shown at all) may never
+    confirm ``_frozen``, since they have no browser view to respond from.
+    Rather than wait the full ``timeout`` for those every time, this stops
+    ``quiet`` seconds after the last widget confirms — so a mixed batch
+    still returns quickly once the real work is done, and only pays the
+    full ``timeout`` when nothing responds at all (e.g. a headless kernel
+    with no real browser view).
+
+    Safe to call more than once, or repeatedly as new widgets get displayed
+    across a session — each call only acts on the widgets not already frozen.
+
+    Must be awaited from a cell (``await gen.freeze_all_widgets()``); a
+    synchronous wrapper cannot work here because it would block the same
+    event loop the frontend's response needs to be delivered on.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        widgets = [
+            widget
+            for widget in ipywidgets.Widget.widgets.values()
+            if isinstance(widget, GraphWidget)
+            and widget.comm is not None
+            and not widget._frozen
+        ]
+    for widget in widgets:
+        widget._freeze()
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    last_progress = loop.time()
+    remaining = [widget for widget in widgets if not widget._frozen]
+    while remaining:
+        now = loop.time()
+        if now > deadline or now - last_progress > quiet:
+            break
+        await asyncio.sleep(0.05)
+        still_remaining = [widget for widget in remaining if not widget._frozen]
+        if len(still_remaining) < len(remaining):
+            last_progress = loop.time()
+        remaining = still_remaining
