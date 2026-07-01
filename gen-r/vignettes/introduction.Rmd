@@ -73,7 +73,7 @@ cat("Sequence graph:", sg_wt$name(), "| sample:", sg_wt$sample_name(), "\n")
 ```{r plot-wt}
 p <- plot(sg_wt)
 
-# Navigate to the MCS — annotated features are first-class, so you can
+# Navigate to the MCS. Annotated features are first-class, so you can
 # jump directly to any named feature rather than specifying coordinates.
 annotations <- sg_wt$list_annotations()
 mcs <- Filter(function(a) grepl("MCS|misc_feature|multiple.cloning", a$name, ignore.case = TRUE), annotations)
@@ -115,7 +115,7 @@ sample_gg <- repo$update_with_sequence(
   new_sample  = "gg_design",
   # MCS coordinates from the GenBank misc_feature annotation (1-based 396..452),
   # converted to 0-based half-open interval for the region string.
-  # Hardcoded for now — a future repo$get_annotation_coordinates() will allow
+  # Hardcoded for now; a future repo$get_annotation_coordinates() will allow
   # looking these up by name directly from the database.
   region_name = "pUC19:395-452"
 )
@@ -244,7 +244,7 @@ sg_seq <- samples_seq[[1]]$block_groups[[1]]
 ```
 
 `update_with_vcf()` returns a list of samples, one per output sample
-name — here there's a single output sample ("sequenced"), so we take
+name. Here there's a single output sample ("sequenced"), so we take
 its first (and only) sequence graph.
 
 Plot the sequenced sample:

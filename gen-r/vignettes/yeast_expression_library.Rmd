@@ -73,7 +73,7 @@ make_parts <- function(nms, seqs, role) {
   dss
 }
 
-# Upstream backbone scar — the left BsmBI assembly site.
+# Upstream backbone scar, the left BsmBI assembly site.
 left_scar <- make_parts(
   "left_scar",
   "AACTAGTATGGCGCGCCAACAAGGATCTGCGG",
@@ -81,25 +81,25 @@ left_scar <- make_parts(
 )
 
 # Three constitutive promoters from the YTK collection.
-# TEF1p (strong) ends with ...GCGTCT — the first six bases of the BsmBI
+# TEF1p (strong) ends with ...GCGTCT, the first six bases of the BsmBI
 # recognition sequence.  When followed by a CDS that begins with C, the
 # junction spells CGTCTC and the cassette is destroyed during assembly.
 promoters <- make_parts(
   c("TEF1p", "PGK1p", "HXT7p"),
   c(
-    # TEF1p — strong, ~150 bp abbreviated.  Ends with GCGTCT.
+    # TEF1p: strong, ~150 bp abbreviated.  Ends with GCGTCT.
     paste0(
       "AGATCTGTTGACAAATAATCATCCGGCTCGTAATGTGTGGAATTGTGAGCGGATAACAAT",
       "TTCACCAGTTCCCAACCTTACTCGGCACAAATCACCTTAATTTGATATTTATATCAAAGA",
       "ATTTCTTTTGTATGGCGTCT"
     ),
-    # PGK1p — medium strength constitutive promoter.
+    # PGK1p: medium strength constitutive promoter.
     paste0(
       "AGTACTTTTTTTTTTATTTTTTTTTTTTTTTGAATTTTTTTTATTTTTTTCAATTCAATT",
       "CATCATTTTTTTTTTTTTTTTTTTTTTTCTTCTTCTTTCTTTCTTTTTTTTTATTTTTTT",
       "CATTTTCTTTTTTTTTTCAATT"
     ),
-    # HXT7p — strong under glucose limitation (useful for fed-batch).
+    # HXT7p: strong under glucose limitation (useful for fed-batch).
     paste0(
       "ATCAGTGAGCAGTATGATGGTTATATTATATAGAGCATATATAGACATATATTATATTAA",
       "ATAGATATAATTATATAATATAAGAAATAATAATATAAGAAATAATAATATAAGAAATAAT",
@@ -149,7 +149,7 @@ terminators <- make_parts(
   "terminator"
 )
 
-# Downstream backbone scar — the right BsmBI assembly site.
+# Downstream backbone scar, the right BsmBI assembly site.
 right_scar <- make_parts(
   "right_scar",
   "GCGGCCGCAAGCTTAGATCTCGCGGCCATACT",
