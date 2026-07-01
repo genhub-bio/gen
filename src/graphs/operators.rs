@@ -380,6 +380,9 @@ fn stitch_inputs<'a>(
     Ok(stitch_inputs)
 }
 
+/// Given a list of block groups to stitch together, confirms there are no
+/// duplicate block groups (which would generate a cycle in the graph) or edges
+/// that are shared between block groups
 fn validate_stitch_inputs(stitch_inputs: &[StitchInput<'_>]) -> Result<(), GraphOperationError> {
     let mut seen_block_group_ids = HashMap::<HashId, &str>::new();
     let mut seen_edge_ids = HashMap::<HashId, &str>::new();
