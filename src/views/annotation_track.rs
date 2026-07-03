@@ -100,17 +100,35 @@ pub fn span_label_text(span: &AnnotationSpan) -> String {
 
 /// Return `true` if every segment of `span` lies on the same node, i.e. the
 /// annotation does not cross a node boundary.
-///
-/// In `Truncated` detail level, single-node spans are dropped from the inline
-/// overlay entirely: their label only adds clutter since the same information
-/// already fits inside the (possibly collapsed) node itself, and dropping them
-/// leaves room for the cross-node spans that the truncated view actually needs
-/// to communicate.
 pub fn span_is_single_node(span: &AnnotationSpan) -> bool {
     match span.segments.first() {
         Some(first) => span.segments.iter().all(|s| s.node_id == first.node_id),
         None => true,
     }
+}
+
+/// Return `true` if the annotation `span` should be dropped from the inline
+/// overlay in `Truncated` detail level.
+///
+/// An annotation that crosses a node boundary, or that covers the full width
+/// of the single node it lies on, is kept: its label communicates something
+/// the collapsed node itself does not show. Only annotations confined to a
+/// partial slice of a single node are hidden, since those are the ones that
+/// pile up on combinatorial libraries made of many short nodes.
+pub fn span_should_hide_in_truncated(span: &AnnotationSpan, graph: &GenGraph) -> bool {
+    if !span_is_single_node(span) {
+        return false;
+    }
+    let Some(segment) = span.segments.first() else {
+        return false;
+    };
+    let Some(node) = graph
+        .node_identifiers()
+        .find(|node| node.node_id == segment.node_id)
+    else {
+        return false;
+    };
+    !(segment.start <= node.sequence_start && segment.end >= node.sequence_end)
 }
 
 /// Return `true` if every segment of `span` at `idx` is fully contained within
@@ -325,5 +343,45 @@ mod tests {
             segments: vec![],
         };
         assert!(span_is_single_node(&span));
+    }
+
+    #[test]
+    fn test_span_should_hide_in_truncated_true_for_partial_single_node_span() {
+        let node = make_node("n1", 0, 20);
+        let graph = make_graph(&[node]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![make_segment("n1", 5, 10, Strand::Forward)],
+        };
+        assert!(span_should_hide_in_truncated(&span, &graph));
+    }
+
+    #[test]
+    fn test_span_should_hide_in_truncated_false_for_full_width_single_node_span() {
+        let node = make_node("n1", 0, 20);
+        let graph = make_graph(&[node]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![make_segment("n1", 0, 20, Strand::Forward)],
+        };
+        assert!(!span_should_hide_in_truncated(&span, &graph));
+    }
+
+    #[test]
+    fn test_span_should_hide_in_truncated_false_for_multi_node_span() {
+        let node_1 = make_node("n1", 0, 20);
+        let node_2 = make_node("n2", 0, 20);
+        let graph = make_graph(&[node_1, node_2]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![
+                make_segment("n1", 5, 20, Strand::Forward),
+                make_segment("n2", 0, 5, Strand::Forward),
+            ],
+        };
+        assert!(!span_should_hide_in_truncated(&span, &graph));
     }
 }

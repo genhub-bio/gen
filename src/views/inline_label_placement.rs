@@ -1,4 +1,4 @@
-use gen_tui::{ViewportState, WorldPos};
+use gen_tui::{ViewportState, WorldPos, WorldRect};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -217,27 +217,68 @@ pub fn draw_label_near_pos(
     None
 }
 
-/// Render a footer note summarizing annotations that didn't get an inline label.
-///
-/// Reports the total annotation count loaded (not just the hidden count) so the
-/// note reads as informational rather than as an error.
+/// Render a footer note summarizing annotations that didn't get an inline label
+/// in the current frame.
 pub fn draw_annotation_overflow_note(
     buf: &mut Buffer,
     area: Rect,
-    total_count: usize,
     hidden_count: usize,
     style: Style,
-    zoom_hint: bool,
+    truncated: bool,
 ) {
     if hidden_count == 0 {
         return;
     }
 
-    let header = if zoom_hint {
-        format!(" {total_count} annotations loaded, zoom in to see {hidden_count} more ")
+    let header = if truncated {
+        format!(" {hidden_count} annotations hidden in truncated view ")
     } else {
-        format!(" {total_count} annotations loaded, {hidden_count} hidden")
+        format!(" {hidden_count} annotations hidden due to space constraints ")
     };
     let footer_y = area.bottom().saturating_sub(1);
     buf.set_string(area.x, footer_y, &header, style);
+}
+
+/// Mark a node that has annotations hidden from the current frame with a small
+/// asterisk placed just above its top-right corner. That cell sits outside the
+/// node's own rect and off any routed edge, so overwriting it doesn't clobber
+/// other graph content.
+pub fn draw_hidden_annotation_marker(
+    buf: &mut Buffer,
+    area: Rect,
+    node_center: WorldPos,
+    node_size: (u64, u64),
+    style: Style,
+    viewport_state: &ViewportState,
+) {
+    let rect = WorldRect::from_center_and_size(node_center, node_size);
+    let marker_pos = WorldPos::new(rect.right() + 1, rect.top() + 1);
+    let Some((x, y)) = viewport_state.world_to_terminal(marker_pos) else {
+        return;
+    };
+    if x >= area.x && x < area.right() && y >= area.y && y < area.bottom() {
+        buf.set_string(x, y, "*", style);
+    }
+}
+
+/// Render a footer legend explaining the hidden-annotation marker, shown only
+/// when at least one marker was drawn this frame.
+pub fn draw_hidden_annotation_legend(
+    buf: &mut Buffer,
+    area: Rect,
+    any_hidden: bool,
+    style: Style,
+    truncated: bool,
+) {
+    if !any_hidden {
+        return;
+    }
+
+    let text = if truncated {
+        " * zoom in for more features "
+    } else {
+        " * some annotations hidden due to space constraints "
+    };
+    let footer_y = area.bottom().saturating_sub(1);
+    buf.set_string(area.x, footer_y, text, style);
 }

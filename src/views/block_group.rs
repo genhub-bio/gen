@@ -1062,7 +1062,6 @@ pub fn view_block_group(
                 // Step 2: Draw floating labels after graph render.
                 let pos_map = viewport_pos_map(&graph_controller);
                 let detail_level = graph_controller.get_detail_level();
-                let mut named_count: usize = 0;
                 let mut hidden_count: usize = 0;
                 for (idx, (span, &color)) in
                     all_spans.iter().zip(annotation_colors.iter()).enumerate()
@@ -1070,7 +1069,6 @@ pub fn view_block_group(
                     if span.name.is_empty() {
                         continue;
                     }
-                    named_count += 1;
                     let locus =
                         graph_locus_from_annotation_span(span, graph_controller.graph());
                     let Some(locus) = locus else {
@@ -1113,7 +1111,6 @@ pub fn view_block_group(
                 draw_annotation_overflow_note(
                     frame.buffer_mut(),
                     canvas_area,
-                    named_count,
                     hidden_count,
                     note_style,
                     detail_level != VisualDetail::Full,

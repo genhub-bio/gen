@@ -7,7 +7,7 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_core::HashId;
-use gen_graph::GenGraph;
+use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_controller::GraphController,
@@ -25,8 +25,8 @@ use ratatui::{
 use crate::views::{
     annotation_groups::load_annotation_group_entries,
     annotation_track::{
-        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later,
-        span_is_single_node, span_label_text,
+        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
+        span_should_hide_in_truncated,
     },
     annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
     block_group::extract_viewport_node_ids,
@@ -34,7 +34,9 @@ use crate::views::{
         GenGraphNodeSizer, create_gen_graph_widget, highlight_locus, locus_label_bounds,
         viewport_pos_map,
     },
-    inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
+    inline_label_placement::{
+        draw_hidden_annotation_legend, draw_hidden_annotation_marker, draw_label_near_pos,
+    },
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -187,7 +189,7 @@ impl<'a> InlineGenGraphState<'a> {
                 continue;
             };
             for span in entry_spans {
-                let color = theme[0x08 + (spans.len() % 8)];
+                let color = theme[0x08 + (span.id.0[0] as usize % 8)];
                 spans.push((span, color));
             }
         }
@@ -438,23 +440,23 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
         let pos_map = viewport_pos_map(&state.controller);
         let span_refs: Vec<&AnnotationSpan> =
             state.annotation_spans.iter().map(|(s, _)| s).collect();
-        let mut named_count: usize = 0;
-        let mut hidden_count: usize = 0;
+        let mut hidden_nodes: HashSet<GraphNode> = HashSet::new();
         for (idx, (span, color)) in state.annotation_spans.iter().enumerate() {
             if span.name.is_empty() {
                 continue;
             }
-            named_count += 1;
-            if span_covered_by_later(span, idx, &span_refs) {
-                hidden_count += 1;
-                continue;
-            }
-            if detail_level == VisualDetail::Truncated && span_is_single_node(span) {
-                hidden_count += 1;
-                continue;
-            }
             let locus = graph_locus_from_annotation_span(span, state.controller.graph());
             let Some(locus) = locus else { continue };
+            if span_covered_by_later(span, idx, &span_refs) {
+                hidden_nodes.extend(locus.slices.iter().map(|slice| slice.block));
+                continue;
+            }
+            if detail_level == VisualDetail::Truncated
+                && span_should_hide_in_truncated(span, state.controller.graph())
+            {
+                hidden_nodes.extend(locus.slices.iter().map(|slice| slice.block));
+                continue;
+            }
             let Some(bounds) = locus_label_bounds(
                 &locus,
                 &pos_map,
@@ -475,17 +477,28 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
             )
             .is_none()
             {
-                hidden_count += 1;
+                hidden_nodes.extend(locus.slices.iter().map(|slice| slice.block));
             }
         }
         let theme = current_theme();
-        let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
-        draw_annotation_overflow_note(
+        let marker_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
+        for node in &hidden_nodes {
+            if let Some(&(center, size)) = pos_map.get(node) {
+                draw_hidden_annotation_marker(
+                    frame.buffer_mut(),
+                    inner_area,
+                    center,
+                    size,
+                    marker_style,
+                    &state.controller.viewport_state,
+                );
+            }
+        }
+        draw_hidden_annotation_legend(
             frame.buffer_mut(),
             inner_area,
-            named_count,
-            hidden_count,
-            note_style,
+            !hidden_nodes.is_empty(),
+            marker_style,
             detail_level != VisualDetail::Full,
         );
     }
