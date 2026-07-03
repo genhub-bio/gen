@@ -586,7 +586,6 @@ impl GraphPage {
             draw_annotation_overflow_note(
                 buf,
                 graph_area,
-                labeled_overlays.len(),
                 hidden_count,
                 note_style,
                 detail_level != gen_tui::layout::VisualDetail::Full,
@@ -702,10 +701,7 @@ impl GraphPage {
     /// Highlight column offsets are clamped at registration time, so they go stale
     /// when the detail level changes. Call this after any zoom or detail change.
     fn reapply_highlights(&mut self) {
-        let styles: Vec<PathStyle> = self.overlays.iter().map(|o| o.style).collect();
-        for style in &styles {
-            self.controller.clear_highlight(style);
-        }
+        self.controller.clear_all_highlights();
         // Collect loci with immutable graph borrow, then apply with mutable controller borrow.
         let loci_with_styles: Vec<(GraphLocus, PathStyle)> = self
             .overlays
@@ -1065,18 +1061,10 @@ impl GraphPage {
 
     /// Clear all annotations from the graph.
     pub fn clear_all_annotations(&mut self) {
-        let mut styles_to_clear: Vec<PathStyle> = Vec::new();
-        self.overlays.retain(|o| {
-            if o.track.is_some() {
-                styles_to_clear.push(o.style);
-                false
-            } else {
-                true
-            }
-        });
-        for style in styles_to_clear {
-            self.controller.clear_highlight(&style);
-        }
+        // Drop the track overlays, keep any non-track overlays (e.g. search
+        // matches), then repaint the remaining overlays from scratch.
+        self.overlays.retain(|o| o.track.is_none());
+        self.reapply_highlights();
     }
 
     /// Add annotations rendered directly on the graph canvas.
@@ -1139,18 +1127,9 @@ impl GraphPage {
     /// Remove all annotations whose track name matches `name`.
     /// If the same name was added more than once, all copies are removed.
     pub fn remove_annotation(&mut self, name: &str) {
-        let mut styles_to_clear: Vec<PathStyle> = Vec::new();
-        self.overlays.retain(|o| {
-            if o.track.as_deref() == Some(name) {
-                styles_to_clear.push(o.style);
-                false
-            } else {
-                true
-            }
-        });
-        for style in styles_to_clear {
-            self.controller.clear_highlight(&style);
-        }
+        // Drop the matching track's overlays, then repaint what remains.
+        self.overlays.retain(|o| o.track.as_deref() != Some(name));
+        self.reapply_highlights();
     }
 }
 

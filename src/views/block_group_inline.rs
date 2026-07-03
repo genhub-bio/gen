@@ -139,6 +139,9 @@ pub struct InlineGenGraphState<'a> {
     /// Annotation spans with their assigned colors, ready for highlight + label rendering.
     annotation_spans: Vec<(AnnotationSpan, Color)>,
     annotation_groups_loaded: bool,
+    /// Whether the current path overlay is toggled on. The overlay itself is
+    /// re-added from this flag each frame in `reapply_highlights`.
+    path_highlighted: bool,
 }
 
 impl<'a> InlineGenGraphState<'a> {
@@ -158,6 +161,7 @@ impl<'a> InlineGenGraphState<'a> {
             block_group_id,
             annotation_spans: Vec::new(),
             annotation_groups_loaded: false,
+            path_highlighted: false,
         }
     }
 
@@ -210,11 +214,17 @@ impl<'a> InlineGenGraphState<'a> {
                 Some((locus, PathStyle::new(*color)))
             })
             .collect();
-        for (_, style) in &loci_and_styles {
-            self.controller.clear_highlight(style);
-        }
+        self.controller.clear_all_highlights();
         for (locus, style) in &loci_and_styles {
             highlight_locus(&mut self.controller, locus, *style);
+        }
+        if self.path_highlighted
+            && let Some(last_path) = self.paths.last().cloned()
+        {
+            let path_style = PathStyle::new(current_theme()[0x09])
+                .with_line_style(LineStyle::Bold)
+                .with_merge_glyphs(true);
+            self.controller.set_path_highlight(path_style, last_path);
         }
     }
 }
@@ -348,17 +358,9 @@ fn show_inline_widget(
                                     break;
                                 }
                                 KeyCode::Char('p') => {
-                                    // Toggle path highlighting
-                                    let path_style = PathStyle::new(current_theme()[0x09])
-                                        .with_line_style(LineStyle::Bold)
-                                        .with_merge_glyphs(true);
-
-                                    if state.controller.has_highlight(&path_style) {
-                                        state.controller.clear_highlight(&path_style);
-                                    } else if let Some(last_path) = state.paths.last() {
-                                        state
-                                            .controller
-                                            .set_path_highlight(path_style, last_path.clone());
+                                    // Toggle the path overlay; reapply_highlights repaints it.
+                                    if state.paths.last().is_some() {
+                                        state.path_highlighted = !state.path_highlighted;
                                     } else {
                                         eprintln!("No paths available for path highlighting");
                                     }

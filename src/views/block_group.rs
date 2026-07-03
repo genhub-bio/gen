@@ -109,26 +109,27 @@ fn get_block_group_path_nodes(
     Ok(path_nodes)
 }
 
-/// Toggle path highlighting for a block group
+/// Toggle the path overlay for a block group.
+///
+/// The overlay is stored in `path_highlight` and repainted each frame by the
+/// render loop, so this only flips the stored state. Returns whether the
+/// overlay is now enabled.
 fn toggle_path_highlight(
     conn: &GraphConnection,
-    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
+    path_highlight: &mut Option<(PathStyle, Vec<GraphNode>)>,
 ) -> Result<bool, String> {
-    let style = PathStyle::new(color)
-        .with_line_style(LineStyle::Bold)
-        .with_merge_glyphs(true);
-    // Check if highlighting is already active for this style
-    if controller.has_highlight(&style) {
-        controller.clear_highlight(&style);
+    if path_highlight.is_some() {
+        *path_highlight = None;
         Ok(false)
     } else {
-        // Get the path nodes for this block group
+        let style = PathStyle::new(color)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
         let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph())?;
-
-        // Set the path highlight using GraphNodes directly
-        controller.set_path_highlight(style, path_nodes);
+        *path_highlight = Some((style, path_nodes));
         Ok(true)
     }
 }
@@ -313,6 +314,9 @@ pub fn view_block_group(
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
     let mut graph_controller = create_gen_graph_controller(block_graph.clone());
+    // Path overlay state, repainted from here each frame so it survives the
+    // clear-all-then-re-add pass that refreshes annotation highlights.
+    let mut path_highlight: Option<(PathStyle, Vec<GraphNode>)> = None;
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if origin.is_some() {
@@ -444,9 +448,10 @@ pub fn view_block_group(
                                 {
                                     match toggle_path_highlight(
                                         conn,
-                                        &mut graph_controller,
+                                        &graph_controller,
                                         block_group_id,
                                         Color::Red,
+                                        &mut path_highlight,
                                     ) {
                                         Ok(highlighting_enabled) => {
                                             if highlighting_enabled {
@@ -1043,11 +1048,10 @@ pub fn view_block_group(
                         .map(|span| theme[0x08 + (span.id.0[0] as usize % 8)])
                         .collect()
                 };
-                // Clear every style first, then re-add every locus. Clearing and adding
-                // per-span in a single pass would let a later span's clear step wipe out
-                // an earlier span's highlight whenever two spans share a color (only 8
-                // accent colors exist, so collisions are common once there are more than
-                // 8 annotations in view).
+                // Repaint every overlay from scratch: clear all highlights, then re-add
+                // the annotation loci and the path overlay. The domain layer owns the
+                // authoritative overlay set; the controller only retains highlights so
+                // they survive viewport rebuilds while scrolling.
                 let loci_and_styles: Vec<_> = all_spans
                     .iter()
                     .zip(annotation_colors.iter())
@@ -1056,11 +1060,12 @@ pub fn view_block_group(
                         Some((locus, PathStyle::new(color)))
                     })
                     .collect();
-                for (_, style) in &loci_and_styles {
-                    graph_controller.clear_highlight(style);
-                }
+                graph_controller.clear_all_highlights();
                 for (locus, style) in &loci_and_styles {
                     highlight_locus(&mut graph_controller, locus, *style);
+                }
+                if let Some((style, path_nodes)) = &path_highlight {
+                    graph_controller.set_path_highlight(*style, path_nodes.clone());
                 }
 
                 let canvas_style = Style::default().bg(current_theme()[0x00]);

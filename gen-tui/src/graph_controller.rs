@@ -470,27 +470,6 @@ where
         &self.viewport_graph.cell_highlights
     }
 
-    /// Check if a specific style has any highlighting
-    pub fn has_highlight(&self, style: &PathStyle) -> bool {
-        self.highlights.iter().any(|(_, s)| s == style)
-    }
-
-    /// Clear highlighting for a specific style
-    pub fn clear_highlight(&mut self, style: &PathStyle) {
-        self.highlights.retain(|(_, s)| s != style);
-        // Also clear from viewport graph
-        self.viewport_graph
-            .node_highlights
-            .retain(|(_, s)| s != style);
-        self.viewport_graph
-            .edge_highlights
-            .retain(|(_, s)| s != style);
-        self.viewport_graph
-            .cell_highlights
-            .retain(|(_, _, _, s)| s != style);
-        self.trigger_rebuild();
-    }
-
     /// Clear all highlights
     pub fn clear_all_highlights(&mut self) {
         self.highlights.clear();
