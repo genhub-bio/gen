@@ -27,7 +27,7 @@ use crate::{
         annotation_groups::load_annotation_group_entries,
         annotation_track::{
             AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span,
-            span_covered_by_later, span_is_single_node, span_label_text,
+            span_covered_by_later, span_label_text, span_should_hide_in_truncated,
         },
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
@@ -1038,8 +1038,9 @@ pub fn view_block_group(
                 });
                 let annotation_colors: Vec<Color> = {
                     let theme = current_theme();
-                    (0..all_spans.len())
-                        .map(|i| theme[0x08 + (i % 8)])
+                    all_spans
+                        .iter()
+                        .map(|span| theme[0x08 + (span.id.0[0] as usize % 8)])
                         .collect()
                 };
                 for (span, &color) in all_spans.iter().zip(annotation_colors.iter()) {
@@ -1079,7 +1080,9 @@ pub fn view_block_group(
                         hidden_count += 1;
                         continue;
                     }
-                    if detail_level == VisualDetail::Truncated && span_is_single_node(span) {
+                    if detail_level == VisualDetail::Truncated
+                        && span_should_hide_in_truncated(span, graph_controller.graph())
+                    {
                         hidden_count += 1;
                         continue;
                     }

@@ -34,9 +34,7 @@ use crate::views::{
         GenGraphNodeSizer, create_gen_graph_widget, highlight_locus, locus_label_bounds,
         viewport_pos_map,
     },
-    inline_label_placement::{
-        draw_hidden_annotation_legend, draw_hidden_annotation_marker, draw_label_near_pos,
-    },
+    inline_label_placement::{draw_hidden_annotation_marker, draw_label_near_pos},
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -436,6 +434,7 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
     frame.render_stateful_widget(widget, inner_area, &mut state.controller);
 
     // Draw floating annotation labels after the graph.
+    let mut any_annotations_hidden = false;
     if !state.annotation_spans.is_empty() {
         let pos_map = viewport_pos_map(&state.controller);
         let span_refs: Vec<&AnnotationSpan> =
@@ -494,16 +493,17 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
                 );
             }
         }
-        draw_hidden_annotation_legend(
-            frame.buffer_mut(),
-            inner_area,
-            !hidden_nodes.is_empty(),
-            marker_style,
-            detail_level != VisualDetail::Full,
-        );
+        any_annotations_hidden = !hidden_nodes.is_empty();
     }
 
-    draw_controls_help(frame, main_layout[1], state);
+    let hidden_legend = any_annotations_hidden.then(|| {
+        if detail_level == VisualDetail::Full {
+            "* some annotations hidden due to space constraints"
+        } else {
+            "* zoom in for more features"
+        }
+    });
+    draw_controls_help(frame, main_layout[1], state, hidden_legend);
 }
 
 /// Draw the final plot after the widget is done
@@ -526,17 +526,43 @@ fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
     );
 }
 
-fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    let help_text = if state.controller.highlights.is_empty() {
+/// Draw the bottom controls line. When `hidden_legend` is set, it's right-aligned on the
+/// same line and the path-visibility shortcut is dropped to make room for it.
+fn draw_controls_help(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut InlineGenGraphState,
+    hidden_legend: Option<&str>,
+) {
+    let help_text = if hidden_legend.is_some() {
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | q: Exit".to_string()
+    } else if state.controller.highlights.is_empty() {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
     } else {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
     };
 
-    let paragraph =
-        ratatui::widgets::Paragraph::new(help_text).style(Style::default().fg(Color::Yellow));
+    let buf = frame.buffer_mut();
+    buf.set_string(
+        area.x,
+        area.y,
+        &help_text,
+        Style::default().fg(Color::Yellow),
+    );
 
-    frame.render_widget(paragraph, area);
+    if let Some(legend) = hidden_legend {
+        let help_width = help_text.chars().count() as u16;
+        let legend_width = legend.chars().count() as u16;
+        let legend_x = area.right().saturating_sub(legend_width);
+        if legend_x > area.x + help_width {
+            buf.set_string(
+                legend_x,
+                area.y,
+                legend,
+                Style::default().fg(current_theme()[0x09]),
+            );
+        }
+    }
 }
 
 #[cfg(test)]

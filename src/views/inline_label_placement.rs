@@ -260,25 +260,3 @@ pub fn draw_hidden_annotation_marker(
         buf.set_string(x, y, "*", style);
     }
 }
-
-/// Render a footer legend explaining the hidden-annotation marker, shown only
-/// when at least one marker was drawn this frame.
-pub fn draw_hidden_annotation_legend(
-    buf: &mut Buffer,
-    area: Rect,
-    any_hidden: bool,
-    style: Style,
-    truncated: bool,
-) {
-    if !any_hidden {
-        return;
-    }
-
-    let text = if truncated {
-        " * zoom in for more features "
-    } else {
-        " * some annotations hidden due to space constraints "
-    };
-    let footer_y = area.bottom().saturating_sub(1);
-    buf.set_string(area.x, footer_y, text, style);
-}
