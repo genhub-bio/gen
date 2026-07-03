@@ -8,40 +8,22 @@ Set Shell "bash"
 Set Padding 20
 
 # Prerequisites:
-#   1. Build the CLI from the repo root:  cargo build --release --bin gen
-#   2. Record from this directory:        cd docs/demo && vhs demo.tape
-
-# Everything up to the first visible command is hidden setup. It builds a
-# repository whose "design" sample carries a combinatorial library dropped
-# into the MCS of an annotated pUC19, then branches off a point mutation.
+#   1. Build the CLI:   cargo build --release --bin gen   (from the repo root)
+#   2. Build the repo:  ./build_demo_repo.sh              (creates /tmp/gen-demo)
+#   3. Record:          cd docs/demo && vhs demo.tape
+#
+# The heavy setup lives in build_demo_repo.sh, not here, so this tape records no
+# blank lead-in while imports and library expansion run. The repo it produces is
+# checked out on sequencing_results (main holds an independent QC annotation),
+# so the visible checkout -> merge -> view below is a genuine branch merge.
 Hide
-Type "REPO=$(cd ../.. && pwd)"
+Type "cd /tmp/gen-demo"
 Enter
-Type "cd /tmp && rm -rf gen-demo && mkdir gen-demo && cd gen-demo"
-Enter
-Type 'cp "$REPO"/gen-python/examples/puc19.gbk .'
-Enter
-Type 'cp "$REPO"/examples/combinatorial_plasmid_design/parts.fa .'
-Enter
-Type 'cp "$REPO"/examples/combinatorial_plasmid_design/design.csv .'
-Enter
-Type 'alias gen="$REPO/target/release/gen"'
-Enter
-
-Type "gen init"
-Enter
-Type "gen import genbank puc19.gbk --sample reference"
-Enter
-Type "gen update library --sample reference --new-sample design --region-name MCS --library design.csv --parts parts.fa"
-Enter
-
-Type "gen branch --create variant && gen branch --checkout variant"
-Enter
-Type "gen update sequence CTAGCTAGCTAGCTAGCT --sample design --new-sample design --region-name pUC19:465-483"
+Type 'alias gen="$(cat gen_path)"'
 Enter
 Type "clear"
 Enter
-Sleep 500ms
+Sleep 300ms
 Show
 
 # --- Switch back to main ---
@@ -51,8 +33,8 @@ Sleep 1.2s
 Enter
 Sleep 1.5s
 
-# --- Merge the mutation branch: version control for sequences ---
-Type "gen merge variant"
+# --- Merge the sequencing results: version control for sequences ---
+Type "gen merge sequencing_results"
 Sleep 1.2s
 Enter
 Sleep 2s
