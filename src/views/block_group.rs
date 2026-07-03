@@ -1043,14 +1043,24 @@ pub fn view_block_group(
                         .map(|span| theme[0x08 + (span.id.0[0] as usize % 8)])
                         .collect()
                 };
-                for (span, &color) in all_spans.iter().zip(annotation_colors.iter()) {
-                    let style = PathStyle::new(color);
-                    graph_controller.clear_highlight(&style);
-                    let locus =
-                        graph_locus_from_annotation_span(span, graph_controller.graph());
-                    if let Some(locus) = locus {
-                        highlight_locus(&mut graph_controller, &locus, style);
-                    }
+                // Clear every style first, then re-add every locus. Clearing and adding
+                // per-span in a single pass would let a later span's clear step wipe out
+                // an earlier span's highlight whenever two spans share a color (only 8
+                // accent colors exist, so collisions are common once there are more than
+                // 8 annotations in view).
+                let loci_and_styles: Vec<_> = all_spans
+                    .iter()
+                    .zip(annotation_colors.iter())
+                    .filter_map(|(span, &color)| {
+                        let locus = graph_locus_from_annotation_span(span, graph_controller.graph())?;
+                        Some((locus, PathStyle::new(color)))
+                    })
+                    .collect();
+                for (_, style) in &loci_and_styles {
+                    graph_controller.clear_highlight(style);
+                }
+                for (locus, style) in &loci_and_styles {
+                    highlight_locus(&mut graph_controller, locus, *style);
                 }
 
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
