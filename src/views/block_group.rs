@@ -35,9 +35,9 @@ use crate::{
             draw_annotation_labels, reapply_overlays,
         },
         graph_overlay::{
-            GraphOverlay, OverlaySource, file_track_key, group_track_key, has_path_overlay,
-            project_path_overlay_nodes, remove_path_overlay, remove_track_overlays,
-            replace_track_overlays, set_path_overlay,
+            AnnotationColorCache, GraphOverlay, OverlaySource, file_track_key, group_track_key,
+            has_path_overlay, project_path_overlay_nodes, remove_path_overlay,
+            remove_track_overlays, replace_track_overlays, set_path_overlay,
         },
         panels::{render_status_bar, render_with_optional_clear},
         tui_runtime::TuiSession,
@@ -264,6 +264,7 @@ pub fn view_block_group(
     // Every annotation currently painted on the canvas, from both loaded files and
     // loaded groups, keyed by track (see `graph_overlay::file_track_key`/`group_track_key`).
     let mut overlays: Vec<GraphOverlay> = Vec::new();
+    let mut annotation_colors = AnnotationColorCache::new();
     let mut annotation_file_index_available: std::collections::HashMap<HashId, bool> =
         std::collections::HashMap::new();
     let mut annotation_file_loaded_windows: std::collections::HashMap<HashId, (i64, i64)> =
@@ -1018,7 +1019,7 @@ pub fn view_block_group(
                 // Re-register overlay highlights before rendering. This reruns every frame
                 // because `overlays` can change between frames (file/group toggles,
                 // scroll-triggered reloads).
-                reapply_overlays(&mut graph_controller, &overlays);
+                reapply_overlays(&mut graph_controller, &mut overlays, &mut annotation_colors);
 
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn)

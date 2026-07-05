@@ -197,7 +197,7 @@ where
     /// visible cells for any node that scales uniformly. Nodes whose content collapses
     /// non-uniformly (for example a truncated `AAAAA...BBBBB` display that folds
     /// interior columns onto an ellipsis) override this.
-    fn clamp_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
+    fn map_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
         let full_width = self.get_node_size(node, VisualDetail::Full).0 as i64;
         if full_width <= 0 {
             return raw_col;
@@ -221,8 +221,8 @@ where
         (**self).get_dummy_size()
     }
 
-    fn clamp_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
-        (**self).clamp_column(node, raw_col, detail_level)
+    fn map_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
+        (**self).map_column(node, raw_col, detail_level)
     }
 }
 

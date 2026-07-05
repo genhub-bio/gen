@@ -1,9 +1,49 @@
+use std::collections::HashMap;
+
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock};
 use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_tui::{plotter::PathStyle, theme::current_theme};
 use ratatui::style::Color;
 
 use crate::views::annotation_track::AnnotationSpan;
+
+/// Remembers the color last chosen for each annotation id by the greedy conflict-avoiding
+/// assignment in `gen_graph_widget::reapply_overlays`. That pass reruns every frame (the
+/// live TUI viewers repaint whenever the overlay set changes with scrolling), so without
+/// this cache an annotation's color could reshuffle between frames even when nothing near
+/// it actually changed. Owned alongside the `Vec<GraphOverlay>` it colors, by whichever
+/// viewer (full-screen, inline, Jupyter) owns that list.
+#[derive(Clone, Default)]
+pub struct AnnotationColorCache {
+    colors: HashMap<HashId, Color>,
+    /// Cursor into the theme accent slots, advanced each time a never-before-seen
+    /// annotation needs a color. A simple rotation, rather than deriving a color from the
+    /// annotation's id hash, means two never-conflicting annotations seen back to back
+    /// reliably get different colors instead of occasionally landing on the same hash.
+    next_index: usize,
+}
+
+impl AnnotationColorCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn get(&self, id: &HashId) -> Option<Color> {
+        self.colors.get(id).copied()
+    }
+
+    pub(crate) fn set(&mut self, id: HashId, color: Color) {
+        self.colors.insert(id, color);
+    }
+
+    /// The next color in rotation through `accents`, advancing the cursor so the color
+    /// after it is a fresh one next time.
+    pub(crate) fn next_color(&mut self, accents: &[Color; 8]) -> Color {
+        let color = accents[self.next_index % accents.len()];
+        self.next_index += 1;
+        color
+    }
+}
 
 /// Project `path_blocks` onto `graph` and return the route's non-terminal nodes, dropping
 /// the synthetic path start/end nodes.

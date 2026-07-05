@@ -18,8 +18,8 @@ use r#gen::{
             GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, reapply_overlays,
         },
         graph_overlay::{
-            GraphOverlay, OverlayContent, OverlaySource, project_path_overlay_nodes,
-            remove_path_overlay, set_path_overlay,
+            AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
+            project_path_overlay_nodes, remove_path_overlay, set_path_overlay,
         },
     },
 };
@@ -261,6 +261,7 @@ struct GraphPage {
     /// `clear_path`/`clear_highlights`) is just another overlay, so it survives
     /// zoom/detail changes the same way the annotation overlays do.
     overlays: Vec<GraphOverlay>,
+    annotation_colors: AnnotationColorCache,
     /// Set to `true` once annotation groups have been loaded (auto or with colors).
     /// Survives cloning so that cell-display clones do not double-load.
     annotation_groups_loaded: bool,
@@ -279,7 +280,7 @@ struct PageRef {
 /// construction the first time it becomes the active page.
 #[derive(Clone)]
 enum Page {
-    Loaded(GraphPage),
+    Loaded(Box<GraphPage>),
     Pending(PageRef),
 }
 
@@ -303,6 +304,7 @@ impl GraphPage {
             block_group_id: None,
             controller,
             overlays: Vec::new(),
+            annotation_colors: AnnotationColorCache::new(),
             annotation_groups_loaded: false,
         }
     }
@@ -415,9 +417,13 @@ impl GraphPage {
     /// Re-register every overlay highlight on the controller from the current overlay list.
     ///
     /// Called after any mutation of `overlays`. Detail/zoom changes between mutations don't
-    /// need this: registered highlights self-heal on viewport rebuild (`clamp_column`).
+    /// need this: registered highlights self-heal on viewport rebuild (`map_column`).
     fn reapply(&mut self) {
-        reapply_overlays(&mut self.controller, &self.overlays);
+        reapply_overlays(
+            &mut self.controller,
+            &mut self.overlays,
+            &mut self.annotation_colors,
+        );
     }
 
     fn push_track_as_overlays_with_colors(
@@ -1112,7 +1118,11 @@ impl PyGraphController {
     /// Wrap a single, already-loaded graph as a one-page controller.
     pub fn new(db_path: PathBuf, graph: GenGraph) -> Self {
         Self {
-            pages: vec![Page::Loaded(GraphPage::new(String::new(), db_path, graph))],
+            pages: vec![Page::Loaded(Box::new(GraphPage::new(
+                String::new(),
+                db_path,
+                graph,
+            )))],
             current_index: 0,
         }
     }
@@ -1120,7 +1130,7 @@ impl PyGraphController {
     /// Build a single-page controller for `sg`, loading its graph eagerly.
     pub(crate) fn for_sequence_graph(sg: &PySequenceGraph) -> PyResult<Self> {
         Ok(Self {
-            pages: vec![Page::Loaded(loaded_page_for_sequence_graph(sg)?)],
+            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(sg)?))],
             current_index: 0,
         })
     }
@@ -1152,10 +1162,10 @@ impl PyGraphController {
                 .map_err(block_group_err_to_pyerr)?;
             let mut loaded = GraphPage::new(page_ref.name.clone(), page_ref.db_path.clone(), graph);
             loaded.block_group_id = Some(page_ref.block_group_id);
-            *page = Page::Loaded(loaded);
+            *page = Page::Loaded(Box::new(loaded));
         }
         match page {
-            Page::Loaded(page) => Ok(page),
+            Page::Loaded(page) => Ok(page.as_mut()),
             Page::Pending(_) => unreachable!("just loaded above"),
         }
     }

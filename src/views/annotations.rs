@@ -11,6 +11,7 @@ use gen_annotations::{
     translate::{bed::translate_bed, gff::translate_gff},
 };
 use gen_core::{HashId, Strand, Workspace};
+use gen_graph::GenGraph;
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, AnnotationError},
@@ -40,31 +41,79 @@ pub struct AnnotationGroupTrackRequest<'a> {
 pub fn load_annotations_for_group(
     request: &AnnotationGroupTrackRequest<'_>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
-    let _ = request.current_block_group;
-    load_group_annotations(request.conn, request.entry, request.node_ids)
+    load_group_annotations(
+        request.conn,
+        request.current_block_group,
+        request.entry,
+        request.node_ids,
+    )
+}
+
+/// Clip `accession_segments` (stored in per-node absolute sequence coordinates, from
+/// whenever the annotation was created) onto every node currently present in the block
+/// group's full graph — every branch, not just one arbitrarily selected path. Unlike
+/// `gen_annotations::projection::project_annotation_segments`, coordinates stay in
+/// per-node absolute space rather than being shifted into path space, matching what
+/// `AnnotationSegment`/`graph_locus_from_annotation_span` expect elsewhere in the TUI and
+/// Jupyter viewers.
+///
+/// A `node_id` is stable across later edits, so scanning every node for one whose
+/// `node_id` overlaps a stored segment already produces one clipped segment per
+/// surviving fragment, with no segment at all over whatever unrelated sequence (e.g. a
+/// library insertion) was spliced into the gap. Scanning the whole graph rather than a
+/// single selected path additionally means an annotation still shows up on every branch
+/// that carries a fragment of it — e.g. every candidate in a combinatorial library, not
+/// only whichever one happens to be "the" current path.
+fn clip_segments_to_graph(
+    accession_segments: &[annotation_projection::AnnotationSegment],
+    graph: &GenGraph,
+) -> Vec<AnnotationSegment> {
+    let mut clipped = Vec::new();
+    for node in graph.nodes() {
+        for segment in accession_segments {
+            if segment.node_id != node.node_id {
+                continue;
+            }
+            let overlap_start = segment.range.start.max(node.sequence_start);
+            let overlap_end = segment.range.end.min(node.sequence_end);
+            if overlap_end <= overlap_start {
+                continue;
+            }
+            clipped.push(AnnotationSegment {
+                node_id: node.node_id,
+                start: overlap_start,
+                end: overlap_end,
+                strand: segment.strand,
+            });
+        }
+    }
+    clipped
 }
 
 fn load_group_annotations(
     conn: &GraphConnection,
+    current_block_group: &BlockGroup,
     entry: &AnnotationGroupEntry,
     node_ids: &HashSet<HashId>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
     let annotations = Annotation::query_by_group(conn, &entry.name)?;
 
+    // Annotations are stored against the node(s) they were created on, which may since
+    // have been split by later edits (a library insertion, a sequence update, ...), or may
+    // live on a branch other than whichever one is "the" current path (e.g. one option in
+    // a combinatorial library). Clip them onto the block group's full graph so an
+    // annotation still covers every surviving fragment of its original range, on every
+    // branch, with a gap wherever an edit spliced in unrelated sequence.
+    let graph =
+        BlockGroup::get_graph(conn, &current_block_group.id).unwrap_or_else(|_| GenGraph::new());
+
     Ok(annotations
         .into_iter()
         .filter_map(|annotation| {
             let _ = Accession::get_by_id(conn, &annotation.accession_id)?;
-            let nodes = Accession::get_nodes_by_id(conn, &annotation.accession_id);
-            let segments = nodes
-                .iter()
-                .map(annotation_projection::AnnotationSegment::from)
-                .map(|segment| AnnotationSegment {
-                    node_id: segment.node_id,
-                    start: segment.range.start,
-                    end: segment.range.end,
-                    strand: segment.strand,
-                })
+            let accession_segments = annotation_projection::annotation_segments(conn, &annotation);
+            let segments = clip_segments_to_graph(&accession_segments, &graph)
+                .into_iter()
                 .filter(|segment| node_ids.contains(&segment.node_id))
                 .collect::<Vec<_>>();
             if segments.is_empty() {
@@ -537,5 +586,134 @@ mod tests {
         assert_eq!(spans[0].segments[0].start, 5);
         assert_eq!(spans[0].segments[0].end, 8);
         assert_eq!(spans[0].segments[0].strand, Strand::Reverse);
+    }
+
+    /// A node that gets split by a later edit (e.g. a library insertion in the middle)
+    /// should keep every surviving fragment of an annotation that used to cover the
+    /// whole thing, with a gap over whatever unrelated sequence was spliced in.
+    #[test]
+    fn clip_segments_to_graph_leaves_a_gap_over_an_inserted_block() {
+        use gen_graph::{GenGraph, GraphNode};
+
+        use super::{annotation_projection, clip_segments_to_graph};
+
+        let original_node_id = HashId::convert_str("original");
+        let inserted_node_id = HashId::convert_str("inserted");
+
+        // The annotation was created before the split, covering the whole original node.
+        let accession_segments = vec![annotation_projection::AnnotationSegment {
+            node_id: original_node_id,
+            range: gen_core::range::Range {
+                start: 0,
+                end: 2686,
+            },
+            strand: Strand::Forward,
+        }];
+
+        // The current graph has since been split: left fragment of the original node,
+        // an unrelated inserted block, then the right fragment of the original node.
+        let mut graph = GenGraph::new();
+        graph.add_node(GraphNode {
+            node_id: original_node_id,
+            sequence_start: 0,
+            sequence_end: 395,
+        });
+        graph.add_node(GraphNode {
+            node_id: inserted_node_id,
+            sequence_start: 0,
+            sequence_end: 50,
+        });
+        graph.add_node(GraphNode {
+            node_id: original_node_id,
+            sequence_start: 483,
+            sequence_end: 2686,
+        });
+
+        let mut segments = clip_segments_to_graph(&accession_segments, &graph);
+        segments.sort_by_key(|s| s.start);
+
+        assert_eq!(segments.len(), 2, "no segment over the inserted block");
+        assert_eq!(segments[0].node_id, original_node_id);
+        assert_eq!(segments[0].start, 0);
+        assert_eq!(segments[0].end, 395);
+        assert_eq!(segments[1].node_id, original_node_id);
+        assert_eq!(segments[1].start, 483);
+        assert_eq!(segments[1].end, 2686);
+    }
+
+    /// Each option in a combinatorial library gets its own annotation on its own graph
+    /// branch. `load_annotations_for_group` must resolve every one of them — not just
+    /// whichever candidate happens to end up on the block group's current path — since
+    /// every candidate is a real, visible branch in the graph.
+    #[test]
+    fn load_annotations_for_group_finds_every_combinatorial_branch() {
+        use std::path::PathBuf;
+
+        use gen_models::{block_group::BlockGroup, sample::Sample};
+
+        use super::{AnnotationGroupTrackRequest, load_annotations_for_group};
+        use crate::{
+            graphs::combinatorial_library::parse_library,
+            imports::library::import_library,
+            test_helpers::setup_gen,
+            track_database,
+            views::annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
+        };
+
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test";
+        let library_name = "m123";
+
+        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let library_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
+        let parts_list =
+            parse_library(parts_path.to_str().unwrap(), library_path.to_str().unwrap()).unwrap();
+
+        import_library(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            library_name,
+            parts_list,
+            Some(parts_path.to_str().unwrap()),
+            Some(library_path.to_str().unwrap()),
+        )
+        .unwrap();
+
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
+        let block_group = &block_groups[0];
+
+        let graph = BlockGroup::get_graph(conn, &block_group.id).unwrap();
+        let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
+
+        let entry = AnnotationGroupEntry {
+            id: library_name.to_string(),
+            name: library_name.to_string(),
+            sample_name: Sample::DEFAULT_NAME.to_string(),
+            source_block_group_id: block_group.id,
+            origin: AnnotationGroupOrigin::CurrentSample,
+        };
+
+        let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn,
+            current_block_group: block_group,
+            entry: &entry,
+            node_ids: &node_ids,
+        })
+        .unwrap();
+
+        let mut names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["cds1", "cds2", "cds3", "p1", "p2", "p3"],
+            "every combinatorial candidate's annotation should resolve, not just the one \
+             on the current path"
+        );
     }
 }

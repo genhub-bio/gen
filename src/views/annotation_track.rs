@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use gen_core::{HashId, Strand};
-use gen_graph::{GenGraph, GraphNodeSlice};
+use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::locus::GraphLocus;
 use petgraph::visit::IntoNodeIdentifiers;
 
@@ -53,6 +53,14 @@ pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> Annot
     }
 }
 
+/// Map `span`'s per-node segments onto the current graph.
+///
+/// A `node_id` identifies a parent `Node`, not a single slice of it: an edit that splits
+/// a node (a library insertion, a sequence update, ...) leaves several `GraphNode`s in the
+/// current graph sharing that same `node_id` but covering different, disjoint sequence
+/// ranges. Each segment is matched to whichever of those candidate slices its own range
+/// overlaps, rather than to an arbitrary one, so a same-`node_id` segment always lands on
+/// the fragment it actually belongs to.
 pub fn graph_locus_from_annotation_span(
     span: &AnnotationSpan,
     graph: &GenGraph,
@@ -60,12 +68,19 @@ pub fn graph_locus_from_annotation_span(
     if span.segments.is_empty() {
         return None;
     }
-    let node_map: HashMap<_, _> = graph.node_identifiers().map(|n| (n.node_id, n)).collect();
+    let mut node_map: HashMap<HashId, Vec<GraphNode>> = HashMap::new();
+    for node in graph.node_identifiers() {
+        node_map.entry(node.node_id).or_default().push(node);
+    }
     let slices: Option<Vec<GraphNodeSlice>> = span
         .segments
         .iter()
         .map(|seg| {
-            let block = *node_map.get(&seg.node_id)?;
+            let candidates = node_map.get(&seg.node_id)?;
+            let block = *candidates
+                .iter()
+                .find(|block| seg.start < block.sequence_end && block.sequence_start < seg.end)
+                .or_else(|| candidates.first())?;
             let start = (seg.start - block.sequence_start).max(0) as usize;
             let end = (seg.end - block.sequence_start).max(0) as usize;
             Some(GraphNodeSlice {
@@ -245,6 +260,47 @@ mod tests {
         };
         let span = annotation_span_from_graph_locus(&locus, "");
         assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
+    }
+
+    /// A node that has been split by a later edit (e.g. a library insertion) shows up as
+    /// several disjoint `GraphNode`s in the current graph, all sharing the same `node_id`.
+    /// A span with one segment per surviving fragment must resolve each segment to the
+    /// specific fragment its range overlaps, not to whichever fragment a naive
+    /// `node_id`-keyed lookup happens to keep.
+    #[test]
+    fn graph_locus_from_annotation_span_resolves_each_segment_to_its_own_fragment() {
+        let node_id = HashId::convert_str("split-node");
+        let left_fragment = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 395,
+        };
+        let right_fragment = GraphNode {
+            node_id,
+            sequence_start: 483,
+            sequence_end: 2686,
+        };
+        // Graph iteration order shouldn't matter; put the right fragment first so a
+        // naive `HashMap<node_id, GraphNode>` collect would keep it over the left one.
+        let graph = make_graph(&[right_fragment, left_fragment]);
+
+        let span = AnnotationSpan {
+            id: HashId::convert_str("source"),
+            name: "source".into(),
+            segments: vec![
+                make_segment("split-node", 0, 395, Strand::Forward),
+                make_segment("split-node", 483, 2686, Strand::Forward),
+            ],
+        };
+
+        let locus = graph_locus_from_annotation_span(&span, &graph).unwrap();
+        assert_eq!(locus.slices.len(), 2);
+        assert_eq!(locus.slices[0].block, left_fragment);
+        assert_eq!(locus.slices[0].start, 0);
+        assert_eq!(locus.slices[0].end, 395);
+        assert_eq!(locus.slices[1].block, right_fragment);
+        assert_eq!(locus.slices[1].start, 0);
+        assert_eq!(locus.slices[1].end, 2203); // 2686 - 483, local to the right fragment
     }
 
     fn make_segment(node_id: &str, start: i64, end: i64, strand: Strand) -> AnnotationSegment {

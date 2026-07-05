@@ -30,8 +30,8 @@ use crate::views::{
         GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
     },
     graph_overlay::{
-        GraphOverlay, group_track_key, has_path_overlay, project_path_overlay_nodes,
-        remove_path_overlay, replace_track_overlays, set_path_overlay,
+        AnnotationColorCache, GraphOverlay, group_track_key, has_path_overlay,
+        project_path_overlay_nodes, remove_path_overlay, replace_track_overlays, set_path_overlay,
     },
 };
 
@@ -117,6 +117,7 @@ pub struct InlineGenGraphState<'a> {
     block_group_id: Option<HashId>,
     /// Annotation and path overlays currently loaded, ready for highlight + label rendering.
     overlays: Vec<GraphOverlay>,
+    annotation_colors: AnnotationColorCache,
     annotation_groups_loaded: bool,
 }
 
@@ -136,6 +137,7 @@ impl<'a> InlineGenGraphState<'a> {
             paths: Vec::new(),
             block_group_id,
             overlays: Vec::new(),
+            annotation_colors: AnnotationColorCache::new(),
             annotation_groups_loaded: false,
         }
     }
@@ -253,7 +255,11 @@ fn show_inline_widget(
                             last_frame_time = now;
 
                             // Re-apply stored overlays before drawing.
-                            reapply_overlays(&mut state.controller, &state.overlays);
+                            reapply_overlays(
+                                &mut state.controller,
+                                &mut state.overlays,
+                                &mut state.annotation_colors,
+                            );
 
                             // Draw the frame
                             terminal.draw(|frame| {

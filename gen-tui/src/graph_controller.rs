@@ -331,8 +331,8 @@ where
         let node_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
         if let Some(&world_pos) = viewport_graph.node_positions.get(&node_idx) {
             let (tl, br) = corners;
-            let tl = (node_sizer.clamp_column(&node_id, tl.0, detail_level), tl.1);
-            let br = (node_sizer.clamp_column(&node_id, br.0, detail_level), br.1);
+            let tl = (node_sizer.map_column(&node_id, tl.0, detail_level), tl.1);
+            let br = (node_sizer.map_column(&node_id, br.0, detail_level), br.1);
             viewport_graph
                 .cell_highlights
                 .push((world_pos, tl, br, style));
