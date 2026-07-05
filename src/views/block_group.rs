@@ -35,8 +35,8 @@ use crate::{
             draw_annotation_labels, reapply_overlays,
         },
         graph_overlay::{
-            GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
-            replace_track_overlays,
+            GraphOverlay, OverlaySource, file_track_key, group_track_key, has_path_overlay,
+            remove_path_overlay, remove_track_overlays, replace_track_overlays, set_path_overlay,
         },
         panels::{render_status_bar, render_with_optional_clear},
         tui_runtime::TuiSession,
@@ -110,25 +110,25 @@ fn get_block_group_path_nodes(
 
 /// Toggle the path overlay for a block group.
 ///
-/// The overlay is stored in `path_highlight` and repainted each frame by the
-/// render loop, so this only flips the stored state. Returns whether the
+/// The path lives in `overlays` alongside the annotation overlays and is repainted each
+/// frame by the render loop, so this only adds or removes it. Returns whether the path
 /// overlay is now enabled.
 fn toggle_path_highlight(
     conn: &GraphConnection,
     controller: &GraphController<GenGraph, GenGraphNodeSizer>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
-    path_highlight: &mut Option<(PathStyle, Vec<GraphNode>)>,
+    overlays: &mut Vec<GraphOverlay>,
 ) -> Result<bool, String> {
-    if path_highlight.is_some() {
-        *path_highlight = None;
+    if has_path_overlay(overlays) {
+        remove_path_overlay(overlays);
         Ok(false)
     } else {
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
         let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph())?;
-        *path_highlight = Some((style, path_nodes));
+        set_path_overlay(overlays, style, path_nodes);
         Ok(true)
     }
 }
@@ -307,9 +307,6 @@ pub fn view_block_group(
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
     let mut graph_controller = create_gen_graph_controller(block_graph.clone());
-    // Path overlay state, repainted from here each frame so it survives the
-    // clear-all-then-re-add pass that refreshes annotation highlights.
-    let mut path_highlight: Option<(PathStyle, Vec<GraphNode>)> = None;
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if origin.is_some() {
@@ -444,7 +441,7 @@ pub fn view_block_group(
                                         &graph_controller,
                                         block_group_id,
                                         Color::Red,
-                                        &mut path_highlight,
+                                        &mut overlays,
                                     ) {
                                         Ok(highlighting_enabled) => {
                                             if highlighting_enabled {
@@ -1037,7 +1034,7 @@ pub fn view_block_group(
                 // Re-register overlay highlights before rendering. This reruns every frame
                 // because `overlays` can change between frames (file/group toggles,
                 // scroll-triggered reloads).
-                reapply_overlays(&mut graph_controller, &overlays, path_highlight.as_ref());
+                reapply_overlays(&mut graph_controller, &overlays);
 
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn)

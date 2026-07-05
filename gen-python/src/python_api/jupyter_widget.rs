@@ -18,7 +18,9 @@ use r#gen::{
             GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, highlight_locus,
             reapply_overlays,
         },
-        graph_overlay::{GraphOverlay, OverlaySource},
+        graph_overlay::{
+            GraphOverlay, OverlayContent, OverlaySource, remove_path_overlay, set_path_overlay,
+        },
     },
 };
 use gen_annotations::projection::annotation_segments;
@@ -247,11 +249,10 @@ struct GraphPage {
     db_path: PathBuf,
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
+    /// Annotation and path overlays. The path (added by `show_path`, removed by
+    /// `clear_path`/`clear_highlights`) is just another overlay, so it survives
+    /// zoom/detail changes the same way the annotation overlays do.
     overlays: Vec<GraphOverlay>,
-    /// Set by `show_path`, cleared by `clear_path`/`clear_highlights`.
-    /// Restored by `reapply_highlights` so it survives zoom/detail changes
-    /// the same way `overlays` do.
-    path_highlight: Option<(PathStyle, Vec<GraphNode>)>,
     /// Set to `true` once annotation groups have been loaded (auto or with colors).
     /// Survives cloning so that cell-display clones do not double-load.
     annotation_groups_loaded: bool,
@@ -294,7 +295,6 @@ impl GraphPage {
             block_group_id: None,
             controller,
             overlays: Vec::new(),
-            path_highlight: None,
             annotation_groups_loaded: false,
         }
     }
@@ -392,7 +392,7 @@ impl GraphPage {
         let accent_base = self
             .overlays
             .iter()
-            .filter(|o| !matches!(o.source, OverlaySource::Adhoc))
+            .filter(|o| !matches!(o.source, OverlaySource::Adhoc | OverlaySource::Path))
             .count();
         let mut accent_offset = 0usize;
         let spans_with_styles: Vec<(AnnotationSpan, PathStyle)> = spans
@@ -428,7 +428,7 @@ impl GraphPage {
         }
         for (span, style) in spans_with_styles {
             self.overlays.push(GraphOverlay {
-                span,
+                content: OverlayContent::Span(span),
                 source: OverlaySource::Track(track_name.clone()),
                 style,
             });
@@ -449,7 +449,7 @@ impl GraphPage {
         let accent_base = self
             .overlays
             .iter()
-            .filter(|o| !matches!(o.source, OverlaySource::Adhoc))
+            .filter(|o| !matches!(o.source, OverlaySource::Adhoc | OverlaySource::Path))
             .count();
         let spans_with_styles: Vec<(AnnotationSpan, PathStyle)> = spans
             .into_iter()
@@ -469,7 +469,7 @@ impl GraphPage {
         }
         for (span, style) in spans_with_styles {
             self.overlays.push(GraphOverlay {
-                span,
+                content: OverlayContent::Span(span),
                 source: OverlaySource::Track(track_name.clone()),
                 style,
             });
@@ -599,46 +599,33 @@ impl GraphPage {
             }
         };
         self.controller.set_detail_level(level);
-        self.reapply_highlights();
+        reapply_overlays(&mut self.controller, &self.overlays);
         Ok(())
     }
 
     pub fn truncate_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Truncated);
-        self.reapply_highlights();
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     pub fn full_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Full);
-        self.reapply_highlights();
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     pub fn minimize_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Minimal);
-        self.reapply_highlights();
-    }
-
-    /// Re-register all overlays (and the path highlight, if any) using the current
-    /// detail level.
-    ///
-    /// Highlight column offsets are clamped at registration time, so they go stale
-    /// when the detail level changes. Call this after any zoom or detail change.
-    fn reapply_highlights(&mut self) {
-        reapply_overlays(
-            &mut self.controller,
-            &self.overlays,
-            self.path_highlight.as_ref(),
-        );
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     fn zoom_in(&mut self) {
         self.controller.zoom_in();
-        self.reapply_highlights();
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     fn zoom_out(&mut self) {
         self.controller.zoom_out();
-        self.reapply_highlights();
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     fn handle_click(&mut self, col: u16, row: u16) -> bool {
@@ -681,7 +668,7 @@ impl GraphPage {
         self.controller.go_to_node(domain_idx, (frac_x, 0.5));
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
-        self.reapply_highlights();
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     /// Highlight the path of nodes covered by `match_obj` in the given colour.
@@ -696,7 +683,7 @@ impl GraphPage {
             .with_merge_glyphs(true);
         highlight_locus(&mut self.controller, &locus.inner, style);
         self.overlays.push(GraphOverlay {
-            span: annotation_span_from_graph_locus(&locus.inner, ""),
+            content: OverlayContent::Span(annotation_span_from_graph_locus(&locus.inner, "")),
             source: OverlaySource::Adhoc,
             style,
         });
@@ -706,7 +693,6 @@ impl GraphPage {
     /// Remove all highlights from the graph, including any path shown by `show_path`.
     fn clear_highlights(&mut self) {
         self.overlays.clear();
-        self.path_highlight = None;
         self.controller.clear_all_highlights();
     }
 
@@ -761,17 +747,15 @@ impl GraphPage {
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
 
-        self.controller
-            .set_path_highlight(style, path_nodes.clone());
-        self.path_highlight = Some((style, path_nodes));
+        set_path_overlay(&mut self.overlays, style, path_nodes);
+        reapply_overlays(&mut self.controller, &self.overlays);
         Ok(())
     }
 
     /// Clear path highlighting previously applied by `show_path`.
     pub fn clear_path(&mut self) {
-        self.path_highlight = None;
-        self.controller.clear_all_highlights();
-        self.reapply_highlights(); // restore overlays cleared by clear_all_highlights
+        remove_path_overlay(&mut self.overlays);
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     /// Load annotations from the database by group name and add them as inline graph overlays.
@@ -909,7 +893,7 @@ impl GraphPage {
             highlight_locus(&mut self.controller, &locus, style);
         }
         self.overlays.push(GraphOverlay {
-            span,
+            content: OverlayContent::Span(span),
             source: OverlaySource::Adhoc,
             style,
         });
@@ -970,7 +954,7 @@ impl GraphPage {
             .iter()
             .filter_map(|o| match &o.source {
                 OverlaySource::Track(name) => Some(name.as_str()),
-                OverlaySource::Annotation(_) | OverlaySource::Adhoc => None,
+                OverlaySource::Annotation(_) | OverlaySource::Adhoc | OverlaySource::Path => None,
             })
             .filter(|n| seen.insert(*n))
             .collect();
@@ -982,16 +966,16 @@ impl GraphPage {
     pub fn remove_track(&mut self, name: &str) {
         self.overlays
             .retain(|o| !matches!(&o.source, OverlaySource::Track(n) if n == name));
-        self.reapply_highlights();
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     /// Clear all annotations from the graph.
     pub fn clear_all_annotations(&mut self) {
-        // Keep only ad hoc highlights (e.g. search matches); drop everything
+        // Keep ad hoc highlights (e.g. search matches) and the path; drop everything
         // added via a track or `add_annotation`, then repaint what remains.
         self.overlays
-            .retain(|o| matches!(o.source, OverlaySource::Adhoc));
-        self.reapply_highlights();
+            .retain(|o| matches!(o.source, OverlaySource::Adhoc | OverlaySource::Path));
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     /// Add annotations rendered directly on the graph canvas.
@@ -1034,7 +1018,7 @@ impl GraphPage {
         }
         for (span, _) in spans_and_loci {
             self.overlays.push(GraphOverlay {
-                span,
+                content: OverlayContent::Span(span),
                 source: source.clone(),
                 style,
             });
@@ -1049,7 +1033,7 @@ impl GraphPage {
         let names: Vec<&str> = self
             .overlays
             .iter()
-            .map(|o| o.span.name.as_str())
+            .filter_map(|o| o.span().map(|s| s.name.as_str()))
             .filter(|n| !n.is_empty() && seen.insert(*n))
             .collect();
         serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
@@ -1059,8 +1043,9 @@ impl GraphPage {
     /// which track (if any) they belong to. If the same name was added more
     /// than once, every copy is removed.
     pub fn remove_annotation(&mut self, name: &str) {
-        self.overlays.retain(|o| o.span.name != name);
-        self.reapply_highlights();
+        self.overlays
+            .retain(|o| o.span().is_none_or(|s| s.name != name));
+        reapply_overlays(&mut self.controller, &self.overlays);
     }
 }
 

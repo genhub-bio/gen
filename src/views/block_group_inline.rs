@@ -29,7 +29,10 @@ use crate::views::{
     gen_graph_widget::{
         GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
     },
-    graph_overlay::{GraphOverlay, group_track_key, replace_track_overlays},
+    graph_overlay::{
+        GraphOverlay, group_track_key, has_path_overlay, remove_path_overlay,
+        replace_track_overlays, set_path_overlay,
+    },
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -131,12 +134,9 @@ pub struct InlineGenGraphState<'a> {
     conn: &'a GraphConnection,
     paths: Vec<Vec<gen_graph::GraphNode>>,
     block_group_id: Option<HashId>,
-    /// Annotation overlays currently loaded, ready for highlight + label rendering.
+    /// Annotation and path overlays currently loaded, ready for highlight + label rendering.
     overlays: Vec<GraphOverlay>,
     annotation_groups_loaded: bool,
-    /// Whether the current path overlay is toggled on. The overlay itself is
-    /// re-added from this flag each frame in `reapply_highlights`.
-    path_highlighted: bool,
 }
 
 impl<'a> InlineGenGraphState<'a> {
@@ -156,7 +156,6 @@ impl<'a> InlineGenGraphState<'a> {
             block_group_id,
             overlays: Vec::new(),
             annotation_groups_loaded: false,
-            path_highlighted: false,
         }
     }
 
@@ -174,7 +173,9 @@ impl<'a> InlineGenGraphState<'a> {
         let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id) else {
             return;
         };
-        self.overlays.clear();
+        // Drop the annotation overlays but keep the path overlay across viewport reloads.
+        self.overlays
+            .retain(|overlay| overlay.path_nodes().is_some());
         for entry in load_annotation_group_entries(conn, &block_group) {
             let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
                 conn,
@@ -186,32 +187,6 @@ impl<'a> InlineGenGraphState<'a> {
             };
             replace_track_overlays(&mut self.overlays, &group_track_key(&entry.id), entry_spans);
         }
-        // Sort longest-first so shorter (inner) overlays paint on top.
-        self.overlays.sort_by_key(|o| {
-            -(o.span
-                .segments
-                .iter()
-                .map(|seg| seg.end - seg.start)
-                .sum::<i64>())
-        });
-    }
-
-    fn reapply_highlights(&mut self) {
-        let path_highlight = self
-            .path_highlighted
-            .then(|| self.paths.last().cloned())
-            .flatten()
-            .map(|nodes| {
-                let style = PathStyle::new(current_theme()[0x09])
-                    .with_line_style(LineStyle::Bold)
-                    .with_merge_glyphs(true);
-                (style, nodes)
-            });
-        reapply_overlays(
-            &mut self.controller,
-            &self.overlays,
-            path_highlight.as_ref(),
-        );
     }
 }
 
@@ -296,8 +271,8 @@ fn show_inline_widget(
                             let frame_delta = now.duration_since(last_frame_time);
                             last_frame_time = now;
 
-                            // Re-apply stored annotation highlights before drawing.
-                            state.reapply_highlights();
+                            // Re-apply stored overlays before drawing.
+                            reapply_overlays(&mut state.controller, &state.overlays);
 
                             // Draw the frame
                             terminal.draw(|frame| {
@@ -345,8 +320,13 @@ fn show_inline_widget(
                                 }
                                 KeyCode::Char('p') => {
                                     // Toggle the path overlay; reapply_highlights repaints it.
-                                    if state.paths.last().is_some() {
-                                        state.path_highlighted = !state.path_highlighted;
+                                    if has_path_overlay(&state.overlays) {
+                                        remove_path_overlay(&mut state.overlays);
+                                    } else if let Some(nodes) = state.paths.last().cloned() {
+                                        let style = PathStyle::new(current_theme()[0x09])
+                                            .with_line_style(LineStyle::Bold)
+                                            .with_merge_glyphs(true);
+                                        set_path_overlay(&mut state.overlays, style, nodes);
                                     } else {
                                         eprintln!("No paths available for path highlighting");
                                     }
@@ -469,7 +449,7 @@ fn draw_controls_help(
 ) {
     let help_text = if hidden_legend.is_some() {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | q: Exit".to_string()
-    } else if state.path_highlighted {
+    } else if has_path_overlay(&state.overlays) {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
     } else {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()

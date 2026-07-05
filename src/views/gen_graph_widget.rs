@@ -457,39 +457,42 @@ pub fn highlight_locus<S: NodeSizer<GenGraph>>(
     }
 }
 
-/// Re-register every overlay highlight (and an optional path highlight) on `controller`,
-/// replacing whatever highlights were previously set.
+/// Re-register every overlay highlight on `controller`, replacing whatever highlights
+/// were previously set.
 ///
-/// Overlays are applied longest-first so shorter (inner) spans paint on top. Callers run
-/// this after any change that invalidates clamped highlight columns (zoom, detail change)
-/// or, in the live TUI viewers, every frame because the overlay set changes with scrolling.
+/// Span overlays are applied longest-first so shorter (inner) spans paint on top; any
+/// path overlay is applied last so the route paints over the span tints. Callers run this
+/// after any change that invalidates clamped highlight columns (zoom, detail change) or,
+/// in the live TUI viewers, every frame because the overlay set changes with scrolling.
 pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
     controller: &mut GraphController<GenGraph, S>,
     overlays: &[GraphOverlay],
-    path_highlight: Option<&(PathStyle, Vec<GraphNode>)>,
 ) {
-    let mut sorted: Vec<&GraphOverlay> = overlays.iter().collect();
-    sorted.sort_by_key(|overlay| {
-        -(overlay
-            .span
+    let mut spans: Vec<(&AnnotationSpan, PathStyle)> = overlays
+        .iter()
+        .filter_map(|overlay| overlay.span().map(|span| (span, overlay.style)))
+        .collect();
+    spans.sort_by_key(|(span, _)| {
+        -(span
             .segments
             .iter()
             .map(|segment| segment.end - segment.start)
             .sum::<i64>())
     });
-    let loci_and_styles: Vec<(GraphLocus, PathStyle)> = sorted
+    let loci_and_styles: Vec<(GraphLocus, PathStyle)> = spans
         .iter()
-        .filter_map(|overlay| {
-            graph_locus_from_annotation_span(&overlay.span, controller.graph())
-                .map(|locus| (locus, overlay.style))
+        .filter_map(|(span, style)| {
+            graph_locus_from_annotation_span(span, controller.graph()).map(|locus| (locus, *style))
         })
         .collect();
     controller.clear_all_highlights();
     for (locus, style) in &loci_and_styles {
         highlight_locus(controller, locus, *style);
     }
-    if let Some((style, nodes)) = path_highlight {
-        controller.set_path_highlight(*style, nodes.clone());
+    for overlay in overlays {
+        if let Some(nodes) = overlay.path_nodes() {
+            controller.set_path_highlight(overlay.style, nodes.to_vec());
+        }
     }
 }
 
@@ -506,23 +509,27 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     controller: &GraphController<GenGraph, S>,
     overlays: &[GraphOverlay],
 ) -> bool {
-    let mut labeled: Vec<&GraphOverlay> = overlays
+    let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
         .iter()
-        .filter(|overlay| !overlay.span.name.is_empty())
+        .filter_map(|overlay| {
+            overlay
+                .span()
+                .filter(|span| !span.name.is_empty())
+                .map(|span| (span, overlay.style))
+        })
         .collect();
     if labeled.is_empty() {
         return false;
     }
-    labeled.sort_by_key(|overlay| {
-        -(overlay
-            .span
+    labeled.sort_by_key(|(span, _)| {
+        -(span
             .segments
             .iter()
             .map(|segment| segment.end - segment.start)
             .sum::<i64>())
     });
 
-    let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|overlay| &overlay.span).collect();
+    let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
     let pos_map = viewport_pos_map(controller);
     let detail_level = controller.get_detail_level();
     let theme = current_theme();
@@ -533,8 +540,7 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     };
 
     let mut any_hidden = false;
-    for (idx, overlay) in labeled.iter().enumerate() {
-        let span = &overlay.span;
+    for (idx, (span, style)) in labeled.iter().enumerate() {
         let Some(locus) = graph_locus_from_annotation_span(span, controller.graph()) else {
             continue;
         };
@@ -553,7 +559,7 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
         else {
             continue;
         };
-        let color = match overlay.style.color {
+        let color = match style.color {
             Color::Reset => theme[0x06],
             other => other,
         };
