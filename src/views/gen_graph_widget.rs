@@ -60,6 +60,21 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
             VisualDetail::Full => (sequence_length, 1u64),              // Full sequence length
         }
     }
+
+    /// Map a raw sequence column to the visual cell it occupies for `detail_level`.
+    ///
+    /// In `Truncated` mode a node longer than 13 bases is drawn as `AAAAA...BBBBB`, so
+    /// interior columns collapse onto the central `...` cell. `Minimal` mode draws a
+    /// single glyph, so every column maps to column 0.
+    fn clamp_column(&self, node: &GraphNode, raw_col: i64, detail_level: VisualDetail) -> i64 {
+        match detail_level {
+            VisualDetail::Minimal => 0,
+            VisualDetail::Truncated if node.length() > 13 => {
+                clamp_truncated_col(raw_col, node.length())
+            }
+            _ => raw_col,
+        }
+    }
 }
 
 /// Domain-specific node renderer for GenGraph that handles database sequence fetching
@@ -335,8 +350,8 @@ pub fn viewport_pos_map<S: NodeSizer<GenGraph>>(
 /// - `right_pos` is the world position of the last matched column in `blocks[last]`,
 ///   with the maximum y across all blocks
 ///
-/// Column offsets are clamped with `clamp_col` so they map correctly in every
-/// detail level (e.g. truncated nodes collapse interior columns to the `...` cell).
+/// Column offsets are clamped with `NodeSizer::clamp_column` so they map correctly in
+/// every detail level (e.g. truncated nodes collapse interior columns to the `...` cell).
 /// The x bounds are clipped to the visible camera rect so viewport-spanning annotations
 /// place their label near the visible portion rather than off-screen.
 ///
@@ -351,7 +366,7 @@ pub fn locus_label_bounds(
     let block_world_pos = |block: GraphNode, col_raw: i64| -> Option<WorldPos> {
         let &(center, size) = pos_map.get(&block)?;
         let rect = WorldRect::from_center_and_size(center, size);
-        let col = clamp_col(col_raw, block.length(), detail_level);
+        let col = GenGraphNodeSizer.clamp_column(&block, col_raw, detail_level);
         Some(WorldPos::new(rect.min.x + col, center.y))
     };
 
@@ -398,19 +413,6 @@ pub fn locus_label_bounds(
     Some((left_pos, right_pos))
 }
 
-/// Apply detail-level clamping to a raw column offset.
-///
-/// In `Truncated` mode, interior columns of long nodes map to the `...` region.
-fn clamp_col(col_raw: i64, block_seq_len: i64, detail_level: VisualDetail) -> i64 {
-    match detail_level {
-        VisualDetail::Minimal => 0,
-        VisualDetail::Truncated if block_seq_len > 13 => {
-            clamp_truncated_col(col_raw, block_seq_len)
-        }
-        _ => col_raw,
-    }
-}
-
 /// Map a sequence offset to a visual cell column inside a 13-cell truncated node.
 ///
 /// Display layout: `AAAAA...BBBBB` — first 5 bases (cells 0-4), `...` (cells 5-7),
@@ -432,23 +434,17 @@ fn clamp_truncated_col(value: i64, block_seq_len: i64) -> i64 {
 /// - Middle nodes: fully tinted.
 /// - End node: tinted from its left edge to `end_offset` (exclusive).
 ///
-/// In `Truncated` detail level the column offsets are clamped so that interior
-/// positions map to the `...` cell rather than a precise (wrong) location.
+/// The stored columns are raw sequence offsets; the controller maps them to visual
+/// cells for the current detail level on every rebuild via `NodeSizer::clamp_column`,
+/// so the highlight self-heals across detail and zoom changes.
 pub fn highlight_locus<S: NodeSizer<GenGraph>>(
     controller: &mut GraphController<GenGraph, S>,
     m: &GraphLocus,
     style: PathStyle,
 ) {
-    let detail_level = controller.get_detail_level();
-
     for s in &m.slices {
-        let block_seq_len = s.block.length();
-        let col_start_raw = s.start as i64;
-        let col_end_raw = s.end.saturating_sub(1) as i64;
-        let (col_start, col_end) = (
-            clamp_col(col_start_raw, block_seq_len, detail_level),
-            clamp_col(col_end_raw, block_seq_len, detail_level),
-        );
+        let col_start = s.start as i64;
+        let col_end = s.end.saturating_sub(1) as i64;
         controller.set_cell_highlight(s.block, (col_start, 0), (col_end, 0), style);
     }
 
@@ -739,5 +735,83 @@ mod tests {
             .unwrap();
 
         insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
+    }
+
+    /// A cell highlight set in `Full` detail must re-clamp onto the truncated cells
+    /// when the detail level changes, without any external `reapply_overlays` call.
+    ///
+    /// The highlight stores raw content columns; the controller maps them through
+    /// `GenGraphNodeSizer::clamp_column` on every rebuild. For a 34-base node drawn
+    /// as `AAAAA...BBBBB` (13 cells), raw column 2 stays at cell 2 while raw column
+    /// 31 (three from the end) lands at cell 10.
+    #[test]
+    fn cell_highlight_reclamps_on_detail_change() {
+        use std::path::PathBuf;
+
+        use gen_core::strand::Strand;
+        use gen_graph::GraphNodeSlice;
+        use gen_models::{locus::GraphLocus, sample::Sample};
+        use ratatui::{layout::Rect, style::Color};
+
+        use crate::{
+            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
+        };
+
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .unwrap()
+            .to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        let gen_graph = Sample::get_graph(conn, collection, Sample::DEFAULT_NAME).unwrap();
+        let mut controller = create_gen_graph_controller(gen_graph);
+
+        let block = controller
+            .graph()
+            .nodes()
+            .find(|node| !is_start_node(node.node_id) && !is_end_node(node.node_id))
+            .expect("should have a data node");
+        assert_eq!(block.length(), 34);
+
+        // Highlight raw columns 2..=31 while showing the full sequence.
+        controller.set_detail_level(VisualDetail::Full);
+        let locus = GraphLocus {
+            slices: vec![GraphNodeSlice {
+                block,
+                start: 2,
+                end: 32,
+                strand: Strand::Forward,
+            }],
+        };
+        highlight_locus(&mut controller, &locus, PathStyle::new(Color::Yellow));
+
+        // Switch to the truncated view; the stored raw columns must re-clamp.
+        controller.set_detail_level(VisualDetail::Truncated);
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 120, 30);
+        controller.ensure_camera_coverage().unwrap();
+        controller.rebuild_viewport_graph().unwrap();
+
+        let highlights = controller.get_cell_highlights();
+        assert_eq!(highlights.len(), 1, "expected exactly one cell highlight");
+        let (_, top_left, bottom_right, _) = highlights[0];
+        assert_eq!(top_left.0, 2, "raw column 2 stays at cell 2");
+        assert_eq!(
+            bottom_right.0, 10,
+            "raw column 31 clamps to cell 10 in the truncated node"
+        );
     }
 }

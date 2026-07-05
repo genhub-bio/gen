@@ -599,33 +599,27 @@ impl GraphPage {
             }
         };
         self.controller.set_detail_level(level);
-        reapply_overlays(&mut self.controller, &self.overlays);
         Ok(())
     }
 
     pub fn truncate_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Truncated);
-        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     pub fn full_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Full);
-        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     pub fn minimize_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Minimal);
-        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     fn zoom_in(&mut self) {
         self.controller.zoom_in();
-        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     fn zoom_out(&mut self) {
         self.controller.zoom_out();
-        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     fn handle_click(&mut self, col: u16, row: u16) -> bool {
@@ -668,7 +662,6 @@ impl GraphPage {
         self.controller.go_to_node(domain_idx, (frac_x, 0.5));
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
-        reapply_overlays(&mut self.controller, &self.overlays);
     }
 
     /// Highlight the path of nodes covered by `match_obj` in the given colour.

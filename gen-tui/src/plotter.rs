@@ -186,6 +186,25 @@ where
     fn get_dummy_size(&self) -> (u64, u64) {
         (1, 1)
     }
+
+    /// Map a raw content column offset to the visual cell column it occupies at a
+    /// given level of detail.
+    ///
+    /// The default scales the column proportionally to how much the node shrinks at
+    /// this detail level: `raw_col * visual_width / full_width`, where `full_width` is
+    /// the node's width at `VisualDetail::Full` and `visual_width` is its width at
+    /// `detail_level` (both from `get_node_size`). This keeps a highlight inside the
+    /// visible cells for any node that scales uniformly. Nodes whose content collapses
+    /// non-uniformly (for example a truncated `AAAAA...BBBBB` display that folds
+    /// interior columns onto an ellipsis) override this.
+    fn clamp_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
+        let full_width = self.get_node_size(node, VisualDetail::Full).0 as i64;
+        if full_width <= 0 {
+            return raw_col;
+        }
+        let visual_width = self.get_node_size(node, detail_level).0 as i64;
+        raw_col * visual_width / full_width
+    }
 }
 
 /// Blanket implementation for Box<T> where T implements NodeSizer
@@ -200,6 +219,10 @@ where
 
     fn get_dummy_size(&self) -> (u64, u64) {
         (**self).get_dummy_size()
+    }
+
+    fn clamp_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
+        (**self).clamp_column(node, raw_col, detail_level)
     }
 }
 
