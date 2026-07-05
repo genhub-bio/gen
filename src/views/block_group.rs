@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     error::Error,
     time::{Duration, Instant},
 };
@@ -26,8 +26,8 @@ use crate::{
     views::{
         annotation_groups::load_annotation_group_entries,
         annotation_track::{
-            AnnotationSpan, AnnotationTrack, graph_locus_from_annotation_span,
-            span_covered_by_later, span_label_text, span_should_hide_in_truncated,
+            AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later,
+            span_label_text, span_should_hide_in_truncated,
         },
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
@@ -37,6 +37,10 @@ use crate::{
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
             highlight_locus, locus_label_bounds, viewport_pos_map,
+        },
+        graph_overlay::{
+            GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
+            replace_track_overlays,
         },
         inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
         panels::{render_status_bar, render_with_optional_clear},
@@ -184,7 +188,7 @@ fn load_annotation_groups_for_viewport(
     block_group: &BlockGroup,
     node_ids: &HashSet<HashId>,
     explorer_state: &mut CollectionExplorerState,
-    annotation_group_tracks: &mut HashMap<String, AnnotationTrack>,
+    overlays: &mut Vec<GraphOverlay>,
     messages: &mut crate::views::messages::MessageBuffer,
 ) {
     for entry in load_annotation_group_entries(conn, block_group) {
@@ -206,15 +210,10 @@ fn load_annotation_groups_for_viewport(
         if spans.is_empty() {
             continue;
         }
-        let title = if block_group.sample_name == entry.sample_name {
-            entry.name.clone()
-        } else {
-            format!("{} ({})", entry.name, entry.sample_name)
-        };
         explorer_state
             .active_annotation_groups
             .insert(entry.id.clone());
-        annotation_group_tracks.insert(entry.id, AnnotationTrack::new(title, spans));
+        replace_track_overlays(overlays, &group_track_key(&entry.id), spans);
     }
 }
 
@@ -283,13 +282,12 @@ pub fn view_block_group(
     bar.finish();
 
     let mut messages = crate::views::messages::MessageBuffer::new(MESSAGE_BUFFER_LIMIT);
-    let mut annotation_file_tracks: std::collections::HashMap<HashId, AnnotationTrack> =
-        std::collections::HashMap::new();
+    // Every annotation currently painted on the canvas, from both loaded files and
+    // loaded groups, keyed by track (see `graph_overlay::file_track_key`/`group_track_key`).
+    let mut overlays: Vec<GraphOverlay> = Vec::new();
     let mut annotation_file_index_available: std::collections::HashMap<HashId, bool> =
         std::collections::HashMap::new();
     let mut annotation_file_loaded_windows: std::collections::HashMap<HashId, (i64, i64)> =
-        std::collections::HashMap::new();
-    let mut annotation_group_tracks: std::collections::HashMap<String, AnnotationTrack> =
         std::collections::HashMap::new();
     let mut current_block_group =
         block_group_id.map(|bg_id| match BlockGroup::get_by_id(conn, &bg_id) {
@@ -520,8 +518,11 @@ pub fn view_block_group(
                                         };
                                         match load_annotation_file_track(&request) {
                                             Ok(load) => {
-                                                annotation_file_tracks
-                                                    .insert(toggled_id, load.track);
+                                                replace_track_overlays(
+                                                    &mut overlays,
+                                                    &file_track_key(&toggled_id),
+                                                    load.track.annotations,
+                                                );
                                                 annotation_file_index_available
                                                     .insert(toggled_id, load.index_available);
                                                 if let Some(window) = load.loaded_window {
@@ -536,14 +537,17 @@ pub fn view_block_group(
                                                 messages.push_warn(format!("{err}"));
                                                 explorer_state
                                                     .deactivate_annotation_file(&toggled_id);
-                                                annotation_file_tracks.remove(&toggled_id);
+                                                remove_track_overlays(
+                                                    &mut overlays,
+                                                    &file_track_key(&toggled_id),
+                                                );
                                                 annotation_file_index_available.remove(&toggled_id);
                                                 annotation_file_loaded_windows.remove(&toggled_id);
                                             }
                                         }
                                     }
                                 } else {
-                                    annotation_file_tracks.remove(&toggled_id);
+                                    remove_track_overlays(&mut overlays, &file_track_key(&toggled_id));
                                     annotation_file_index_available.remove(&toggled_id);
                                     annotation_file_loaded_windows.remove(&toggled_id);
                                 }
@@ -582,30 +586,18 @@ pub fn view_block_group(
                                             explorer_state
                                                 .deactivate_annotation_group(&toggled_group);
                                         } else {
-                                            let title = if let Some(entry) =
-                                                explorer.annotation_group_entry(&toggled_group)
-                                            {
-                                                if current_block_group.as_ref().is_some_and(|bg| {
-                                                    bg.sample_name == entry.sample_name
-                                                }) {
-                                                    entry.name.clone()
-                                                } else {
-                                                    format!(
-                                                        "{} ({})",
-                                                        entry.name, entry.sample_name
-                                                    )
-                                                }
-                                            } else {
-                                                toggled_group.clone()
-                                            };
-                                            annotation_group_tracks.insert(
-                                                toggled_group.clone(),
-                                                AnnotationTrack::new(title, spans),
+                                            replace_track_overlays(
+                                                &mut overlays,
+                                                &group_track_key(&toggled_group),
+                                                spans,
                                             );
                                         }
                                     }
                                 } else {
-                                    annotation_group_tracks.remove(&toggled_group);
+                                    remove_track_overlays(
+                                        &mut overlays,
+                                        &group_track_key(&toggled_group),
+                                    );
                                 }
                             }
                         }
@@ -648,7 +640,11 @@ pub fn view_block_group(
                                 };
                                 match load_annotation_file_track(&request) {
                                     Ok(load) => {
-                                        annotation_file_tracks.insert(toggled_id, load.track);
+                                        replace_track_overlays(
+                                            &mut overlays,
+                                            &file_track_key(&toggled_id),
+                                            load.track.annotations,
+                                        );
                                         annotation_file_index_available
                                             .insert(toggled_id, load.index_available);
                                         if let Some(window) = load.loaded_window {
@@ -661,14 +657,17 @@ pub fn view_block_group(
                                     Err(err) => {
                                         messages.push_warn(format!("{err}"));
                                         explorer_state.deactivate_annotation_file(&toggled_id);
-                                        annotation_file_tracks.remove(&toggled_id);
+                                        remove_track_overlays(
+                                            &mut overlays,
+                                            &file_track_key(&toggled_id),
+                                        );
                                         annotation_file_index_available.remove(&toggled_id);
                                         annotation_file_loaded_windows.remove(&toggled_id);
                                     }
                                 }
                             }
                         } else {
-                            annotation_file_tracks.remove(&toggled_id);
+                            remove_track_overlays(&mut overlays, &file_track_key(&toggled_id));
                             annotation_file_index_available.remove(&toggled_id);
                             annotation_file_loaded_windows.remove(&toggled_id);
                         }
@@ -702,25 +701,15 @@ pub fn view_block_group(
                                 if spans.is_empty() {
                                     explorer_state.deactivate_annotation_group(&toggled_group);
                                 } else {
-                                    let title = if let Some(entry) =
-                                        explorer.annotation_group_entry(&toggled_group)
-                                    {
-                                        if bg.sample_name == entry.sample_name {
-                                            entry.name.clone()
-                                        } else {
-                                            format!("{} ({})", entry.name, entry.sample_name)
-                                        }
-                                    } else {
-                                        toggled_group.clone()
-                                    };
-                                    annotation_group_tracks.insert(
-                                        toggled_group.clone(),
-                                        AnnotationTrack::new(title, spans),
+                                    replace_track_overlays(
+                                        &mut overlays,
+                                        &group_track_key(&toggled_group),
+                                        spans,
                                     );
                                 }
                             }
                         } else {
-                            annotation_group_tracks.remove(&toggled_group);
+                            remove_track_overlays(&mut overlays, &group_track_key(&toggled_group));
                         }
                     }
                 }
@@ -779,13 +768,24 @@ pub fn view_block_group(
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
-                annotation_file_tracks.retain(|id, _| explorer_state.is_annotation_file_active(id));
                 annotation_file_index_available
                     .retain(|id, _| explorer_state.is_annotation_file_active(id));
                 annotation_file_loaded_windows
                     .retain(|id, _| explorer_state.is_annotation_file_active(id));
-                annotation_group_tracks
-                    .retain(|name, _| explorer_state.is_annotation_group_active(name));
+                let active_file_keys: HashSet<String> = explorer_state
+                    .active_annotation_files
+                    .iter()
+                    .map(file_track_key)
+                    .collect();
+                overlays.retain(|o| match &o.source {
+                    OverlaySource::Track(key) if key.starts_with("file:") => {
+                        active_file_keys.contains(key)
+                    }
+                    OverlaySource::Track(key) => key
+                        .strip_prefix("group:")
+                        .is_some_and(|group_id| explorer_state.is_annotation_group_active(group_id)),
+                    _ => true,
+                });
             }
             last_refresh = Instant::now();
         }
@@ -839,7 +839,11 @@ pub fn view_block_group(
                 };
                 match load_annotation_file_track(&request) {
                     Ok(load) => {
-                        annotation_file_tracks.insert(id, load.track);
+                        replace_track_overlays(
+                            &mut overlays,
+                            &file_track_key(&id),
+                            load.track.annotations,
+                        );
                         if let Some(window) = load.loaded_window {
                             annotation_file_loaded_windows.insert(id, window);
                         } else {
@@ -850,7 +854,7 @@ pub fn view_block_group(
                     Err(err) => {
                         messages.push_warn(format!("{err}"));
                         explorer_state.deactivate_annotation_file(&id);
-                        annotation_file_tracks.remove(&id);
+                        remove_track_overlays(&mut overlays, &file_track_key(&id));
                         annotation_file_index_available.remove(&id);
                         annotation_file_loaded_windows.remove(&id);
                     }
@@ -1031,33 +1035,23 @@ pub fn view_block_group(
                 graph_controller.viewport_state.focus();
 
                 // Step 1: Apply annotation highlights before graph render.
-                // Sort spans longest-first so shorter (inner) annotations paint on top.
-                let mut all_spans: Vec<&AnnotationSpan> =
-                    annotation_file_tracks
-                        .values()
-                        .chain(annotation_group_tracks.values())
-                        .flat_map(|t| t.annotations.iter())
-                        .collect();
-                all_spans.sort_by_key(|s| {
-                    -(s.segments.iter().map(|seg| seg.end - seg.start).sum::<i64>())
+                // Sort longest-first so shorter (inner) annotations paint on top.
+                let mut sorted_overlays: Vec<&GraphOverlay> = overlays.iter().collect();
+                sorted_overlays.sort_by_key(|o| {
+                    -(o.span.segments.iter().map(|seg| seg.end - seg.start).sum::<i64>())
                 });
-                let annotation_colors: Vec<Color> = {
-                    let theme = current_theme();
-                    all_spans
-                        .iter()
-                        .map(|span| theme[0x08 + (span.id.0[0] as usize % 8)])
-                        .collect()
-                };
-                // Repaint every overlay from scratch: clear all highlights, then re-add
-                // the annotation loci and the path overlay. The domain layer owns the
-                // authoritative overlay set; the controller only retains highlights so
-                // they survive viewport rebuilds while scrolling.
-                let loci_and_styles: Vec<_> = all_spans
+                // Clear every highlight first, then re-add every locus. Clearing and
+                // adding per-overlay in a single pass would let a later overlay's clear
+                // step wipe out an earlier overlay's highlight whenever two overlays
+                // share a color (only 8 accent colors exist, so collisions are common
+                // once there are more than 8 annotations in view). This whole block
+                // reruns every frame because `overlays` can change between frames
+                // (file/group toggles, scroll-triggered reloads).
+                let loci_and_styles: Vec<_> = sorted_overlays
                     .iter()
-                    .zip(annotation_colors.iter())
-                    .filter_map(|(span, &color)| {
-                        let locus = graph_locus_from_annotation_span(span, graph_controller.graph())?;
-                        Some((locus, PathStyle::new(color)))
+                    .filter_map(|o| {
+                        let locus = graph_locus_from_annotation_span(&o.span, graph_controller.graph())?;
+                        Some((locus, o.style))
                     })
                     .collect();
                 graph_controller.clear_all_highlights();
@@ -1078,10 +1072,11 @@ pub fn view_block_group(
                 // Step 2: Draw floating labels after graph render.
                 let pos_map = viewport_pos_map(&graph_controller);
                 let detail_level = graph_controller.get_detail_level();
+                let span_refs: Vec<&AnnotationSpan> =
+                    sorted_overlays.iter().map(|o| &o.span).collect();
                 let mut hidden_count: usize = 0;
-                for (idx, (span, &color)) in
-                    all_spans.iter().zip(annotation_colors.iter()).enumerate()
-                {
+                for (idx, overlay) in sorted_overlays.iter().enumerate() {
+                    let span = &overlay.span;
                     if span.name.is_empty() {
                         continue;
                     }
@@ -1091,7 +1086,7 @@ pub fn view_block_group(
                         continue;
                     };
                     // Skip spans whose every segment is covered by a shorter annotation on top.
-                    if span_covered_by_later(span, idx, &all_spans) {
+                    if span_covered_by_later(span, idx, &span_refs) {
                         hidden_count += 1;
                         continue;
                     }
@@ -1115,7 +1110,7 @@ pub fn view_block_group(
                         canvas_area,
                         bounds,
                         &label,
-                        color,
+                        overlay.style.color,
                         &graph_controller.viewport_state,
                         5,
                     )
@@ -1251,14 +1246,14 @@ pub fn view_block_group(
         if !annotation_groups_loaded && let Some(block_group) = current_block_group.as_ref() {
             let node_ids = extract_viewport_node_ids(&graph_controller);
             if !node_ids.is_empty() {
-                annotation_group_tracks.clear();
+                overlays.retain(|o| !matches!(&o.source, OverlaySource::Track(k) if k.starts_with("group:")));
                 explorer_state.active_annotation_groups.clear();
                 load_annotation_groups_for_viewport(
                     conn,
                     block_group,
                     &node_ids,
                     &mut explorer_state,
-                    &mut annotation_group_tracks,
+                    &mut overlays,
                     &mut messages,
                 );
                 annotation_groups_loaded = true;
@@ -1296,10 +1291,9 @@ pub fn view_block_group(
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
             }
-            annotation_file_tracks.clear();
+            overlays.clear();
             annotation_file_index_available.clear();
             annotation_file_loaded_windows.clear();
-            annotation_group_tracks.clear();
             explorer_state.active_annotation_groups.clear();
             annotation_groups_loaded = false;
             if let Some(bg) = current_block_group.as_ref() {
@@ -1324,7 +1318,11 @@ pub fn view_block_group(
                     };
                     match load_annotation_file_track(&request) {
                         Ok(load) => {
-                            annotation_file_tracks.insert(id, load.track);
+                            replace_track_overlays(
+                                &mut overlays,
+                                &file_track_key(&id),
+                                load.track.annotations,
+                            );
                             if let Some(window) = load.loaded_window {
                                 annotation_file_loaded_windows.insert(id, window);
                             }

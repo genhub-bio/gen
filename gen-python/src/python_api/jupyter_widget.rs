@@ -19,6 +19,7 @@ use r#gen::{
             GenGraphNodeRenderer, GenGraphNodeSizer, highlight_locus, locus_label_bounds,
             viewport_pos_map,
         },
+        graph_overlay::{GraphOverlay, OverlaySource},
         inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
     },
 };
@@ -256,14 +257,6 @@ fn annotation_to_span(annotation: &PyAnnotation) -> AnnotationSpan {
     }
 }
 
-/// A span annotated onto the graph canvas, with or without a label (highlight), optionally associated with a specific track.
-#[derive(Clone)]
-struct GraphOverlay {
-    span: AnnotationSpan,
-    track: Option<String>,
-    style: PathStyle,
-}
-
 /// View state and renderer for a single sequence graph "page" of a
 /// `PyGraphController`. A plain `GraphWidget` has exactly one page; a
 /// `Sample`-backed widget pages through several.
@@ -424,7 +417,11 @@ impl GraphPage {
                 .sum::<i64>())
         });
         let theme = current_theme();
-        let accent_base = self.overlays.iter().filter(|o| o.track.is_some()).count();
+        let accent_base = self
+            .overlays
+            .iter()
+            .filter(|o| !matches!(o.source, OverlaySource::Adhoc))
+            .count();
         let mut accent_offset = 0usize;
         let spans_with_styles: Vec<(AnnotationSpan, PathStyle)> = spans
             .into_iter()
@@ -460,7 +457,7 @@ impl GraphPage {
         for (span, style) in spans_with_styles {
             self.overlays.push(GraphOverlay {
                 span,
-                track: Some(track_name.clone()),
+                source: OverlaySource::Track(track_name.clone()),
                 style,
             });
         }
@@ -477,7 +474,11 @@ impl GraphPage {
                 .sum::<i64>())
         });
         let theme = current_theme();
-        let accent_base = self.overlays.iter().filter(|o| o.track.is_some()).count();
+        let accent_base = self
+            .overlays
+            .iter()
+            .filter(|o| !matches!(o.source, OverlaySource::Adhoc))
+            .count();
         let spans_with_styles: Vec<(AnnotationSpan, PathStyle)> = spans
             .into_iter()
             .enumerate()
@@ -497,7 +498,7 @@ impl GraphPage {
         for (span, style) in spans_with_styles {
             self.overlays.push(GraphOverlay {
                 span,
-                track: Some(track_name.clone()),
+                source: OverlaySource::Track(track_name.clone()),
                 style,
             });
         }
@@ -785,7 +786,7 @@ impl GraphPage {
         highlight_locus(&mut self.controller, &locus.inner, style);
         self.overlays.push(GraphOverlay {
             span: annotation_span_from_graph_locus(&locus.inner, ""),
-            track: None,
+            source: OverlaySource::Adhoc,
             style,
         });
         Ok(())
@@ -998,7 +999,7 @@ impl GraphPage {
         }
         self.overlays.push(GraphOverlay {
             span,
-            track: None,
+            source: OverlaySource::Adhoc,
             style,
         });
         Ok(())
@@ -1049,21 +1050,36 @@ impl GraphPage {
             .collect())
     }
 
-    /// Return a JSON list of track annotation names currently loaded.
+    /// Return a JSON list of track names currently loaded (from `add_track_group`,
+    /// `add_track_file`, or auto-loaded annotation groups).
     pub fn get_track_names(&self) -> PyResult<String> {
-        self.get_annotation_names()
+        let mut seen = std::collections::HashSet::new();
+        let names: Vec<&str> = self
+            .overlays
+            .iter()
+            .filter_map(|o| match &o.source {
+                OverlaySource::Track(name) => Some(name.as_str()),
+                OverlaySource::Annotation(_) | OverlaySource::Adhoc => None,
+            })
+            .filter(|n| seen.insert(*n))
+            .collect();
+        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Remove all annotation overlays whose track name matches `name`.
+    /// Remove all overlays belonging to the track `name` (loaded via
+    /// `add_track_group` / `add_track_file` / auto-loaded annotation groups).
     pub fn remove_track(&mut self, name: &str) {
-        self.remove_annotation(name);
+        self.overlays
+            .retain(|o| !matches!(&o.source, OverlaySource::Track(n) if n == name));
+        self.reapply_highlights();
     }
 
     /// Clear all annotations from the graph.
     pub fn clear_all_annotations(&mut self) {
-        // Drop the track overlays, keep any non-track overlays (e.g. search
-        // matches), then repaint the remaining overlays from scratch.
-        self.overlays.retain(|o| o.track.is_none());
+        // Keep only ad hoc highlights (e.g. search matches); drop everything
+        // added via a track or `add_annotation`, then repaint what remains.
+        self.overlays
+            .retain(|o| matches!(o.source, OverlaySource::Adhoc));
         self.reapply_highlights();
     }
 
@@ -1074,18 +1090,20 @@ impl GraphPage {
         annotations: Vec<PyRef<PyAnnotation>>,
         track_name: Option<String>,
     ) {
-        let color = if let Some(existing) = self
-            .overlays
-            .iter()
-            .find(|o| track_name.is_some() && o.track == track_name)
-        {
-            existing.style.color
-        } else {
-            self.controller.next_accent_color()
-        };
+        let existing_color = track_name.as_deref().and_then(|name| {
+            self.overlays.iter().find_map(|o| match &o.source {
+                OverlaySource::Annotation(n) if n == name => Some(o.style.color),
+                _ => None,
+            })
+        });
+        let color = existing_color.unwrap_or_else(|| self.controller.next_accent_color());
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
+        let source = match &track_name {
+            Some(name) => OverlaySource::Annotation(name.clone()),
+            None => OverlaySource::Adhoc,
+        };
         // Collect spans and loci with immutable graph borrow, then apply with mutable controller borrow.
         let spans_and_loci: Vec<(AnnotationSpan, Option<GraphLocus>)> = annotations
             .iter()
@@ -1106,29 +1124,31 @@ impl GraphPage {
         for (span, _) in spans_and_loci {
             self.overlays.push(GraphOverlay {
                 span,
-                track: track_name.clone(),
+                source: source.clone(),
                 style,
             });
         }
     }
 
-    /// Return a JSON list of annotation names currently loaded.
+    /// Return a JSON list of annotation names currently loaded (from
+    /// `add_annotation`; annotations loaded as part of a track keep their own
+    /// name here too, separately from the track's name).
     pub fn get_annotation_names(&self) -> PyResult<String> {
         let mut seen = std::collections::HashSet::new();
         let names: Vec<&str> = self
             .overlays
             .iter()
-            .filter_map(|o| o.track.as_deref())
-            .filter(|n| seen.insert(*n))
+            .map(|o| o.span.name.as_str())
+            .filter(|n| !n.is_empty() && seen.insert(*n))
             .collect();
         serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Remove all annotations whose track name matches `name`.
-    /// If the same name was added more than once, all copies are removed.
+    /// Remove all overlays whose annotation name matches `name`, regardless of
+    /// which track (if any) they belong to. If the same name was added more
+    /// than once, every copy is removed.
     pub fn remove_annotation(&mut self, name: &str) {
-        // Drop the matching track's overlays, then repaint what remains.
-        self.overlays.retain(|o| o.track.as_deref() != Some(name));
+        self.overlays.retain(|o| o.span.name != name);
         self.reapply_highlights();
     }
 }

@@ -9,6 +9,7 @@ pub mod diff;
 pub mod diff_graph;
 pub mod dot_export;
 pub mod gen_graph_widget;
+pub mod graph_overlay;
 pub mod helpers;
 pub mod inline_label_placement;
 pub mod messages;

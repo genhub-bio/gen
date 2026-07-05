@@ -34,6 +34,7 @@ use crate::views::{
         GenGraphNodeSizer, create_gen_graph_widget, highlight_locus, locus_label_bounds,
         viewport_pos_map,
     },
+    graph_overlay::{GraphOverlay, group_track_key, replace_track_overlays},
     inline_label_placement::{draw_hidden_annotation_marker, draw_label_near_pos},
 };
 
@@ -136,8 +137,8 @@ pub struct InlineGenGraphState<'a> {
     conn: &'a GraphConnection,
     paths: Vec<Vec<gen_graph::GraphNode>>,
     block_group_id: Option<HashId>,
-    /// Annotation spans with their assigned colors, ready for highlight + label rendering.
-    annotation_spans: Vec<(AnnotationSpan, Color)>,
+    /// Annotation overlays currently loaded, ready for highlight + label rendering.
+    overlays: Vec<GraphOverlay>,
     annotation_groups_loaded: bool,
     /// Whether the current path overlay is toggled on. The overlay itself is
     /// re-added from this flag each frame in `reapply_highlights`.
@@ -159,7 +160,7 @@ impl<'a> InlineGenGraphState<'a> {
             conn,
             paths: Vec::new(),
             block_group_id,
-            annotation_spans: Vec::new(),
+            overlays: Vec::new(),
             annotation_groups_loaded: false,
             path_highlighted: false,
         }
@@ -179,8 +180,7 @@ impl<'a> InlineGenGraphState<'a> {
         let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id) else {
             return;
         };
-        let theme = current_theme();
-        let mut spans: Vec<(AnnotationSpan, Color)> = Vec::new();
+        self.overlays.clear();
         for entry in load_annotation_group_entries(conn, &block_group) {
             let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
                 conn,
@@ -190,28 +190,21 @@ impl<'a> InlineGenGraphState<'a> {
             }) else {
                 continue;
             };
-            for span in entry_spans {
-                let color = theme[0x08 + (span.id.0[0] as usize % 8)];
-                spans.push((span, color));
-            }
+            replace_track_overlays(&mut self.overlays, &group_track_key(&entry.id), entry_spans);
         }
-        // Sort longest-first so shorter (inner) spans paint on top.
-        spans.sort_by_key(|(s, _)| {
-            -(s.segments
-                .iter()
-                .map(|seg| seg.end - seg.start)
-                .sum::<i64>())
+        // Sort longest-first so shorter (inner) overlays paint on top.
+        self.overlays.sort_by_key(|o| {
+            -(o.span.segments.iter().map(|seg| seg.end - seg.start).sum::<i64>())
         });
-        self.annotation_spans = spans;
     }
 
     fn reapply_highlights(&mut self) {
         let loci_and_styles: Vec<_> = self
-            .annotation_spans
+            .overlays
             .iter()
-            .filter_map(|(span, color)| {
-                let locus = graph_locus_from_annotation_span(span, self.controller.graph())?;
-                Some((locus, PathStyle::new(*color)))
+            .filter_map(|o| {
+                let locus = graph_locus_from_annotation_span(&o.span, self.controller.graph())?;
+                Some((locus, o.style))
             })
             .collect();
         self.controller.clear_all_highlights();
@@ -437,12 +430,12 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
 
     // Draw floating annotation labels after the graph.
     let mut any_annotations_hidden = false;
-    if !state.annotation_spans.is_empty() {
+    if !state.overlays.is_empty() {
         let pos_map = viewport_pos_map(&state.controller);
-        let span_refs: Vec<&AnnotationSpan> =
-            state.annotation_spans.iter().map(|(s, _)| s).collect();
+        let span_refs: Vec<&AnnotationSpan> = state.overlays.iter().map(|o| &o.span).collect();
         let mut hidden_nodes: HashSet<GraphNode> = HashSet::new();
-        for (idx, (span, color)) in state.annotation_spans.iter().enumerate() {
+        for (idx, overlay) in state.overlays.iter().enumerate() {
+            let span = &overlay.span;
             if span.name.is_empty() {
                 continue;
             }
@@ -472,7 +465,7 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
                 inner_area,
                 bounds,
                 &label,
-                *color,
+                overlay.style.color,
                 &state.controller.viewport_state,
                 5,
             )
