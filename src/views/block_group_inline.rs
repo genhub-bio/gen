@@ -7,7 +7,7 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_core::HashId;
-use gen_graph::{GenGraph, GraphNode};
+use gen_graph::GenGraph;
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_controller::GraphController,
@@ -24,18 +24,12 @@ use ratatui::{
 
 use crate::views::{
     annotation_groups::load_annotation_group_entries,
-    annotation_track::{
-        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
-        span_should_hide_in_truncated,
-    },
     annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
     block_group::extract_viewport_node_ids,
     gen_graph_widget::{
-        GenGraphNodeSizer, create_gen_graph_widget, highlight_locus, locus_label_bounds,
-        viewport_pos_map,
+        GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
     },
     graph_overlay::{GraphOverlay, group_track_key, replace_track_overlays},
-    inline_label_placement::{draw_hidden_annotation_marker, draw_label_near_pos},
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -194,31 +188,30 @@ impl<'a> InlineGenGraphState<'a> {
         }
         // Sort longest-first so shorter (inner) overlays paint on top.
         self.overlays.sort_by_key(|o| {
-            -(o.span.segments.iter().map(|seg| seg.end - seg.start).sum::<i64>())
+            -(o.span
+                .segments
+                .iter()
+                .map(|seg| seg.end - seg.start)
+                .sum::<i64>())
         });
     }
 
     fn reapply_highlights(&mut self) {
-        let loci_and_styles: Vec<_> = self
-            .overlays
-            .iter()
-            .filter_map(|o| {
-                let locus = graph_locus_from_annotation_span(&o.span, self.controller.graph())?;
-                Some((locus, o.style))
-            })
-            .collect();
-        self.controller.clear_all_highlights();
-        for (locus, style) in &loci_and_styles {
-            highlight_locus(&mut self.controller, locus, *style);
-        }
-        if self.path_highlighted
-            && let Some(last_path) = self.paths.last().cloned()
-        {
-            let path_style = PathStyle::new(current_theme()[0x09])
-                .with_line_style(LineStyle::Bold)
-                .with_merge_glyphs(true);
-            self.controller.set_path_highlight(path_style, last_path);
-        }
+        let path_highlight = self
+            .path_highlighted
+            .then(|| self.paths.last().cloned())
+            .flatten()
+            .map(|nodes| {
+                let style = PathStyle::new(current_theme()[0x09])
+                    .with_line_style(LineStyle::Bold)
+                    .with_merge_glyphs(true);
+                (style, nodes)
+            });
+        reapply_overlays(
+            &mut self.controller,
+            &self.overlays,
+            path_highlight.as_ref(),
+        );
     }
 }
 
@@ -429,67 +422,12 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
     frame.render_stateful_widget(widget, inner_area, &mut state.controller);
 
     // Draw floating annotation labels after the graph.
-    let mut any_annotations_hidden = false;
-    if !state.overlays.is_empty() {
-        let pos_map = viewport_pos_map(&state.controller);
-        let span_refs: Vec<&AnnotationSpan> = state.overlays.iter().map(|o| &o.span).collect();
-        let mut hidden_nodes: HashSet<GraphNode> = HashSet::new();
-        for (idx, overlay) in state.overlays.iter().enumerate() {
-            let span = &overlay.span;
-            if span.name.is_empty() {
-                continue;
-            }
-            let locus = graph_locus_from_annotation_span(span, state.controller.graph());
-            let Some(locus) = locus else { continue };
-            if span_covered_by_later(span, idx, &span_refs) {
-                hidden_nodes.extend(locus.slices.iter().map(|slice| slice.block));
-                continue;
-            }
-            if detail_level == VisualDetail::Truncated
-                && span_should_hide_in_truncated(span, state.controller.graph())
-            {
-                hidden_nodes.extend(locus.slices.iter().map(|slice| slice.block));
-                continue;
-            }
-            let Some(bounds) = locus_label_bounds(
-                &locus,
-                &pos_map,
-                detail_level,
-                &state.controller.viewport_state,
-            ) else {
-                continue;
-            };
-            let label = span_label_text(span);
-            if draw_label_near_pos(
-                frame.buffer_mut(),
-                inner_area,
-                bounds,
-                &label,
-                overlay.style.color,
-                &state.controller.viewport_state,
-                5,
-            )
-            .is_none()
-            {
-                hidden_nodes.extend(locus.slices.iter().map(|slice| slice.block));
-            }
-        }
-        let theme = current_theme();
-        let marker_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
-        for node in &hidden_nodes {
-            if let Some(&(center, size)) = pos_map.get(node) {
-                draw_hidden_annotation_marker(
-                    frame.buffer_mut(),
-                    inner_area,
-                    center,
-                    size,
-                    marker_style,
-                    &state.controller.viewport_state,
-                );
-            }
-        }
-        any_annotations_hidden = !hidden_nodes.is_empty();
-    }
+    let any_annotations_hidden = draw_annotation_labels(
+        frame.buffer_mut(),
+        inner_area,
+        &state.controller,
+        &state.overlays,
+    );
 
     let hidden_legend = any_annotations_hidden.then(|| {
         if detail_level == VisualDetail::Full {
@@ -531,10 +469,10 @@ fn draw_controls_help(
 ) {
     let help_text = if hidden_legend.is_some() {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | q: Exit".to_string()
-    } else if state.controller.highlights.is_empty() {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
-    } else {
+    } else if state.path_highlighted {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
+    } else {
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
     };
 
     let buf = frame.buffer_mut();

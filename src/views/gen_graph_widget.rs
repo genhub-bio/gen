@@ -16,7 +16,20 @@ use gen_tui::{
     theme::current_theme,
 };
 use petgraph::visit::NodeIndexable;
-use ratatui::style::Style;
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
+
+use crate::views::{
+    annotation_track::{
+        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
+        span_should_hide_in_truncated,
+    },
+    graph_overlay::GraphOverlay,
+    inline_label_placement::draw_label_near_pos,
+};
 
 /// Labels for special start/end nodes
 pub mod label {
@@ -442,6 +455,124 @@ pub fn highlight_locus<S: NodeSizer<GenGraph>>(
     for (s, t) in m.slices.iter().zip(m.slices.iter().skip(1)) {
         controller.set_edge_highlight((s.block, t.block), style);
     }
+}
+
+/// Re-register every overlay highlight (and an optional path highlight) on `controller`,
+/// replacing whatever highlights were previously set.
+///
+/// Overlays are applied longest-first so shorter (inner) spans paint on top. Callers run
+/// this after any change that invalidates clamped highlight columns (zoom, detail change)
+/// or, in the live TUI viewers, every frame because the overlay set changes with scrolling.
+pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
+    controller: &mut GraphController<GenGraph, S>,
+    overlays: &[GraphOverlay],
+    path_highlight: Option<&(PathStyle, Vec<GraphNode>)>,
+) {
+    let mut sorted: Vec<&GraphOverlay> = overlays.iter().collect();
+    sorted.sort_by_key(|overlay| {
+        -(overlay
+            .span
+            .segments
+            .iter()
+            .map(|segment| segment.end - segment.start)
+            .sum::<i64>())
+    });
+    let loci_and_styles: Vec<(GraphLocus, PathStyle)> = sorted
+        .iter()
+        .filter_map(|overlay| {
+            graph_locus_from_annotation_span(&overlay.span, controller.graph())
+                .map(|locus| (locus, overlay.style))
+        })
+        .collect();
+    controller.clear_all_highlights();
+    for (locus, style) in &loci_and_styles {
+        highlight_locus(controller, locus, *style);
+    }
+    if let Some((style, nodes)) = path_highlight {
+        controller.set_path_highlight(*style, nodes.clone());
+    }
+}
+
+/// Draw floating labels for `overlays` after the graph has been rendered into `buf`.
+///
+/// Overlays are labelled longest-first so the covered-by-later check matches highlight
+/// paint order. A label is suppressed when its span is fully covered by a shorter overlay
+/// on top, when it collapses into a truncated node, or when no free cell is found near its
+/// span. Returns `true` if any labelled overlay was suppressed, so the caller can show a
+/// single "some annotations hidden" hint.
+pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
+    buf: &mut Buffer,
+    area: Rect,
+    controller: &GraphController<GenGraph, S>,
+    overlays: &[GraphOverlay],
+) -> bool {
+    let mut labeled: Vec<&GraphOverlay> = overlays
+        .iter()
+        .filter(|overlay| !overlay.span.name.is_empty())
+        .collect();
+    if labeled.is_empty() {
+        return false;
+    }
+    labeled.sort_by_key(|overlay| {
+        -(overlay
+            .span
+            .segments
+            .iter()
+            .map(|segment| segment.end - segment.start)
+            .sum::<i64>())
+    });
+
+    let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|overlay| &overlay.span).collect();
+    let pos_map = viewport_pos_map(controller);
+    let detail_level = controller.get_detail_level();
+    let theme = current_theme();
+    let max_distance = if detail_level == VisualDetail::Minimal {
+        10
+    } else {
+        5
+    };
+
+    let mut any_hidden = false;
+    for (idx, overlay) in labeled.iter().enumerate() {
+        let span = &overlay.span;
+        let Some(locus) = graph_locus_from_annotation_span(span, controller.graph()) else {
+            continue;
+        };
+        if span_covered_by_later(span, idx, &span_refs) {
+            any_hidden = true;
+            continue;
+        }
+        if detail_level == VisualDetail::Truncated
+            && span_should_hide_in_truncated(span, controller.graph())
+        {
+            any_hidden = true;
+            continue;
+        }
+        let Some(bounds) =
+            locus_label_bounds(&locus, &pos_map, detail_level, &controller.viewport_state)
+        else {
+            continue;
+        };
+        let color = match overlay.style.color {
+            Color::Reset => theme[0x06],
+            other => other,
+        };
+        let label = span_label_text(span);
+        if draw_label_near_pos(
+            buf,
+            area,
+            bounds,
+            &label,
+            color,
+            &controller.viewport_state,
+            max_distance,
+        )
+        .is_none()
+        {
+            any_hidden = true;
+        }
+    }
+    any_hidden
 }
 
 #[cfg(test)]

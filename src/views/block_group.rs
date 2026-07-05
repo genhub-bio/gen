@@ -25,10 +25,6 @@ use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
         annotation_groups::load_annotation_group_entries,
-        annotation_track::{
-            AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later,
-            span_label_text, span_should_hide_in_truncated,
-        },
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
             load_annotations_for_group,
@@ -36,13 +32,12 @@ use crate::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
-            highlight_locus, locus_label_bounds, viewport_pos_map,
+            draw_annotation_labels, reapply_overlays,
         },
         graph_overlay::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
             replace_track_overlays,
         },
-        inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
         panels::{render_status_bar, render_with_optional_clear},
         tui_runtime::TuiSession,
     },
@@ -547,7 +542,10 @@ pub fn view_block_group(
                                         }
                                     }
                                 } else {
-                                    remove_track_overlays(&mut overlays, &file_track_key(&toggled_id));
+                                    remove_track_overlays(
+                                        &mut overlays,
+                                        &file_track_key(&toggled_id),
+                                    );
                                     annotation_file_index_available.remove(&toggled_id);
                                     annotation_file_loaded_windows.remove(&toggled_id);
                                 }
@@ -781,9 +779,11 @@ pub fn view_block_group(
                     OverlaySource::Track(key) if key.starts_with("file:") => {
                         active_file_keys.contains(key)
                     }
-                    OverlaySource::Track(key) => key
-                        .strip_prefix("group:")
-                        .is_some_and(|group_id| explorer_state.is_annotation_group_active(group_id)),
+                    OverlaySource::Track(key) => {
+                        key.strip_prefix("group:").is_some_and(|group_id| {
+                            explorer_state.is_annotation_group_active(group_id)
+                        })
+                    }
                     _ => true,
                 });
             }
@@ -1034,33 +1034,10 @@ pub fn view_block_group(
             } else {
                 graph_controller.viewport_state.focus();
 
-                // Step 1: Apply annotation highlights before graph render.
-                // Sort longest-first so shorter (inner) annotations paint on top.
-                let mut sorted_overlays: Vec<&GraphOverlay> = overlays.iter().collect();
-                sorted_overlays.sort_by_key(|o| {
-                    -(o.span.segments.iter().map(|seg| seg.end - seg.start).sum::<i64>())
-                });
-                // Clear every highlight first, then re-add every locus. Clearing and
-                // adding per-overlay in a single pass would let a later overlay's clear
-                // step wipe out an earlier overlay's highlight whenever two overlays
-                // share a color (only 8 accent colors exist, so collisions are common
-                // once there are more than 8 annotations in view). This whole block
-                // reruns every frame because `overlays` can change between frames
-                // (file/group toggles, scroll-triggered reloads).
-                let loci_and_styles: Vec<_> = sorted_overlays
-                    .iter()
-                    .filter_map(|o| {
-                        let locus = graph_locus_from_annotation_span(&o.span, graph_controller.graph())?;
-                        Some((locus, o.style))
-                    })
-                    .collect();
-                graph_controller.clear_all_highlights();
-                for (locus, style) in &loci_and_styles {
-                    highlight_locus(&mut graph_controller, locus, *style);
-                }
-                if let Some((style, path_nodes)) = &path_highlight {
-                    graph_controller.set_path_highlight(*style, path_nodes.clone());
-                }
+                // Re-register overlay highlights before rendering. This reruns every frame
+                // because `overlays` can change between frames (file/group toggles,
+                // scroll-triggered reloads).
+                reapply_overlays(&mut graph_controller, &overlays, path_highlight.as_ref());
 
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn)
@@ -1069,65 +1046,29 @@ pub fn view_block_group(
                     .cursor();
                 frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
 
-                // Step 2: Draw floating labels after graph render.
-                let pos_map = viewport_pos_map(&graph_controller);
+                // Draw floating labels after the graph, then a single hint if any were hidden.
                 let detail_level = graph_controller.get_detail_level();
-                let span_refs: Vec<&AnnotationSpan> =
-                    sorted_overlays.iter().map(|o| &o.span).collect();
-                let mut hidden_count: usize = 0;
-                for (idx, overlay) in sorted_overlays.iter().enumerate() {
-                    let span = &overlay.span;
-                    if span.name.is_empty() {
-                        continue;
-                    }
-                    let locus =
-                        graph_locus_from_annotation_span(span, graph_controller.graph());
-                    let Some(locus) = locus else {
-                        continue;
-                    };
-                    // Skip spans whose every segment is covered by a shorter annotation on top.
-                    if span_covered_by_later(span, idx, &span_refs) {
-                        hidden_count += 1;
-                        continue;
-                    }
-                    if detail_level == VisualDetail::Truncated
-                        && span_should_hide_in_truncated(span, graph_controller.graph())
-                    {
-                        hidden_count += 1;
-                        continue;
-                    }
-                    let Some(bounds) = locus_label_bounds(
-                        &locus,
-                        &pos_map,
-                        detail_level,
-                        &graph_controller.viewport_state,
-                    ) else {
-                        continue;
-                    };
-                    let label = span_label_text(span);
-                    if draw_label_near_pos(
-                        frame.buffer_mut(),
-                        canvas_area,
-                        bounds,
-                        &label,
-                        overlay.style.color,
-                        &graph_controller.viewport_state,
-                        5,
-                    )
-                    .is_none()
-                    {
-                        hidden_count += 1;
-                    }
-                }
-                let note_style =
-                    Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]);
-                draw_annotation_overflow_note(
+                let any_hidden = draw_annotation_labels(
                     frame.buffer_mut(),
                     canvas_area,
-                    hidden_count,
-                    note_style,
-                    detail_level != VisualDetail::Full,
+                    &graph_controller,
+                    &overlays,
                 );
+                if any_hidden {
+                    let note = if detail_level == VisualDetail::Full {
+                        " some annotations hidden due to space constraints "
+                    } else {
+                        " some annotations hidden in truncated view "
+                    };
+                    let note_style =
+                        Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]);
+                    frame.buffer_mut().set_string(
+                        canvas_area.x,
+                        canvas_area.bottom().saturating_sub(1),
+                        note,
+                        note_style,
+                    );
+                }
             }
 
             // Panel
@@ -1246,7 +1187,9 @@ pub fn view_block_group(
         if !annotation_groups_loaded && let Some(block_group) = current_block_group.as_ref() {
             let node_ids = extract_viewport_node_ids(&graph_controller);
             if !node_ids.is_empty() {
-                overlays.retain(|o| !matches!(&o.source, OverlaySource::Track(k) if k.starts_with("group:")));
+                overlays.retain(
+                    |o| !matches!(&o.source, OverlaySource::Track(k) if k.starts_with("group:")),
+                );
                 explorer_state.active_annotation_groups.clear();
                 load_annotation_groups_for_viewport(
                     conn,

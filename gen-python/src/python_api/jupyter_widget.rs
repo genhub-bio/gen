@@ -11,21 +11,19 @@ use r#gen::{
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
         annotation_track::{
             AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
-            graph_locus_from_annotation_span, span_covered_by_later, span_is_single_node,
-            span_label_text,
+            graph_locus_from_annotation_span,
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, highlight_locus, locus_label_bounds,
-            viewport_pos_map,
+            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, highlight_locus,
+            reapply_overlays,
         },
         graph_overlay::{GraphOverlay, OverlaySource},
-        inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
     },
 };
 use gen_annotations::projection::annotation_segments;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode, GraphNodeSlice, project_path};
+use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
@@ -33,8 +31,8 @@ use gen_models::{
     locus::GraphLocus,
 };
 use gen_tui::{
-    LineStyle, geometry::WorldPos, graph_controller::GraphController, graph_widget::GraphWidget,
-    layout::VisualDetail, plotter::PathStyle, theme::current_theme,
+    LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
+    plotter::PathStyle, theme::current_theme,
 };
 use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
@@ -211,32 +209,6 @@ fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
         neutral_bg,
         cells,
     }
-}
-
-/// Build a `GraphLocus` from an `AnnotationSpan` using only nodes visible in
-/// the current viewport (`pos_map`).  Segments whose node is not in the map
-/// are silently dropped; `locus_label_bounds` handles partial coverage fine.
-fn locus_from_span_and_pos_map(
-    span: &AnnotationSpan,
-    pos_map: &HashMap<GraphNode, (WorldPos, (u64, u64))>,
-) -> GraphLocus {
-    let node_by_id: HashMap<HashId, GraphNode> = pos_map.keys().map(|n| (n.node_id, *n)).collect();
-    let slices = span
-        .segments
-        .iter()
-        .filter_map(|seg| {
-            let node = *node_by_id.get(&seg.node_id)?;
-            let start = (seg.start - node.sequence_start).max(0) as usize;
-            let end = (seg.end - node.sequence_start).max(0) as usize;
-            Some(GraphNodeSlice {
-                block: node,
-                start,
-                end,
-                strand: seg.strand,
-            })
-        })
-        .collect();
-    GraphLocus { slices }
 }
 
 fn annotation_to_span(annotation: &PyAnnotation) -> AnnotationSpan {
@@ -523,73 +495,23 @@ impl GraphPage {
             GraphWidget::with_renderer(renderer).render(graph_area, buf, &mut self.controller);
         }
 
-        // Draw overlay labels. Midpoints are recomputed each render because the viewport may have changed.
-        let mut labeled_overlays: Vec<_> = self
-            .overlays
-            .iter()
-            .filter(|o| !o.span.name.is_empty())
-            .collect();
-        if !labeled_overlays.is_empty() {
-            // Sort longest-first so the covered-by-later check matches highlight order.
-            labeled_overlays
-                .sort_by_key(|o| -(o.span.segments.iter().map(|s| s.end - s.start).sum::<i64>()));
-            let span_refs: Vec<&AnnotationSpan> =
-                labeled_overlays.iter().map(|o| &o.span).collect();
+        // Draw overlay labels after the graph, then a single hint if any were hidden.
+        // Midpoints are recomputed each render because the viewport may have changed.
+        let detail_level = self.controller.get_detail_level();
+        let any_hidden = draw_annotation_labels(buf, graph_area, &self.controller, &self.overlays);
+        if any_hidden {
+            let note = if detail_level == VisualDetail::Full {
+                " some annotations hidden due to space constraints "
+            } else {
+                " some annotations hidden in truncated view "
+            };
             let theme = current_theme();
-            let pos_map = viewport_pos_map(&self.controller);
-            let detail_level = self.controller.get_detail_level();
-            let mut hidden_count: usize = 0;
-            for (idx, overlay) in labeled_overlays.iter().enumerate() {
-                let color = match overlay.style.color {
-                    ratatui::style::Color::Reset => theme[0x06],
-                    c => c,
-                };
-                if span_covered_by_later(&overlay.span, idx, &span_refs) {
-                    hidden_count += 1;
-                    continue;
-                }
-                if detail_level == gen_tui::layout::VisualDetail::Truncated
-                    && span_is_single_node(&overlay.span)
-                {
-                    hidden_count += 1;
-                    continue;
-                }
-                let locus = locus_from_span_and_pos_map(&overlay.span, &pos_map);
-                let Some((left_pos, right_pos)) = locus_label_bounds(
-                    &locus,
-                    &pos_map,
-                    detail_level,
-                    &self.controller.viewport_state,
-                ) else {
-                    continue;
-                };
-                let max_distance = if detail_level == gen_tui::layout::VisualDetail::Minimal {
-                    10
-                } else {
-                    5
-                };
-                let label = span_label_text(&overlay.span);
-                if draw_label_near_pos(
-                    buf,
-                    graph_area,
-                    (left_pos, right_pos),
-                    &label,
-                    color,
-                    &self.controller.viewport_state,
-                    max_distance,
-                )
-                .is_none()
-                {
-                    hidden_count += 1;
-                }
-            }
             let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
-            draw_annotation_overflow_note(
-                buf,
-                graph_area,
-                hidden_count,
+            buf.set_string(
+                graph_area.x,
+                graph_area.bottom().saturating_sub(1),
+                note,
                 note_style,
-                detail_level != gen_tui::layout::VisualDetail::Full,
             );
         }
 
@@ -702,22 +624,11 @@ impl GraphPage {
     /// Highlight column offsets are clamped at registration time, so they go stale
     /// when the detail level changes. Call this after any zoom or detail change.
     fn reapply_highlights(&mut self) {
-        self.controller.clear_all_highlights();
-        // Collect loci with immutable graph borrow, then apply with mutable controller borrow.
-        let loci_with_styles: Vec<(GraphLocus, PathStyle)> = self
-            .overlays
-            .iter()
-            .filter_map(|o| {
-                graph_locus_from_annotation_span(&o.span, self.controller.graph())
-                    .map(|l| (l, o.style))
-            })
-            .collect();
-        for (locus, style) in &loci_with_styles {
-            highlight_locus(&mut self.controller, locus, *style);
-        }
-        if let Some((style, nodes)) = self.path_highlight.clone() {
-            self.controller.set_path_highlight(style, nodes);
-        }
+        reapply_overlays(
+            &mut self.controller,
+            &self.overlays,
+            self.path_highlight.as_ref(),
+        );
     }
 
     fn zoom_in(&mut self) {

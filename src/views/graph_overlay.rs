@@ -38,7 +38,11 @@ pub fn stable_span_color(span: &AnnotationSpan) -> Color {
 
 /// Replace every overlay belonging to track `key` with freshly loaded `spans`, each
 /// coloured from its own stable per-id hash.
-pub fn replace_track_overlays(overlays: &mut Vec<GraphOverlay>, key: &str, spans: Vec<AnnotationSpan>) {
+pub fn replace_track_overlays(
+    overlays: &mut Vec<GraphOverlay>,
+    key: &str,
+    spans: Vec<AnnotationSpan>,
+) {
     remove_track_overlays(overlays, key);
     for span in spans {
         let style = PathStyle::new(stable_span_color(&span));
