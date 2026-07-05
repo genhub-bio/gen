@@ -5,7 +5,7 @@ use std::{
 };
 
 use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{
@@ -36,7 +36,8 @@ use crate::{
         },
         graph_overlay::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, has_path_overlay,
-            remove_path_overlay, remove_track_overlays, replace_track_overlays, set_path_overlay,
+            project_path_overlay_nodes, remove_path_overlay, remove_track_overlays,
+            replace_track_overlays, set_path_overlay,
         },
         panels::{render_status_bar, render_with_optional_clear},
         tui_runtime::TuiSession,
@@ -69,7 +70,6 @@ fn get_block_group_path_nodes(
     block_group_id: &gen_core::HashId,
     graph: &GenGraph,
 ) -> Result<Vec<gen_graph::GraphNode>, String> {
-    use gen_graph::project_path;
     use gen_models::path::Path;
 
     // Query the database for the most recent path for this block group
@@ -80,27 +80,11 @@ fn get_block_group_path_nodes(
     )
     .map_err(|e| format!("Failed to query path: {}", e))?;
 
-    // Get the path blocks from the database
     let path_blocks = path
         .blocks(conn)
         .map_err(|err| format!("Failed to load path blocks: {err}"))?;
 
-    // Project the path blocks onto the current graph state
-    let projected_path = project_path(graph, &path_blocks);
-
-    // Filter out terminal nodes (start and end) and convert to GraphNodes
-    let path_nodes: Vec<gen_graph::GraphNode> = projected_path
-        .iter()
-        .filter_map(|(node, _)| {
-            // Filter out terminal nodes
-            if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
-                Some(*node)
-            } else {
-                None
-            }
-        })
-        .collect();
-
+    let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
     if path_nodes.is_empty() {
         return Err("Path nodes not found in current graph state".to_string());
     }

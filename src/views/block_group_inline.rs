@@ -30,8 +30,8 @@ use crate::views::{
         GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
     },
     graph_overlay::{
-        GraphOverlay, group_track_key, has_path_overlay, remove_path_overlay,
-        replace_track_overlays, set_path_overlay,
+        GraphOverlay, group_track_key, has_path_overlay, project_path_overlay_nodes,
+        remove_path_overlay, replace_track_overlays, set_path_overlay,
     },
 };
 
@@ -41,30 +41,11 @@ fn get_path_nodes(
     path: &Path,
     graph: &GenGraph,
 ) -> std::io::Result<Vec<gen_graph::GraphNode>> {
-    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
-    use gen_graph::project_path;
-
-    // Get the path blocks from the database
     let path_blocks = path
         .blocks(conn)
         .map_err(|err| Error::other(format!("Failed to load path blocks: {err}")))?;
 
-    // Project the path blocks onto the current graph state
-    let projected_path = project_path(graph, &path_blocks);
-
-    // Filter out terminal nodes (start and end) and convert to GraphNodes
-    let path_nodes: Vec<gen_graph::GraphNode> = projected_path
-        .iter()
-        .filter_map(|(node, _)| {
-            // Filter out terminal nodes
-            if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
-                Some(*node)
-            } else {
-                None
-            }
-        })
-        .collect();
-
+    let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
     if path_nodes.is_empty() {
         return Err(Error::other(
             "Path nodes not found in current graph state".to_string(),

@@ -1,9 +1,23 @@
-use gen_core::HashId;
-use gen_graph::GraphNode;
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock};
+use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_tui::{plotter::PathStyle, theme::current_theme};
 use ratatui::style::Color;
 
 use crate::views::annotation_track::AnnotationSpan;
+
+/// Project `path_blocks` onto `graph` and return the route's non-terminal nodes, dropping
+/// the synthetic path start/end nodes.
+///
+/// Shared by every viewer that turns a stored `Path` into a path overlay. Returns an empty
+/// vector when the path does not project onto any real node in the current graph state;
+/// callers decide how to report that (each viewer has its own error type).
+pub fn project_path_overlay_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<GraphNode> {
+    project_path(graph, path_blocks)
+        .into_iter()
+        .filter(|(node, _)| node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID)
+        .map(|(node, _)| node)
+        .collect()
+}
 
 /// How a `GraphOverlay` was added, and the name/key it's addressable by (if any).
 ///
