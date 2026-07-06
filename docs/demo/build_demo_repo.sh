@@ -26,14 +26,15 @@ if [ ! -x "$GEN" ]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORK=/tmp/gen-demo
 rm -rf "$WORK"
 mkdir -p "$WORK"
 cd "$WORK"
 
 cp "$REPO/gen-python/examples/puc19.gbk" .
-cp "$REPO/examples/combinatorial_plasmid_design/parts.fa" .
-cp "$REPO/examples/combinatorial_plasmid_design/design.csv" .
+cp "$SCRIPT_DIR/parts.fa" .
+cp "$SCRIPT_DIR/design.csv" .
 
 # Record the binary path so demo.tape can alias gen without hardcoding.
 printf '%s\n' "$GEN" > gen_path

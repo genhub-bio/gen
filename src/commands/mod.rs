@@ -77,7 +77,7 @@ pub enum Commands {
         #[arg(short, long)]
         full: bool,
         /// Number of terminal rows for the inline graph view
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 16)]
         height: u16,
     },
     /// Show a diff of operations and render the consolidated graph
