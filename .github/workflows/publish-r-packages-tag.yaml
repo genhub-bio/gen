@@ -81,9 +81,9 @@ jobs:
       - name: Upload macOS binary artifact
         uses: actions/upload-artifact@v4
         with:
+          name: genr-${{ matrix.asset_suffix }}
           path: ${{ env.ASSET_NAME }}
           if-no-files-found: error
-          archive: false
 
       - name: Ensure release exists
         if: ${{ env.RELEASE_NAME != '' }}
@@ -208,9 +208,9 @@ jobs:
       - name: Upload Windows binary artifact
         uses: actions/upload-artifact@v4
         with:
+          name: genr-windows
           path: ${{ env.ASSET_NAME }}
           if-no-files-found: error
-          archive: false
 
       - name: Ensure release exists
         if: ${{ env.RELEASE_NAME != '' }}
