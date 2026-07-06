@@ -50,6 +50,41 @@ def _transform(text: str, highlighted: bool) -> str:
 
 _ESM = pathlib.Path(__file__).parent / "static" / "jupyter_widget.js"
 
+# Prefixed onto the text/plain fallback of a not-yet-frozen widget display: the
+# widget-view+json in the same bundle only mounts the interactive canvas inside
+# a live kernel (ipywidgets comms), so a reader without one (a raw notebook
+# diff, an unfrozen commit rendered on GitHub) sees only this ASCII fallback.
+# It orients a reader (human or LLM) skimming the raw notebook JSON who has
+# never seen a Gen graph widget before.
+_LIVE_TEXT_HINT = (
+    "# Gen graph widget (interactive; not yet frozen to a static image).\n"
+    "# If you are viewing this outside a running Jupyter kernel, the interactive canvas\n"
+    "# above could not mount and you are seeing this ASCII fallback instead. It is an\n"
+    "# ASCII rendering of the same frame: each character is one terminal cell from the\n"
+    "# Rust layout engine; UPPERCASE marks a highlighted annotation region, lowercase is\n"
+    "# unhighlighted sequence/graph structure.\n"
+    "# To interact with this graph, run the notebook in a live Jupyter kernel; the\n"
+    "# returned GraphWidget supports .zoom_in()/.zoom_out(), .scroll_left()/.scroll_right()/\n"
+    "# .scroll_up()/.scroll_down(), and .next_page()/.prev_page() for multi-page samples.\n"
+    "# See also `make notebook-freeze`, which bakes a static PNG into the notebook.\n"
+)
+
+# Prefixed onto the text/plain fallback of a frozen widget only (not the live
+# widget's __repr__): a frozen output has no kernel or JS behind it, so unlike
+# an interactive display, there is nothing to inspect except this text. It
+# orients a reader (human or LLM) skimming the raw notebook JSON who has never
+# seen a Gen graph widget before.
+_FREEZE_TEXT_HINT = (
+    "# Gen graph widget, frozen to a static image for GitHub viewing.\n"
+    "# The text below is an ASCII rendering of the same frame: each character is one\n"
+    "# terminal cell from the Rust layout engine; UPPERCASE marks a highlighted\n"
+    "# annotation region, lowercase is unhighlighted sequence/graph structure.\n"
+    "# To interact with this graph instead of reading the ASCII, rerun the notebook's\n"
+    "# own cell (e.g. `repo.plot(sg)` or `sample.plot()`) in a live Jupyter kernel; the\n"
+    "# returned GraphWidget supports .zoom_in()/.zoom_out(), .scroll_left()/.scroll_right()/\n"
+    "# .scroll_up()/.scroll_down(), and .next_page()/.prev_page() for multi-page samples.\n"
+)
+
 
 class GraphWidget(anywidget.AnyWidget):
     """Jupyter widget that displays a Gen graph using the native Rust renderer.
@@ -181,7 +216,7 @@ class GraphWidget(anywidget.AnyWidget):
         cloned_ctrl = self._controller.clone_controller()
         snapshot = type(self)(cloned_ctrl, cols=self.cols, rows=self.rows)
         data = {
-            "text/plain": repr(snapshot),
+            "text/plain": _LIVE_TEXT_HINT + repr(snapshot),
             "application/vnd.jupyter.widget-view+json": {
                 "version_major": 2,
                 "version_minor": 0,
@@ -285,7 +320,7 @@ class GraphWidget(anywidget.AnyWidget):
                             "model_id": self._model_id,
                         },
                         "image/png": b64,
-                        "text/plain": repr(self),
+                        "text/plain": _LIVE_TEXT_HINT + repr(self),
                     },
                     raw=True,
                 )
@@ -294,16 +329,20 @@ class GraphWidget(anywidget.AnyWidget):
         if msg_type == "freeze":
             data_url = msg.get("data", "")
             self._static_png = data_url
+            ascii_repr = repr(self)
             self._frozen = True
             if self._display_handle is not None:
-                from IPython.display import HTML
-
                 w, h = msg.get("width"), msg.get("height")
                 size = f";width:{w}px;height:{h}px" if w and h else ""
                 self._display_handle.update(
-                    HTML(
-                        f'<img src="{data_url}" style="display:block;font-family:monospace{size}" />'
-                    )
+                    {
+                        "text/html": (
+                            f'<img src="{data_url}" '
+                            f'style="display:block;font-family:monospace{size}" />'
+                        ),
+                        "text/plain": _FREEZE_TEXT_HINT + ascii_repr,
+                    },
+                    raw=True,
                 )
             # A frozen widget is inert (every mutating method below early-returns
             # on self._frozen), so nothing is lost by releasing the controller
