@@ -52,7 +52,7 @@ gen view
 gen push
 ```
 
-Python and R libraries expose the same operations:
+Python and R libraries expose the same operations. The R bindings are compatible with Bioconductor types such as DNAStringSet and GRanges. The Python API exposes samples and sequence graphs as rich objects that provide a programmatic equivalent for every action available through the CLI. Notebook users can install the Python bindings with `pip install gen[jupyter]` to enable an interactive widget for graph visualization in any anywidget-compatible notebook like Jupyter. The Python module was built with AI agents in mind, for example by embedding a textual representation of graph visualizations in notebook files alongside the pixel data. 
 
 ```python
 import gen
