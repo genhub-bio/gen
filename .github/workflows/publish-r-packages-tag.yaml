@@ -52,8 +52,6 @@ jobs:
           use-public-rspm: true
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: x86_64-pc-windows-gnu
 
       - name: Install system dependencies
         run: |
@@ -127,6 +125,8 @@ jobs:
           windows-path-include-rtools: true
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: x86_64-pc-windows-gnu
 
       - name: Install system dependencies
         shell: pwsh
