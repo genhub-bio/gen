@@ -15,8 +15,8 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         id: setup-python
         with:
           python-version: ${{ matrix.python-version }}
@@ -71,7 +71,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           gh release upload "$env:TAG" "gen-python/target/wheels/*.whl"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
           path: gen-python/target/wheels/*.whl
