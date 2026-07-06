@@ -60,7 +60,11 @@ jobs:
           brew install capnp
 
       - name: Install R package dependencies
-        run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
+        env:
+          GITHUB_PAT: ${{ github.token }}
+        run: |
+          Rscript -e "install.packages(c('remotes', 'testthat'), repos = 'https://cloud.r-project.org')"
+          Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget', upgrade = 'never')"
 
       - name: Build macOS binary package
         run: R CMD INSTALL --build gen-r
@@ -133,7 +137,11 @@ jobs:
 
       - name: Install R package dependencies
         shell: pwsh
-        run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
+        env:
+          GITHUB_PAT: ${{ github.token }}
+        run: |
+          Rscript -e "install.packages(c('remotes', 'testthat'), repos = 'https://cloud.r-project.org')"
+          Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget', upgrade = 'never')"
 
       - name: Build Windows binary package
         shell: cmd
