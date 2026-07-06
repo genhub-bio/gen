@@ -4,8 +4,7 @@ Gen brings version control to genetic sequences. You can clone repositories, cre
 
 [![PyPI](https://img.shields.io/pypi/v/gen.svg)](https://pypi.org/project/gen/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-<!-- TODO: replace with screenshot of Jupyter widget or TUI showing a real genome graph -->
-![Gen graph viewer](docs/figures/placeholder.png)
+![Checking out a branch, merging in sequencing results, and browsing the combined graph in the terminal viewer](demo.gif)
 
 ## Install
 
@@ -17,7 +16,17 @@ Gen brings version control to genetic sequences. You can clone repositories, cre
 pip install gen
 ```
 
-**R** — see the [installation guide](https://www.genhub.bio/docs/installation) for platform-specific instructions. On macOS (Apple silicon):
+For the interactive graph widget in Jupyter and other anywidget-compatible notebooks, install the `jupyter` extra:
+
+```sh
+pip install gen[jupyter]
+```
+
+**R** — see the [installation guide](https://www.genhub.bio/docs/installation) for platform-specific instructions.
+
+<!--
+TODO: restore once the R publish workflow ships genr binaries to a release (see publish-r-packages-tag.yaml).
+On macOS (Apple silicon):
 
 ```r
 install.packages("remotes")
@@ -27,14 +36,21 @@ remotes::install_url(
 ```
 
 Windows builds are published as `genr-windows-<version>.zip` on the same [releases page](https://github.com/genhub-bio/gen/releases).
+-->
+
 
 ## Quick start
 
+### Set up a repository
+
 ```sh
-# Set up a new repository and import a reference genome
 gen init
 gen import fasta reference.fa --reference hg38
+```
 
+### Branch, update, and inspect
+
+```sh
 # Branch before making changes
 gen branch --create experiment/na12878
 gen checkout --branch experiment/na12878
@@ -47,21 +63,41 @@ gen operations
 
 # Browse the graph in the terminal
 gen view
+```
 
-# Push to a remote GenHub repository
+### Push to a remote
+
+Pushing needs a remote repository to push to and an authenticated session, so add the remote, log in, and set it as the default before the first push:
+
+```sh
+gen remote add origin https://www.genhub.bio/api/repos/<user>/<repo>
+gen remote login origin
+gen remote set-default origin
 gen push
 ```
 
-Python and R libraries expose the same operations. The R bindings are compatible with Bioconductor types such as DNAStringSet and GRanges. The Python API exposes samples and sequence graphs as rich objects that provide a programmatic equivalent for every action available through the CLI. Notebook users can install the Python bindings with `pip install gen[jupyter]` to enable an interactive widget for graph visualization in any anywidget-compatible notebook like Jupyter. The Python module was built with AI agents in mind, for example by embedding a textual representation of graph visualizations in notebook files alongside the pixel data. 
+Subsequent pushes from this repository only need `gen push`.
+
+### Python and R bindings
+
+Python and R libraries expose the same operations. The R bindings are compatible with Bioconductor types such as DNAStringSet and GRanges. The Python API exposes samples and sequence graphs as rich objects that provide a programmatic equivalent for every action available through the CLI. The `jupyter` extra provides an interactive widget for graph visualization and exploration. The Python module was built with AI agents in mind, for example by embedding a textual representation of graph visualizations in notebook files alongside the pixel data. 
 
 ```python
 import gen
 
 repo = gen.Repository(".")
 repo.import_reference_fasta("reference.fa", "hg38")
-repo.update_with_vcf("variants.vcf", reference="hg38", sample="NA12878")
-sgs = repo.get_sequence_graphs()
-sgs[0].plot()
+sample = repo.update_with_vcf("variants.vcf", reference="hg38", sample="NA12878")[0]
+sample.plot()
+```
+
+```r
+library(genr)
+
+repo <- Repository(".")
+repo$import_reference_fasta("reference.fa", reference = "hg38")
+sample <- repo$update_with_vcf(filename = "variants.vcf", sample = "NA12878", reference = "hg38")[[1]]
+plot(sample)
 ```
 
 ## Features
@@ -76,26 +112,25 @@ sgs[0].plot()
 
 ## Screenshots
 
-<!-- TODO: replace with real screenshots before publishing -->
+**Jupyter widget** — a combinatorial expression-cassette library built with `import_library()`, from [`introduction.ipynb`](gen-python/examples/introduction.ipynb)
 
-**Jupyter widget**
+![Jupyter widget showing a forked expression-cassette graph with three promoters, two RBS variants, and two CDSes](docs/figures/screenshot_jupyter.png)
 
-![Jupyter widget — interactive canvas with zoom and pan](docs/figures/placeholder_jupyter.png)
+**RStudio viewer** — a pUC19 sequence graph with GenBank annotation tracks, branching at an unexpected mutation found by [`introduction.Rmd`](gen-r/vignettes/introduction.Rmd)
 
-**RStudio viewer**
-
-![RStudio viewer — GenPlot htmlwidget](docs/figures/placeholder_rstudio.png)
-
-**Terminal viewer**
-
-![Terminal viewer — ratatui graph navigator](docs/figures/placeholder_tui.png)
+![RStudio viewer showing an annotated pUC19 graph with a branch at a sequencing-detected mutation](docs/figures/screenshot_rstudio.png)
 
 ## Example workflows
 
-- [Variation-aware alignment against hg38](examples/human_variation_aware_alignment/Analysis.ipynb) — import a reference, encode GIAB variants into the graph, export to GFA for `vg map`.
-- [Genome editing in yeast](examples/yeast_editing/edit-yeast-and-export-fasta.ipynb) — import S288C, apply a cassette edit at a specific locus, export the modified sequence as FASTA.
-- [Combinatorial plasmid design](examples/combinatorial_plasmid_design/combinatorial_design.md) — insert a promoter/RBS library into pUC19, then identify colony genotypes from long-read sequencing.
-- [Modeling a yeast cross](examples/yeast_crosses/Analysis.md) — compare two beer yeast strains starting from VCF variant calls or whole-genome assemblies.
+**Using the bindings**
+
+- [Golden Gate redesign, in R](gen-r/vignettes/introduction.Rmd) — import an annotated pUC19 GenBank record, design a Golden Gate MCS swap, confirm the cut sites with `search()`, export for synthesis, then catch an unintended mutation by importing the sequencing VCF.
+- [Screening a combinatorial library for junction-emergent cut sites, in R](gen-r/vignettes/yeast_expression_library.Rmd) — build a 12-construct promoter/CDS/terminator library for a yeast expression cassette, then use a single `search()` call to find a BsmBI site that only appears at one part junction, not in any individual part.
+- [Genome editing in Python](examples/yeast_editing/edit-yeast-and-export-fasta.ipynb) — import a yeast chromosome, apply a cassette edit with `update_with_sequence()`, and export the result as FASTA.
+
+**CLI only**
+
+- [Combinatorial plasmid design](examples/combinatorial_plasmid_design/combinatorial_design.md) — insert a promoter/RBS library into pUC19 with `gen update --library`, export to GFA, then identify colony genotypes from long-read sequencing. No Python or R required.
 
 ## Data model
 
