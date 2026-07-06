@@ -10,8 +10,8 @@ use gen_annotations::{
     projection as annotation_projection,
     translate::{bed::translate_bed, gff::translate_gff},
 };
-use gen_core::{HashId, Strand, Workspace};
-use gen_graph::GenGraph;
+use gen_core::{HashId, Strand, Workspace, is_terminal};
+use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, AnnotationError},
@@ -23,6 +23,7 @@ use gen_models::{
     traits::Query,
 };
 use noodles::{bed, core::Region, gff, tabix};
+use petgraph::Direction;
 
 use crate::views::{
     annotation_files::AnnotationFileEntry,
@@ -90,6 +91,57 @@ fn clip_segments_to_graph(
     clipped
 }
 
+/// True if `segments` cover the block group graph end to end. Root/leaf are resolved past
+/// any zero-length PATH_START_NODE_ID/PATH_END_NODE_ID sentinel to the real content node.
+fn spans_whole_block_group(segments: &[AnnotationSegment], graph: &GenGraph) -> bool {
+    let mut root = None;
+    let mut leaf = None;
+    for node in graph.nodes() {
+        if graph
+            .neighbors_directed(node, Direction::Incoming)
+            .next()
+            .is_none()
+        {
+            root = Some(node);
+        }
+        if graph
+            .neighbors_directed(node, Direction::Outgoing)
+            .next()
+            .is_none()
+        {
+            leaf = Some(node);
+        }
+    }
+
+    let boundary_nodes = |node: GraphNode, direction: Direction| -> Vec<GraphNode> {
+        if is_terminal(node.node_id) {
+            graph.neighbors_directed(node, direction).collect()
+        } else {
+            vec![node]
+        }
+    };
+
+    let starts_at_root = root.is_some_and(|root| {
+        boundary_nodes(root, Direction::Outgoing)
+            .into_iter()
+            .any(|boundary| {
+                segments.iter().any(|segment| {
+                    segment.node_id == boundary.node_id && segment.start <= boundary.sequence_start
+                })
+            })
+    });
+    let ends_at_leaf = leaf.is_some_and(|leaf| {
+        boundary_nodes(leaf, Direction::Incoming)
+            .into_iter()
+            .any(|boundary| {
+                segments.iter().any(|segment| {
+                    segment.node_id == boundary.node_id && segment.end >= boundary.sequence_end
+                })
+            })
+    });
+    starts_at_root && ends_at_leaf
+}
+
 fn load_group_annotations(
     conn: &GraphConnection,
     current_block_group: &BlockGroup,
@@ -106,13 +158,16 @@ fn load_group_annotations(
     // branch, with a gap wherever an edit spliced in unrelated sequence.
     let graph =
         BlockGroup::get_graph(conn, &current_block_group.id).unwrap_or_else(|_| GenGraph::new());
-
     Ok(annotations
         .into_iter()
         .filter_map(|annotation| {
             let _ = Accession::get_by_id(conn, &annotation.accession_id)?;
             let accession_segments = annotation_projection::annotation_segments(conn, &annotation);
-            let segments = clip_segments_to_graph(&accession_segments, &graph)
+            let full_segments = clip_segments_to_graph(&accession_segments, &graph);
+            if spans_whole_block_group(&full_segments, &graph) {
+                return None;
+            }
+            let segments = full_segments
                 .into_iter()
                 .filter(|segment| node_ids.contains(&segment.node_id))
                 .collect::<Vec<_>>();
@@ -565,8 +620,9 @@ mod tests {
     };
 
     use gen_core::{HashId, Strand};
+    use gen_graph::{GenGraph, GraphNode};
 
-    use super::parse_translated_bed;
+    use super::{AnnotationSegment, parse_translated_bed, spans_whole_block_group};
 
     #[test]
     fn parse_translated_bed_preserves_strand() {
@@ -639,6 +695,83 @@ mod tests {
         assert_eq!(segments[1].node_id, original_node_id);
         assert_eq!(segments[1].start, 483);
         assert_eq!(segments[1].end, 2686);
+    }
+
+    /// pUC19's `source 1..2686` feature spans the whole plasmid and should be hidden.
+    #[test]
+    fn load_annotations_for_group_hides_puc19_whole_plasmid_source_annotation() {
+        use std::{fs::File, io::BufReader, path::PathBuf};
+
+        use gen_models::{
+            block_group::BlockGroup,
+            file_types::FileTypes,
+            operations::{OperationFile, OperationInfo},
+            sample::Sample,
+        };
+
+        use super::{AnnotationGroupTrackRequest, load_annotations_for_group};
+        use crate::{
+            imports::genbank::{GenBankImportOptions, import_genbank},
+            test_helpers::setup_gen,
+            track_database,
+            views::annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
+        };
+
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
+        let file = File::open(&path).unwrap();
+        import_genbank(
+            &context,
+            BufReader::new(file),
+            Some("fixtures"),
+            "puc19-sample",
+            OperationInfo {
+                files: vec![
+                    OperationFile::new(path.to_str().unwrap().to_string())
+                        .set_file_type(FileTypes::GenBank),
+                ],
+                description: "test".to_string(),
+            },
+            GenBankImportOptions::default().annotation_name_from_path(&path),
+        )
+        .unwrap();
+
+        let block_groups = Sample::get_block_groups(conn, "fixtures", "puc19-sample");
+        let block_group = &block_groups[0];
+        let graph = BlockGroup::get_graph(conn, &block_group.id).unwrap();
+        let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
+
+        let groups =
+            gen_models::annotations::AnnotationGroup::query_by_sample(conn, "puc19-sample");
+        let entry = AnnotationGroupEntry {
+            id: groups[0].name.clone(),
+            name: groups[0].name.clone(),
+            sample_name: "puc19-sample".to_string(),
+            source_block_group_id: block_group.id,
+            origin: AnnotationGroupOrigin::CurrentSample,
+        };
+
+        let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn,
+            current_block_group: block_group,
+            entry: &entry,
+            node_ids: &node_ids,
+        })
+        .unwrap();
+
+        let names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            !names.contains(&"source"),
+            "expected the whole-plasmid `source` feature to be hidden, got {names:?}"
+        );
+        assert!(
+            names.contains(&"AmpR"),
+            "real features should still resolve, got {names:?}"
+        );
     }
 
     /// Each option in a combinatorial library gets its own annotation on its own graph
@@ -715,5 +848,39 @@ mod tests {
             "every combinatorial candidate's annotation should resolve, not just the one \
              on the current path"
         );
+    }
+
+    /// A full-length annotation between sentinel-wrapped root/leaf should be hidden.
+    #[test]
+    fn spans_whole_block_group_hides_full_length_annotation_on_single_node_graph() {
+        use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
+
+        let node_id = HashId::convert_str("only-node");
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let content = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 100,
+        };
+        let end = GraphNode {
+            node_id: PATH_END_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(start, content, Vec::new());
+        graph.add_edge(content, end, Vec::new());
+
+        let segments = vec![AnnotationSegment {
+            node_id,
+            start: 0,
+            end: 100,
+            strand: Strand::Forward,
+        }];
+        assert!(spans_whole_block_group(&segments, &graph));
     }
 }
