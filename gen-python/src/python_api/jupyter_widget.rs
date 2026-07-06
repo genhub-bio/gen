@@ -448,7 +448,12 @@ impl GraphPage {
                     None => theme[0x08 + ((accent_base + accent_offset) % 8)],
                 };
                 accent_offset += 1;
-                Some((span, PathStyle::new(color)))
+                Some((
+                    span,
+                    PathStyle::new(color)
+                        .with_line_style(LineStyle::Bold)
+                        .with_merge_glyphs(true),
+                ))
             })
             .collect();
         self.push_span_overlays(&track_name, spans_with_styles);
@@ -466,7 +471,9 @@ impl GraphPage {
             .map(|(index, span)| {
                 (
                     span,
-                    PathStyle::new(theme[0x08 + ((accent_base + index) % 8)]),
+                    PathStyle::new(theme[0x08 + ((accent_base + index) % 8)])
+                        .with_line_style(LineStyle::Bold)
+                        .with_merge_glyphs(true),
                 )
             })
             .collect();

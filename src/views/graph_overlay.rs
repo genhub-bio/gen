@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock};
 use gen_graph::{GenGraph, GraphNode, project_path};
-use gen_tui::{plotter::PathStyle, theme::current_theme};
+use gen_tui::{
+    plotter::{LineStyle, PathStyle},
+    theme::current_theme,
+};
 use ratatui::style::Color;
 
 use crate::views::annotation_track::AnnotationSpan;
@@ -136,7 +139,9 @@ pub fn replace_track_overlays(
 ) {
     remove_track_overlays(overlays, key);
     for span in spans {
-        let style = PathStyle::new(stable_span_color(&span));
+        let style = PathStyle::new(stable_span_color(&span))
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
         overlays.push(GraphOverlay {
             content: OverlayContent::Span(span),
             source: OverlaySource::Track(key.to_string()),
