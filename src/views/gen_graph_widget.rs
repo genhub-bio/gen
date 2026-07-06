@@ -4,9 +4,10 @@ use gen_core::{
     INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
     is_end_node, is_start_node,
 };
-use gen_graph::{GenGraph, GraphEdge, GraphNode};
+use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
+    ViewportState,
     geometry::{WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
@@ -15,7 +16,20 @@ use gen_tui::{
     theme::current_theme,
 };
 use petgraph::visit::NodeIndexable;
-use ratatui::style::Style;
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
+
+use crate::views::{
+    annotation_track::{
+        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
+        span_should_hide_in_truncated,
+    },
+    graph_overlay::{AnnotationColorCache, GraphOverlay},
+    inline_label_placement::draw_label_near_pos,
+};
 
 /// Labels for special start/end nodes
 pub mod label {
@@ -44,6 +58,21 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
             VisualDetail::Minimal => (1u64, 1u64), // Just a glyph
             VisualDetail::Truncated => (sequence_length.min(13), 1u64), // 13 = 5 border + 3 mid + 5 border
             VisualDetail::Full => (sequence_length, 1u64),              // Full sequence length
+        }
+    }
+
+    /// Map a raw sequence column to the visual cell it occupies for `detail_level`.
+    ///
+    /// In `Truncated` mode a node longer than 13 bases is drawn as `AAAAA...BBBBB`, so
+    /// interior columns collapse onto the central `...` cell. `Minimal` mode draws a
+    /// single glyph, so every column maps to column 0.
+    fn map_column(&self, node: &GraphNode, raw_col: i64, detail_level: VisualDetail) -> i64 {
+        match detail_level {
+            VisualDetail::Minimal => 0,
+            VisualDetail::Truncated if node.length() > 13 => {
+                map_truncated_col(raw_col, node.length())
+            }
+            _ => raw_col,
         }
     }
 }
@@ -321,22 +350,29 @@ pub fn viewport_pos_map<S: NodeSizer<GenGraph>>(
 /// - `right_pos` is the world position of the last matched column in `blocks[last]`,
 ///   with the maximum y across all blocks
 ///
-/// Column offsets are clamped with `clamp_col` so they map correctly in every
-/// detail level (e.g. truncated nodes collapse interior columns to the `...` cell).
+/// Column offsets are mapped with `NodeSizer::map_column` so they land correctly in
+/// every detail level (e.g. truncated nodes collapse interior columns to the `...` cell).
+/// The x bounds are clipped to the visible camera rect so viewport-spanning annotations
+/// place their label near the visible portion rather than off-screen.
 ///
-/// Returns `None` if no block in the locus is present in `pos_map` (all off-screen).
+/// Returns `None` if no block in the locus is present in `pos_map` (all off-screen),
+/// or if the annotation's x span is entirely outside the camera rect.
 pub fn locus_label_bounds(
     locus: &GraphLocus,
     pos_map: &HashMap<GraphNode, (WorldPos, (u64, u64))>,
     detail_level: VisualDetail,
+    viewport_state: &ViewportState,
 ) -> Option<(WorldPos, WorldPos)> {
     let block_world_pos = |block: GraphNode, col_raw: i64| -> Option<WorldPos> {
         let &(center, size) = pos_map.get(&block)?;
         let rect = WorldRect::from_center_and_size(center, size);
-        let col = clamp_col(col_raw, block.length(), detail_level);
+        let col = GenGraphNodeSizer.map_column(&block, col_raw, detail_level);
         Some(WorldPos::new(rect.min.x + col, center.y))
     };
 
+    if locus.slices.is_empty() {
+        return None;
+    }
     let last = locus.slices.len() - 1;
 
     let left_pos = locus.slices.iter().enumerate().find_map(|(i, s)| {
@@ -367,31 +403,25 @@ pub fn locus_label_bounds(
         return None;
     }
 
-    let left_pos = WorldPos::new(left_pos.x, y_max);
-    let right_pos = WorldPos::new(right_pos.x, y_min);
+    let cam = viewport_state.camera_rect();
+    let clipped_left_x = left_pos.x.max(cam.min.x);
+    let clipped_right_x = right_pos.x.min(cam.max.x);
+    if clipped_right_x < clipped_left_x {
+        return None;
+    }
+
+    let left_pos = WorldPos::new(clipped_left_x, y_max);
+    let right_pos = WorldPos::new(clipped_right_x, y_min);
 
     Some((left_pos, right_pos))
-}
-
-/// Apply detail-level clamping to a raw column offset.
-///
-/// In `Truncated` mode, interior columns of long nodes map to the `...` region.
-fn clamp_col(col_raw: i64, block_seq_len: i64, detail_level: VisualDetail) -> i64 {
-    match detail_level {
-        VisualDetail::Minimal => 0,
-        VisualDetail::Truncated if block_seq_len > 13 => {
-            clamp_truncated_col(col_raw, block_seq_len)
-        }
-        _ => col_raw,
-    }
 }
 
 /// Map a sequence offset to a visual cell column inside a 13-cell truncated node.
 ///
 /// Display layout: `AAAAA...BBBBB` — first 5 bases (cells 0-4), `...` (cells 5-7),
-/// last 5 bases (cells 8-12). Interior positions that fall in the `...` region clamp
+/// last 5 bases (cells 8-12). Interior positions that fall in the `...` region map
 /// to cell 6 (the centre dot).
-fn clamp_truncated_col(value: i64, block_seq_len: i64) -> i64 {
+fn map_truncated_col(value: i64, block_seq_len: i64) -> i64 {
     if value < 5 {
         value
     } else if block_seq_len - value <= 5 {
@@ -407,29 +437,260 @@ fn clamp_truncated_col(value: i64, block_seq_len: i64) -> i64 {
 /// - Middle nodes: fully tinted.
 /// - End node: tinted from its left edge to `end_offset` (exclusive).
 ///
-/// In `Truncated` detail level the column offsets are clamped so that interior
-/// positions map to the `...` cell rather than a precise (wrong) location.
-pub fn highlight_match_range<S: NodeSizer<GenGraph>>(
+/// The stored columns are raw sequence offsets; the controller maps them to visual
+/// cells for the current detail level on every rebuild via `NodeSizer::map_column`,
+/// so the highlight self-heals across detail and zoom changes.
+pub fn highlight_locus<S: NodeSizer<GenGraph>>(
     controller: &mut GraphController<GenGraph, S>,
     m: &GraphLocus,
     style: PathStyle,
 ) {
-    let detail_level = controller.get_detail_level();
-
     for s in &m.slices {
-        let block_seq_len = s.block.length();
-        let col_start_raw = s.start as i64;
-        let col_end_raw = s.end.saturating_sub(1) as i64;
-        let (col_start, col_end) = (
-            clamp_col(col_start_raw, block_seq_len, detail_level),
-            clamp_col(col_end_raw, block_seq_len, detail_level),
-        );
+        let col_start = s.start as i64;
+        let col_end = s.end.saturating_sub(1) as i64;
         controller.set_cell_highlight(s.block, (col_start, 0), (col_end, 0), style);
     }
 
     for (s, t) in m.slices.iter().zip(m.slices.iter().skip(1)) {
         controller.set_edge_highlight((s.block, t.block), style);
     }
+}
+
+/// A mapped cell rectangle: the node it's on, and its top-left/bottom-right columns.
+type CellRegion = (GraphNode, (i64, i64), (i64, i64));
+
+/// The mapped column range a `GraphNodeSlice` occupies once rendered, using the exact
+/// same `NodeSizer::map_column` math `highlight_locus` uses to paint it. Computing
+/// conflicts against this (rather than against raw, unmapped sequence coordinates) is
+/// what catches collisions that only exist after mapping — e.g. two annotations that
+/// don't overlap at `Full` detail can still both collapse onto the same cell once a node
+/// is small enough to be `Truncated`.
+fn slice_region<S: NodeSizer<GenGraph>>(
+    node_sizer: &S,
+    detail_level: VisualDetail,
+    slice: &GraphNodeSlice,
+) -> CellRegion {
+    let col_start = slice.start as i64;
+    let col_end = slice.end.saturating_sub(1) as i64;
+    let tl = (
+        node_sizer.map_column(&slice.block, col_start, detail_level),
+        0,
+    );
+    let br = (
+        node_sizer.map_column(&slice.block, col_end, detail_level),
+        0,
+    );
+    (slice.block, tl, br)
+}
+
+/// Whether two mapped cell regions occupy any of the same cells.
+fn regions_overlap(a: &CellRegion, b: &CellRegion) -> bool {
+    a.0 == b.0 && a.1.0 <= b.2.0 && b.1.0 <= a.2.0
+}
+
+/// The 8 theme accent slots annotation colors and `next_accent_color` are drawn from.
+fn accent_colors() -> [Color; 8] {
+    let theme = current_theme();
+    [
+        theme[0x08],
+        theme[0x09],
+        theme[0x0A],
+        theme[0x0B],
+        theme[0x0C],
+        theme[0x0D],
+        theme[0x0E],
+        theme[0x0F],
+    ]
+}
+
+/// Re-register every overlay highlight on `controller`, replacing whatever highlights
+/// were previously set.
+///
+/// Span overlays are processed longest-first so shorter (inner) spans paint on top; any
+/// path overlay is applied last so the route paints over the span tints. Each span's color
+/// is chosen greedily: its color from a previous pass (`color_cache`) if it's still
+/// conflict-free, or else the next color in rotation, so spans that never conflict with
+/// anything still get spread across distinct colors instead of colors reshuffling across
+/// frames or collapsing onto one repeated color. Only hunts for a different free accent
+/// slot when the preferred color is actually taken by a previously-processed span whose
+/// mapped cell range overlaps this one; only gives up and accepts a collision if every
+/// slot is already taken by a genuine neighbor — with only 8 slots, a dense pile of
+/// mutually-overlapping annotations can still collide, but this makes collisions the
+/// exception rather than the default.
+///
+/// `overlays` is written back with the colors actually used, so `draw_annotation_labels`
+/// (which reads `overlay.style` separately, after this runs) labels each span in the same
+/// color that got painted. Callers run this after any change that invalidates mapped
+/// highlight columns (zoom, detail change) or, in the live TUI viewers, every frame
+/// because the overlay set changes with scrolling.
+pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
+    controller: &mut GraphController<GenGraph, S>,
+    overlays: &mut [GraphOverlay],
+    color_cache: &mut AnnotationColorCache,
+) {
+    let detail_level = controller.get_detail_level();
+    let node_sizer = &controller.partition_controller.node_sizer;
+    let graph = controller.graph();
+
+    let mut span_indices: Vec<usize> = overlays
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, overlay)| overlay.span().map(|_| idx))
+        .collect();
+    span_indices.sort_by_key(|&idx| {
+        let span = overlays[idx]
+            .span()
+            .expect("filtered to span overlays above");
+        -(span
+            .segments
+            .iter()
+            .map(|segment| segment.end - segment.start)
+            .sum::<i64>())
+    });
+
+    // Decide every span's locus and color first (only needs `&controller`); painting
+    // (`&mut controller`) happens in a second pass once every color is settled.
+    let accents = accent_colors();
+    let mut occupied: Vec<(CellRegion, Color)> = Vec::new();
+    let mut decisions: Vec<(usize, GraphLocus, Color)> = Vec::new();
+    for idx in span_indices {
+        let span = overlays[idx]
+            .span()
+            .expect("filtered to span overlays above");
+        let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+            continue;
+        };
+        let regions: Vec<CellRegion> = locus
+            .slices
+            .iter()
+            .map(|slice| slice_region(node_sizer, detail_level, slice))
+            .collect();
+        let used: Vec<Color> = occupied
+            .iter()
+            .filter(|(placed, _)| regions.iter().any(|region| regions_overlap(placed, region)))
+            .map(|(_, color)| *color)
+            .collect();
+
+        // Prefer this span's previous color, or, the first time it's seen, the next color
+        // in rotation, so spans that never conflict with anything still get spread across
+        // distinct colors instead of repeatedly landing on the same one. Only hunt for a
+        // different free accent slot when the preferred color is actually taken by
+        // something this span overlaps; only give up and accept a collision if every slot
+        // is taken.
+        let preferred = color_cache
+            .get(&span.id)
+            .unwrap_or_else(|| color_cache.next_color(&accents));
+        let color = if used.contains(&preferred) {
+            accents
+                .into_iter()
+                .find(|c| !used.contains(c))
+                .unwrap_or(preferred)
+        } else {
+            preferred
+        };
+        color_cache.set(span.id, color);
+
+        for region in regions {
+            occupied.push((region, color));
+        }
+        decisions.push((idx, locus, color));
+    }
+
+    controller.clear_all_highlights();
+    for (idx, locus, color) in &decisions {
+        overlays[*idx].style.color = *color;
+        highlight_locus(controller, locus, overlays[*idx].style);
+    }
+    for overlay in overlays.iter() {
+        if let Some(nodes) = overlay.path_nodes() {
+            controller.set_path_highlight(overlay.style, nodes.to_vec());
+        }
+    }
+}
+
+/// Draw floating labels for `overlays` after the graph has been rendered into `buf`.
+///
+/// Overlays are labelled longest-first so the covered-by-later check matches highlight
+/// paint order. A label is suppressed when its span is fully covered by a shorter overlay
+/// on top, when it collapses into a truncated node, or when no free cell is found near its
+/// span. Returns `true` if any labelled overlay was suppressed, so the caller can show a
+/// single "some annotations hidden" hint.
+pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
+    buf: &mut Buffer,
+    area: Rect,
+    controller: &GraphController<GenGraph, S>,
+    overlays: &[GraphOverlay],
+) -> bool {
+    let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
+        .iter()
+        .filter_map(|overlay| {
+            overlay
+                .span()
+                .filter(|span| !span.name.is_empty())
+                .map(|span| (span, overlay.style))
+        })
+        .collect();
+    if labeled.is_empty() {
+        return false;
+    }
+    labeled.sort_by_key(|(span, _)| {
+        -(span
+            .segments
+            .iter()
+            .map(|segment| segment.end - segment.start)
+            .sum::<i64>())
+    });
+
+    let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
+    let pos_map = viewport_pos_map(controller);
+    let detail_level = controller.get_detail_level();
+    let theme = current_theme();
+    let max_distance = if detail_level == VisualDetail::Minimal {
+        10
+    } else {
+        5
+    };
+
+    let mut any_hidden = false;
+    for (idx, (span, style)) in labeled.iter().enumerate() {
+        let Some(locus) = graph_locus_from_annotation_span(span, controller.graph()) else {
+            continue;
+        };
+        if span_covered_by_later(span, idx, &span_refs) {
+            any_hidden = true;
+            continue;
+        }
+        if detail_level == VisualDetail::Truncated
+            && span_should_hide_in_truncated(span, controller.graph())
+        {
+            any_hidden = true;
+            continue;
+        }
+        let Some(bounds) =
+            locus_label_bounds(&locus, &pos_map, detail_level, &controller.viewport_state)
+        else {
+            continue;
+        };
+        let color = match style.color {
+            Color::Reset => theme[0x06],
+            other => other,
+        };
+        let label = span_label_text(span);
+        if draw_label_near_pos(
+            buf,
+            area,
+            bounds,
+            &label,
+            color,
+            &controller.viewport_state,
+            max_distance,
+        )
+        .is_none()
+        {
+            any_hidden = true;
+        }
+    }
+    any_hidden
 }
 
 #[cfg(test)]
@@ -590,5 +851,463 @@ mod tests {
             .unwrap();
 
         insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
+    }
+
+    /// A cell highlight set in `Full` detail must re-map onto the truncated cells
+    /// when the detail level changes, without any external `reapply_overlays` call.
+    ///
+    /// The highlight stores raw content columns; the controller maps them through
+    /// `GenGraphNodeSizer::map_column` on every rebuild. For a 34-base node drawn
+    /// as `AAAAA...BBBBB` (13 cells), raw column 2 stays at cell 2 while raw column
+    /// 31 (three from the end) lands at cell 10.
+    #[test]
+    fn cell_highlight_remaps_on_detail_change() {
+        use std::path::PathBuf;
+
+        use gen_core::strand::Strand;
+        use gen_graph::GraphNodeSlice;
+        use gen_models::{locus::GraphLocus, sample::Sample};
+        use ratatui::{layout::Rect, style::Color};
+
+        use crate::{
+            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
+        };
+
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .unwrap()
+            .to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        let gen_graph = Sample::get_graph(conn, collection, Sample::DEFAULT_NAME).unwrap();
+        let mut controller = create_gen_graph_controller(gen_graph);
+
+        let block = controller
+            .graph()
+            .nodes()
+            .find(|node| !is_start_node(node.node_id) && !is_end_node(node.node_id))
+            .expect("should have a data node");
+        assert_eq!(block.length(), 34);
+
+        // Highlight raw columns 2..=31 while showing the full sequence.
+        controller.set_detail_level(VisualDetail::Full);
+        let locus = GraphLocus {
+            slices: vec![GraphNodeSlice {
+                block,
+                start: 2,
+                end: 32,
+                strand: Strand::Forward,
+            }],
+        };
+        highlight_locus(&mut controller, &locus, PathStyle::new(Color::Yellow));
+
+        // Switch to the truncated view; the stored raw columns must re-map.
+        controller.set_detail_level(VisualDetail::Truncated);
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 120, 30);
+        controller.ensure_camera_coverage().unwrap();
+        controller.rebuild_viewport_graph().unwrap();
+
+        let highlights = controller.get_cell_highlights();
+        assert_eq!(highlights.len(), 1, "expected exactly one cell highlight");
+        let (_, top_left, bottom_right, _) = highlights[0];
+        assert_eq!(top_left.0, 2, "raw column 2 stays at cell 2");
+        assert_eq!(
+            bottom_right.0, 10,
+            "raw column 31 maps to cell 10 in the truncated node"
+        );
+    }
+
+    /// An annotation spanning multiple blocks must get a highlight attempt on each
+    /// covered block, and overlay application order must be by total annotation
+    /// length, not by the length of any individual per-block segment.
+    #[test]
+    fn reapply_overlays_covers_each_block_and_orders_by_total_length() {
+        use gen_core::{HashId, Strand};
+        use gen_tui::graph_controller::HighlightKind;
+
+        use crate::views::{
+            annotation_track::{AnnotationSegment, AnnotationSpan},
+            graph_overlay::{OverlayContent, OverlaySource},
+        };
+
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("block-a"),
+            sequence_start: 0,
+            sequence_end: 10,
+        };
+        let node_b = GraphNode {
+            node_id: HashId::convert_str("block-b"),
+            sequence_start: 0,
+            sequence_end: 10,
+        };
+        let node_c = GraphNode {
+            node_id: HashId::convert_str("block-c"),
+            sequence_start: 0,
+            sequence_end: 10,
+        };
+
+        let mut graph = GenGraph::new();
+        graph.add_node(node_a);
+        graph.add_node(node_b);
+        graph.add_node(node_c);
+        let edge = vec![GraphEdge {
+            edge_id: HashId::convert_str("edge"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 0,
+        }];
+        graph.add_edge(node_a, node_b, edge.clone());
+        graph.add_edge(node_b, node_c, edge);
+
+        let mut controller = create_gen_graph_controller(graph);
+
+        // Two 6-base segments, one per block: total length 12.
+        let multi_block_span = AnnotationSpan {
+            id: HashId::convert_str("multi"),
+            name: "multi".to_string(),
+            segments: vec![
+                AnnotationSegment {
+                    node_id: node_a.node_id,
+                    start: 0,
+                    end: 6,
+                    strand: Strand::Forward,
+                },
+                AnnotationSegment {
+                    node_id: node_b.node_id,
+                    start: 0,
+                    end: 6,
+                    strand: Strand::Forward,
+                },
+            ],
+        };
+        // One 10-base segment: shorter total length than the multi-block span above,
+        // but its single segment is individually longer than either of that span's
+        // per-block segments.
+        let single_block_span = AnnotationSpan {
+            id: HashId::convert_str("single"),
+            name: "single".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node_c.node_id,
+                start: 0,
+                end: 10,
+                strand: Strand::Forward,
+            }],
+        };
+
+        let mut overlays = vec![
+            GraphOverlay {
+                content: OverlayContent::Span(single_block_span),
+                source: OverlaySource::Track("single".to_string()),
+                style: PathStyle::new(Color::Cyan),
+            },
+            GraphOverlay {
+                content: OverlayContent::Span(multi_block_span),
+                source: OverlaySource::Track("multi".to_string()),
+                style: PathStyle::new(Color::Yellow),
+            },
+        ];
+
+        let mut color_cache = AnnotationColorCache::new();
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+
+        let cell_highlights: Vec<GraphNode> = controller
+            .highlights
+            .iter()
+            .filter_map(|(kind, _)| match kind {
+                HighlightKind::Cells { node, .. } => Some(*node),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            cell_highlights.len(),
+            3,
+            "expected one highlight attempt per block covered by the two spans"
+        );
+        assert_eq!(
+            cell_highlights[0], node_a,
+            "multi-block span (total length 12) applied before the single-block span (length 10)"
+        );
+        assert_eq!(
+            cell_highlights[1], node_b,
+            "second block covered by the multi-block span is also highlighted"
+        );
+        assert_eq!(
+            cell_highlights[2], node_c,
+            "single-block span applied last despite its lone segment being longer than \
+             either per-block segment of the multi-block span"
+        );
+    }
+
+    /// Two annotations whose ranges overlap on the same node (e.g. a GenBank `source`
+    /// feature and a shorter `lacZalpha` feature nested inside it) must not be painted
+    /// with the same accent color. A third, unrelated span elsewhere doesn't conflict with
+    /// either, so nothing forces it away from whatever color the rotation gives it next —
+    /// collision-avoidance should only kick in for annotations that actually touch.
+    #[test]
+    fn reapply_overlays_avoids_color_collisions_between_overlapping_spans() {
+        use gen_core::{HashId, Strand};
+
+        use crate::views::{
+            annotation_track::AnnotationSegment,
+            graph_overlay::{OverlayContent, OverlaySource},
+        };
+
+        let shared_node = GraphNode {
+            node_id: HashId::convert_str("shared-block"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let other_node = GraphNode {
+            node_id: HashId::convert_str("unrelated-block"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(shared_node);
+        graph.add_node(other_node);
+        let mut controller = create_gen_graph_controller(graph);
+
+        let long_span = AnnotationSpan {
+            id: HashId::convert_str("source"),
+            name: "source".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: shared_node.node_id,
+                start: 0,
+                end: 20,
+                strand: Strand::Forward,
+            }],
+        };
+        let nested_span = AnnotationSpan {
+            id: HashId::convert_str("lacZalpha"),
+            name: "lacZalpha".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: shared_node.node_id,
+                start: 5,
+                end: 10,
+                strand: Strand::Reverse,
+            }],
+        };
+        let unrelated_span = AnnotationSpan {
+            id: HashId::convert_str("unrelated"),
+            name: "unrelated".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: other_node.node_id,
+                start: 0,
+                end: 20,
+                strand: Strand::Forward,
+            }],
+        };
+
+        let mut overlays = vec![
+            GraphOverlay {
+                content: OverlayContent::Span(long_span),
+                source: OverlaySource::Track("t".to_string()),
+                style: PathStyle::new(Color::Reset),
+            },
+            GraphOverlay {
+                content: OverlayContent::Span(nested_span),
+                source: OverlaySource::Track("t".to_string()),
+                style: PathStyle::new(Color::Reset),
+            },
+            GraphOverlay {
+                content: OverlayContent::Span(unrelated_span),
+                source: OverlaySource::Track("t".to_string()),
+                style: PathStyle::new(Color::Reset),
+            },
+        ];
+
+        let mut color_cache = AnnotationColorCache::new();
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+
+        assert_ne!(
+            overlays[0].style.color, overlays[1].style.color,
+            "source and the nested lacZalpha-like span overlap and must get different colors"
+        );
+        assert_ne!(
+            overlays[0].style.color, overlays[2].style.color,
+            "the unrelated span gets its own turn in the color rotation"
+        );
+        assert_ne!(
+            overlays[1].style.color, overlays[2].style.color,
+            "the unrelated span gets its own turn in the color rotation"
+        );
+    }
+
+    /// Never-before-seen annotations that don't conflict with each other should still get
+    /// spread across different colors — cycling through the accent slots in turn, rather
+    /// than deriving a color from each annotation's id, so two arbitrary unrelated
+    /// annotations don't coincidentally land on the same one.
+    #[test]
+    fn reapply_overlays_cycles_colors_for_new_non_conflicting_spans() {
+        use gen_core::{HashId, Strand};
+
+        use crate::views::{
+            annotation_track::AnnotationSegment,
+            graph_overlay::{OverlayContent, OverlaySource},
+        };
+
+        let mut graph = GenGraph::new();
+        let nodes: Vec<GraphNode> = (0..3)
+            .map(|i| {
+                let node = GraphNode {
+                    node_id: HashId::convert_str(&format!("block-{i}")),
+                    sequence_start: 0,
+                    sequence_end: 10,
+                };
+                graph.add_node(node);
+                node
+            })
+            .collect();
+        let mut controller = create_gen_graph_controller(graph);
+
+        let mut overlays: Vec<GraphOverlay> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| GraphOverlay {
+                content: OverlayContent::Span(AnnotationSpan {
+                    id: HashId::convert_str(&format!("span-{i}")),
+                    name: format!("span-{i}"),
+                    segments: vec![AnnotationSegment {
+                        node_id: node.node_id,
+                        start: 0,
+                        end: 10,
+                        strand: Strand::Forward,
+                    }],
+                }),
+                source: OverlaySource::Track("t".to_string()),
+                style: PathStyle::new(Color::Reset),
+            })
+            .collect();
+
+        let mut color_cache = AnnotationColorCache::new();
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+
+        let colors: HashSet<Color> = overlays.iter().map(|o| o.style.color).collect();
+        assert_eq!(
+            colors.len(),
+            overlays.len(),
+            "three unrelated, non-conflicting spans should each get a distinct color \
+             from the rotation, not repeat one by chance"
+        );
+    }
+
+    /// The color chosen for an annotation must stay the same across repeated
+    /// `reapply_overlays` calls (the live TUI viewers call this every frame), even when
+    /// the overlays happen to be given in a different order, so annotations don't flicker
+    /// between colors as the user scrolls.
+    #[test]
+    fn reapply_overlays_keeps_colors_stable_across_repeated_calls() {
+        use gen_core::{HashId, Strand};
+
+        use crate::views::{
+            annotation_track::AnnotationSegment,
+            graph_overlay::{OverlayContent, OverlaySource},
+        };
+
+        let node = GraphNode {
+            node_id: HashId::convert_str("block"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let mut controller = create_gen_graph_controller(graph);
+
+        let make_overlays = |reversed: bool| {
+            let span_a = AnnotationSpan {
+                id: HashId::convert_str("a"),
+                name: "a".to_string(),
+                segments: vec![AnnotationSegment {
+                    node_id: node.node_id,
+                    start: 0,
+                    end: 5,
+                    strand: Strand::Forward,
+                }],
+            };
+            let span_b = AnnotationSpan {
+                id: HashId::convert_str("b"),
+                name: "b".to_string(),
+                segments: vec![AnnotationSegment {
+                    node_id: node.node_id,
+                    start: 10,
+                    end: 15,
+                    strand: Strand::Forward,
+                }],
+            };
+            let mut overlays = vec![
+                GraphOverlay {
+                    content: OverlayContent::Span(span_a),
+                    source: OverlaySource::Track("t".to_string()),
+                    style: PathStyle::new(Color::Reset),
+                },
+                GraphOverlay {
+                    content: OverlayContent::Span(span_b),
+                    source: OverlaySource::Track("t".to_string()),
+                    style: PathStyle::new(Color::Reset),
+                },
+            ];
+            if reversed {
+                overlays.reverse();
+            }
+            overlays
+        };
+
+        let mut color_cache = AnnotationColorCache::new();
+        let mut first = make_overlays(false);
+        reapply_overlays(&mut controller, &mut first, &mut color_cache);
+        let color_a = first
+            .iter()
+            .find(|o| o.span().unwrap().name == "a")
+            .unwrap()
+            .style
+            .color;
+        let color_b = first
+            .iter()
+            .find(|o| o.span().unwrap().name == "b")
+            .unwrap()
+            .style
+            .color;
+
+        // Reload with the two spans in the opposite order, as a fresh track reload might.
+        let mut second = make_overlays(true);
+        reapply_overlays(&mut controller, &mut second, &mut color_cache);
+        let color_a_again = second
+            .iter()
+            .find(|o| o.span().unwrap().name == "a")
+            .unwrap()
+            .style
+            .color;
+        let color_b_again = second
+            .iter()
+            .find(|o| o.span().unwrap().name == "b")
+            .unwrap()
+            .style
+            .color;
+
+        assert_eq!(
+            color_a, color_a_again,
+            "span a's color should survive a reload"
+        );
+        assert_eq!(
+            color_b, color_b_again,
+            "span b's color should survive a reload"
+        );
     }
 }

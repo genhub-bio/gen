@@ -1,7 +1,8 @@
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
 use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
-use pyo3::prelude::*;
+use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
+use serde_json::{Map, Value, to_string as json_to_string, to_value as json_to_value};
 
 use super::graph_search::PyGraphLocus;
 
@@ -29,7 +30,6 @@ impl PyAnnotation {
     /// Create an ephemeral annotation from a search-result locus.
     ///
     /// Parameters
-    /// ----------
     /// locus : Locus
     ///     A ``Locus`` returned by ``SequenceGraph.search()``.
     /// name : str
@@ -93,15 +93,53 @@ impl PyAnnotation {
         &self.inner.group
     }
 
-    /// GenBank feature kind (e.g. ``"gene"``, ``"CDS"``, ``"sig_peptide"``), if available.
+    /// Track (annotation group) this annotation was loaded from, or ``None`` for
+    /// ephemeral annotations created with ``Annotation(locus, name)``.
     #[getter]
-    fn kind(&self) -> Option<&str> {
-        self.inner
-            .extra
-            .as_ref()?
-            .genbank
-            .as_ref()
-            .map(|g| g.kind.as_str())
+    fn track(&self) -> Option<&str> {
+        if self.inner.group.is_empty() {
+            None
+        } else {
+            Some(&self.inner.group)
+        }
+    }
+
+    /// All source-agnostic annotation metadata as a flat dict, or ``None`` if no
+    /// extra data is stored.
+    ///
+    /// All source-specific sub-dicts (``genbank``, ``gff``, ``bed``) are merged
+    /// into a single dict so callers do not need to know which file format the
+    /// annotation originated from.  In practice only one source is populated per
+    /// annotation, so there are no key collisions.
+    ///
+    /// Example
+    /// ::
+    ///
+    ///     for ann in widget.list_annotations():
+    ///         print(ann.metadata)
+    ///         # GenBank CDS:  {"kind": "CDS", "qualifiers": [...]}
+    #[getter]
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let Some(ref extra) = self.inner.extra else {
+            return Ok(None);
+        };
+
+        // GenBank / GFF / BED: flat-merge the non-null source sub-dicts.
+        let top = json_to_value(extra).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut merged = Map::new();
+        if let Value::Object(map) = top {
+            for (_, child) in map {
+                if let Value::Object(child_map) = child {
+                    merged.extend(child_map);
+                }
+            }
+        }
+        if merged.is_empty() {
+            return Ok(None);
+        }
+        let json_str =
+            json_to_string(&merged).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Some(py.import("json")?.call_method1("loads", (json_str,))?))
     }
 
     /// Genomic segments covered by this annotation.
@@ -137,9 +175,14 @@ impl PyAnnotation {
             .iter()
             .map(|s| (s.range.end - s.range.start) as usize)
             .sum();
+        let track = if self.inner.group.is_empty() {
+            "None".to_string()
+        } else {
+            format!("{:?}", self.inner.group)
+        };
         format!(
-            "Annotation(name={:?}, group={:?}, len={len})",
-            self.inner.name, self.inner.group
+            "Annotation(name={:?}, track={track}, len={len})",
+            self.inner.name
         )
     }
 }

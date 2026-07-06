@@ -1,21 +1,9 @@
-use std::{
-    cmp::{max, min},
-    collections::{HashMap, HashSet},
-};
+use std::collections::HashMap;
 
-use gen_core::{HashId, Strand, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNodeSlice};
+use gen_core::{HashId, Strand};
+use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::locus::GraphLocus;
-use gen_tui::{
-    GraphController, ViewportState, VisualDetail, WorldRect, plotter::NodeSizer,
-    theme::current_theme,
-};
-use petgraph::visit::{IntoNodeIdentifiers, NodeIndexable};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-};
+use petgraph::visit::IntoNodeIdentifiers;
 
 #[derive(Clone, Debug)]
 pub struct AnnotationSegment {
@@ -36,9 +24,15 @@ pub struct AnnotationSpan {
 pub struct AnnotationTrack {
     pub name: String,
     pub annotations: Vec<AnnotationSpan>,
-    pub annotation_segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>>,
-    pub min_rows: usize,
-    pub max_rows: usize,
+}
+
+impl AnnotationTrack {
+    pub fn new(name: impl Into<String>, annotations: Vec<AnnotationSpan>) -> Self {
+        AnnotationTrack {
+            name: name.into(),
+            annotations,
+        }
+    }
 }
 
 pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> AnnotationSpan {
@@ -59,6 +53,14 @@ pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> Annot
     }
 }
 
+/// Map `span`'s per-node segments onto the current graph.
+///
+/// A `node_id` identifies a parent `Node`, not a single slice of it: an edit that splits
+/// a node (a library insertion, a sequence update, ...) leaves several `GraphNode`s in the
+/// current graph sharing that same `node_id` but covering different, disjoint sequence
+/// ranges. Each segment is matched to whichever of those candidate slices its own range
+/// overlaps, rather than to an arbitrary one, so a same-`node_id` segment always lands on
+/// the fragment it actually belongs to.
 pub fn graph_locus_from_annotation_span(
     span: &AnnotationSpan,
     graph: &GenGraph,
@@ -66,12 +68,19 @@ pub fn graph_locus_from_annotation_span(
     if span.segments.is_empty() {
         return None;
     }
-    let node_map: HashMap<_, _> = graph.node_identifiers().map(|n| (n.node_id, n)).collect();
+    let mut node_map: HashMap<HashId, Vec<GraphNode>> = HashMap::new();
+    for node in graph.node_identifiers() {
+        node_map.entry(node.node_id).or_default().push(node);
+    }
     let slices: Option<Vec<GraphNodeSlice>> = span
         .segments
         .iter()
         .map(|seg| {
-            let block = *node_map.get(&seg.node_id)?;
+            let candidates = node_map.get(&seg.node_id)?;
+            let block = *candidates
+                .iter()
+                .find(|block| seg.start < block.sequence_end && block.sequence_start < seg.end)
+                .or_else(|| candidates.first())?;
             let start = (seg.start - block.sequence_start).max(0) as usize;
             let end = (seg.end - block.sequence_start).max(0) as usize;
             Some(GraphNodeSlice {
@@ -85,695 +94,81 @@ pub fn graph_locus_from_annotation_span(
     Some(GraphLocus { slices: slices? })
 }
 
-impl AnnotationTrack {
-    pub fn new(name: impl Into<String>, annotations: Vec<AnnotationSpan>) -> Self {
-        let name = name.into();
-        let mut segments_by_node: HashMap<HashId, Vec<(usize, AnnotationSegment)>> = HashMap::new();
-        for (idx, annotation) in annotations.iter().enumerate() {
-            for segment in &annotation.segments {
-                segments_by_node
-                    .entry(segment.node_id)
-                    .or_default()
-                    .push((idx, segment.clone()));
-            }
-        }
-        AnnotationTrack {
-            name,
-            annotations,
-            annotation_segments_by_node: segments_by_node,
-            min_rows: 0,
-            max_rows: 9,
-        }
-    }
-
-    /// Draw annotation track at the bottom of `area`. Returns height used, or 0 if nothing visible.
-    pub fn draw<S: NodeSizer<GenGraph>>(
-        &self,
-        buf: &mut Buffer,
-        area: Rect,
-        controller: &GraphController<GenGraph, S>,
-    ) -> u16 {
-        let (_, mut segments_by_annotation, mut truncated_count) =
-            collect_visual_segments(self, controller);
-
-        if controller.get_detail_level() == VisualDetail::Minimal {
-            segments_by_annotation.retain(|_, segs| {
-                let all_same_node = segs.windows(2).all(|w| w[0].node_x1 == w[1].node_x1);
-                if all_same_node {
-                    truncated_count += 1;
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-
-        let visible_ranges: AnnotationVisibleRanges = segments_by_annotation
-            .iter()
-            .map(|(idx, segs)| {
-                let x1 = segs.iter().map(VisualSegment::start_x).min().unwrap_or(0);
-                let x2 = segs.iter().map(VisualSegment::end_x).max().unwrap_or(0);
-                (*idx, (x1, x2))
-            })
-            .collect();
-        let packed_rows = pack_visible_annotation_rows(&visible_ranges, self, self.max_rows);
-
-        let n = packed_rows.len().max(self.min_rows);
-        let height = (n as u16 + 1).max(1);
-        if area.height < height {
-            return 0;
-        }
-
-        let area = Rect {
-            x: area.x,
-            y: area.y + area.height - height,
-            width: area.width,
-            height,
-        };
-
-        let viewport_state = &controller.viewport_state;
-
-        let theme = current_theme();
-
-        let divider_style = Style::default().fg(theme[0x02]);
-        buf.set_string(
-            area.x,
-            area.y,
-            "─".repeat(area.width as usize),
-            divider_style,
-        );
-
-        if !self.name.is_empty() {
-            let header = if truncated_count > 0 {
-                format!("{} (+{truncated_count} in truncated regions)", self.name)
-            } else {
-                self.name.clone()
-            };
-            buf.set_string(area.x + 1, area.y, header, Style::default().fg(theme[0x07]));
-        }
-
-        let inner = Rect {
-            x: area.x,
-            y: area.y + 1,
-            width: area.width,
-            height: area.height - 1,
-        };
-
-        if inner.width == 0 {
-            return height;
-        }
-
-        let bg_color = theme[0x00];
-        for row in inner.y..inner.y + inner.height {
-            buf.set_string(
-                inner.x,
-                row,
-                " ".repeat(inner.width as usize),
-                Style::default().bg(bg_color),
-            );
-        }
-
-        let label_fg_over_bar = bg_color;
-
-        for (row_idx, row_annotations) in packed_rows.iter().take(inner.height as usize).enumerate()
+/// Compute the display label for a span, appending a strand arrow when all
+/// segments share a single non-ambiguous strand.
+pub fn span_label_text(span: &AnnotationSpan) -> String {
+    let strand = match span.segments.first() {
+        Some(seg)
+            if !Strand::is_ambiguous(seg.strand)
+                && span.segments.iter().all(|s| s.strand == seg.strand) =>
         {
-            let annotation_color = if row_idx % 2 == 0 {
-                theme[0x0B]
-            } else {
-                theme[0x0C]
-            };
-            let annotation_style = Style::default().fg(annotation_color).bg(bg_color);
-            let terminal_y = inner.y + row_idx as u16;
+            Some(seg.strand)
+        }
+        _ => None,
+    };
+    match strand {
+        Some(Strand::Forward) => format!("{}›", span.name),
+        Some(Strand::Reverse) => format!("‹{}", span.name),
+        _ => span.name.clone(),
+    }
+}
 
-            for idx in row_annotations {
-                let Some(mut segments) = segments_by_annotation.get(idx).cloned() else {
-                    continue;
-                };
-                segments.sort_by_key(|s| s.node_x1);
-                let mut prev_end: Option<i64> = None;
-                for seg in &segments {
-                    let x1 = seg.start_x();
-                    let x2 = seg.end_x();
-                    place_bar(
-                        buf,
-                        inner,
-                        viewport_state,
-                        x1,
-                        x2,
-                        terminal_y,
-                        annotation_style,
-                    );
-                    if seg.start.1.is_none() {
-                        draw_truncation_marker(
-                            buf,
-                            inner,
-                            viewport_state,
-                            seg.start.0,
-                            terminal_y,
-                            annotation_style,
-                        );
-                    }
-                    if seg.end.1.is_none() {
-                        draw_truncation_marker(
-                            buf,
-                            inner,
-                            viewport_state,
-                            seg.end.0,
-                            terminal_y,
-                            annotation_style,
-                        );
-                    }
-                    if let Some(prev) = prev_end
-                        && x1 - prev > 1
-                    {
-                        draw_dashed_connector(
-                            buf,
-                            inner,
-                            viewport_state,
-                            prev + 1,
-                            x1 - 1,
-                            terminal_y,
-                            annotation_style,
-                        );
-                    }
-                    prev_end = Some(x2);
+/// Return `true` if every segment of `span` lies on the same node, i.e. the
+/// annotation does not cross a node boundary.
+pub fn span_is_single_node(span: &AnnotationSpan) -> bool {
+    match span.segments.first() {
+        Some(first) => span.segments.iter().all(|s| s.node_id == first.node_id),
+        None => true,
+    }
+}
+
+/// Return `true` if the annotation `span` should be dropped from the inline
+/// overlay in `Truncated` detail level.
+///
+/// An annotation that crosses a node boundary, or that covers the full width
+/// of the single node it lies on, is kept: its label communicates something
+/// the collapsed node itself does not show. Only annotations confined to a
+/// partial slice of a single node are hidden, since those are the ones that
+/// pile up on combinatorial libraries made of many short nodes.
+pub fn span_should_hide_in_truncated(span: &AnnotationSpan, graph: &GenGraph) -> bool {
+    if !span_is_single_node(span) {
+        return false;
+    }
+    let Some(segment) = span.segments.first() else {
+        return false;
+    };
+    let Some(node) = graph
+        .node_identifiers()
+        .find(|node| node.node_id == segment.node_id)
+    else {
+        return false;
+    };
+    !(segment.start <= node.sequence_start && segment.end >= node.sequence_end)
+}
+
+/// Return `true` if every segment of `span` at `idx` is fully contained within
+/// at least one segment from a later span (higher index = shorter = painted on top).
+/// Used to count annotations that are completely obscured by other highlights.
+pub fn span_covered_by_later(
+    span: &AnnotationSpan,
+    idx: usize,
+    all_spans: &[&AnnotationSpan],
+) -> bool {
+    if span.segments.is_empty() {
+        return false;
+    }
+    'outer: for seg in &span.segments {
+        for later_span in &all_spans[idx + 1..] {
+            for other in &later_span.segments {
+                if other.node_id == seg.node_id && other.start <= seg.start && other.end >= seg.end
+                {
+                    continue 'outer;
                 }
             }
-
-            for idx in row_annotations {
-                let annotation_name = &self.annotations[*idx].name;
-                if annotation_name.is_empty() {
-                    continue;
-                }
-                let Some(visual_segs) = segments_by_annotation.get(idx) else {
-                    continue;
-                };
-                let x1 = visual_segs
-                    .iter()
-                    .map(VisualSegment::start_x)
-                    .min()
-                    .unwrap_or_default();
-                let x2 = visual_segs
-                    .iter()
-                    .map(VisualSegment::end_x)
-                    .max()
-                    .unwrap_or_default();
-
-                let span_strand = span_strand(&self.annotations[*idx]);
-                place_sticky_label(
-                    buf,
-                    inner,
-                    viewport_state,
-                    x1,
-                    x2,
-                    terminal_y,
-                    annotation_name,
-                    span_strand,
-                    annotation_style,
-                    label_fg_over_bar,
-                );
-            }
         }
-
-        height
+        return false;
     }
-}
-
-type AnnotationVisibleRanges = HashMap<usize, (i64, i64)>;
-
-/// Bases from either node boundary that map to precise cells (0-indexed, inclusive).
-/// For example, if we truncate 123456789 to 12...89  this number would be 2
-const BORDER_BP: i64 = 5;
-
-/// Extra collection margin for labels that can remain visible outside the bar.
-const MIN_LABEL_LOOKAHEAD: i64 = 8;
-
-/// Fixed gap between annotation bar and label when label is external.
-const LABEL_SIDE_GUTTER: i64 = 1;
-
-/// Fixed gap reserved to the right of each annotation bar when packing rows
-const RIGHT_BAR_MARGIN: i64 = 4;
-
-/// How an annotation endpoint maps to the current visual representation.
-///
-/// `(base_x, Some(offset))` — exact cell at world position `base_x + offset`.
-/// `(node_mid_x, None)`     — falls in the truncated interior; draw `░` at `node_mid_x`.
-pub type EndpointX = (i64, Option<i64>);
-
-/// One resolved segment of an annotation, covering part of a single graph node.
-#[derive(Clone, Debug)]
-pub struct VisualSegment {
-    /// World X of node left edge.
-    pub node_x1: i64,
-    /// World X of node right edge.
-    pub node_x2: i64,
-    /// Resolved start endpoint.
-    pub start: EndpointX,
-    /// Resolved end endpoint.
-    pub end: EndpointX,
-}
-
-impl VisualSegment {
-    pub fn start_x(&self) -> i64 {
-        self.start.0 + self.start.1.unwrap_or(0)
-    }
-
-    pub fn end_x(&self) -> i64 {
-        self.end.0 + self.end.1.unwrap_or(0)
-    }
-}
-
-/// Resolve one annotation sequence position to a visual endpoint.
-///
-/// * `dist_from_start` – bases from the node's first base (≥ 0).
-/// * `dist_from_end`   – bases from the node's last base, inclusive (≥ 0; 0 = last base).
-///
-/// For truncated nodes (`node_len > node_width`, `node_width ≥ 3`):
-/// - Positions within `BORDER_BP` bases of either boundary map to a precise border cell.
-/// - All other positions map to the node's middle cell with `offset = None`.
-///
-/// The middle cell (`node_width / 2`) is kept free of border mappings, ensuring
-/// `░` indicators only appear for genuinely ambiguous interior positions.
-fn resolve_endpoint(
-    dist_from_start: i64,
-    dist_from_end: i64,
-    node_x1: i64,
-    node_width: i64,
-    node_len: i64,
-) -> EndpointX {
-    if node_len <= node_width || node_width < 3 {
-        let offset = if node_len <= 0 {
-            0
-        } else {
-            (dist_from_start * node_width / node_len).clamp(0, node_width - 1)
-        };
-        return (node_x1, Some(offset));
-    }
-
-    // Truncated node. `half` is the mid-cell index (= 6 for width 13).
-    // Left border uses cells 0 .. half-1; right border uses cells half+1 .. end.
-    let half = node_width / 2;
-
-    if dist_from_start <= BORDER_BP {
-        return (node_x1, Some(dist_from_start.min(half - 1)));
-    }
-
-    if dist_from_end <= BORDER_BP {
-        return (node_x1, Some(node_width - 1 - dist_from_end.min(half - 1)));
-    }
-
-    (node_x1 + half, None)
-}
-
-/// Collect visible annotation segments, resolving endpoint positions against
-/// the current layout and detail level.
-///
-/// Returns `(visible_indices_sorted, segments_by_annotation, entirely_truncated_count)`.
-/// `entirely_truncated_count` is the number of visible annotations whose every segment
-/// falls entirely within a truncated node interior and is therefore visually omitted.
-pub fn collect_visual_segments<S: NodeSizer<GenGraph>>(
-    track: &AnnotationTrack,
-    controller: &GraphController<GenGraph, S>,
-) -> (Vec<usize>, HashMap<usize, Vec<VisualSegment>>, usize) {
-    if track.annotations.is_empty() {
-        return (Vec::new(), HashMap::new(), 0);
-    }
-
-    let viewport_state = &controller.viewport_state;
-    let viewport_graph = controller.get_viewport_graph();
-    let graph = controller.graph();
-
-    let camera_rect = viewport_state.camera_rect();
-    let win_start = camera_rect.min.x;
-    let win_end = camera_rect.max.x;
-
-    let max_label_len = track
-        .annotations
-        .iter()
-        .map(|annotation| annotation.name.chars().count() as i64)
-        .max()
-        .unwrap_or(0);
-
-    // Labels can remain visible outside the bar by roughly their own width plus
-    // gutter. If collection only looks at the bar, a label can vanish before it
-    // has finished sliding out of the viewport.
-    let lookahead = MIN_LABEL_LOOKAHEAD.max(max_label_len + LABEL_SIDE_GUTTER * 2 + 1);
-    let left_bound = win_start - lookahead;
-    let right_bound = win_end + lookahead;
-
-    let mut segments_by_annotation: HashMap<usize, Vec<VisualSegment>> = HashMap::new();
-    let mut visible_indices: Vec<usize> = Vec::new();
-    let mut visible_set: HashSet<usize> = HashSet::new();
-
-    for (world_pos, domain_idx, layout_node) in viewport_graph.data_nodes() {
-        let block = <&GenGraph as NodeIndexable>::from_index(&graph, domain_idx.index());
-
-        if is_start_node(block.node_id) || is_end_node(block.node_id) {
-            continue;
-        }
-
-        let node_rect = WorldRect::from_center_and_size(world_pos, layout_node.size);
-        let x1 = node_rect.min.x;
-        let x2 = node_rect.max.x;
-
-        if x2 < left_bound || x1 > right_bound {
-            continue;
-        }
-
-        let Some(segments) = track.annotation_segments_by_node.get(&block.node_id) else {
-            continue;
-        };
-
-        let node_len = block.sequence_end - block.sequence_start;
-        if node_len <= 0 {
-            continue;
-        }
-
-        let node_width = layout_node.size.0 as i64;
-
-        for (idx, segment) in segments {
-            let overlap_start = max(segment.start, block.sequence_start);
-            let overlap_end = min(segment.end, block.sequence_end);
-
-            if overlap_end <= overlap_start {
-                continue;
-            }
-
-            let seg_start = resolve_endpoint(
-                overlap_start - block.sequence_start,
-                block.sequence_end - 1 - overlap_start,
-                x1,
-                node_width,
-                node_len,
-            );
-
-            let seg_end = resolve_endpoint(
-                overlap_end - 1 - block.sequence_start,
-                block.sequence_end - overlap_end,
-                x1,
-                node_width,
-                node_len,
-            );
-
-            if visible_set.insert(*idx) {
-                visible_indices.push(*idx);
-            }
-
-            segments_by_annotation
-                .entry(*idx)
-                .or_default()
-                .push(VisualSegment {
-                    node_x1: x1,
-                    node_x2: x2,
-                    start: seg_start,
-                    end: seg_end,
-                });
-        }
-    }
-
-    // Filter out entirely truncated annotations (start and end on same node, both in truncated interior).
-    let mut entirely_truncated_count = 0;
-
-    visible_indices.retain(|idx| {
-        let Some(segs) = segments_by_annotation.get(idx) else {
-            return false;
-        };
-
-        let (Some(first), Some(last)) = (segs.first(), segs.last()) else {
-            return true;
-        };
-
-        let is_truncated =
-            first.node_x1 == last.node_x1 && first.start.1.is_none() && last.end.1.is_none();
-
-        if is_truncated {
-            entirely_truncated_count += 1;
-            segments_by_annotation.remove(idx);
-            false
-        } else {
-            true
-        }
-    });
-
-    (
-        visible_indices,
-        segments_by_annotation,
-        entirely_truncated_count,
-    )
-}
-
-fn pack_visible_annotation_rows(
-    visible_ranges: &AnnotationVisibleRanges,
-    track: &AnnotationTrack,
-    max_rows: usize,
-) -> Vec<Vec<usize>> {
-    if visible_ranges.is_empty() || max_rows == 0 {
-        return Vec::new();
-    }
-
-    let mut annotations: Vec<_> = visible_ranges.iter().collect();
-    annotations.sort_by(|a, b| {
-        a.1.0
-            .cmp(&b.1.0)
-            .then_with(|| a.1.1.cmp(&b.1.1))
-            .then_with(|| a.0.cmp(b.0))
-    });
-
-    let mut rows: Vec<Vec<usize>> = Vec::with_capacity(max_rows);
-    let mut row_ends: Vec<i64> = Vec::with_capacity(max_rows);
-
-    for (idx, (start, end)) in annotations {
-        let label_len = track.annotations[*idx].name.chars().count() as i64;
-        let occupied_start = *start - label_len - 1;
-        let occupied_end = *end + RIGHT_BAR_MARGIN;
-
-        let best_row = row_ends
-            .iter()
-            .enumerate()
-            .filter(|(_, row_end)| occupied_start > **row_end)
-            .min_by_key(|(_, row_end)| **row_end)
-            .map(|(row_idx, _)| row_idx);
-
-        if let Some(row_idx) = best_row {
-            rows[row_idx].push(*idx);
-            row_ends[row_idx] = occupied_end;
-            continue;
-        }
-
-        if rows.len() < max_rows {
-            rows.push(vec![*idx]);
-            row_ends.push(occupied_end);
-        }
-    }
-
-    rows
-}
-
-fn span_strand(span: &AnnotationSpan) -> Option<Strand> {
-    let first = span.segments.first()?.strand;
-    if Strand::is_ambiguous(first) {
-        return None;
-    }
-    if span.segments.iter().all(|s| s.strand == first) {
-        Some(first)
-    } else {
-        None
-    }
-}
-
-/// Convert a world X coordinate to a terminal X coordinate.
-#[inline]
-pub(crate) fn world_x_to_term_x(viewport_state: &ViewportState, world_x: i64) -> i64 {
-    let cam_min_x = viewport_state.camera_rect().min.x;
-    viewport_state.viewport_bounds.x as i64 + (world_x - cam_min_x)
-}
-
-fn draw_truncation_marker(
-    buf: &mut Buffer,
-    inner: Rect,
-    viewport_state: &ViewportState,
-    world_x: i64,
-    terminal_y: u16,
-    style: Style,
-) {
-    let raw_x = world_x_to_term_x(viewport_state, world_x);
-    let area_left = inner.x as i64;
-    let area_right = (inner.x + inner.width - 1) as i64;
-
-    if raw_x >= area_left && raw_x <= area_right {
-        buf.set_string(raw_x as u16, terminal_y, "░", style);
-    }
-}
-
-fn place_bar(
-    buf: &mut Buffer,
-    inner: Rect,
-    viewport_state: &ViewportState,
-    world_x1: i64,
-    world_x2: i64,
-    terminal_y: u16,
-    style: Style,
-) {
-    let area_left = inner.x as i64;
-    let area_right = (inner.x + inner.width - 1) as i64;
-    let raw_x1 = world_x_to_term_x(viewport_state, world_x1);
-    let raw_x2 = world_x_to_term_x(viewport_state, world_x2);
-
-    if raw_x2 < area_left || raw_x1 > area_right {
-        return;
-    }
-
-    let start_x = raw_x1.max(area_left) as u16;
-    let end_x = raw_x2.min(area_right) as u16;
-    let width = (end_x - start_x + 1) as usize;
-
-    buf.set_string(start_x, terminal_y, "█".repeat(width), style);
-}
-
-fn draw_dashed_connector(
-    buf: &mut Buffer,
-    inner: Rect,
-    viewport_state: &ViewportState,
-    world_x_start: i64,
-    world_x_end: i64,
-    terminal_y: u16,
-    style: Style,
-) {
-    if world_x_end <= world_x_start {
-        return;
-    }
-
-    let area_left = inner.x as i64;
-    let area_right = (inner.x + inner.width - 1) as i64;
-    let raw_x1 = world_x_to_term_x(viewport_state, world_x_start);
-    let raw_x2 = world_x_to_term_x(viewport_state, world_x_end);
-
-    if raw_x2 < area_left || raw_x1 > area_right {
-        return;
-    }
-
-    let start_x = raw_x1.max(area_left) as u16;
-    let end_x = raw_x2.min(area_right) as u16;
-    let visible_width = (end_x - start_x + 1) as usize;
-
-    buf.set_string(start_x, terminal_y, "-".repeat(visible_width), style);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn place_sticky_label(
-    buf: &mut Buffer,
-    inner: Rect,
-    viewport_state: &ViewportState,
-    annotation_world_x1: i64,
-    annotation_world_x2: i64,
-    terminal_y: u16,
-    label: &str,
-    strand: Option<Strand>,
-    normal_style: Style,
-    label_fg_over_bar: Color,
-) {
-    // TODO: this assumes one terminal cell per char. If annotation names can
-    // contain wide Unicode or combining marks, switch to unicode-width and
-    // grapheme-aware clipping/writing.
-    let label_len = label.chars().count() as i64;
-
-    if label_len == 0 || inner.width == 0 {
-        return;
-    }
-
-    let area_left = inner.x as i64;
-    let area_right = (inner.x + inner.width - 1) as i64;
-
-    if area_right < area_left {
-        return;
-    }
-
-    let annotation_start = annotation_world_x1.min(annotation_world_x2);
-    let annotation_end = annotation_world_x1.max(annotation_world_x2);
-
-    let annotation_start_term = world_x_to_term_x(viewport_state, annotation_start);
-    let annotation_end_term = world_x_to_term_x(viewport_state, annotation_end);
-
-    let final_start = match strand {
-        Some(Strand::Forward) => (annotation_start_term - LABEL_SIDE_GUTTER - label_len)
-            .max(area_left + LABEL_SIDE_GUTTER)
-            .min(annotation_end_term - label_len),
-        Some(Strand::Reverse) => (annotation_end_term + LABEL_SIDE_GUTTER)
-            .min(area_right - label_len - LABEL_SIDE_GUTTER)
-            .max(annotation_start_term + LABEL_SIDE_GUTTER),
-        _ => (annotation_start_term - LABEL_SIDE_GUTTER - label_len)
-            .max(area_left + LABEL_SIDE_GUTTER)
-            .min(annotation_end_term - label_len),
-    };
-
-    let label_with_marker = match strand {
-        Some(Strand::Forward) => format!("{label}›"),
-        Some(Strand::Reverse) => format!("‹{label}"),
-        _ => label.to_string(),
-    };
-
-    draw_label_clipped_over_existing(
-        buf,
-        inner,
-        final_start,
-        terminal_y,
-        &label_with_marker,
-        normal_style,
-        label_fg_over_bar,
-    );
-}
-
-fn draw_label_clipped_over_existing(
-    buf: &mut Buffer,
-    inner: Rect,
-    start_x: i64,
-    terminal_y: u16,
-    label: &str,
-    normal_style: Style,
-    label_fg_over_bar: Color,
-) {
-    let area_left = inner.x as i64;
-    let area_right = (inner.x + inner.width - 1) as i64;
-
-    if area_right < area_left {
-        return;
-    }
-
-    let normal_fg = normal_style.fg.unwrap_or(Color::Reset);
-
-    for (i, ch) in label.chars().enumerate() {
-        let x = start_x + i as i64;
-
-        if x < area_left || x > area_right {
-            continue;
-        }
-
-        if ch == ' ' {
-            // Preserve the existing cell entirely for spaces in the label, so
-            // bars/connectors/backgrounds shine through instead of getting a
-            // visible label-colored gap.
-            continue;
-        }
-
-        let x = x as u16;
-
-        let Some(old_cell) = buf.cell((x, terminal_y)) else {
-            continue;
-        };
-
-        let old_symbol = old_cell.symbol();
-
-        let style = if old_symbol == "█" || old_symbol == "░" {
-            // The annotation bar is drawn as a full block glyph. Its visible
-            // color is the cell foreground, so reuse that fg as the label bg.
-            Style::default().fg(label_fg_over_bar).bg(old_cell.fg)
-        } else {
-            // Not over a bar: preserve whatever background is already there.
-            Style::default().fg(normal_fg).bg(old_cell.bg)
-        };
-
-        buf.set_string(x, terminal_y, ch.to_string(), style);
-    }
+    true
 }
 
 #[cfg(test)]
@@ -867,62 +262,182 @@ mod tests {
         assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
     }
 
-    fn track_with_names(names: &[&str]) -> AnnotationTrack {
-        AnnotationTrack::new(
-            "test",
-            names
-                .iter()
-                .map(|name| AnnotationSpan {
-                    id: HashId::convert_str(name),
-                    name: (*name).to_string(),
-                    segments: Vec::new(),
-                })
-                .collect(),
-        )
+    /// A node that has been split by a later edit (e.g. a library insertion) shows up as
+    /// several disjoint `GraphNode`s in the current graph, all sharing the same `node_id`.
+    /// A span with one segment per surviving fragment must resolve each segment to the
+    /// specific fragment its range overlaps, not to whichever fragment a naive
+    /// `node_id`-keyed lookup happens to keep.
+    #[test]
+    fn graph_locus_from_annotation_span_resolves_each_segment_to_its_own_fragment() {
+        let node_id = HashId::convert_str("split-node");
+        let left_fragment = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 395,
+        };
+        let right_fragment = GraphNode {
+            node_id,
+            sequence_start: 483,
+            sequence_end: 2686,
+        };
+        // Graph iteration order shouldn't matter; put the right fragment first so a
+        // naive `HashMap<node_id, GraphNode>` collect would keep it over the left one.
+        let graph = make_graph(&[right_fragment, left_fragment]);
+
+        let span = AnnotationSpan {
+            id: HashId::convert_str("source"),
+            name: "source".into(),
+            segments: vec![
+                make_segment("split-node", 0, 395, Strand::Forward),
+                make_segment("split-node", 483, 2686, Strand::Forward),
+            ],
+        };
+
+        let locus = graph_locus_from_annotation_span(&span, &graph).unwrap();
+        assert_eq!(locus.slices.len(), 2);
+        assert_eq!(locus.slices[0].block, left_fragment);
+        assert_eq!(locus.slices[0].start, 0);
+        assert_eq!(locus.slices[0].end, 395);
+        assert_eq!(locus.slices[1].block, right_fragment);
+        assert_eq!(locus.slices[1].start, 0);
+        assert_eq!(locus.slices[1].end, 2203); // 2686 - 483, local to the right fragment
+    }
+
+    fn make_segment(node_id: &str, start: i64, end: i64, strand: Strand) -> AnnotationSegment {
+        AnnotationSegment {
+            node_id: HashId::convert_str(node_id),
+            start,
+            end,
+            strand,
+        }
     }
 
     #[test]
-    fn pack_visible_annotation_rows_packs_disjoint_annotations_on_same_row() {
-        let track = track_with_names(&["abc1", "abc2", "abc3"]);
-        let mut visible_ranges = AnnotationVisibleRanges::new();
-        visible_ranges.insert(0, (10, 20));
-        visible_ranges.insert(1, (31, 41));
-        visible_ranges.insert(2, (52, 62));
-
-        let rows = pack_visible_annotation_rows(&visible_ranges, &track, 2);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], vec![0, 1, 2]);
+    fn span_label_text_appends_forward_arrow() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "my_gene".into(),
+            segments: vec![make_segment("n1", 0, 10, Strand::Forward)],
+        };
+        assert_eq!(span_label_text(&span), "my_gene›");
     }
 
     #[test]
-    fn pack_visible_annotation_rows_uses_multiple_rows_for_overlaps() {
-        let track = track_with_names(&["abc1", "abc2", "abc3"]);
-        let mut visible_ranges = AnnotationVisibleRanges::new();
-        visible_ranges.insert(0, (10, 20));
-        visible_ranges.insert(1, (18, 28));
-        visible_ranges.insert(2, (50, 60));
-
-        let rows = pack_visible_annotation_rows(&visible_ranges, &track, 2);
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], vec![0, 2]);
-        assert_eq!(rows[1], vec![1]);
+    fn span_label_text_prepends_reverse_arrow() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "my_gene".into(),
+            segments: vec![make_segment("n1", 0, 10, Strand::Reverse)],
+        };
+        assert_eq!(span_label_text(&span), "‹my_gene");
     }
 
     #[test]
-    fn pack_visible_annotation_rows_drops_annotations_when_rows_are_full() {
-        let track = track_with_names(&["abc1", "abc2", "abc3"]);
-        let mut visible_ranges = AnnotationVisibleRanges::new();
-        visible_ranges.insert(0, (10, 20));
-        visible_ranges.insert(1, (11, 21));
-        visible_ranges.insert(2, (12, 22));
+    fn span_label_text_omits_arrow_when_segments_disagree_on_strand() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "my_gene".into(),
+            segments: vec![
+                make_segment("n1", 0, 10, Strand::Forward),
+                make_segment("n2", 0, 10, Strand::Reverse),
+            ],
+        };
+        assert_eq!(span_label_text(&span), "my_gene");
+    }
 
-        let rows = pack_visible_annotation_rows(&visible_ranges, &track, 2);
+    #[test]
+    fn span_label_text_omits_arrow_for_empty_segments() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "my_gene".into(),
+            segments: vec![],
+        };
+        assert_eq!(span_label_text(&span), "my_gene");
+    }
 
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], vec![0]);
-        assert_eq!(rows[1], vec![1]);
-        assert!(!rows.iter().flatten().any(|idx| *idx == 2));
+    #[test]
+    fn span_is_single_node_true_for_one_segment() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![make_segment("n1", 0, 10, Strand::Forward)],
+        };
+        assert!(span_is_single_node(&span));
+    }
+
+    #[test]
+    fn span_is_single_node_true_when_all_segments_share_node() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![
+                make_segment("n1", 0, 10, Strand::Forward),
+                make_segment("n1", 10, 20, Strand::Forward),
+            ],
+        };
+        assert!(span_is_single_node(&span));
+    }
+
+    #[test]
+    fn span_is_single_node_false_when_segments_span_multiple_nodes() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![
+                make_segment("n1", 0, 10, Strand::Forward),
+                make_segment("n2", 0, 10, Strand::Forward),
+            ],
+        };
+        assert!(!span_is_single_node(&span));
+    }
+
+    #[test]
+    fn span_is_single_node_true_for_empty_segments() {
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![],
+        };
+        assert!(span_is_single_node(&span));
+    }
+
+    #[test]
+    fn test_span_should_hide_in_truncated_true_for_partial_single_node_span() {
+        let node = make_node("n1", 0, 20);
+        let graph = make_graph(&[node]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![make_segment("n1", 5, 10, Strand::Forward)],
+        };
+        assert!(span_should_hide_in_truncated(&span, &graph));
+    }
+
+    #[test]
+    fn test_span_should_hide_in_truncated_false_for_full_width_single_node_span() {
+        let node = make_node("n1", 0, 20);
+        let graph = make_graph(&[node]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![make_segment("n1", 0, 20, Strand::Forward)],
+        };
+        assert!(!span_should_hide_in_truncated(&span, &graph));
+    }
+
+    #[test]
+    fn test_span_should_hide_in_truncated_false_for_multi_node_span() {
+        let node_1 = make_node("n1", 0, 20);
+        let node_2 = make_node("n2", 0, 20);
+        let graph = make_graph(&[node_1, node_2]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![
+                make_segment("n1", 5, 20, Strand::Forward),
+                make_segment("n2", 0, 5, Strand::Forward),
+            ],
+        };
+        assert!(!span_should_hide_in_truncated(&span, &graph));
     }
 }

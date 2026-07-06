@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
+use crossterm::terminal;
 #[cfg(all(debug_assertions, feature = "profiling"))]
 use r#gen::profiling::{Profiler, SamplingProfiler};
 use r#gen::{
@@ -29,7 +30,7 @@ use r#gen::{
     track_database,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, block_group_inline::show_inline_gen_graph_widget,
+        block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
         diff::view_diff, operations::view_operations, patch::view_patches,
         tui_runtime::install_global_panic_hook,
     },
@@ -60,6 +61,17 @@ fn get_default_collection(conn: &OperationsConnection) -> Result<String, rusqlit
     Ok(stmt
         .query_row((), |row| row.get(0))
         .unwrap_or("default".to_string()))
+}
+
+/// Clamp a requested inline view height to a usable range: at least enough rows for the
+/// top/bottom border, the graph, and the footer, and no taller than the terminal itself.
+fn clamp_inline_view_height(requested_height: u16) -> u16 {
+    const MINIMUM_HEIGHT: u16 = 5;
+    let clamped_height = requested_height.max(MINIMUM_HEIGHT);
+    match terminal::size() {
+        Ok((_, terminal_rows)) => clamped_height.min(terminal_rows),
+        Err(_) => clamped_height,
+    }
 }
 
 fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
@@ -175,6 +187,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             collection,
             position,
             full,
+            height,
         }) => {
             let collection_name = &(match collection {
                 Some(collection) => collection,
@@ -191,14 +204,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
                 match block_group {
                     Ok(bg) => {
-                        let block_graph = BlockGroup::get_graph(graph_conn, &bg.id)?;
                         let current_path = BlockGroup::get_current_path(graph_conn, &bg.id)?;
-                        // Use a default height of 10 for now
-                        match show_inline_gen_graph_widget(
+                        match show_inline_block_group_widget(
                             graph_conn,
-                            &block_graph,
+                            bg.id,
                             vec![current_path],
-                            10,
+                            clamp_inline_view_height(height),
                         ) {
                             Ok(true) => {
                                 // User requested upgrade to full TUI

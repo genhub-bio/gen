@@ -9,7 +9,8 @@ GenPlot(
   sequence_graph_id,
   detail = "normal",
   rows = NULL,
-  cols = NULL
+  cols = NULL,
+  colors = NULL
 )
 }
 \arguments{
@@ -23,6 +24,18 @@ GenPlot(
 \item{rows}{Integer or \code{NULL}. Canvas height in terminal rows (default 24).}
 
 \item{cols}{Integer or \code{NULL}. Canvas width in terminal columns (default 72).}
+
+\item{colors}{Annotation colors. Three forms are accepted:
+\itemize{
+\item \code{NULL} (default) — use the built-in theme cycle.
+\item A named character vector such as \code{c(TEF1p = "#4393c3")} — maps
+annotation names to hex colors; annotations not in the vector are hidden.
+\item An unnamed character vector such as \code{c("#4393c3", "#1a9850")} — a
+cyclic palette assigned in encounter order.
+\item A function \code{function(ann) ...} that receives each annotation
+(a list with \code{id}, \code{name}, \code{group}, \code{metadata}, etc.)
+and returns a hex color string or \code{NULL} to hide that annotation.
+}}
 }
 \value{
 A \code{gen_plot} environment with methods:
@@ -34,10 +47,10 @@ A \code{gen_plot} environment with methods:
 \item{\code{set_detail(detail)}}{Change node detail level (\code{"normal"}, \code{"compressed"}, or \code{"full"}). Returns self invisibly.}
 \item{\code{render_frame(cols, rows)}}{Render to JSON string (used internally by the widget).}
 \item{\code{goto_match(match_locus)}}{Center the viewport on a search result locus. Sets detail to \code{"full"}. Returns self invisibly.}
-\item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be any named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}). Returns self invisibly.}
+\item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be a named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}) or a CSS hex string (e.g. \code{"#4393c3"}). Returns self invisibly.}
 \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
-\item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file as an annotation track panel below the graph. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
-\item{\code{add_track_group(group)}}{Add a DB-stored annotation group as a track panel below the graph.}
+\item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file and render annotations as inline graph highlights with floating labels. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
+\item{\code{add_track_group(group)}}{Add a DB-stored annotation group as inline graph highlights with floating labels.}
 \item{\code{list_annotations()}}{Return a list of \code{gen_annotation} records from the database. Each record has \code{id}, \code{name}, \code{group}, \code{kind}, \code{segments}, \code{length}, and \code{locus} fields.}
 \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 }

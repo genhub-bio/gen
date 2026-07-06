@@ -64,11 +64,9 @@ where
     }
     match op(context) {
         Ok(val) => {
-            if managed {
-                if let Err(e) = tx_commit(context) {
-                    tx_rollback(context);
-                    return Err(e);
-                }
+            if managed && let Err(e) = tx_commit(context) {
+                tx_rollback(context);
+                return Err(e);
             }
             Ok(val)
         }
@@ -194,9 +192,7 @@ impl PyRepository {
         path_to_py_path(py, &path)
     }
 
-    // -------------------------------------------------------------------------
     // Transaction context manager
-    // -------------------------------------------------------------------------
 
     /// Returns self so that Python's `with` statement calls `__enter__`/`__exit__`
     /// on this repository, batching multiple operations into one transaction.
@@ -231,9 +227,7 @@ impl PyRepository {
         Ok(false)
     }
 
-    // -------------------------------------------------------------------------
     // Raw database access
-    // -------------------------------------------------------------------------
 
     fn execute(&self, query: &str) -> PyResult<()> {
         self.context
@@ -248,9 +242,7 @@ impl PyRepository {
         py_query(py, self.context.graph().conn(), query)
     }
 
-    // -------------------------------------------------------------------------
     // SequenceGraph queries
-    // -------------------------------------------------------------------------
 
     fn get_sequence_graph_by_id(&self, id: &PyHashId) -> PyResult<PySequenceGraph> {
         let conn = self.context.graph().conn();
@@ -299,11 +291,9 @@ impl PyRepository {
         Ok(samples)
     }
 
-    // -------------------------------------------------------------------------
     // Plot
-    // -------------------------------------------------------------------------
 
-    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None))]
+    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None, colors=None))]
     fn plot(
         &self,
         py: Python<'_>,
@@ -311,13 +301,14 @@ impl PyRepository {
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
+        colors: Option<PyObject>,
     ) -> PyResult<PyObject> {
         let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph)?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
         let ctrl = Py::new(py, ctrl)?;
-        build_widget(py, ctrl, rows, cols)
+        build_widget(py, ctrl, rows, cols, colors)
     }
 
     fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {

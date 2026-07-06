@@ -15,24 +15,25 @@ use r#gen::{
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, highlight_match_range, locus_label_bounds,
-            viewport_pos_map,
+            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, reapply_overlays,
         },
-        inline_label_placement::draw_label_near_pos,
+        graph_overlay::{
+            AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
+            project_path_overlay_nodes, remove_path_overlay, set_path_overlay,
+        },
     },
 };
 use gen_annotations::projection::annotation_segments;
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode, GraphNodeSlice, project_path};
+use gen_core::{HashId, is_end_node, is_start_node};
+use gen_graph::GenGraph;
 use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
-    locus::GraphLocus,
 };
 use gen_tui::{
-    LineStyle, geometry::WorldPos, graph_controller::GraphController, graph_widget::GraphWidget,
-    layout::VisualDetail, plotter::PathStyle, theme::current_theme,
+    LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
+    plotter::PathStyle, theme::current_theme,
 };
 use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
@@ -211,32 +212,6 @@ fn serialize_buffer(buf: &Buffer, cols: u16, rows: u16) -> RenderedFrame {
     }
 }
 
-/// Build a `GraphLocus` from an `AnnotationSpan` using only nodes visible in
-/// the current viewport (`pos_map`).  Segments whose node is not in the map
-/// are silently dropped; `locus_label_bounds` handles partial coverage fine.
-fn locus_from_span_and_pos_map(
-    span: &AnnotationSpan,
-    pos_map: &HashMap<GraphNode, (WorldPos, (u64, u64))>,
-) -> GraphLocus {
-    let node_by_id: HashMap<HashId, GraphNode> = pos_map.keys().map(|n| (n.node_id, *n)).collect();
-    let slices = span
-        .segments
-        .iter()
-        .filter_map(|seg| {
-            let node = *node_by_id.get(&seg.node_id)?;
-            let start = (seg.start - node.sequence_start).max(0) as usize;
-            let end = (seg.end - node.sequence_start).max(0) as usize;
-            Some(GraphNodeSlice {
-                block: node,
-                start,
-                end,
-                strand: seg.strand,
-            })
-        })
-        .collect();
-    GraphLocus { slices }
-}
-
 fn annotation_to_span(annotation: &PyAnnotation) -> AnnotationSpan {
     use r#gen::views::annotation_track::AnnotationSegment as ViewSegment;
     AnnotationSpan {
@@ -255,12 +230,13 @@ fn annotation_to_span(annotation: &PyAnnotation) -> AnnotationSpan {
     }
 }
 
-/// A span annotated onto the graph canvas, with or without a label (highlight), optionally associated with a specific track.
-#[derive(Clone)]
-struct GraphOverlay {
-    span: AnnotationSpan,
-    track: Option<String>,
-    style: PathStyle,
+/// Sort key ordering annotation spans longest-first, so shorter (inner) spans paint on top.
+fn sort_key_longest_first(span: &AnnotationSpan) -> i64 {
+    -span
+        .segments
+        .iter()
+        .map(|segment| segment.end - segment.start)
+        .sum::<i64>()
 }
 
 /// View state and renderer for a single sequence graph "page" of a
@@ -281,12 +257,14 @@ struct GraphPage {
     db_path: PathBuf,
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
-    track_annotations: Vec<AnnotationTrack>,
+    /// Annotation and path overlays. The path (added by `show_path`, removed by
+    /// `clear_path`/`clear_highlights`) is just another overlay, so it survives
+    /// zoom/detail changes the same way the annotation overlays do.
     overlays: Vec<GraphOverlay>,
-    /// Set by `show_path`, cleared by `clear_path`/`clear_highlights`.
-    /// Restored by `reapply_highlights` so it survives zoom/detail changes
-    /// the same way `overlays` do.
-    path_highlight: Option<(PathStyle, Vec<GraphNode>)>,
+    annotation_colors: AnnotationColorCache,
+    /// Set to `true` once annotation groups have been loaded (auto or with colors).
+    /// Survives cloning so that cell-display clones do not double-load.
+    annotation_groups_loaded: bool,
 }
 
 /// The information needed to lazily build a `GraphPage` on first visit,
@@ -302,7 +280,7 @@ struct PageRef {
 /// construction the first time it becomes the active page.
 #[derive(Clone)]
 enum Page {
-    Loaded(GraphPage),
+    Loaded(Box<GraphPage>),
     Pending(PageRef),
 }
 
@@ -325,9 +303,9 @@ impl GraphPage {
             db_path,
             block_group_id: None,
             controller,
-            track_annotations: Vec::new(),
             overlays: Vec::new(),
-            path_highlight: None,
+            annotation_colors: AnnotationColorCache::new(),
+            annotation_groups_loaded: false,
         }
     }
 
@@ -344,15 +322,6 @@ impl GraphPage {
             .collect()
     }
 
-    fn all_node_ranges(&self) -> HashMap<HashId, Vec<(i64, i64)>> {
-        self.controller
-            .graph()
-            .nodes()
-            .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
-            .map(|n| (n.node_id, vec![(n.sequence_start, n.sequence_end)]))
-            .collect()
-    }
-
     fn load_group_as_track(
         &self,
         conn: &GraphConnection,
@@ -363,7 +332,7 @@ impl GraphPage {
         ))?;
         let current_block_group = BlockGroup::get_by_id(conn, &block_group_id)
             .map_err(|_| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
-        let ranges = self.all_node_ranges();
+        let node_ids = self.all_node_ids();
         let entry = load_annotation_group_entries(conn, &current_block_group)
             .into_iter()
             .find(|entry| entry.name == group)
@@ -372,7 +341,7 @@ impl GraphPage {
             conn,
             current_block_group: &current_block_group,
             entry: &entry,
-            visible_ranges_by_node: &ranges,
+            node_ids: &node_ids,
         })?;
         Ok(AnnotationTrack::new(group.to_string(), spans))
     }
@@ -386,9 +355,129 @@ impl GraphPage {
         };
         for name in annotation_group_names(conn, &current_block_group) {
             if let Ok(track) = self.load_group_as_track(conn, &name) {
-                self.track_annotations.push(track);
+                self.push_track_as_overlays(track);
             }
         }
+        self.reapply();
+        self.annotation_groups_loaded = true;
+    }
+
+    /// Load annotation groups applying per-annotation colors supplied by the Python layer.
+    ///
+    /// `color_map` maps annotation ID hex strings to an optional CSS hex color.
+    /// `Some(color)` → paint with that color; `None` → skip the annotation entirely.
+    /// Annotations whose ID is absent from the map fall back to the auto theme palette.
+    fn load_annotation_groups_with_colors_inner(
+        &mut self,
+        conn: &GraphConnection,
+        color_map: &HashMap<String, Option<String>>,
+    ) {
+        let Some(bg_id) = self.block_group_id else {
+            return;
+        };
+        let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id) else {
+            return;
+        };
+        for name in annotation_group_names(conn, &current_block_group) {
+            if let Ok(track) = self.load_group_as_track(conn, &name) {
+                self.push_track_as_overlays_with_colors(track, color_map);
+            }
+        }
+        self.reapply();
+        self.annotation_groups_loaded = true;
+    }
+
+    /// Starting offset into the accent palette for a newly loaded track: the count of
+    /// already-loaded themed overlays (tracks and single annotations), so added annotations
+    /// continue the colour cycle rather than restarting it. Ad hoc and path overlays don't
+    /// occupy an accent slot.
+    fn track_accent_base(&self) -> usize {
+        self.overlays
+            .iter()
+            .filter(|overlay| !matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path))
+            .count()
+    }
+
+    /// Append `spans_with_styles` as `Track`-sourced span overlays. Highlights are applied
+    /// separately by [`Self::reapply`] once the overlay list is fully updated.
+    fn push_span_overlays(
+        &mut self,
+        track_name: &str,
+        spans_with_styles: Vec<(AnnotationSpan, PathStyle)>,
+    ) {
+        for (span, style) in spans_with_styles {
+            self.overlays.push(GraphOverlay {
+                content: OverlayContent::Span(span),
+                source: OverlaySource::Track(track_name.to_string()),
+                style,
+            });
+        }
+    }
+
+    /// Re-register every overlay highlight on the controller from the current overlay list.
+    ///
+    /// Called after any mutation of `overlays`. Detail/zoom changes between mutations don't
+    /// need this: registered highlights self-heal on viewport rebuild (`map_column`).
+    fn reapply(&mut self) {
+        reapply_overlays(
+            &mut self.controller,
+            &mut self.overlays,
+            &mut self.annotation_colors,
+        );
+    }
+
+    fn push_track_as_overlays_with_colors(
+        &mut self,
+        track: AnnotationTrack,
+        color_map: &HashMap<String, Option<String>>,
+    ) {
+        let track_name = track.name;
+        let mut spans = track.annotations;
+        spans.sort_by_key(sort_key_longest_first);
+        let theme = current_theme();
+        let accent_base = self.track_accent_base();
+        let mut accent_offset = 0usize;
+        let spans_with_styles: Vec<(AnnotationSpan, PathStyle)> = spans
+            .into_iter()
+            .filter_map(|span| {
+                let color = match color_map.get(&span.id.to_string()) {
+                    // A `None` map value means the caller requested this annotation be hidden.
+                    Some(None) => return None,
+                    Some(Some(hex)) => parse_hex_color(hex)
+                        .unwrap_or_else(|_| theme[0x08 + ((accent_base + accent_offset) % 8)]),
+                    None => theme[0x08 + ((accent_base + accent_offset) % 8)],
+                };
+                accent_offset += 1;
+                Some((
+                    span,
+                    PathStyle::new(color)
+                        .with_line_style(LineStyle::Bold)
+                        .with_merge_glyphs(true),
+                ))
+            })
+            .collect();
+        self.push_span_overlays(&track_name, spans_with_styles);
+    }
+
+    fn push_track_as_overlays(&mut self, track: AnnotationTrack) {
+        let track_name = track.name;
+        let mut spans = track.annotations;
+        spans.sort_by_key(sort_key_longest_first);
+        let theme = current_theme();
+        let accent_base = self.track_accent_base();
+        let spans_with_styles: Vec<(AnnotationSpan, PathStyle)> = spans
+            .into_iter()
+            .enumerate()
+            .map(|(index, span)| {
+                (
+                    span,
+                    PathStyle::new(theme[0x08 + ((accent_base + index) % 8)])
+                        .with_line_style(LineStyle::Bold)
+                        .with_merge_glyphs(true),
+                )
+            })
+            .collect();
+        self.push_span_overlays(&track_name, spans_with_styles);
     }
 
     fn navigate_to_span(&mut self, span: &AnnotationSpan) {
@@ -410,52 +499,24 @@ impl GraphPage {
             GraphWidget::with_renderer(renderer).render(graph_area, buf, &mut self.controller);
         }
 
-        // Draw overlay labels. Midpoints are recomputed each render because the viewport may have changed.
-        let labeled_overlays: Vec<_> = self
-            .overlays
-            .iter()
-            .filter(|o| !o.span.name.is_empty())
-            .collect();
-        if !labeled_overlays.is_empty() {
+        // Draw overlay labels after the graph, then a single hint if any were hidden.
+        // Midpoints are recomputed each render because the viewport may have changed.
+        let detail_level = self.controller.get_detail_level();
+        let any_hidden = draw_annotation_labels(buf, graph_area, &self.controller, &self.overlays);
+        if any_hidden {
+            let note = if detail_level == VisualDetail::Full {
+                " some annotations hidden due to space constraints "
+            } else {
+                " some annotations hidden in truncated view "
+            };
             let theme = current_theme();
-            let pos_map = viewport_pos_map(&self.controller);
-            let detail_level = self.controller.get_detail_level();
-            for overlay in labeled_overlays {
-                let color = match overlay.style.color {
-                    ratatui::style::Color::Reset => theme[0x06],
-                    c => c,
-                };
-                let locus = locus_from_span_and_pos_map(&overlay.span, &pos_map);
-                let Some((left_pos, right_pos)) =
-                    locus_label_bounds(&locus, &pos_map, detail_level)
-                else {
-                    continue;
-                };
-                let max_distance = if detail_level == gen_tui::layout::VisualDetail::Minimal {
-                    10
-                } else {
-                    5
-                };
-                draw_label_near_pos(
-                    buf,
-                    graph_area,
-                    (left_pos, right_pos),
-                    &overlay.span.name,
-                    color,
-                    &self.controller.viewport_state,
-                    max_distance,
-                );
-            }
-        }
-
-        // Overlay annotation tracks at the bottom of the canvas area.
-        let mut remaining = graph_area;
-        for track in self.track_annotations.iter_mut().rev() {
-            let height = track.draw(buf, remaining, &self.controller);
-            if height == 0 {
-                break;
-            }
-            remaining.height = remaining.height.saturating_sub(height);
+            let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
+            buf.set_string(
+                graph_area.x,
+                graph_area.bottom().saturating_sub(1),
+                note,
+                note_style,
+            );
         }
 
         Ok(())
@@ -482,10 +543,51 @@ impl GraphPage {
 }
 
 impl GraphPage {
+    /// Whether annotation groups have already been loaded into this page.
+    ///
+    /// Returns ``true`` after either [`Self::trigger_auto_load`] or
+    /// [`Self::load_annotation_groups_with_colors`] has been called. Cloned
+    /// pages inherit this flag, preventing double-loads on cell re-display.
+    fn annotations_loaded(&self) -> bool {
+        self.annotation_groups_loaded
+    }
+
+    /// Load all annotation groups using the automatic theme-colour palette.
+    ///
+    /// Called by ``GraphWidget`` when no ``colors`` mapping is provided to
+    /// ``plot()``. No-op if annotations have already been loaded.
+    fn trigger_auto_load(&mut self) -> PyResult<()> {
+        if self.annotation_groups_loaded {
+            return Ok(());
+        }
+        let conn = self.open_conn()?;
+        self.auto_load_annotation_groups(&conn);
+        Ok(())
+    }
+
+    /// Load annotation groups applying per-annotation colours from a Python-resolved map.
+    ///
+    /// `color_map` maps annotation ID hex strings to a CSS hex colour string
+    /// (e.g. ``"#ff4444"``) or ``None`` to hide that annotation entirely.
+    /// Annotations absent from the map fall back to the auto theme palette.
+    ///
+    /// Called by ``GraphWidget`` after it evaluates the ``colors`` callable/dict/list
+    /// provided to ``plot()``. No-op if annotations have already been loaded.
+    fn load_annotation_groups_with_colors(
+        &mut self,
+        color_map: &HashMap<String, Option<String>>,
+    ) -> PyResult<()> {
+        if self.annotation_groups_loaded {
+            return Ok(());
+        }
+        let conn = self.open_conn()?;
+        self.load_annotation_groups_with_colors_inner(&conn, color_map);
+        Ok(())
+    }
+
     /// Set the level of node detail.
     ///
     /// Parameters
-    /// ----------
     /// detail : {"normal", "full", "minimal"}
     ///     ``"normal"`` shows truncated labels (default); ``"full"`` shows
     ///     complete labels; ``"minimal"`` shows the smallest representation.
@@ -501,60 +603,27 @@ impl GraphPage {
             }
         };
         self.controller.set_detail_level(level);
-        self.reapply_highlights();
         Ok(())
     }
 
     pub fn truncate_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Truncated);
-        self.reapply_highlights();
     }
 
     pub fn full_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Full);
-        self.reapply_highlights();
     }
 
     pub fn minimize_sequences(&mut self) {
         self.controller.set_detail_level(VisualDetail::Minimal);
-        self.reapply_highlights();
-    }
-
-    /// Re-register all overlays (and the path highlight, if any) using the current
-    /// detail level.
-    ///
-    /// Highlight column offsets are clamped at registration time, so they go stale
-    /// when the detail level changes. Call this after any zoom or detail change.
-    fn reapply_highlights(&mut self) {
-        let styles: Vec<PathStyle> = self.overlays.iter().map(|o| o.style).collect();
-        for style in &styles {
-            self.controller.clear_highlight(style);
-        }
-        // Collect loci with immutable graph borrow, then apply with mutable controller borrow.
-        let loci_with_styles: Vec<(GraphLocus, PathStyle)> = self
-            .overlays
-            .iter()
-            .filter_map(|o| {
-                graph_locus_from_annotation_span(&o.span, self.controller.graph())
-                    .map(|l| (l, o.style))
-            })
-            .collect();
-        for (locus, style) in &loci_with_styles {
-            highlight_match_range(&mut self.controller, locus, *style);
-        }
-        if let Some((style, nodes)) = self.path_highlight.clone() {
-            self.controller.set_path_highlight(style, nodes);
-        }
     }
 
     fn zoom_in(&mut self) {
         self.controller.zoom_in();
-        self.reapply_highlights();
     }
 
     fn zoom_out(&mut self) {
         self.controller.zoom_out();
-        self.reapply_highlights();
     }
 
     fn handle_click(&mut self, col: u16, row: u16) -> bool {
@@ -597,7 +666,6 @@ impl GraphPage {
         self.controller.go_to_node(domain_idx, (frac_x, 0.5));
         self.controller.queue_snap_left();
         self.controller.hide_cursor();
-        self.reapply_highlights();
     }
 
     /// Highlight the path of nodes covered by `match_obj` in the given colour.
@@ -606,30 +674,28 @@ impl GraphPage {
     /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
     /// next unused theme accent colour (slots 0x08–0x0F) is chosen automatically.
     fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
-        let c = self.resolve_color(color)?;
-        let style = PathStyle::new(c)
+        let highlight_color = self.resolve_color(color)?;
+        let style = PathStyle::new(highlight_color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        highlight_match_range(&mut self.controller, &locus.inner, style);
         self.overlays.push(GraphOverlay {
-            span: annotation_span_from_graph_locus(&locus.inner, ""),
-            track: None,
+            content: OverlayContent::Span(annotation_span_from_graph_locus(&locus.inner, "")),
+            source: OverlaySource::Adhoc,
             style,
         });
+        self.reapply();
         Ok(())
     }
 
     /// Remove all highlights from the graph, including any path shown by `show_path`.
     fn clear_highlights(&mut self) {
         self.overlays.clear();
-        self.path_highlight = None;
         self.controller.clear_all_highlights();
     }
 
     /// Highlight the most recent path associated with this sequence graph.
     ///
     /// Parameters
-    /// ----------
     /// color : str, optional
     ///     Colour for the highlight.  Accepts named colours
     ///     (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -637,7 +703,6 @@ impl GraphPage {
     ///     colour is chosen automatically.
     ///
     /// Raises
-    /// ------
     /// RuntimeError
     ///     If no sequence graph is associated with this widget, or if no path
     ///     exists for the sequence graph.
@@ -656,18 +721,7 @@ impl GraphPage {
         let path = BlockGroup::get_current_path(&conn, &block_group_id)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let path_blocks = path.blocks(&conn).unwrap_or_default();
-        let projected_path = project_path(self.controller.graph(), &path_blocks);
-
-        let path_nodes: Vec<GraphNode> = projected_path
-            .iter()
-            .filter_map(|(node, _)| {
-                if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
-                    Some(*node)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let path_nodes = project_path_overlay_nodes(self.controller.graph(), &path_blocks);
 
         if path_nodes.is_empty() {
             return Err(PyRuntimeError::new_err(
@@ -679,41 +733,40 @@ impl GraphPage {
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
 
-        self.controller
-            .set_path_highlight(style, path_nodes.clone());
-        self.path_highlight = Some((style, path_nodes));
+        set_path_overlay(&mut self.overlays, style, path_nodes);
+        self.reapply();
         Ok(())
     }
 
     /// Clear path highlighting previously applied by `show_path`.
     pub fn clear_path(&mut self) {
-        self.path_highlight = None;
-        self.controller.clear_all_highlights();
-        self.reapply_highlights(); // restore overlays cleared by clear_all_highlights
+        remove_path_overlay(&mut self.overlays);
+        self.reapply();
     }
 
-    /// Load annotations from the database by group name and add them as a
-    /// horizontal track panel below the graph.
+    /// Load annotations from the database by group name and add them as inline graph overlays.
     pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
         let conn = self.open_conn()?;
         let track = self
             .load_group_as_track(&conn, group)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        self.track_annotations.push(track);
+        self.push_track_as_overlays(track);
+        self.reapply();
         Ok(())
     }
 
-    /// Build a track panel from a list of `Annotation` objects.
-    /// Each `Annotation` becomes one span; all are grouped under `name`.
+    /// Add a list of `Annotation` objects as inline graph overlays grouped under `name`.
     pub fn add_track_annotations(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
-        let spans: Vec<AnnotationSpan> =
-            annotations.iter().map(|a| annotation_to_span(a)).collect();
-        self.track_annotations
-            .push(AnnotationTrack::new(name, spans));
+        let spans: Vec<AnnotationSpan> = annotations
+            .iter()
+            .map(|annotation| annotation_to_span(annotation))
+            .collect();
+        self.push_track_as_overlays(AnnotationTrack::new(name, spans));
+        self.reapply();
     }
 
-    /// Load annotations from a GFF3 or BED file and add them as a
-    /// horizontal track panel below the graph.
+    /// Load annotations from a GFF3 or BED file and render them as
+    /// inline graph highlights with floating labels.
     ///
     /// Accepts both standard files (chromosome/contig names as reference) and
     /// pre-translated files (node hash-IDs as reference).  Standard files are
@@ -801,7 +854,8 @@ impl GraphPage {
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
         };
 
-        self.track_annotations.push(track);
+        self.push_track_as_overlays(track);
+        self.reapply();
         Ok(())
     }
 
@@ -811,30 +865,22 @@ impl GraphPage {
         self.navigate_to_span(&span);
     }
 
-    /// Highlight an `Annotation` on the graph as a nameless inline annotation,
-    /// so the locus is coloured without duplicating the track label.
+    /// Highlight an `Annotation` on the graph without a label.
     pub fn highlight_annotation_obj(
         &mut self,
         annotation: &PyAnnotation,
         color: Option<&str>,
     ) -> PyResult<()> {
-        let c = self.resolve_color(color)?;
-        let style = PathStyle::new(c)
+        let highlight_color = self.resolve_color(color)?;
+        let style = PathStyle::new(highlight_color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        let span = annotation_to_span(annotation);
-        let locus = annotation
-            .locus
-            .clone()
-            .or_else(|| graph_locus_from_annotation_span(&span, self.controller.graph()));
-        if let Some(locus) = locus {
-            highlight_match_range(&mut self.controller, &locus, style);
-        }
         self.overlays.push(GraphOverlay {
-            span,
-            track: None,
+            content: OverlayContent::Span(annotation_to_span(annotation)),
+            source: OverlaySource::Adhoc,
             style,
         });
+        self.reapply();
         Ok(())
     }
 
@@ -883,120 +929,99 @@ impl GraphPage {
             .collect())
     }
 
-    /// Return a JSON list of track-panel annotation names currently loaded.
+    /// Return a JSON list of track names currently loaded (from `add_track_group`,
+    /// `add_track_file`, or auto-loaded annotation groups).
     pub fn get_track_names(&self) -> PyResult<String> {
-        let names: Vec<&str> = self
-            .track_annotations
-            .iter()
-            .map(|t| t.name.as_str())
-            .collect();
-        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Remove a track-panel annotation by name.
-    pub fn remove_track(&mut self, name: &str) {
-        self.track_annotations.retain(|t| t.name != name);
-    }
-
-    /// Clear all track-panel annotations.
-    pub fn clear_all_annotations(&mut self) {
-        self.track_annotations.clear();
-    }
-
-    /// Add inline annotations rendered directly on the graph canvas.
-    /// Annotations are tinted with an accent colour and labelled below their span.
-    pub fn add_inline_annotation(
-        &mut self,
-        annotations: Vec<PyRef<PyAnnotation>>,
-        track_name: Option<String>,
-    ) {
-        let color = if let Some(existing) = self
-            .overlays
-            .iter()
-            .find(|o| track_name.is_some() && o.track == track_name)
-        {
-            existing.style.color
-        } else {
-            self.controller.next_accent_color()
-        };
-        let style = PathStyle::new(color)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        // Collect spans and loci with immutable graph borrow, then apply with mutable controller borrow.
-        let spans_and_loci: Vec<(AnnotationSpan, Option<GraphLocus>)> = annotations
-            .iter()
-            .map(|ann| {
-                let span = annotation_to_span(ann);
-                let locus = ann
-                    .locus
-                    .clone()
-                    .or_else(|| graph_locus_from_annotation_span(&span, self.controller.graph()));
-                (span, locus)
-            })
-            .collect();
-        for (_, locus) in &spans_and_loci {
-            if let Some(locus) = locus {
-                highlight_match_range(&mut self.controller, locus, style);
-            }
-        }
-        for (span, _) in spans_and_loci {
-            self.overlays.push(GraphOverlay {
-                span,
-                track: track_name.clone(),
-                style,
-            });
-        }
-    }
-
-    /// Return a JSON list of inline annotation names currently loaded.
-    pub fn get_inline_annotation_names(&self) -> PyResult<String> {
         let mut seen = std::collections::HashSet::new();
         let names: Vec<&str> = self
             .overlays
             .iter()
-            .filter_map(|o| o.track.as_deref())
+            .filter_map(|o| match &o.source {
+                OverlaySource::Track(name) => Some(name.as_str()),
+                OverlaySource::Annotation(_) | OverlaySource::Adhoc | OverlaySource::Path => None,
+            })
             .filter(|n| seen.insert(*n))
             .collect();
         serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Remove all inline annotations whose track name matches `name`.
-    /// If the same name was added more than once, all copies are removed.
-    pub fn remove_inline_annotation(&mut self, name: &str) {
-        let mut styles_to_clear: Vec<PathStyle> = Vec::new();
-        self.overlays.retain(|o| {
-            if o.track.as_deref() == Some(name) {
-                styles_to_clear.push(o.style);
-                false
-            } else {
-                true
-            }
-        });
-        for style in styles_to_clear {
-            self.controller.clear_highlight(&style);
-        }
+    /// Remove all overlays belonging to the track `name` (loaded via
+    /// `add_track_group` / `add_track_file` / auto-loaded annotation groups).
+    pub fn remove_track(&mut self, name: &str) {
+        self.overlays
+            .retain(|overlay| !matches!(&overlay.source, OverlaySource::Track(n) if n == name));
+        self.reapply();
     }
 
-    /// Clear all inline annotations (named tracks only; direct highlights are unaffected).
-    pub fn clear_all_inline_annotations(&mut self) {
-        let mut styles_to_clear: Vec<PathStyle> = Vec::new();
-        self.overlays.retain(|o| {
-            if o.track.is_some() {
-                styles_to_clear.push(o.style);
-                false
-            } else {
-                true
-            }
+    /// Clear all annotations from the graph.
+    pub fn clear_all_annotations(&mut self) {
+        // Keep ad hoc highlights (e.g. search matches) and the path; drop everything
+        // added via a track or `add_annotation`, then repaint what remains.
+        self.overlays
+            .retain(|overlay| matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path));
+        self.reapply();
+    }
+
+    /// Add annotations rendered directly on the graph canvas.
+    /// Annotations are tinted with an accent colour and labelled below their span.
+    pub fn add_annotation(
+        &mut self,
+        annotations: Vec<PyRef<PyAnnotation>>,
+        track_name: Option<String>,
+    ) {
+        let existing_color = track_name.as_deref().and_then(|name| {
+            self.overlays
+                .iter()
+                .find_map(|overlay| match &overlay.source {
+                    OverlaySource::Annotation(existing) if existing == name => {
+                        Some(overlay.style.color)
+                    }
+                    _ => None,
+                })
         });
-        for style in styles_to_clear {
-            self.controller.clear_highlight(&style);
+        let color = existing_color.unwrap_or_else(|| self.controller.next_accent_color());
+        let style = PathStyle::new(color)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        let source = match &track_name {
+            Some(name) => OverlaySource::Annotation(name.clone()),
+            None => OverlaySource::Adhoc,
+        };
+        for annotation in &annotations {
+            self.overlays.push(GraphOverlay {
+                content: OverlayContent::Span(annotation_to_span(annotation)),
+                source: source.clone(),
+                style,
+            });
         }
+        self.reapply();
+    }
+
+    /// Return a JSON list of annotation names currently loaded (from
+    /// `add_annotation`; annotations loaded as part of a track keep their own
+    /// name here too, separately from the track's name).
+    pub fn get_annotation_names(&self) -> PyResult<String> {
+        let mut seen = std::collections::HashSet::new();
+        let names: Vec<&str> = self
+            .overlays
+            .iter()
+            .filter_map(|o| o.span().map(|s| s.name.as_str()))
+            .filter(|n| !n.is_empty() && seen.insert(*n))
+            .collect();
+        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Remove all overlays whose annotation name matches `name`, regardless of
+    /// which track (if any) they belong to. If the same name was added more
+    /// than once, every copy is removed.
+    pub fn remove_annotation(&mut self, name: &str) {
+        self.overlays
+            .retain(|overlay| overlay.span().is_none_or(|span| span.name != name));
+        self.reapply();
     }
 }
 
-// --------------------------------------------------------------------------
 // File loading helper
-// --------------------------------------------------------------------------
 
 /// Parse a translated GFF3 or BED file into an `AnnotationTrack`.
 ///
@@ -1043,7 +1068,6 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
     let graph = BlockGroup::get_graph(graph_conn, &sg.id).map_err(block_group_err_to_pyerr)?;
     let mut page = GraphPage::new(sg.name.clone(), db_path, graph);
     page.block_group_id = Some(sg.id);
-    page.auto_load_annotation_groups(graph_conn);
     Ok(page)
 }
 
@@ -1101,7 +1125,11 @@ impl PyGraphController {
     /// Wrap a single, already-loaded graph as a one-page controller.
     pub fn new(db_path: PathBuf, graph: GenGraph) -> Self {
         Self {
-            pages: vec![Page::Loaded(GraphPage::new(String::new(), db_path, graph))],
+            pages: vec![Page::Loaded(Box::new(GraphPage::new(
+                String::new(),
+                db_path,
+                graph,
+            )))],
             current_index: 0,
         }
     }
@@ -1109,7 +1137,7 @@ impl PyGraphController {
     /// Build a single-page controller for `sg`, loading its graph eagerly.
     pub(crate) fn for_sequence_graph(sg: &PySequenceGraph) -> PyResult<Self> {
         Ok(Self {
-            pages: vec![Page::Loaded(loaded_page_for_sequence_graph(sg)?)],
+            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(sg)?))],
             current_index: 0,
         })
     }
@@ -1141,11 +1169,10 @@ impl PyGraphController {
                 .map_err(block_group_err_to_pyerr)?;
             let mut loaded = GraphPage::new(page_ref.name.clone(), page_ref.db_path.clone(), graph);
             loaded.block_group_id = Some(page_ref.block_group_id);
-            loaded.auto_load_annotation_groups(&conn);
-            *page = Page::Loaded(loaded);
+            *page = Page::Loaded(Box::new(loaded));
         }
         match page {
-            Page::Loaded(page) => Ok(page),
+            Page::Loaded(page) => Ok(page.as_mut()),
             Page::Pending(_) => unreachable!("just loaded above"),
         }
     }
@@ -1158,10 +1185,45 @@ impl PyGraphController {
         self.clone()
     }
 
+    /// Whether annotation groups have already been loaded into the active page.
+    ///
+    /// Returns ``True`` after either :meth:`trigger_auto_load` or
+    /// :meth:`load_annotation_groups_with_colors` has been called. Cloned
+    /// controllers inherit this flag, preventing double-loads on cell re-display.
+    #[getter]
+    fn annotations_loaded(&mut self) -> PyResult<bool> {
+        Ok(self.active()?.annotations_loaded())
+    }
+
+    /// Load all annotation groups using the automatic theme-colour palette.
+    ///
+    /// Called by ``GraphWidget`` when no ``colors`` mapping is provided to
+    /// ``plot()``. No-op if annotations have already been loaded.
+    fn trigger_auto_load(&mut self) -> PyResult<()> {
+        self.active()?.trigger_auto_load()
+    }
+
+    /// Load annotation groups applying per-annotation colours from a Python-resolved map.
+    ///
+    /// Parameters
+    /// color_map : dict[str, str | None]
+    ///     Maps annotation ID hex strings to a CSS hex colour string (e.g.
+    ///     ``"#ff4444"``) or ``None`` to hide that annotation entirely.
+    ///     Annotations absent from the map fall back to the auto theme palette.
+    ///
+    /// Called by ``GraphWidget`` after it evaluates the ``colors`` callable/dict/list
+    /// provided to ``plot()``. No-op if annotations have already been loaded.
+    fn load_annotation_groups_with_colors(
+        &mut self,
+        color_map: HashMap<String, Option<String>>,
+    ) -> PyResult<()> {
+        self.active()?
+            .load_annotation_groups_with_colors(&color_map)
+    }
+
     /// Set the level of node detail.
     ///
     /// Parameters
-    /// ----------
     /// detail : {"normal", "full", "minimal"}
     ///     ``"normal"`` shows truncated labels (default); ``"full"`` shows
     ///     complete labels; ``"minimal"`` shows the smallest representation.
@@ -1241,7 +1303,6 @@ impl PyGraphController {
     /// Highlight the most recent path associated with this sequence graph.
     ///
     /// Parameters
-    /// ----------
     /// color : str, optional
     ///     Colour for the highlight.  Accepts named colours
     ///     (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -1249,7 +1310,6 @@ impl PyGraphController {
     ///     colour is chosen automatically.
     ///
     /// Raises
-    /// ------
     /// RuntimeError
     ///     If no sequence graph is associated with this widget, or if no path
     ///     exists for the sequence graph.
@@ -1354,33 +1414,26 @@ impl PyGraphController {
         Ok(())
     }
 
-    /// Add inline annotations rendered directly on the graph canvas.
+    /// Add annotations rendered directly on the graph canvas.
     /// Annotations are tinted with an accent colour and labelled below their span.
-    pub fn add_inline_annotation(
+    pub fn add_annotation(
         &mut self,
         annotations: Vec<PyRef<PyAnnotation>>,
         track_name: Option<String>,
     ) -> PyResult<()> {
-        self.active()?
-            .add_inline_annotation(annotations, track_name);
+        self.active()?.add_annotation(annotations, track_name);
         Ok(())
     }
 
-    /// Return a JSON list of inline annotation names currently loaded.
-    pub fn get_inline_annotation_names(&mut self) -> PyResult<String> {
-        self.active()?.get_inline_annotation_names()
+    /// Return a JSON list of annotation names currently loaded.
+    pub fn get_annotation_names(&mut self) -> PyResult<String> {
+        self.active()?.get_annotation_names()
     }
 
-    /// Remove all inline annotations whose track name matches `name`.
+    /// Remove all annotations whose track name matches `name`.
     /// If the same name was added more than once, all copies are removed.
-    pub fn remove_inline_annotation(&mut self, name: &str) -> PyResult<()> {
-        self.active()?.remove_inline_annotation(name);
-        Ok(())
-    }
-
-    /// Clear all inline annotations (named tracks only; direct highlights are unaffected).
-    pub fn clear_all_inline_annotations(&mut self) -> PyResult<()> {
-        self.active()?.clear_all_inline_annotations();
+    pub fn remove_annotation(&mut self, name: &str) -> PyResult<()> {
+        self.active()?.remove_annotation(name);
         Ok(())
     }
 
@@ -1410,8 +1463,6 @@ impl PyGraphController {
         self.current_index
     }
 }
-
-// --------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1496,6 +1547,7 @@ pub fn build_widget(
     ctrl: Py<PyGraphController>,
     rows: Option<u32>,
     cols: Option<u32>,
+    colors: Option<PyObject>,
 ) -> PyResult<PyObject> {
     let gen_module = py.import("gen")?;
     let widget_cls = gen_module.getattr("GraphWidget")?;
@@ -1505,6 +1557,9 @@ pub fn build_widget(
     }
     if let Some(c) = cols {
         kwargs.set_item("cols", c)?;
+    }
+    if let Some(c) = colors {
+        kwargs.set_item("colors", c)?;
     }
     let widget = widget_cls.call((ctrl,), Some(&kwargs))?;
     Ok(widget.into())

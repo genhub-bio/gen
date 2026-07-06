@@ -1,12 +1,14 @@
 use std::{
+    collections::HashSet,
     io::{Error, Result},
     panic,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use gen_core::HashId;
 use gen_graph::GenGraph;
-use gen_models::{db::GraphConnection, path::Path};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_controller::GraphController,
     layout::VisualDetail,
@@ -16,10 +18,22 @@ use gen_tui::{
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
+    style::Color,
     widgets::{Block, Borders},
 };
 
-use crate::views::gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_widget};
+use crate::views::{
+    annotation_groups::load_annotation_group_entries,
+    annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
+    block_group::extract_viewport_node_ids,
+    gen_graph_widget::{
+        GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
+    },
+    graph_overlay::{
+        AnnotationColorCache, GraphOverlay, group_track_key, has_path_overlay,
+        project_path_overlay_nodes, remove_path_overlay, replace_track_overlays, set_path_overlay,
+    },
+};
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
 fn get_path_nodes(
@@ -27,30 +41,11 @@ fn get_path_nodes(
     path: &Path,
     graph: &GenGraph,
 ) -> std::io::Result<Vec<gen_graph::GraphNode>> {
-    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
-    use gen_graph::project_path;
-
-    // Get the path blocks from the database
     let path_blocks = path
         .blocks(conn)
         .map_err(|err| Error::other(format!("Failed to load path blocks: {err}")))?;
 
-    // Project the path blocks onto the current graph state
-    let projected_path = project_path(graph, &path_blocks);
-
-    // Filter out terminal nodes (start and end) and convert to GraphNodes
-    let path_nodes: Vec<gen_graph::GraphNode> = projected_path
-        .iter()
-        .filter_map(|(node, _)| {
-            // Filter out terminal nodes
-            if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
-                Some(*node)
-            } else {
-                None
-            }
-        })
-        .collect();
-
+    let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
     if path_nodes.is_empty() {
         return Err(Error::other(
             "Path nodes not found in current graph state".to_string(),
@@ -119,19 +114,31 @@ pub struct InlineGenGraphState<'a> {
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     conn: &'a GraphConnection,
     paths: Vec<Vec<gen_graph::GraphNode>>,
+    block_group_id: Option<HashId>,
+    /// Annotation and path overlays currently loaded, ready for highlight + label rendering.
+    overlays: Vec<GraphOverlay>,
+    annotation_colors: AnnotationColorCache,
+    annotation_groups_loaded: bool,
 }
 
 impl<'a> InlineGenGraphState<'a> {
-    pub fn new(graph: &GenGraph, conn: &'a GraphConnection) -> Self {
+    pub fn new(
+        graph: &GenGraph,
+        conn: &'a GraphConnection,
+        block_group_id: Option<HashId>,
+    ) -> Self {
         let node_sizer = GenGraphNodeSizer;
         let mut graph_controller = GraphController::new(graph.clone(), node_sizer);
         graph_controller.set_detail_level(VisualDetail::Truncated);
         graph_controller.show_cursor();
-        let paths = Vec::new();
         Self {
             controller: graph_controller,
             conn,
-            paths,
+            paths: Vec::new(),
+            block_group_id,
+            overlays: Vec::new(),
+            annotation_colors: AnnotationColorCache::new(),
+            annotation_groups_loaded: false,
         }
     }
 
@@ -141,13 +148,39 @@ impl<'a> InlineGenGraphState<'a> {
         self.paths.push(path_nodes);
         Ok(())
     }
+
+    fn load_annotation_groups(&mut self, node_ids: &HashSet<HashId>) {
+        let (Some(block_group_id), conn) = (self.block_group_id, self.conn) else {
+            return;
+        };
+        let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id) else {
+            return;
+        };
+        // Drop the annotation overlays but keep the path overlay across viewport reloads.
+        self.overlays
+            .retain(|overlay| overlay.path_nodes().is_some());
+        for entry in load_annotation_group_entries(conn, &block_group) {
+            let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
+                conn,
+                current_block_group: &block_group,
+                entry: &entry,
+                node_ids,
+            }) else {
+                continue;
+            };
+            replace_track_overlays(&mut self.overlays, &group_track_key(&entry.id), entry_spans);
+        }
+    }
 }
 
-/// Display an inline GenGraph widget with interactive controls
+/// Display an inline widget for a generic GenGraph with interactive controls
 ///
 /// This function creates an interactive inline terminal widget that displays a GenGraph
 /// with full navigation and zoom controls. The widget appears inline in the terminal
 /// without taking over the entire screen.
+///
+/// Use [`show_inline_block_group_widget`] instead when the graph belongs to a `BlockGroup`,
+/// so that annotations can be loaded.
 ///
 /// # Controls
 /// * Arrow keys: Navigate cursor between nodes and pan the view
@@ -170,6 +203,29 @@ pub fn show_inline_gen_graph_widget(
     paths: Vec<Path>,
     height: u16,
 ) -> Result<bool> {
+    show_inline_widget(conn, graph, paths, height, None)
+}
+
+/// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
+///
+/// See [`show_inline_gen_graph_widget`] for controls and return value.
+pub fn show_inline_block_group_widget(
+    conn: &GraphConnection,
+    block_group_id: HashId,
+    paths: Vec<Path>,
+    height: u16,
+) -> Result<bool> {
+    let graph = BlockGroup::get_graph(conn, &block_group_id).map_err(Error::other)?;
+    show_inline_widget(conn, &graph, paths, height, Some(block_group_id))
+}
+
+fn show_inline_widget(
+    conn: &GraphConnection,
+    graph: &GenGraph,
+    paths: Vec<Path>,
+    height: u16,
+    block_group_id: Option<HashId>,
+) -> Result<bool> {
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(height),
@@ -178,7 +234,7 @@ pub fn show_inline_gen_graph_widget(
 
     match terminal_result {
         Ok(mut terminal) => {
-            let mut state = InlineGenGraphState::new(graph, conn);
+            let mut state = InlineGenGraphState::new(graph, conn, block_group_id);
             for path in paths {
                 state.add_path(&path, conn)?;
             }
@@ -197,6 +253,13 @@ pub fn show_inline_gen_graph_widget(
                             let now = Instant::now();
                             let frame_delta = now.duration_since(last_frame_time);
                             last_frame_time = now;
+
+                            // Re-apply stored overlays before drawing.
+                            reapply_overlays(
+                                &mut state.controller,
+                                &mut state.overlays,
+                                &mut state.annotation_colors,
+                            );
 
                             // Draw the frame
                             terminal.draw(|frame| {
@@ -217,6 +280,20 @@ pub fn show_inline_gen_graph_widget(
 
                                 render_inline(frame, &mut state);
                             })?;
+
+                            // After the first draw the viewport is populated. Load (or reload)
+                            // annotation groups using the viewport node IDs. On subsequent frames,
+                            // invalidate when the camera has moved far enough to change the node set.
+                            if state.controller.detect_motion() {
+                                state.annotation_groups_loaded = false;
+                            }
+                            if !state.annotation_groups_loaded {
+                                let node_ids = extract_viewport_node_ids(&state.controller);
+                                if !node_ids.is_empty() {
+                                    state.load_annotation_groups(&node_ids);
+                                    state.annotation_groups_loaded = true;
+                                }
+                            }
                         }
                         AppEvent::KeyPress(key) => {
                             // Intercept quit signal and path highlighting
@@ -229,17 +306,14 @@ pub fn show_inline_gen_graph_widget(
                                     break;
                                 }
                                 KeyCode::Char('p') => {
-                                    // Toggle path highlighting
-                                    let path_style = PathStyle::new(current_theme()[0x09])
-                                        .with_line_style(LineStyle::Bold)
-                                        .with_merge_glyphs(true);
-
-                                    if state.controller.has_highlight(&path_style) {
-                                        state.controller.clear_highlight(&path_style);
-                                    } else if let Some(last_path) = state.paths.last() {
-                                        state
-                                            .controller
-                                            .set_path_highlight(path_style, last_path.clone());
+                                    // Toggle the path overlay; reapply_highlights repaints it.
+                                    if has_path_overlay(&state.overlays) {
+                                        remove_path_overlay(&mut state.overlays);
+                                    } else if let Some(nodes) = state.paths.last().cloned() {
+                                        let style = PathStyle::new(current_theme()[0x09])
+                                            .with_line_style(LineStyle::Bold)
+                                            .with_merge_glyphs(true);
+                                        set_path_overlay(&mut state.overlays, style, nodes);
                                     } else {
                                         eprintln!("No paths available for path highlighting");
                                     }
@@ -313,7 +387,23 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
 
     // Render the graph widget
     frame.render_stateful_widget(widget, inner_area, &mut state.controller);
-    draw_controls_help(frame, main_layout[1], state);
+
+    // Draw floating annotation labels after the graph.
+    let any_annotations_hidden = draw_annotation_labels(
+        frame.buffer_mut(),
+        inner_area,
+        &state.controller,
+        &state.overlays,
+    );
+
+    let hidden_legend = any_annotations_hidden.then(|| {
+        if detail_level == VisualDetail::Full {
+            "* some annotations hidden due to space constraints"
+        } else {
+            "* zoom in for more features"
+        }
+    });
+    draw_controls_help(frame, main_layout[1], state, hidden_legend);
 }
 
 /// Draw the final plot after the widget is done
@@ -336,17 +426,43 @@ fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
     );
 }
 
-fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
-    let help_text = if state.controller.highlights.is_empty() {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
-    } else {
+/// Draw the bottom controls line. When `hidden_legend` is set, it's right-aligned on the
+/// same line and the path-visibility shortcut is dropped to make room for it.
+fn draw_controls_help(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut InlineGenGraphState,
+    hidden_legend: Option<&str>,
+) {
+    let help_text = if hidden_legend.is_some() {
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | q: Exit".to_string()
+    } else if has_path_overlay(&state.overlays) {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
+    } else {
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
     };
 
-    let paragraph =
-        ratatui::widgets::Paragraph::new(help_text).style(Style::default().fg(Color::Yellow));
+    let buf = frame.buffer_mut();
+    buf.set_string(
+        area.x,
+        area.y,
+        &help_text,
+        Style::default().fg(Color::Yellow),
+    );
 
-    frame.render_widget(paragraph, area);
+    if let Some(legend) = hidden_legend {
+        let help_width = help_text.chars().count() as u16;
+        let legend_width = legend.chars().count() as u16;
+        let legend_x = area.right().saturating_sub(legend_width);
+        if legend_x > area.x + help_width {
+            buf.set_string(
+                legend_x,
+                area.y,
+                legend,
+                Style::default().fg(current_theme()[0x09]),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -370,7 +486,7 @@ mod tests {
         };
         graph.add_node(node);
 
-        let state = InlineGenGraphState::new(&graph, &conn);
+        let state = InlineGenGraphState::new(&graph, &conn, None);
         assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
     }
 }

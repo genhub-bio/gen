@@ -68,17 +68,24 @@ impl PySample {
     /// skipped and only the widget is returned.
     ///
     /// Parameters
-    /// ----------
     /// rows : int, optional
     ///     Initial viewport height in terminal rows.
     /// cols : int, optional
     ///     Initial viewport width in terminal columns.
-    #[pyo3(signature = (rows=None, cols=None))]
-    fn plot(slf: &Bound<'_, PySample>, rows: Option<u32>, cols: Option<u32>) -> PyResult<PyObject> {
+    /// colors : callable | dict | list, optional
+    ///     Controls how annotation group entries are coloured when they are
+    ///     auto-loaded from the repository. See ``Repository.plot`` for details.
+    #[pyo3(signature = (rows=None, cols=None, colors=None))]
+    fn plot(
+        slf: &Bound<'_, PySample>,
+        rows: Option<u32>,
+        cols: Option<u32>,
+        colors: Option<PyObject>,
+    ) -> PyResult<PyObject> {
         let py = slf.py();
         let ctrl = PyGraphController::for_sample(&slf.borrow().block_groups)?;
         let ctrl = Py::new(py, ctrl)?;
-        build_widget(py, ctrl, rows, cols)
+        build_widget(py, ctrl, rows, cols, colors)
     }
 
     /// IPython display hook — called when a cell ends with a Sample.

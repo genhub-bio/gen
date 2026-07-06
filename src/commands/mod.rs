@@ -76,6 +76,9 @@ pub enum Commands {
         /// Show the full TUI explorer instead of the inline preview. Includes sidebar explorer and additional interactive features.
         #[arg(short, long)]
         full: bool,
+        /// Number of terminal rows for the inline graph view
+        #[arg(long, default_value_t = 10)]
+        height: u16,
     },
     /// Show a diff of operations and render the consolidated graph
     #[command(name = "view-diff", arg_required_else_help(true))]

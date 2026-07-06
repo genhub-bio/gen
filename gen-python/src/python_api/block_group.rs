@@ -125,7 +125,6 @@ impl PySequenceGraph {
     /// ``Repository``.
     ///
     /// Parameters
-    /// ----------
     /// rows : int, optional
     ///     Initial viewport height in terminal rows.
     /// cols : int, optional
@@ -134,12 +133,25 @@ impl PySequenceGraph {
     ///     Initial level of node detail.  ``"normal"`` (default) shows
     ///     truncated labels; ``"full"`` shows complete labels; ``"minimal"``
     ///     shows the smallest representation.
-    #[pyo3(signature = (rows=None, cols=None, detail=None))]
+    /// colors : callable | dict | list, optional
+    ///     Controls how annotation group entries are coloured when they are
+    ///     auto-loaded from the repository.
+    ///
+    ///     - **callable** ``(ann: Annotation) -> str | None`` — called once per
+    ///       annotation; return a CSS hex colour (``"#rrggbb"``) to paint it,
+    ///       or ``None`` to hide it.
+    ///     - **dict** ``{name: color}`` — maps ``ann.name`` to a colour; annotations
+    ///       absent from the dict are hidden.
+    ///     - **list** ``[color, ...]`` — assigns colours from the list cyclically.
+    ///
+    ///     When omitted the theme accent palette is used automatically.
+    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None))]
     fn plot(
         slf: &Bound<'_, PySequenceGraph>,
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
+        colors: Option<PyObject>,
     ) -> PyResult<PyObject> {
         let py = slf.py();
         let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow())?;
@@ -147,7 +159,7 @@ impl PySequenceGraph {
             ctrl.set_detail(node_detail)?;
         }
         let ctrl = Py::new(py, ctrl)?;
-        build_widget(py, ctrl, rows, cols)
+        build_widget(py, ctrl, rows, cols, colors)
     }
 
     /// Search for exact occurrences of `query` in this sequence graph.
@@ -157,7 +169,6 @@ impl PySequenceGraph {
     ///   - `.slices` → `list[NodeSlice]`
     ///
     /// Parameters
-    /// ----------
     /// query : str
     ///     The sequence to search for.
     /// sequence_kind : {"exact", "dna", "ssdna", "protein"}, optional
@@ -219,7 +230,6 @@ impl PySequenceGraph {
     /// ``Repository``.
     ///
     /// Parameters
-    /// ----------
     /// sequence_kind : {"exact", "dna", "ssdna", "protein"}, optional
     ///     Biological interpretation of the sequences (default: ``"dna"``).
     ///     ``"exact"`` builds a case-sensitive index; must match the value
@@ -278,7 +288,6 @@ impl PySequenceGraph {
     /// Return the sequence for a graph node.
     ///
     /// Parameters
-    /// ----------
     /// node : Node
     ///     A ``Node`` obtained from ``to_dict()["nodes"]``, ``search()`` results,
     ///     or any other API that returns graph nodes.
@@ -430,7 +439,6 @@ impl PySequenceGraph {
     /// Export all sequence graphs in this sequence graph's sample to FASTA.
     ///
     /// Parameters
-    /// ----------
     /// filename : str
     ///     Output file path.
     fn export_fasta(&self, filename: String) -> PyResult<()> {
@@ -448,7 +456,6 @@ impl PySequenceGraph {
     /// Export all sequence graphs in this sequence graph's sample to GFA.
     ///
     /// Parameters
-    /// ----------
     /// filename : str
     ///     Output file path.
     /// node_max : int, optional
@@ -470,7 +477,6 @@ impl PySequenceGraph {
     /// Export all sequence graphs in this sequence graph's sample to GenBank.
     ///
     /// Parameters
-    /// ----------
     /// filename : str
     ///     Output file path.
     fn export_genbank(&self, filename: String) -> PyResult<()> {
@@ -487,7 +493,6 @@ impl PySequenceGraph {
     /// Return all gene annotations associated with this sequence graph.
     ///
     /// Returns
-    /// -------
     /// list[GeneAnnotation]
     fn list_annotations(&self) -> PyResult<Vec<PyAnnotation>> {
         let ctx = self.require_context("list_annotations()")?;
@@ -520,7 +525,6 @@ impl PySequenceGraph {
     /// searched. The protein sequence graph is created in this graph's sample.
     ///
     /// Parameters
-    /// ----------
     /// region : str or Annotation, optional
     ///     - ``str``: a path name or annotation name scoped to this sequence
     ///       graph. Path names take priority over annotation names.
@@ -656,7 +660,6 @@ impl PySequenceGraph {
     /// Derive a coordinate-bounded subgraph from this sequence graph.
     ///
     /// Parameters
-    /// ----------
     /// new_sample : str
     ///     Sample name for the derived sequence graph.
     /// start : int
@@ -699,7 +702,6 @@ impl PySequenceGraph {
     /// Split this sequence graph into coordinate-bounded subgraphs.
     ///
     /// Parameters
-    /// ----------
     /// new_sample : str
     ///     Sample name for the derived sequence graphs.
     /// breakpoints : str, optional

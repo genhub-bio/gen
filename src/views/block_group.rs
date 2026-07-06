@@ -1,14 +1,16 @@
 use std::{
+    collections::HashSet,
     error::Error,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{
-    LineStyle, graph_controller::GraphController, plotter::PathStyle, theme::current_theme,
+    LineStyle, graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle,
+    theme::current_theme,
 };
 use log::{info, warn};
 use ratatui::{
@@ -22,7 +24,7 @@ use rusqlite::params;
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
-        annotation_track::AnnotationTrack,
+        annotation_groups::load_annotation_group_entries,
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
             load_annotations_for_group,
@@ -30,6 +32,12 @@ use crate::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
+            draw_annotation_labels, reapply_overlays,
+        },
+        graph_overlay::{
+            AnnotationColorCache, GraphOverlay, OverlaySource, file_track_key, group_track_key,
+            has_path_overlay, project_path_overlay_nodes, remove_path_overlay,
+            remove_track_overlays, replace_track_overlays, set_path_overlay,
         },
         panels::{render_status_bar, render_with_optional_clear},
         tui_runtime::TuiSession,
@@ -62,7 +70,6 @@ fn get_block_group_path_nodes(
     block_group_id: &gen_core::HashId,
     graph: &GenGraph,
 ) -> Result<Vec<gen_graph::GraphNode>, String> {
-    use gen_graph::project_path;
     use gen_models::path::Path;
 
     // Query the database for the most recent path for this block group
@@ -73,27 +80,11 @@ fn get_block_group_path_nodes(
     )
     .map_err(|e| format!("Failed to query path: {}", e))?;
 
-    // Get the path blocks from the database
     let path_blocks = path
         .blocks(conn)
         .map_err(|err| format!("Failed to load path blocks: {err}"))?;
 
-    // Project the path blocks onto the current graph state
-    let projected_path = project_path(graph, &path_blocks);
-
-    // Filter out terminal nodes (start and end) and convert to GraphNodes
-    let path_nodes: Vec<gen_graph::GraphNode> = projected_path
-        .iter()
-        .filter_map(|(node, _)| {
-            // Filter out terminal nodes
-            if node.node_id != PATH_START_NODE_ID && node.node_id != PATH_END_NODE_ID {
-                Some(*node)
-            } else {
-                None
-            }
-        })
-        .collect();
-
+    let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
     if path_nodes.is_empty() {
         return Err("Path nodes not found in current graph state".to_string());
     }
@@ -101,50 +92,49 @@ fn get_block_group_path_nodes(
     Ok(path_nodes)
 }
 
-/// Toggle path highlighting for a block group
+/// Toggle the path overlay for a block group.
+///
+/// The path lives in `overlays` alongside the annotation overlays and is repainted each
+/// frame by the render loop, so this only adds or removes it. Returns whether the path
+/// overlay is now enabled.
 fn toggle_path_highlight(
     conn: &GraphConnection,
-    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
+    overlays: &mut Vec<GraphOverlay>,
 ) -> Result<bool, String> {
-    let style = PathStyle::new(color)
-        .with_line_style(LineStyle::Bold)
-        .with_merge_glyphs(true);
-    // Check if highlighting is already active for this style
-    if controller.has_highlight(&style) {
-        controller.clear_highlight(&style);
+    if has_path_overlay(overlays) {
+        remove_path_overlay(overlays);
         Ok(false)
     } else {
-        // Get the path nodes for this block group
+        let style = PathStyle::new(color)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
         let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph())?;
-
-        // Set the path highlight using GraphNodes directly
-        controller.set_path_highlight(style, path_nodes);
+        set_path_overlay(overlays, style, path_nodes);
         Ok(true)
     }
 }
 
-fn visible_ranges_by_node(
-    block_graph: &GenGraph,
-) -> std::collections::HashMap<HashId, Vec<(i64, i64)>> {
-    let mut ranges_by_node: std::collections::HashMap<HashId, Vec<(i64, i64)>> =
-        std::collections::HashMap::new();
-    for node in block_graph.nodes() {
-        if node.sequence_end <= node.sequence_start {
-            continue;
-        }
-        ranges_by_node
-            .entry(node.node_id)
-            .or_default()
-            .push((node.sequence_start, node.sequence_end));
-    }
-    ranges_by_node
+/// Node IDs present in the current viewport (excluding terminal start/end nodes).
+pub(crate) fn extract_viewport_node_ids(
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+) -> HashSet<HashId> {
+    use gen_core::{is_end_node, is_start_node};
+    use petgraph::visit::NodeIndexable;
+    let graph = controller.graph();
+    controller
+        .get_viewport_graph()
+        .data_nodes()
+        .map(|(_, idx, _)| <&GenGraph as NodeIndexable>::from_index(&graph, idx.index()).node_id)
+        .filter(|&id| !is_start_node(id) && !is_end_node(id))
+        .collect()
 }
 
 /// Compute the coordinate window (min sequence start, max sequence end) of visible blocks
 /// in the current viewport, using the graph controller's viewport graph.
-fn current_view_coordinate_window(
+pub(crate) fn current_view_coordinate_window(
     controller: &GraphController<GenGraph, GenGraphNodeSizer>,
 ) -> Option<(i64, i64)> {
     use gen_core::{is_end_node, is_start_node};
@@ -167,9 +157,43 @@ fn current_view_coordinate_window(
     (start <= end).then_some((start, end))
 }
 
-fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
+pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     let span = (window.1 - window.0).max(1);
     (window.0.saturating_sub(span), window.1.saturating_add(span))
+}
+
+fn load_annotation_groups_for_viewport(
+    conn: &GraphConnection,
+    block_group: &BlockGroup,
+    node_ids: &HashSet<HashId>,
+    explorer_state: &mut CollectionExplorerState,
+    overlays: &mut Vec<GraphOverlay>,
+    messages: &mut crate::views::messages::MessageBuffer,
+) {
+    for entry in load_annotation_group_entries(conn, block_group) {
+        let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn,
+            current_block_group: block_group,
+            entry: &entry,
+            node_ids,
+        }) {
+            Ok(spans) => spans,
+            Err(err) => {
+                messages.push_warn(format!(
+                    "Failed to load annotations for group {}: {err}",
+                    entry.id
+                ));
+                continue;
+            }
+        };
+        if spans.is_empty() {
+            continue;
+        }
+        explorer_state
+            .active_annotation_groups
+            .insert(entry.id.clone());
+        replace_track_overlays(overlays, &group_track_key(&entry.id), spans);
+    }
 }
 
 pub fn view_block_group(
@@ -237,13 +261,13 @@ pub fn view_block_group(
     bar.finish();
 
     let mut messages = crate::views::messages::MessageBuffer::new(MESSAGE_BUFFER_LIMIT);
-    let mut annotation_file_tracks: std::collections::HashMap<HashId, AnnotationTrack> =
-        std::collections::HashMap::new();
+    // Every annotation currently painted on the canvas, from both loaded files and
+    // loaded groups, keyed by track (see `graph_overlay::file_track_key`/`group_track_key`).
+    let mut overlays: Vec<GraphOverlay> = Vec::new();
+    let mut annotation_colors = AnnotationColorCache::new();
     let mut annotation_file_index_available: std::collections::HashMap<HashId, bool> =
         std::collections::HashMap::new();
     let mut annotation_file_loaded_windows: std::collections::HashMap<HashId, (i64, i64)> =
-        std::collections::HashMap::new();
-    let mut annotation_group_tracks: std::collections::HashMap<String, AnnotationTrack> =
         std::collections::HashMap::new();
     let mut current_block_group =
         block_group_id.map(|bg_id| match BlockGroup::get_by_id(conn, &bg_id) {
@@ -275,6 +299,8 @@ pub fn view_block_group(
     }
 
     bar.finish();
+
+    let mut annotation_groups_loaded = false;
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -397,9 +423,10 @@ pub fn view_block_group(
                                 {
                                     match toggle_path_highlight(
                                         conn,
-                                        &mut graph_controller,
+                                        &graph_controller,
                                         block_group_id,
                                         Color::Red,
+                                        &mut overlays,
                                     ) {
                                         Ok(highlighting_enabled) => {
                                             if highlighting_enabled {
@@ -468,8 +495,11 @@ pub fn view_block_group(
                                         };
                                         match load_annotation_file_track(&request) {
                                             Ok(load) => {
-                                                annotation_file_tracks
-                                                    .insert(toggled_id, load.track);
+                                                replace_track_overlays(
+                                                    &mut overlays,
+                                                    &file_track_key(&toggled_id),
+                                                    load.track.annotations,
+                                                );
                                                 annotation_file_index_available
                                                     .insert(toggled_id, load.index_available);
                                                 if let Some(window) = load.loaded_window {
@@ -484,14 +514,20 @@ pub fn view_block_group(
                                                 messages.push_warn(format!("{err}"));
                                                 explorer_state
                                                     .deactivate_annotation_file(&toggled_id);
-                                                annotation_file_tracks.remove(&toggled_id);
+                                                remove_track_overlays(
+                                                    &mut overlays,
+                                                    &file_track_key(&toggled_id),
+                                                );
                                                 annotation_file_index_available.remove(&toggled_id);
                                                 annotation_file_loaded_windows.remove(&toggled_id);
                                             }
                                         }
                                     }
                                 } else {
-                                    annotation_file_tracks.remove(&toggled_id);
+                                    remove_track_overlays(
+                                        &mut overlays,
+                                        &file_track_key(&toggled_id),
+                                    );
                                     annotation_file_index_available.remove(&toggled_id);
                                     annotation_file_loaded_windows.remove(&toggled_id);
                                 }
@@ -502,8 +538,7 @@ pub fn view_block_group(
                             {
                                 if explorer_state.is_annotation_group_active(&toggled_group) {
                                     if current_block_group.is_some() {
-                                        let visible_node_ranges =
-                                            visible_ranges_by_node(&block_graph);
+                                        let node_ids = extract_viewport_node_ids(&graph_controller);
                                         let entry = explorer.annotation_group_entry(&toggled_group);
                                         let spans = match entry.map(|entry| {
                                             load_annotations_for_group(
@@ -513,7 +548,7 @@ pub fn view_block_group(
                                                         .as_ref()
                                                         .expect("current block group should exist"),
                                                     entry,
-                                                    visible_ranges_by_node: &visible_node_ranges,
+                                                    node_ids: &node_ids,
                                                 },
                                             )
                                         }) {
@@ -531,30 +566,18 @@ pub fn view_block_group(
                                             explorer_state
                                                 .deactivate_annotation_group(&toggled_group);
                                         } else {
-                                            let title = if let Some(entry) =
-                                                explorer.annotation_group_entry(&toggled_group)
-                                            {
-                                                if current_block_group.as_ref().is_some_and(|bg| {
-                                                    bg.sample_name == entry.sample_name
-                                                }) {
-                                                    entry.name.clone()
-                                                } else {
-                                                    format!(
-                                                        "{} ({})",
-                                                        entry.name, entry.sample_name
-                                                    )
-                                                }
-                                            } else {
-                                                toggled_group.clone()
-                                            };
-                                            annotation_group_tracks.insert(
-                                                toggled_group.clone(),
-                                                AnnotationTrack::new(title, spans),
+                                            replace_track_overlays(
+                                                &mut overlays,
+                                                &group_track_key(&toggled_group),
+                                                spans,
                                             );
                                         }
                                     }
                                 } else {
-                                    annotation_group_tracks.remove(&toggled_group);
+                                    remove_track_overlays(
+                                        &mut overlays,
+                                        &group_track_key(&toggled_group),
+                                    );
                                 }
                             }
                         }
@@ -597,7 +620,11 @@ pub fn view_block_group(
                                 };
                                 match load_annotation_file_track(&request) {
                                     Ok(load) => {
-                                        annotation_file_tracks.insert(toggled_id, load.track);
+                                        replace_track_overlays(
+                                            &mut overlays,
+                                            &file_track_key(&toggled_id),
+                                            load.track.annotations,
+                                        );
                                         annotation_file_index_available
                                             .insert(toggled_id, load.index_available);
                                         if let Some(window) = load.loaded_window {
@@ -610,14 +637,17 @@ pub fn view_block_group(
                                     Err(err) => {
                                         messages.push_warn(format!("{err}"));
                                         explorer_state.deactivate_annotation_file(&toggled_id);
-                                        annotation_file_tracks.remove(&toggled_id);
+                                        remove_track_overlays(
+                                            &mut overlays,
+                                            &file_track_key(&toggled_id),
+                                        );
                                         annotation_file_index_available.remove(&toggled_id);
                                         annotation_file_loaded_windows.remove(&toggled_id);
                                     }
                                 }
                             }
                         } else {
-                            annotation_file_tracks.remove(&toggled_id);
+                            remove_track_overlays(&mut overlays, &file_track_key(&toggled_id));
                             annotation_file_index_available.remove(&toggled_id);
                             annotation_file_loaded_windows.remove(&toggled_id);
                         }
@@ -628,14 +658,14 @@ pub fn view_block_group(
                     {
                         if explorer_state.is_annotation_group_active(&toggled_group) {
                             if let Some(bg) = current_block_group.as_ref() {
-                                let visible_node_ranges = visible_ranges_by_node(&block_graph);
+                                let node_ids = extract_viewport_node_ids(&graph_controller);
                                 let entry = explorer.annotation_group_entry(&toggled_group);
                                 let spans = match entry.map(|entry| {
                                     load_annotations_for_group(&AnnotationGroupTrackRequest {
                                         conn,
                                         current_block_group: bg,
                                         entry,
-                                        visible_ranges_by_node: &visible_node_ranges,
+                                        node_ids: &node_ids,
                                     })
                                 }) {
                                     Some(Ok(spans)) => spans,
@@ -651,25 +681,15 @@ pub fn view_block_group(
                                 if spans.is_empty() {
                                     explorer_state.deactivate_annotation_group(&toggled_group);
                                 } else {
-                                    let title = if let Some(entry) =
-                                        explorer.annotation_group_entry(&toggled_group)
-                                    {
-                                        if bg.sample_name == entry.sample_name {
-                                            entry.name.clone()
-                                        } else {
-                                            format!("{} ({})", entry.name, entry.sample_name)
-                                        }
-                                    } else {
-                                        toggled_group.clone()
-                                    };
-                                    annotation_group_tracks.insert(
-                                        toggled_group.clone(),
-                                        AnnotationTrack::new(title, spans),
+                                    replace_track_overlays(
+                                        &mut overlays,
+                                        &group_track_key(&toggled_group),
+                                        spans,
                                     );
                                 }
                             }
                         } else {
-                            annotation_group_tracks.remove(&toggled_group);
+                            remove_track_overlays(&mut overlays, &group_track_key(&toggled_group));
                         }
                     }
                 }
@@ -728,22 +748,40 @@ pub fn view_block_group(
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
-                annotation_file_tracks.retain(|id, _| explorer_state.is_annotation_file_active(id));
                 annotation_file_index_available
                     .retain(|id, _| explorer_state.is_annotation_file_active(id));
                 annotation_file_loaded_windows
                     .retain(|id, _| explorer_state.is_annotation_file_active(id));
-                annotation_group_tracks
-                    .retain(|name, _| explorer_state.is_annotation_group_active(name));
+                let active_file_keys: HashSet<String> = explorer_state
+                    .active_annotation_files
+                    .iter()
+                    .map(file_track_key)
+                    .collect();
+                overlays.retain(|o| match &o.source {
+                    OverlaySource::Track(key) if key.starts_with("file:") => {
+                        active_file_keys.contains(key)
+                    }
+                    OverlaySource::Track(key) => {
+                        key.strip_prefix("group:").is_some_and(|group_id| {
+                            explorer_state.is_annotation_group_active(group_id)
+                        })
+                    }
+                    _ => true,
+                });
             }
             last_refresh = Instant::now();
         }
 
-        // Reload indexed annotation file tracks when the user scrolls past the loaded window
+        // Reload indexed annotation file tracks when the user scrolls past the loaded window.
+        // Annotation group reload piggybacks on the viewport-rebuild signal: when the camera has
+        // moved far enough that the cropped-graph node set changes, invalidate and re-load.
         if !is_loading
             && let Some(bg) = current_block_group.as_ref()
             && let Some(visible_window) = current_view_coordinate_window(&graph_controller)
         {
+            if graph_controller.detect_motion() {
+                annotation_groups_loaded = false;
+            }
             let query_window = expand_query_window(visible_window);
             let node_filter: std::collections::HashSet<HashId> =
                 block_graph.nodes().map(|node| node.node_id).collect();
@@ -783,7 +821,11 @@ pub fn view_block_group(
                 };
                 match load_annotation_file_track(&request) {
                     Ok(load) => {
-                        annotation_file_tracks.insert(id, load.track);
+                        replace_track_overlays(
+                            &mut overlays,
+                            &file_track_key(&id),
+                            load.track.annotations,
+                        );
                         if let Some(window) = load.loaded_window {
                             annotation_file_loaded_windows.insert(id, window);
                         } else {
@@ -794,7 +836,7 @@ pub fn view_block_group(
                     Err(err) => {
                         messages.push_warn(format!("{err}"));
                         explorer_state.deactivate_annotation_file(&id);
-                        annotation_file_tracks.remove(&id);
+                        remove_track_overlays(&mut overlays, &file_track_key(&id));
                         annotation_file_index_available.remove(&id);
                         annotation_file_loaded_windows.remove(&id);
                     }
@@ -973,6 +1015,12 @@ pub fn view_block_group(
                 render_with_optional_clear(frame, canvas_area, splash_area, true, splash_para);
             } else {
                 graph_controller.viewport_state.focus();
+
+                // Re-register overlay highlights before rendering. This reruns every frame
+                // because `overlays` can change between frames (file/group toggles,
+                // scroll-triggered reloads).
+                reapply_overlays(&mut graph_controller, &mut overlays, &mut annotation_colors);
+
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
                 let widget = create_gen_graph_widget(conn)
                     .detail_level(graph_controller.get_detail_level())
@@ -980,17 +1028,28 @@ pub fn view_block_group(
                     .cursor();
                 frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
 
-                // Overlay annotation tracks at the bottom of the canvas.
-                // Prepare after graph render so viewport state is accurate.
-                let mut remaining = canvas_area;
-                let tracks: Vec<&mut AnnotationTrack> = annotation_file_tracks
-                    .values_mut()
-                    .chain(annotation_group_tracks.values_mut())
-                    .collect();
-                for track in tracks.into_iter().rev() {
-                    let height = track.draw(frame.buffer_mut(), remaining, &graph_controller);
-                    if height == 0 { break; }
-                    remaining.height = remaining.height.saturating_sub(height);
+                // Draw floating labels after the graph, then a single hint if any were hidden.
+                let detail_level = graph_controller.get_detail_level();
+                let any_hidden = draw_annotation_labels(
+                    frame.buffer_mut(),
+                    canvas_area,
+                    &graph_controller,
+                    &overlays,
+                );
+                if any_hidden {
+                    let note = if detail_level == VisualDetail::Full {
+                        " some annotations hidden due to space constraints "
+                    } else {
+                        " some annotations hidden in truncated view "
+                    };
+                    let note_style =
+                        Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]);
+                    frame.buffer_mut().set_string(
+                        canvas_area.x,
+                        canvas_area.bottom().saturating_sub(1),
+                        note,
+                        note_style,
+                    );
                 }
             }
 
@@ -1014,7 +1073,6 @@ pub fn view_block_group(
 
                 let panel_text = match panel_mode {
                     PanelMode::Details => {
-                        use gen_tui::layout::VisualDetail;
                         use petgraph::visit::NodeIndexable;
 
                         let mut lines = vec![];
@@ -1106,6 +1164,27 @@ pub fn view_block_group(
             }
         })?;
 
+        // After the first draw the viewport is populated. Load (or reload) annotation groups
+        // using the viewport node IDs so only on-screen segments are fetched.
+        if !annotation_groups_loaded && let Some(block_group) = current_block_group.as_ref() {
+            let node_ids = extract_viewport_node_ids(&graph_controller);
+            if !node_ids.is_empty() {
+                overlays.retain(
+                    |o| !matches!(&o.source, OverlaySource::Track(k) if k.starts_with("group:")),
+                );
+                explorer_state.active_annotation_groups.clear();
+                load_annotation_groups_for_viewport(
+                    conn,
+                    block_group,
+                    &node_ids,
+                    &mut explorer_state,
+                    &mut overlays,
+                    &mut messages,
+                );
+                annotation_groups_loaded = true;
+            }
+        }
+
         // Update the graph controller if a new block group was selected.
         // This runs after terminal.draw() so the loading indicator is visible
         // for the full duration of the blocking DB work.
@@ -1137,49 +1216,16 @@ pub fn view_block_group(
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
             }
-            annotation_file_tracks.clear();
+            overlays.clear();
             annotation_file_index_available.clear();
             annotation_file_loaded_windows.clear();
-            annotation_group_tracks.clear();
+            explorer_state.active_annotation_groups.clear();
+            annotation_groups_loaded = false;
             if let Some(bg) = current_block_group.as_ref() {
                 let node_filter: std::collections::HashSet<HashId> =
                     block_graph.nodes().map(|node| node.node_id).collect();
-                let visible_node_ranges = visible_ranges_by_node(&block_graph);
                 let query_window =
                     current_view_coordinate_window(&graph_controller).map(expand_query_window);
-                for entry in explorer.data.annotation_groups.iter() {
-                    if explorer_state.is_annotation_group_active(&entry.id) {
-                        let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
-                            conn,
-                            current_block_group: bg,
-                            entry,
-                            visible_ranges_by_node: &visible_node_ranges,
-                        }) {
-                            Ok(spans) => spans,
-                            Err(err) => {
-                                messages.push_warn(format!(
-                                    "Failed to load annotations for group {}: {err}",
-                                    entry.id
-                                ));
-                                Vec::new()
-                            }
-                        };
-                        if spans.is_empty() {
-                            continue;
-                        }
-                        annotation_group_tracks.insert(
-                            entry.id.clone(),
-                            AnnotationTrack::new(
-                                if entry.sample_name == bg.sample_name {
-                                    entry.name.clone()
-                                } else {
-                                    format!("{} ({})", entry.name, entry.sample_name)
-                                },
-                                spans,
-                            ),
-                        );
-                    }
-                }
                 for entry in explorer.data.annotation_files.iter() {
                     let id = entry.file_addition.id;
                     if !explorer_state.is_annotation_file_active(&id) {
@@ -1197,7 +1243,11 @@ pub fn view_block_group(
                     };
                     match load_annotation_file_track(&request) {
                         Ok(load) => {
-                            annotation_file_tracks.insert(id, load.track);
+                            replace_track_overlays(
+                                &mut overlays,
+                                &file_track_key(&id),
+                                load.track.annotations,
+                            );
                             if let Some(window) = load.loaded_window {
                                 annotation_file_loaded_windows.insert(id, window);
                             }

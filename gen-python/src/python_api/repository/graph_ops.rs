@@ -107,7 +107,6 @@ impl PyRepository {
     /// the following one, producing a single concatenated graph.
     ///
     /// Parameters
-    /// ----------
     /// bgs : list[BlockGroup]
     ///     Block groups to concatenate, in order.
     /// new_sample : str

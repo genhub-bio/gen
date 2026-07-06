@@ -315,16 +315,24 @@ where
     /// Internal helper to apply a node rect highlight to the viewport graph.
     /// Resolves the node to its world position and stores that for consistency
     /// with node_highlights and edge_highlights.
+    ///
+    /// `corners` are the raw `(top_left, bottom_right)` content column offsets; the
+    /// `node_sizer` maps them to visual cell columns for the current detail level so a
+    /// stored highlight lands on the right cells after a detail or zoom change.
     fn apply_cell_highlight(
         viewport_graph: &mut CroppedGraph,
         graph: &G,
+        node_sizer: &S,
+        detail_level: VisualDetail,
         node_id: G::NodeId,
-        tl: (i64, i64),
-        br: (i64, i64),
+        corners: ((i64, i64), (i64, i64)),
         style: PathStyle,
     ) {
         let node_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node_id));
         if let Some(&world_pos) = viewport_graph.node_positions.get(&node_idx) {
+            let (tl, br) = corners;
+            let tl = (node_sizer.map_column(&node_id, tl.0, detail_level), tl.1);
+            let br = (node_sizer.map_column(&node_id, br.0, detail_level), br.1);
             viewport_graph
                 .cell_highlights
                 .push((world_pos, tl, br, style));
@@ -441,7 +449,15 @@ where
         style: PathStyle,
     ) {
         let graph = &self.partition_controller.graph;
-        Self::apply_cell_highlight(&mut self.viewport_graph, graph, node_id, tl, br, style);
+        Self::apply_cell_highlight(
+            &mut self.viewport_graph,
+            graph,
+            &self.partition_controller.node_sizer,
+            self.detail_level,
+            node_id,
+            (tl, br),
+            style,
+        );
         let kind = HighlightKind::Cells {
             node: node_id,
             tl,
@@ -468,27 +484,6 @@ where
     #[allow(clippy::type_complexity)]
     pub fn get_cell_highlights(&self) -> &[(WorldPos, (i64, i64), (i64, i64), PathStyle)] {
         &self.viewport_graph.cell_highlights
-    }
-
-    /// Check if a specific style has any highlighting
-    pub fn has_highlight(&self, style: &PathStyle) -> bool {
-        self.highlights.iter().any(|(_, s)| s == style)
-    }
-
-    /// Clear highlighting for a specific style
-    pub fn clear_highlight(&mut self, style: &PathStyle) {
-        self.highlights.retain(|(_, s)| s != style);
-        // Also clear from viewport graph
-        self.viewport_graph
-            .node_highlights
-            .retain(|(_, s)| s != style);
-        self.viewport_graph
-            .edge_highlights
-            .retain(|(_, s)| s != style);
-        self.viewport_graph
-            .cell_highlights
-            .retain(|(_, _, _, s)| s != style);
-        self.trigger_rebuild();
     }
 
     /// Clear all highlights
@@ -1118,9 +1113,10 @@ where
                     Self::apply_cell_highlight(
                         &mut self.viewport_graph,
                         &self.partition_controller.graph,
+                        &self.partition_controller.node_sizer,
+                        detail_level,
                         *node,
-                        *tl,
-                        *br,
+                        (*tl, *br),
                         *style,
                     );
                 }
