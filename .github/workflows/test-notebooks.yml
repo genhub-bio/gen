@@ -11,22 +11,39 @@ env:
 
 jobs:
   test-notebooks:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y capnproto
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: choco install capnproto
+      - name: Set venv bin dir
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "VENV_BIN=.venv/Scripts" >> "$GITHUB_ENV"
+          else
+            echo "VENV_BIN=.venv/bin" >> "$GITHUB_ENV"
+          fi
       - name: Build and install gen package
         run: |
           python -m venv .venv
-          source .venv/bin/activate
-          pip install maturin
-          maturin develop
+          "$VENV_BIN/python" -m pip install maturin
+          "$VENV_BIN/maturin" develop
       - name: Install notebook test dependencies
-        run: source .venv/bin/activate && pip install pytest nbmake anywidget traitlets
+        run: $VENV_BIN/python -m pip install pytest nbmake anywidget traitlets
       - name: Test notebooks
-        run: source .venv/bin/activate && pytest --nbmake --nbmake-timeout=120 .
+        run: $VENV_BIN/pytest --nbmake --nbmake-timeout=120 .
