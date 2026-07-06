@@ -30,6 +30,8 @@ jobs:
         include:
           - os: macos-15
             asset_suffix: macos-arm64
+          - os: macos-15-intel
+            asset_suffix: macos-x86_64
 
     steps:
       - name: Ensure ref provided
