@@ -150,7 +150,7 @@ arch <- R.version$arch
 
 asset <- switch(
   sysname,
-  "Windows" = sprintf("genr_%s-windows-x86_64.zip", version),
+  "Windows" = sprintf("genr-windows-%s.zip", version),
   "Darwin" = if (grepl("aarch64|arm64", arch)) {
     sprintf("genr_%s-macos-arm64.tgz", version)
   } else {
