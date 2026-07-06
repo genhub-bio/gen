@@ -29,18 +29,17 @@ use r#gen::{
         annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
         annotation_track::{
             AnnotationSegment as ViewAnnotationSegment, AnnotationSpan, AnnotationTrack,
-            graph_locus_from_annotation_span, span_covered_by_later, span_is_single_node,
-            span_label_text,
+            graph_locus_from_annotation_span,
         },
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
             parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
         },
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, highlight_locus, locus_label_bounds,
-            viewport_pos_map,
+            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, highlight_locus,
+            reapply_overlays,
         },
-        inline_label_placement::{draw_annotation_overflow_note, draw_label_near_pos},
+        graph_overlay::{AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource},
     },
 };
 use gen_annotations::{
@@ -68,7 +67,7 @@ use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::StatefulWidget,
 };
 use rusqlite::{Connection, types::ValueRef};
@@ -2052,62 +2051,44 @@ impl Repository {
 
         let tracks = load_tracks_from_specs(conn, &controller, &bg_id, &tracks_json);
 
-        // Step 1: Apply annotation highlights before graph render.
-        // Sort spans longest-first so shorter annotations paint on top.
-        let mut all_spans: Vec<&AnnotationSpan> =
-            tracks.iter().flat_map(|t| t.annotations.iter()).collect();
-        all_spans.sort_by_key(|s| {
-            -(s.segments
-                .iter()
-                .map(|seg| seg.end - seg.start)
-                .sum::<i64>())
-        });
         // Parse the caller-supplied color map: id_hex → Some(color) to use that
         // color, None to hide the annotation entirely. Empty map means use the
         // default theme cycle for every annotation.
         let color_overrides: HashMap<String, Option<String>> =
             json_from_str(&annotation_colors_json).unwrap_or_default();
-        let use_overrides = !color_overrides.is_empty();
 
-        // Resolve per-span colors. None means the span should be hidden.
-        let annotation_colors: Vec<Option<Color>> = {
-            let theme = current_theme();
-            let mut theme_idx = 0usize;
-            all_spans
-                .iter()
-                .map(|span| {
-                    let id_hex = span.id.to_string();
-                    if use_overrides {
-                        match color_overrides.get(&id_hex) {
-                            Some(Some(hex)) => parse_op_color(hex).ok(),
-                            Some(None) => None,
-                            // Unknown span (e.g. from a file track) → theme cycle
-                            None => {
-                                let c = theme[0x08 + (theme_idx % 8)];
-                                theme_idx += 1;
-                                Some(c)
-                            }
-                        }
-                    } else {
+        // Build one overlay per visible annotation span. A caller-supplied override color
+        // wins; spans with no override fall back to the theme rotation. `reapply_overlays`
+        // then repaints every overlay, greedily reassigning colors to keep overlapping
+        // spans distinguishable.
+        let mut overlays: Vec<GraphOverlay> = Vec::new();
+        let mut annotation_colors = AnnotationColorCache::new();
+        let theme = current_theme();
+        let mut theme_idx = 0usize;
+        for track in &tracks {
+            for span in &track.annotations {
+                let id_hex = span.id.to_string();
+                let color = match color_overrides.get(&id_hex) {
+                    Some(None) => continue,
+                    Some(Some(hex)) => parse_op_color(hex).unwrap_or_else(|_| {
                         let c = theme[0x08 + (theme_idx % 8)];
                         theme_idx += 1;
-                        Some(c)
+                        c
+                    }),
+                    None => {
+                        let c = theme[0x08 + (theme_idx % 8)];
+                        theme_idx += 1;
+                        c
                     }
-                })
-                .collect()
-        };
-        {
-            let loci: Vec<Option<_>> = all_spans
-                .iter()
-                .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
-                .collect();
-            for (locus, color_opt) in loci.iter().zip(annotation_colors.iter()) {
-                let Some(color) = color_opt else { continue };
-                if let Some(l) = locus {
-                    highlight_locus(&mut controller, l, PathStyle::new(*color));
-                }
+                };
+                overlays.push(GraphOverlay {
+                    content: OverlayContent::Span(span.clone()),
+                    source: OverlaySource::Track(track.name.clone()),
+                    style: PathStyle::new(color),
+                });
             }
         }
+        reapply_overlays(&mut controller, &mut overlays, &mut annotation_colors);
 
         // Apply match highlights after annotations so they render on top.
         apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
@@ -2116,73 +2097,20 @@ impl Repository {
         let renderer = GenGraphNodeRenderer::new(conn);
         GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut controller);
 
-        // Step 2: Draw floating labels after graph render.
-        let pos_map = viewport_pos_map(&controller);
-        let detail_level = controller.get_detail_level();
-        let mut named_count: usize = 0;
-        let mut hidden_count: usize = 0;
-        {
-            let loci: Vec<Option<_>> = all_spans
-                .iter()
-                .map(|span| graph_locus_from_annotation_span(span, controller.graph()))
-                .collect();
-            for (idx, ((span, color_opt), locus)) in all_spans
-                .iter()
-                .zip(annotation_colors.iter())
-                .zip(loci.iter())
-                .enumerate()
-            {
-                let Some(&color) = color_opt.as_ref() else {
-                    continue;
-                };
-                if span.name.is_empty() {
-                    continue;
-                }
-                named_count += 1;
-                // Count spans whose every segment is covered by a later (shorter) span.
-                if locus.is_some() && span_covered_by_later(span, idx, &all_spans) {
-                    hidden_count += 1;
-                    continue;
-                }
-                if detail_level == VisualDetail::Truncated && span_is_single_node(span) {
-                    hidden_count += 1;
-                    continue;
-                }
-                let Some(l) = locus else {
-                    continue;
-                };
-                let Some(bounds) =
-                    locus_label_bounds(l, &pos_map, detail_level, &controller.viewport_state)
-                else {
-                    continue;
-                };
-                let label = span_label_text(span);
-                if draw_label_near_pos(
-                    &mut buf,
-                    area,
-                    bounds,
-                    &label,
-                    color,
-                    &controller.viewport_state,
-                    5,
-                )
-                .is_none()
-                {
-                    hidden_count += 1;
-                }
-            }
+        // Draw floating labels after the graph, then a single hint if any were hidden.
+        let any_hidden = draw_annotation_labels(&mut buf, area, &controller, &overlays);
+        if any_hidden {
+            let detail_level = controller.get_detail_level();
+            let note = if detail_level == VisualDetail::Full {
+                " some annotations hidden due to space constraints "
+            } else {
+                " some annotations hidden in truncated view "
+            };
+            let note_style = Style::default()
+                .fg(current_theme()[0x09])
+                .bg(current_theme()[0x00]);
+            buf.set_string(area.x, area.bottom().saturating_sub(1), note, note_style);
         }
-        let note_style = Style::default()
-            .fg(current_theme()[0x09])
-            .bg(current_theme()[0x00]);
-        draw_annotation_overflow_note(
-            &mut buf,
-            area,
-            named_count,
-            hidden_count,
-            note_style,
-            detail_level != VisualDetail::Full,
-        );
 
         serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))
             .map_err(|err| Error::Other(err.to_string()))
