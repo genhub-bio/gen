@@ -8,7 +8,7 @@ Gen brings version control to genetic sequences. You can clone repositories, cre
 
 ## Install
 
-**CLI binary** — prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/genhub-bio/gen/releases): [macOS (.pkg)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), [Linux x86_64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip), [Linux arm64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip). Gen is built for Unix-like systems; on Windows, install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
+**CLI binary** — prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/genhub-bio/gen/releases): [macOS (.pkg)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), [Linux x86_64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip), [Linux arm64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
 
 **Python**
 
@@ -22,21 +22,16 @@ For the interactive graph widget in Jupyter and other anywidget-compatible noteb
 pip install gen[jupyter]
 ```
 
-**R** — see the [installation guide](https://www.genhub.bio/docs/installation) for platform-specific instructions.
-
-<!--
-TODO: restore once the R publish workflow ships genr binaries to a release (see publish-r-packages-tag.yaml).
-On macOS (Apple silicon):
+**R** — see the [installation guide](https://www.genhub.bio/docs/installation) for platform-specific instructions. On macOS (Apple silicon):
 
 ```r
 install.packages("remotes")
 remotes::install_url(
-  "https://github.com/genhub-bio/gen/releases/download/v0.1.31/genr_0.1.31-macos-arm64.tgz"
+  "https://github.com/genhub-bio/gen/releases/download/v0.2.0/genr_0.2.0-macos-arm64.tgz"
 )
 ```
 
 Windows builds are published as `genr-windows-<version>.zip` on the same [releases page](https://github.com/genhub-bio/gen/releases).
--->
 
 
 ## Quick start
@@ -122,15 +117,9 @@ plot(sample)
 
 ## Example workflows
 
-**Using the bindings**
-
-- [Golden Gate redesign, in R](gen-r/vignettes/introduction.Rmd) — import an annotated pUC19 GenBank record, design a Golden Gate MCS swap, confirm the cut sites with `search()`, export for synthesis, then catch an unintended mutation by importing the sequencing VCF.
-- [Screening a combinatorial library for junction-emergent cut sites, in R](gen-r/vignettes/yeast_expression_library.Rmd) — build a 12-construct promoter/CDS/terminator library for a yeast expression cassette, then use a single `search()` call to find a BsmBI site that only appears at one part junction, not in any individual part.
-- [Genome editing in Python](examples/yeast_editing/edit-yeast-and-export-fasta.ipynb) — import a yeast chromosome, apply a cassette edit with `update_with_sequence()`, and export the result as FASTA.
-
-**CLI only**
-
-- [Combinatorial plasmid design](examples/combinatorial_plasmid_design/combinatorial_design.md) — insert a promoter/RBS library into pUC19 with `gen update --library`, export to GFA, then identify colony genotypes from long-read sequencing. No Python or R required.
+- [Model a yeast cross](examples/yeast_crosses/Analysis.md) — cross two beer-yeast strains from the 1002 Yeast Genomes collection, building the combined graph from either VCF variant calls or whole-genome alignment.
+- [Explore a brewing-yeast variant graph in Python](gen-python/examples/flo11_brq_demo.ipynb) — analyse the *FLO11* locus on a 9.1 kb *S. cerevisiae* chrIX fragment, searching and navigating the variant graph in the interactive widget.
+- [Screen a combinatorial library in R](https://htmlpreview.github.io/?https://github.com/genhub-bio/gen/blob/main/docs/vignettes/yeast_expression_library.html) — build a 12-construct YTK expression-cassette library, then use a single `search()` call to find a BsmBI site that appears only at one part junction, not in any individual part.
 
 ## Data model
 
