@@ -9,20 +9,13 @@ wget "https://github.com/genhub-bio/gen/blob/7814933b99515fc2c7749b7df3014cf438a
 wget "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&rettype=gb&id=U00004.1" -O Tn5.gb
 ```
 
-Gen does not support feature annotations yet, so we will first convert these genbank files to fasta using BioPython:
-```console
-python -c "from Bio import SeqIO; SeqIO.convert('pBeloBAC11.gb', 'genbank', 'pBeloBAC11.fa', 'fasta')"
-python -c "from Bio import SeqIO; SeqIO.convert('Tn5.gb', 'genbank', 'Tn5.fa', 'fasta')"
-```
-
-We then initialize a new gen repository and import the BAC sequence.
+We then initialize a new gen repository and import the BAC sequence directly from GenBank.
 ```console
 gen init
-gen defaults --database my_project.db --collection plasmids
-gen import --fasta pBeloBAC11.fa
+gen import --gb pBeloBAC11.gb
 ```
 
-Gen does not yet keep track of files, so let's copy the imported files to a snapshot directory:
+Save a copy of the original sequence before editing — we'll need it as the reference in the pairwise alignment:
 ```console
 mkdir snapshot_1
 cp pBeloBAC11.* snapshot_1
@@ -30,9 +23,10 @@ cp pBeloBAC11.* snapshot_1
 
 Then we move over to our sequence editor, where we edit the BAC sequence to replace the chloramphenicol acetyl transferase (cat) coding sequence by the coding sequence of aminoglycoside-3'-O-phosphotransferase from Tn5 (don't forget to reverse complement it before pasting). We then save the resulting sequence, overwriting the original file.
 
-We now have two files called pBeloBAC11.gb, one in the working directory, and one in the snapshot_1 directory. In order to update the sequence in the gen database, we must represent the changes that were made in a format gen understands. To do that, we must convert the genbank file to fasta like we did earlier :
+We now have two files called pBeloBAC11.gb, one in the working directory, and one in the snapshot_1 directory. To represent the changes in a format wfmash and seqwish can process, convert both to FASTA:
 ```console
 python -c "from Bio import SeqIO; SeqIO.convert('snapshot_1/pBeloBAC11.gb', 'genbank', 'snapshot_1/pBeloBAC11.fa', 'fasta')"
+python -c "from Bio import SeqIO; SeqIO.convert('pBeloBAC11.gb', 'genbank', 'pBeloBAC11.fa', 'fasta')"
 ```
 
 Next, we perform a pairwise alignment using [wfmash](https://github.com/waveygang/wfmash), and graph induction using [seqwish](https://github.com/ekg/seqwish). Both applications are conveniently available in the [PanGenome Graph Builder (pggb)](https://github.com/pangenome/pggb) Docker image that can be launched as follows:
