@@ -801,13 +801,132 @@ fn extract_from_entry(
     })
 }
 
-/// Translate a gene annotation: take the entry coordinate and strand from the
-/// annotation's first segment (the transcription-start end of its accession
-/// path, see `projection::annotation_segments`) and translate from there, the
-/// same way `translate_from_path` does for a raw path coordinate. Translation
-/// is not bounded by or spliced across the rest of the annotation's segments:
-/// it reads the literal underlying DNA graph from the entry point to its own
-/// first in-frame stop codon, the same as every other translation entry point.
+/// Extract the sub-DAG from the sequence graph's start up to a single anchor
+/// coordinate, capturing every variant branch along the way. No database writes.
+///
+/// This is the reverse-strand mirror of `extract_from_entry`. The anchor is the
+/// annotation's rightmost (highest) coordinate: the walk runs left toward
+/// `PATH_START`, and the anchor node is trimmed on its right so no sequence to
+/// the right of the anchor is read. `translate_from` then reverse-complements and
+/// flips the subgraph, so translation begins at the anchor (the start codon) and
+/// runs to its own first in-frame stop codon, exactly as the forward path does
+/// from its entry.
+///
+/// Trimming only the anchor's right edge is what keeps a reverse-strand CDS
+/// embedded in a larger node from rev-comping the trailing context to its right
+/// onto the front of the protein; the left end is bounded by the stop codon, not
+/// by the annotation.
+fn extract_to_anchor(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    block_group_id: &HashId,
+    anchor_node_id: HashId,
+    anchor_coord: i64,
+) -> Result<TranslationSubgraph, TranslationError> {
+    let gen_graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)
+        .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
+
+    let anchor_node = gen_graph
+        .nodes()
+        .find(|graph_node| {
+            graph_node.node_id == anchor_node_id
+                && graph_node.sequence_start < anchor_coord
+                && graph_node.sequence_end >= anchor_coord
+        })
+        .ok_or_else(|| {
+            TranslationError::NodeError(format!(
+                "anchor coordinate {anchor_coord} not found in graph"
+            ))
+        })?;
+    let start_node = gen_graph
+        .nodes()
+        .find(|graph_node| graph_node.node_id == PATH_START_NODE_ID)
+        .ok_or_else(|| TranslationError::BlockGroupError("graph has no start node".into()))?;
+
+    let mut graph: DiGraphMap<HashId, ()> = DiGraphMap::new();
+    let mut node_ranges: HashMap<HashId, (HashId, Option<i64>, Option<i64>)> = HashMap::new();
+    let mut edge_chromosome_indices: HashMap<(HashId, HashId), Vec<i64>> = HashMap::new();
+    let mut entry_nodes: HashSet<HashId> = HashSet::new();
+
+    let anchor_virtual_id = virtual_id(anchor_node);
+    let intermediate_edges = all_intermediate_edges(&gen_graph, start_node, anchor_node);
+    if intermediate_edges.is_empty() {
+        // A direct edge from the start (no internal sequence before the anchor,
+        // e.g. a single-node annotation) makes the anchor its own standalone entry.
+        entry_nodes.insert(anchor_virtual_id);
+    }
+    for edge_ref in &intermediate_edges {
+        let source = edge_ref.source();
+        let target = edge_ref.target();
+        if is_terminal(source.node_id) && !is_terminal(target.node_id) {
+            entry_nodes.insert(virtual_id(target));
+        }
+        if is_terminal(source.node_id) || is_terminal(target.node_id) {
+            continue;
+        }
+        let source_virtual_id = virtual_id(source);
+        let target_virtual_id = virtual_id(target);
+        graph.add_node(source_virtual_id);
+        graph.add_node(target_virtual_id);
+        graph.add_edge(source_virtual_id, target_virtual_id, ());
+        let indices = edge_chromosome_indices
+            .entry((source_virtual_id, target_virtual_id))
+            .or_default();
+        for graph_edge in edge_ref.weight() {
+            if !indices.contains(&graph_edge.chromosome_index) {
+                indices.push(graph_edge.chromosome_index);
+            }
+        }
+    }
+
+    // The anchor node itself, or an entry reached only via a direct edge from a
+    // terminal, has no non-terminal edge of its own and so is skipped by the loop
+    // above; add it directly.
+    graph.add_node(anchor_virtual_id);
+    for &virtual_node_id in &entry_nodes {
+        graph.add_node(virtual_node_id);
+    }
+
+    // DNA range for every node in the subgraph; only the anchor node is trimmed,
+    // on its right, to the anchor coordinate.
+    for graph_node in gen_graph.nodes() {
+        let virtual_node_id = virtual_id(graph_node);
+        if !graph.contains_node(virtual_node_id) {
+            continue;
+        }
+        let sequence_end = if graph_node == anchor_node {
+            anchor_coord
+        } else {
+            graph_node.sequence_end
+        };
+        node_ranges.insert(
+            virtual_node_id,
+            (
+                graph_node.node_id,
+                Some(graph_node.sequence_start),
+                Some(sequence_end),
+            ),
+        );
+    }
+
+    Ok(TranslationSubgraph {
+        graph,
+        node_ranges,
+        edge_chromosome_indices,
+        entry_nodes: entry_nodes.into_iter().collect(),
+        exit_nodes: vec![anchor_virtual_id],
+    })
+}
+
+/// Translate a gene annotation. The strand and the annotation's coordinate span
+/// come from its first segment (see `projection::annotation_segments`).
+///
+/// A forward-strand annotation enters at its left (low) coordinate and reads
+/// right toward `PATH_END`; a reverse-strand annotation anchors at its right
+/// (high) coordinate and reads left toward `PATH_START`, reverse-complementing as
+/// it goes. Either way translation runs to its own first in-frame stop codon
+/// rather than being bounded by or spliced across the rest of the annotation's
+/// segments, the same as every other translation entry point.
 pub fn translate_annotation(
     conn: &GraphConnection,
     workspace: &Workspace,
@@ -840,13 +959,22 @@ pub fn translate_annotation(
         }
     };
 
-    let subgraph = extract_from_entry(
-        conn,
-        workspace,
-        block_group_id,
-        segments[0].node_id,
-        segments[0].range.start,
-    )?;
+    let subgraph = match strand {
+        Strand::Reverse => extract_to_anchor(
+            conn,
+            workspace,
+            block_group_id,
+            segments[0].node_id,
+            segments[0].range.end,
+        )?,
+        _ => extract_from_entry(
+            conn,
+            workspace,
+            block_group_id,
+            segments[0].node_id,
+            segments[0].range.start,
+        )?,
+    };
     let block_group_name = params
         .name
         .map(str::to_string)
@@ -1712,8 +1840,9 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     /// out in reverse graph order (the suffix piece nearest PATH_START, the
     /// prefix piece nearest PATH_END), so that translating with strand = Reverse
     /// reconstructs the same CDS, read left to right. The current path follows
-    /// the wild-type branch (chromosome_index 0). Returns the suffix node's id and length,
-    /// which is also the graph's literal entry point (path coordinate 0).
+    /// the wild-type branch (chromosome_index 0). Returns the prefix node (the CDS
+    /// piece nearest PATH_END): a reverse-strand annotation anchors at its right
+    /// edge, where translation starts.
     fn setup_reverse_variant_gene(
         prefix: &str,
         wt_mid: &str,
@@ -1751,7 +1880,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
 
-        (conn, block_group.id, suf, suf_len)
+        (conn, block_group.id, pre, pre_len)
     }
 
     /// Two fully-connected columns of two nodes each:
@@ -2214,6 +2343,66 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             .unwrap(),
             HashSet::from([expected.to_string()]),
             "reverse-strand protein should read N → C left to right"
+        );
+    }
+
+    /// A reverse-strand CDS embedded in a node that continues to the right of the
+    /// annotated span must translate only that span. The trailing context shares
+    /// the node, so rev-comping the whole node (the pre-fix behaviour) reads that
+    /// context onto the front of the protein and collapses the gene to a few
+    /// unrelated residues (the pUC19 `bla` bug).
+    #[test]
+    fn reverse_strand_trailing_context_is_not_translated() {
+        // Reverse CDS "ATGAAATAA" (M K *) stored as its reverse complement on the
+        // forward strand, followed by six bases of downstream context on the same
+        // node. The context precedes the start codon once rev-comped.
+        let cds = "ATGAAATAA";
+        let stored = format!("{}GGGCCC", revcomp(cds));
+        let cds_len = cds.len() as i64;
+
+        let (conn, block_group) = new_block_group("rev-context");
+        let (node, len) = build_node(&conn, &stored, "rev-context");
+        let e_in = build_edge(&conn, PATH_START_NODE_ID, 0, node, 0);
+        let e_out = build_edge(&conn, node, len, PATH_END_NODE_ID, 0);
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[
+                build_block_group_edge(block_group.id, e_in, 0),
+                build_block_group_edge(block_group.id, e_out, 0),
+            ],
+        );
+
+        // Accession covers only the CDS (forward [0, cds_len)) on the reverse strand.
+        let spans = vec![AccessionSpan {
+            node_id: node,
+            range: Range {
+                start: 0,
+                end: cds_len,
+            },
+            strand: Strand::Reverse,
+        }];
+        let accession = Accession::create(
+            &conn,
+            &NewAccession {
+                name: "rev-gene".to_string(),
+                block_group_id: block_group.id,
+                parent_accession_id: None,
+                spans,
+            },
+        )
+        .unwrap();
+        AnnotationGroup::create(&conn, "gene").unwrap();
+        let annotation =
+            Annotation::create(&conn, "rev-gene", "gene", &accession.id, None).unwrap();
+
+        let params = TranslationParams::new("test");
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group.id), params).unwrap();
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["MK*".to_string()]),
+            "trailing context on the anchor node must not be translated"
         );
     }
 
@@ -3167,19 +3356,20 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
     }
 
-    /// Annotation translation on the reverse strand reads every node's reverse
-    /// complement and walks the graph back to front from the entry segment,
-    /// reconstructing the CDS and both branches of the variant bubble. Strand is
-    /// inferred from the accession's own segment, not passed explicitly.
+    /// Annotation translation on the reverse strand anchors at the annotation's
+    /// right edge (the prefix node, nearest PATH_END) and walks left toward
+    /// PATH_START, reverse-complementing as it goes, reconstructing the CDS and
+    /// both branches of the variant bubble. Strand is inferred from the accession's
+    /// own segment, not passed explicitly.
     #[test]
     fn reverse_strand_annotation_translation_handles_variant() {
-        let (conn, block_group_id, suf, suf_len) =
+        let (conn, block_group_id, pre, pre_len) =
             setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
         let annotation = accession_annotation(
             &conn,
             &block_group_id,
             "rev-gene",
-            &[(suf, suf_len)],
+            &[(pre, pre_len)],
             Strand::Reverse,
         );
 
