@@ -46,7 +46,6 @@ assemble much more efficiently than others.
 ```{r setup, message=FALSE, warning=FALSE}
 library(genr)
 library(Biostrings)
-library(S4Vectors)
 
 ws <- file.path(tempdir(), "yeast_carotenoid")
 dir.create(ws, showWarnings = FALSE)
@@ -57,27 +56,24 @@ repo <- Repository(NULL)
 
 ## Define parts
 
-Parts are `DNAStringSet` objects. The `mcols()` metadata carries a `role`
-column (promoter, cds, terminator, or scar) that will colour each
-annotation group in the viewer.
+Parts are `DNAStringSet` objects, one column per slot. Gen stores each
+part's name as its annotation label; when plotting we map that name to a
+role (promoter, cds, terminator, or scar) and colour by role.
 
 Backbone scars are single-part columns so every path through the graph
 is a complete, self-contained expression cassette, ready for Golden Gate
 ligation into the pYTK001 destination vector.
 
 ```{r define-parts}
-# Helper: build a DNAStringSet with a role annotation column.
-make_parts <- function(nms, seqs, role) {
-  dss <- DNAStringSet(setNames(seqs, nms))
-  mcols(dss)$role <- role
-  dss
+# Helper: build a named DNAStringSet for one library column.
+make_parts <- function(nms, seqs) {
+  DNAStringSet(setNames(seqs, nms))
 }
 
 # Upstream backbone scar, the left BsmBI assembly site.
 left_scar <- make_parts(
   "left_scar",
-  "AACTAGTATGGCGCGCCAACAAGGATCTGCGG",
-  "scar"
+  "AACTAGTATGGCGCGCCAACAAGGATCTGCGG"
 )
 
 # Three constitutive promoters from the YTK collection.
@@ -105,8 +101,7 @@ promoters <- make_parts(
       "ATAGATATAATTATATAATATAAGAAATAATAATATAAGAAATAATAATATAAGAAATAAT",
       "ATCAGTGAGCAACTAGCAC"
     )
-  ),
-  "promoter"
+  )
 )
 
 # Two crtE variants (GGPP synthase from Erwinia uredovora).
@@ -127,8 +122,7 @@ cds_variants <- make_parts(
       "GCAGCTGAATCCCAATCTCAAGCAGCGATTTCCCAAATCAGACAAGCGATGATTTCTGAA",
       "GGTATCCATCAATGTAAGAAATGA"
     )
-  ),
-  "cds"
+  )
 )
 
 # Two terminators from the YTK collection.
@@ -145,15 +139,13 @@ terminators <- make_parts(
       "TTATTATTTATAATTTAATATATAAATAATATATTTAAATATATATTTTTTTATTATTTTAT",
       "TATTTATAATTTAATATATAAATAAT"
     )
-  ),
-  "terminator"
+  )
 )
 
 # Downstream backbone scar, the right BsmBI assembly site.
 right_scar <- make_parts(
   "right_scar",
-  "GCGGCCGCAAGCTTAGATCTCGCGGCCATACT",
-  "scar"
+  "GCGGCCGCAAGCTTAGATCTCGCGGCCATACT"
 )
 
 parts_list <- list(left_scar, promoters, cds_variants, terminators, right_scar)
@@ -183,8 +175,9 @@ Because `GenPlot` calls `auto_load_annotation_groups()` at construction
 time, the track appears without an explicit `add_track_group()` call.
 
 The `colors` parameter accepts a function that receives each annotation
-and returns a hex color string.  Here we map the `role` field stored in
-`ann$metadata` (propagated from `mcols()$role` on import) to a fixed palette.
+and returns a hex color string. Gen stores each part's name as its
+annotation label, so we colour by name: `ROLE_COLORS` holds the palette
+and `NAME_ROLE` records which role each part name belongs to.
 
 ```{r role-colors}
 ROLE_COLORS <- c(
@@ -193,11 +186,21 @@ ROLE_COLORS <- c(
   cds        = "#1a9850",
   terminator = "#e08214"
 )
+
+# Gen does not persist per-part metadata, so drive colour from the part
+# name (stored as the annotation label) rather than a stored role field.
+NAME_ROLE <- c(
+  setNames(rep("scar",       length(left_scar)),    names(left_scar)),
+  setNames(rep("promoter",   length(promoters)),    names(promoters)),
+  setNames(rep("cds",        length(cds_variants)), names(cds_variants)),
+  setNames(rep("terminator", length(terminators)),  names(terminators)),
+  setNames(rep("scar",       length(right_scar)),   names(right_scar))
+)
 ```
 
 ```{r plot-library}
 p <- plot(sg, rows = 20L,
-          colors = function(ann) ROLE_COLORS[[ann$metadata$role]])
+          colors = function(ann) ROLE_COLORS[[NAME_ROLE[[ann$name]]]])
 p
 ```
 
@@ -286,7 +289,7 @@ terminator is chosen.
 
 ```{r highlight-site}
 p2 <- plot(sg, rows = 20L,
-           colors = function(ann) ROLE_COLORS[[ann$metadata$role]])
+           colors = function(ann) ROLE_COLORS[[NAME_ROLE[[ann$name]]]])
 
 m <- hits[[1]]$matches[[1]]
 p2$goto_match(m)
