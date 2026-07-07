@@ -1,6 +1,6 @@
 # Gen
 
-Gen brings version control to genetic sequences. You can clone repositories, create branches, make edits, and push changes to a shared remote using the same workflow developers know from Git. It works across FASTA files, VCFs, GenBank records, and other common bioinformatics formats. Under the hood, Gen stores data as a sequence graph, allowing a single repository to represent a reference genome, known variants, and engineered modifications without repeatedly storing the same sequence.
+Gen brings version control to genetic sequences. With it, you can track variants and edits to single genes or whole genomes, across multiple generations and lineages. You can clone genome repositories, create branches, make edits, and push changes to a shared remote using the same workflow developers know from Git. It works across FASTA files, VCFs, GenBank records, and other common bioinformatics formats. Under the hood, Gen stores data as a sequence graph, allowing a single repository to represent a reference genome, known variants, and engineered modifications without repeatedly storing the same sequence.
 
 [![PyPI](https://img.shields.io/pypi/v/gen.svg)](https://pypi.org/project/gen/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -77,6 +77,9 @@ Subsequent pushes from this repository only need `gen push`.
 
 Python and R libraries expose the same operations. The R bindings are compatible with Bioconductor types such as DNAStringSet and GRanges. The Python API exposes samples and sequence graphs as rich objects that provide a programmatic equivalent for every action available through the CLI. The `jupyter` extra provides an interactive widget for graph visualization and exploration. The Python module was built with AI agents in mind, for example by embedding a textual representation of graph visualizations in notebook files alongside the pixel data. 
 
+Example Python code to initialize or load a repository, import a sequence as reference, applying variants from a
+VCF file, and viewing the resulting sequence graph:
+
 ```python
 import gen
 
@@ -86,6 +89,7 @@ sample = repo.update_with_vcf("variants.vcf", reference="hg38", sample="NA12878"
 sample.plot()
 ```
 
+Equivalent R code:
 ```r
 library(genr)
 
