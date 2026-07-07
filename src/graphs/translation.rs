@@ -809,13 +809,7 @@ fn extract_from_entry(
 /// `PATH_START`, and the anchor node is trimmed on its right so no sequence to
 /// the right of the anchor is read. `translate_from` then reverse-complements and
 /// flips the subgraph, so translation begins at the anchor (the start codon) and
-/// runs to its own first in-frame stop codon, exactly as the forward path does
-/// from its entry.
-///
-/// Trimming only the anchor's right edge is what keeps a reverse-strand CDS
-/// embedded in a larger node from rev-comping the trailing context to its right
-/// onto the front of the protein; the left end is bounded by the stop codon, not
-/// by the annotation.
+/// runs to its own first in-frame stop codon.
 fn extract_to_anchor(
     conn: &GraphConnection,
     workspace: &Workspace,
@@ -2396,11 +2390,17 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             Annotation::create(&conn, "rev-gene", "gene", &accession.id, None).unwrap();
 
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group.id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group.id),
+            params,
+        )
+        .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(&conn, test_workspace(), &protein.id, true).unwrap(),
             HashSet::from(["MK*".to_string()]),
             "trailing context on the anchor node must not be translated"
         );
@@ -2906,7 +2906,6 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
     }
 
-    //
     // `translate_annotation` operates per block group: the annotation pins the
     // entry node, and the sequence forward of it is read from the block group's
     // own graph. These tests model a parent and a child sample as two block
