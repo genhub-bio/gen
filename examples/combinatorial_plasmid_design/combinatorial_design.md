@@ -6,55 +6,32 @@ promoter and ribosome binding site that result in the highest expression of an i
 We start by setting up a new gen repository and a default database and collection name. This way we don't have to keep
 specifying which database file and collection to use in the `gen import` and `gen update` commands.
 
-```console
-bvh@mbp:~$ gen init
-
-Gen repository initialized.
+```sh
+gen init
+gen defaults --database insulin.db --collection plasmids
 ```
-``` console
-bvh@mbp:~$ gen defaults --database insulin.db --collection plasmids
 
+```
+Gen repository initialized.
 Default database set to insulin.db
 Default collection set to plasmids
 ```
 
-Next, we import our base vector from a fasta file.
-``` console
-bvh@mbp:~$ gen import --fasta puc19.fa
+Next, we import our base vector from a fasta file as a reference sample called `puc19`.
 
-Created it
+```sh
+gen import fasta puc19.fa --reference puc19
 ```
 
-By importing the sequence we have created one new block group and one new path. These are comprised of two edges from
-the source node to the start of the imported sequence node, and from the end of the imported sequence node to the sink
-node. We can verify this by querying the database _(todo: implement this functionality in gen)_.
-```console
-bvh@mbp:~$ sqlite3 --header insulin.db
-
-SQLite version 3.39.5 2022-10-14 20:58:05
-Enter ".help" for usage hints.
-
-sqlite> select * from block_group;
-id|collection_name|sample_name|name
-1|plasmids||M77789.2
-
-sqlite> select * from path;
-id|block_group_id|name
-1|1|M77789.2
-
-sqlite> select * from edges;
-id|source_node_id|source_coordinate|source_strand|target_node_id|target_coordinate|target_strand|chromosome_index|phased
-1|1|0|+|3|0|+|0|0
-2|3|2686|+|2|0|+|0|0
-
-sqlite> .quit
+```
+Fasta imported.
 ```
 
-We see that both the path and the block group are called M77789.2, is accession ID for the pUC19 plasmid, which was
-extracted from the fasta header. Next, we will prepare a _gen update_ operation to insert the insulin operon variants
-into the vector, more specifically between position 106 and 539. We need two files to specify the design: a _parts_ file
-that contains the sequences of all of the genetic parts that go into the design, and a _library_ file that describes how
-the parts should be arranged. 
+Importing the sequence creates one block group and one path, both named `M77789.2`, the accession ID for the pUC19
+plasmid that was extracted from the fasta header. Next, we will prepare a _gen update_ operation to insert the insulin
+operon variants into the vector, more specifically between position 106 and 539. We need two files to specify the
+design: a _parts_ file that contains the sequences of all of the genetic parts that go into the design, and a _library_
+file that describes how the parts should be arranged.
 
 The library file is a simple CSV table without headers, where each column represents a 'slot' in the construct, and the
 rows represent the possible parts to include in each slot. Gen will create a combinatorial design where all options for
@@ -91,88 +68,107 @@ each slot are combined with all options for the other slots. In the example belo
 </table>
 
 If you create this file by hand outside of a spreadsheet program, please ensure that empty cells are still be separated
-by commas. We can then run the update operation using the following command:
+by commas. We can then run the update operation using the following command. It reads the region to replace from the
+`M77789.2` path of the `puc19` reference and writes the combinatorial result to a new sample called `library`, leaving
+the original vector untouched.
 
-
-```console
-bvh@mbp:~$ gen update --path-name M77789.2 --start 106 --end 539 --library design.csv --parts parts.fa
+```sh
+gen update library \
+  --sample puc19 \
+  --new-sample library \
+  --region-name M77789.2:106-539 \
+  --library design.csv \
+  --parts parts.fa
 ```
 
-This update operation did not create new block groups or paths, it only created new edges in the existing block group.
-You can verify this by running the queries described above, or by rendering a graphical representation of the block
-group.
+```
+Updated with library file: design.csv
+```
+
+This adds all of the part combinations as new edges in the `library` sample's block group. Rather than querying the
+database to see how the graph is wired, we can look at it directly with the viewer.
 
 ## Visualizing the library
-We start by exporting our block group to a GFA file that can be used by graph handling software like vg. The gen
-'export' command can take a sample name as argument if you only want to export the block group associated with a
-specific sample, but in this case we just have one block group and it is not associated with any sample.
 
-```console
-bvh@mbp:~$ gen export --gfa library.gfa
+The `gen view` command renders a block group as an interactive graph right in the terminal. Pass the graph name and the
+sample you want to inspect:
+
+```sh
+gen view M77789.2 --sample library
 ```
 
-We will use the vg tools using Docker, which we will start as follows to automatically download the vg Docker image, and
-bind the current working directory to the /data directory in the Docker container.
+Add `--full` to open the full-screen explorer, which adds a sidebar for browsing collections, reference graphs, sample
+lineages, and annotation groups:
 
-```console
-bvh@mbp:~$ docker run --volume $PWD:/data --workdir /data --interactive -t quay.io/vgteam/vg:v1.60.0
+```sh
+gen view M77789.2 --sample library --full
 ```
 
-Once we're inside the container, we still have to install the graphviz suite to render our images to SVG format.
+![the combinatorial library rendered in the gen terminal viewer](./gen_view.png)
 
-```console
-root@e97629b542ca:/vg# apt install -y graphviz
-```
-
-Then we run `vg view` and pipe its output to the `dot` program, which was installed as part of graphviz.
-```console
-root@e97629b542ca:/vg# vg view --gfa-in library.gfa --dot --color --simple-dot | dot -Tsvg -o library.svg
-```
-
-This results in the following image, in which the new nodes are highlighted in red. Nodes 1, 4, 5, 11 and 12 are the promoters;
-nodes 2, 9 and 10 are ribosome binding sites. The original pUC19 sequence is also visible as the path over nodes [6, 7, 8]. 
-
-![visual representation of the graph](./library.svg)
-
-Note that VG uses its own numbering for the nodes. To find out which gen nodes these correspond to, run the following
-series of commands instead:
-
-```console
-root@e97629b542ca:/vg# vg convert --gfa-in library.gfa --gfa-trans translation_table.txt --vg-out | vg view --vg-in - --dot --color --simple-dot | dot -Tsvg -o library.svg 
-root@e97629b542ca:/vg# cp library.svg library_fixed.svg && while IFS=$'\t' read _ new old; do sed "s#font-size=\"14.00\">$old</text>#font-size=\"14.00\">$new</text>#g" library_fixed.svg > temp_file.html && mv temp_file.html library_fixed.svg; done < translation_table.txt
-```
-
-This results in the following output, where the nodes are referred to by their gen identifier in the block graph model
-used when exporting to GFA. In this model, nodes are identified by two numbers separated by a period: the first number
-is the original node identifier in the regular gen model, the number behind the period is the coordinate to where the
-block starts. Since we asked to insert the library from coordinate 106 to 539 on the reference path, node 3 is split up
-into 3.0, 3.106 and 3.159 in the block graph model. ![visual representation with the actual node
-IDs](./library_fixed.svg)
+The graph makes the design self-evident. The five promoters fan out into the three ribosome binding sites, which all
+feed into the single `proinsulin` payload before rejoining the vector backbone. The empty slot in the third column
+shows up as the bypass edge along the bottom that skips the payload entirely, and the original pUC19 sequence is still
+present as the path straight across the graph. You can drag to pan, click a node to select it, and press `q` to quit.
 
 ## Searching the library
-We can use a sequence-to-graph mapper like [minigraph](https://github.com/lh3/minigraph?tab=readme-ov-file) to search a
-block group for the presence of a subsequence, traversing all valid edges if needed. Minigraph is a light weight
-application that can be built from source like this:
-```console
-wget "https://github.com/lh3/minigraph/releases/download/v0.21/minigraph-0.21.tar.bz2" 
-tar -xzf minigraph-0.21.tar.bz2 
-cd minigraph-0.21
-make 
-cp minigraph /usr/local/bin/
-``` 
 
-Queries are entered via a fasta file. If your query is particularly short you will need to tune minigraph's parameters.
-For short queries where you expect an exact match these work well:
-```console
-minigraph -c  -n 1,1 -m 1,1 library.gfa query.fa
+To confirm that a particular part made it into the library, or to locate any exact subsequence across the graph, use
+`gen search`. It walks every block group and reports each place the query occurs, following valid edges as needed. Here
+we look for the `BBa_J23100` promoter:
+
+```sh
+gen search TTGACGGCTAGCTCAGTCCTAGGTACAGTGCTAGC --sample library
 ```
 
-## Analysing sequencing data
-### Isolate
-We will also use minigraph to map longread NGS reads obtained from a single colony isolate:
-```console
-minigraph -cx lr library.gfa sample1.fq -o sample1.gaf
+```
+sample	graph	blocks	offset
+library	M77789.2	[0d80ffde7502:0-35]	0
+```
 
+And here we confirm the proinsulin payload is present:
+
+```sh
+gen search ATGCGCTTCGTCAATCAGCACCTTTGTGGTTCTCACCTCGTTG --sample library
+```
+
+```
+sample	graph	blocks	offset
+library	M77789.2	[fa260db839e8:0-264]	0
+```
+
+The `blocks` column is formatted as `[hash:start-end, ...]`, where `hash` is a 12-character prefix of the node the
+block was carved from and `start`/`end` are the coordinates within it. When a match spans several nodes the column
+lists each block in order. The `offset` column gives the position within the first block where the match begins.
+
+## Analysing sequencing data
+
+For read mapping we export the block group to a GFA file that graph-aware tools can consume. The `gen export` command
+takes a sample name so you can pick which block group to export.
+
+```sh
+gen export gfa library.gfa --sample library
+```
+
+We will use [minigraph](https://github.com/lh3/minigraph), a lightweight sequence-to-graph mapper, to align long reads
+against the exported graph. In the GFA export nodes are identified by two numbers separated by a period: the first is
+the source node identifier and the second is the coordinate where the block starts. Because we inserted the library
+between coordinate 106 and 539 on the reference path, node 3 is split into 3.0, 3.106 and 3.539.
+
+> **Note:** the `library.gfa` and `sample*.gaf` files checked in alongside this example, and the outputs shown below,
+> were produced with an older version of gen that used short integer node identifiers such as `3.0` and `3.539`.
+> Current versions of gen instead name each node by its source node hash, so you will see long hash-based identifiers
+> like `fc6b26a992cc….106.539` in your own export and mappings rather than the short numbers used here.
+
+### Isolate
+
+We first map long-read NGS reads obtained from a single colony isolate:
+
+```sh
+minigraph -cx lr library.gfa sample1.fq -o sample1.gaf
+```
+
+```
 [M::main::0.000*8.39] loaded the graph from "library.gfa"
 [M::mg_index::0.002*3.58] indexed the graph
 [M::mg_opt_update::0.002*3.37] occ_max1=50; lc_max_occ=2
@@ -184,9 +180,12 @@ minigraph -cx lr library.gfa sample1.fq -o sample1.gaf
 
 The resulting GAF file has the path to which a read maps listed in the 6th column. We can extract all unique paths that
 were identified as follows:
-```console
-cut -f6 sample1.gaf | sort | uniq
 
+```sh
+cut -f6 sample1.gaf | sort | uniq
+```
+
+```
 <3.539
 <3.539<4.0
 >3.0>8.0>10.0>4.0>3.539
@@ -198,15 +197,18 @@ Not all reads cover the graph from end to end, but by looking at the longest pat
 to identify the genotype of a colony.
 
 ### Pool
+
 Pooled DNA assembly is a great cost-effective way to access a lot of sequence diversity. Instead of making each
 combination of parts in a separate sample during cloning, we add all possible parts to a single tube in a one-pot
 cloning reaction. Analysing the population of sequences obtained from such a reaction is where long-read NGS and graph
 sequence representations really shine.
 
-```console
+```sh
 minigraph -cx lr library.gfa sample2.fq -o sample2.gaf
-cut -f6 sample1.gaf | sort | uniq
+cut -f6 sample2.gaf | sort | uniq
+```
 
+```
 <3.539
 <3.539<3.106
 <3.539<3.106<3.0
@@ -228,10 +230,12 @@ sample you can't do that. This usually isn't a problem, as long as the frequency
 measure this by counting the relative occurence of the empty vector paths amongst all observe paths that traverse node
 3.0 and 3.539.
 
-```console
+```sh
 total_count=$(cut -f6 sample2.gaf | grep '3\.0' | grep '3\.539' | wc -l)
-(.venv) cut -f6 sample2.gaf | grep '3\.0' | grep '3\.539' | sort | uniq -c | awk -v total="$total_count" '{printf "%.2f %s\n", $1 / total * 100, $2}'
+cut -f6 sample2.gaf | grep '3\.0' | grep '3\.539' | sort | uniq -c | awk -v total="$total_count" '{printf "%.2f %s\n", $1 / total * 100, $2}'
+```
 
+```
 27.87 <3.539<3.106<3.0
 1.64 <3.539<4.0<10.0<6.0<3.0
 1.64 <3.539<4.0<10.0<7.0<3.0
@@ -248,20 +252,23 @@ Here we see that approximately 28% of all molecules in the sample are carryover,
 from a Golden Gate cloning reaction for example this will generally be much lower. Note that we haven't taken into
 account any biases to length in this quick analysis.
 
-
 # Appendix
+
 ## Simulating NGS reads using VG
+
 The NGS data used in this example was simulated using the VG toolkit. For the isolate sample we started from a single
-sequence and converted that into a graph first: 
-```
-root@32a61b3f3998:/data# vg construct -r sample1.fa | vg convert --xg-out - > isolate.xg
-root@32a61b3f3998:/data# vg sim -x isolate.xg -n 10 -l 2000 -a | vg view --fastq-out - > sample1.fq
+sequence and converted that into a graph first:
+
+```sh
+vg construct -r sample1.fa | vg convert --xg-out - > isolate.xg
+vg sim -x isolate.xg -n 10 -l 2000 -a | vg view --fastq-out - > sample1.fq
 ```
 
 For the pooled sample we use a GFA file exported by gen. VG doesn't handle lowercase nucleotides, so we convert
 everything to uppercase first.
-```
-root@32a61b3f3998:/data# cat library.gfa | tr 'a-z' 'A-Z' > library_allcaps.gfa
-root@32a61b3f3998:/data# vg convert --gfa-in library_allcaps.gfa --xg-out > library.xg 
-root@32a61b3f3998:/data# vg sim -x library.xg -n 1000 -l 2000 -a | vg view --fastq-out - > sample2.fq
+
+```sh
+cat library.gfa | tr 'a-z' 'A-Z' > library_allcaps.gfa
+vg convert --gfa-in library_allcaps.gfa --xg-out > library.xg
+vg sim -x library.xg -n 1000 -l 2000 -a | vg view --fastq-out - > sample2.fq
 ```
