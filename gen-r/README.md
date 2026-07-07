@@ -125,6 +125,15 @@ import_granges(gr, seqs, sample = "hg38", repo = repo)
 See `inst/examples/combinatorial_expression_cassette.R` and
 `inst/examples/library_from_granges.R` for full worked examples.
 
+## Vignettes
+
+- [Introduction](https://htmlpreview.github.io/?https://github.com/genhub-bio/gen/blob/main/docs/vignettes/introduction.html) — pUC19 import, editing, and export walkthrough.
+- [Yeast expression library](https://htmlpreview.github.io/?https://github.com/genhub-bio/gen/blob/main/docs/vignettes/yeast_expression_library.html) — combinatorial library design for a carotenoid pathway.
+
+The rendered HTML is checked into `docs/vignettes/`. After changing a vignette,
+rebuild it with `Rscript -e "tools::buildVignettes(dir='gen-r', tangle=FALSE)"`
+and copy the output from `gen-r/vignettes/*.html` into `docs/vignettes/`.
+
 ## Layout
 
 The package follows the standard `extendr` structure:

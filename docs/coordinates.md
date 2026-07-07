@@ -1,3 +1,19 @@
+## Sequence graphs vs. segment graphs
+
+Gen represents sequences as a sequence graph. Nodes hold sequence fragments, edges connect them, and any linear sequence is reconstructed by walking a defined path. New variants extend the graph without splitting existing nodes, so node IDs remain stable across updates.
+
+![Figure 1](figures/figure_1.svg)
+
+**_Figure 1_**: _Sequence graph representation of a variant where two nucleotides AT are replaced by TG; the modified sequence (shown in bold) is stored as a path over a list of edges that address specific coordinates._
+
+This differs from the segment graph model used by tools like vg and Bandage, where the reference sequence is split into pieces to accommodate each variant. Gen converts between the two formats on GFA export.
+
+![Figure 2](figures/figure_2.svg)
+
+**_Figure 2_**: _Segment graph model corresponding to the variant in Figure 1. The original sequence is split into 3 parts; the modified path is defined by a list of nodes that refer to these segments._
+
+## Coordinates
+
 Indexing into a graph is one of the most challenging parts of working with graph genomes. As an example, take the following
 reference genome with variants found in a sample:
 
