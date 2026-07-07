@@ -62,7 +62,7 @@ jobs:
           GITHUB_PAT: ${{ github.token }}
         run: |
           Rscript -e "install.packages(c('remotes', 'testthat'), repos = 'https://cloud.r-project.org')"
-          Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget', upgrade = 'never')"
+          Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget@be23d31587b3b0986febef00ba27567e46dc3338', upgrade = 'never')"
 
       - name: Build macOS binary package
         run: R CMD INSTALL --build gen-r
@@ -142,7 +142,7 @@ jobs:
           GITHUB_PAT: ${{ github.token }}
         run: |
           Rscript -e "install.packages(c('remotes', 'testthat'), repos = 'https://cloud.r-project.org')"
-          Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget', upgrade = 'never')"
+          Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget@be23d31587b3b0986febef00ba27567e46dc3338', upgrade = 'never')"
 
       - name: Build Windows binary package
         shell: cmd
