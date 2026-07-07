@@ -16,7 +16,7 @@ Gen brings version control to genetic sequences. You can clone repositories, cre
 pip install gen
 ```
 
-For the interactive graph widget in Jupyter and other anywidget-compatible notebooks, install the `jupyter` extra:
+Install the `jupyter` extra to include an interactive graph widget for Jupyter and other anywidget-compatible notebooks:
 
 ```sh
 pip install gen[jupyter]
@@ -62,7 +62,7 @@ gen view
 
 ### Push to a remote
 
-Pushing needs a remote repository to push to and an authenticated session, so add the remote, log in, and set it as the default before the first push:
+In order to upload data to a remote repository, you have to add a remote repository (call it `origin` here), log in to authenticate and optionally make it the default remote for this repository, and then run the push command:
 
 ```sh
 gen remote add origin https://www.genhub.bio/api/repos/<user>/<repo>
@@ -107,35 +107,23 @@ plot(sample)
 
 ## Screenshots
 
-**Jupyter widget** — a combinatorial expression-cassette library built with `import_library()`, from [`introduction.ipynb`](gen-python/examples/introduction.ipynb)
+**Python bindings**: Claude reasons about a DNA graph and its protein translation, concluding that one of two SNPs is silent.
 
-![Jupyter widget showing a forked expression-cassette graph with three promoters, two RBS variants, and two CDSes](docs/figures/screenshot_jupyter.png)
+![Claude Code session using the Gen Python module to inspect a sequence variant DNA graph and its translated protein graph, identifying which of two SNPs is non-synonymous](docs/figures/screenshot_cc.png)
 
-**RStudio viewer** — a pUC19 sequence graph with GenBank annotation tracks, branching at an unexpected mutation found by [`introduction.Rmd`](gen-r/vignettes/introduction.Rmd)
+**RStudio viewer**: highlighting a BsmBI site that straddles a part junction in a combinatorial expression-cassette library, from [`yeast_expression_library.Rmd`](gen-r/vignettes/yeast_expression_library.Rmd).
 
-![RStudio viewer showing an annotated pUC19 graph with a branch at a sequencing-detected mutation](docs/figures/screenshot_rstudio.png)
+![RStudio viewer showing an annotated expression-cassette graph with a highlighted restriction site at the TEF1p to crtE_native junction](docs/figures/screenshot_rstudio.png)
 
 ## Example workflows
 
-- [Model a yeast cross](examples/yeast_crosses/Analysis.md) — cross two beer-yeast strains from the 1002 Yeast Genomes collection, building the combined graph from either VCF variant calls or whole-genome alignment.
-- [Explore a brewing-yeast variant graph in Python](gen-python/examples/flo11_brq_demo.ipynb) — analyse the *FLO11* locus on a 9.1 kb *S. cerevisiae* chrIX fragment, searching and navigating the variant graph in the interactive widget.
-- [Screen a combinatorial library in R](https://htmlpreview.github.io/?https://github.com/genhub-bio/gen/blob/main/docs/vignettes/yeast_expression_library.html) — build a 12-construct YTK expression-cassette library, then use a single `search()` call to find a BsmBI site that appears only at one part junction, not in any individual part.
+- [Model a yeast cross](examples/yeast_crosses/Analysis.md): cross two beer-yeast strains from the 1002 Yeast Genomes collection, building the combined graph from either VCF variant calls or whole-genome alignment.
+- [Explore a brewing-yeast variant graph in Python](gen-python/examples/flo11_brq_demo.ipynb): analyse the *FLO11* locus on a 9.1 kb *S. cerevisiae* chrIX fragment, searching and navigating the variant graph in the interactive widget.
+- [Screen a combinatorial library in R](https://htmlpreview.github.io/?https://github.com/genhub-bio/gen/blob/main/docs/vignettes/yeast_expression_library.html): build a combinatorial YTK expression-cassette library, easily detecting a restriction site that appears only at one part junction, not in any individual part.
 
 ## Data model
 
-Gen represents sequences as a sequence graph. Nodes hold sequence fragments, edges connect them, and any linear sequence is reconstructed by walking a defined path. New variants extend the graph without splitting existing nodes, so node IDs remain stable across updates.
-
-![Figure 1](docs/figures/figure_1.svg)
-
-**_Figure 1_**: _Sequence graph representation of a variant where two nucleotides AT are replaced by TG; the modified sequence (shown in bold) is stored as a path over a list of edges that address specific coordinates._
-
-This differs from the segment graph model used by tools like vg and Bandage, where the reference sequence is split into pieces to accommodate each variant. Gen converts between the two formats on GFA export.
-
-![Figure 2](docs/figures/figure_2.svg)
-
-**_Figure 2_**: _Segment graph model corresponding to the variant in Figure 1. The original sequence is split into 3 parts; the modified path is defined by a list of nodes that refer to these segments._
-
-For a longer explanation see [docs/coordinates.md](docs/coordinates.md).
+Gen represents sequences as a sequence graph: nodes hold sequence fragments, edges connect them, and any linear sequence is reconstructed by walking a defined path. New variants extend the graph without splitting existing nodes, so node IDs remain stable across updates. This differs from the segment graph model used by tools like vg, where the reference sequence is split into pieces to accommodate each variant; Gen converts between the two formats on GFA export. See [docs/coordinates.md](docs/coordinates.md) for a full explanation with diagrams.
 
 ## Documentation
 
