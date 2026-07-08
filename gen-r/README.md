@@ -168,18 +168,31 @@ asset <- switch(
   stop("Prebuilt genr packages are currently published for macOS and Windows.")
 )
 
-remotes::install_url(sprintf(
-  "https://github.com/genhub-bio/gen/releases/download/v%s/%s",
-  version,
-  asset
-))
+remotes::install_url(
+  sprintf(
+    "https://github.com/genhub-bio/gen/releases/download/v%s/%s",
+    version,
+    asset
+  ),
+  dependencies = c("Depends", "Imports")
+)
 ```
+
+`dependencies` is pinned to skip `Suggests` (`knitr`, `rmarkdown`, `testthat`,
+and the `webshot2`/`htmlwidgets` pair used only for rendering PDF vignettes),
+which `remotes` would otherwise install by default. Drop that argument (or
+set it to `NA`) if you want those too, e.g. to build the vignettes locally.
 
 Linux installs currently require a source build. For development or Linux,
 install Rust/cargo, `libclang`, and `capnp`, then use:
 
 ```r
-remotes::install_github("genhub-bio/gen", subdir = "gen-r", ref = "v0.1.31")
+remotes::install_github(
+  "genhub-bio/gen",
+  subdir = "gen-r",
+  ref = "v0.1.31",
+  dependencies = c("Depends", "Imports")
+)
 ```
 
 ## Development

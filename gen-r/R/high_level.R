@@ -319,6 +319,9 @@ print.gen_plot <- function(x, ...) {
 knit_print.gen_plot <- function(x, ...) {
   json <- x$render_frame(x$cols, x$rows)
   w <- .genplot_widget(json)
+  if (isTRUE(knitr::is_latex_output())) {
+    return(knitr::knit_print(.genplot_snapshot(w), ...))
+  }
   knitr::knit_print(w$.get_htmlwidget(), ...)
 }
 

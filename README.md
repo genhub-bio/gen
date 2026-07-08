@@ -29,7 +29,8 @@ pip install gen[jupyter]
 ```r
 install.packages("remotes")
 remotes::install_url(
-  "https://github.com/genhub-bio/gen/releases/download/v0.2.0/genr_0.2.0-macos-arm64.tgz"
+  "https://github.com/genhub-bio/gen/releases/download/v0.2.0/genr_0.2.0-macos-arm64.tgz",
+  dependencies = c("Depends", "Imports")
 )
 ```
 

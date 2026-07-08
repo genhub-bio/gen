@@ -23,9 +23,11 @@ Imports:
 Remotes:
     keller-mark/anyhtmlwidget
 Suggests:
+    htmlwidgets,
     knitr,
     rmarkdown,
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    webshot2
 VignetteBuilder: knitr
 Config/testthat/edition: 3
 NeedsCompilation: yes
