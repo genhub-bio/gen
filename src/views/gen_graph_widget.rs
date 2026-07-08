@@ -641,6 +641,10 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     let detail_level = controller.get_detail_level();
     let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
         .iter()
+        .filter(|overlay| {
+            detail_level != VisualDetail::Minimal
+                || !matches!(overlay.source, OverlaySource::Track(_))
+        })
         .filter_map(|overlay| {
             overlay
                 .span()
