@@ -27,7 +27,7 @@ use crate::views::{
         AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
         span_should_hide_in_truncated,
     },
-    graph_overlay::{AnnotationColorCache, GraphOverlay},
+    graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
     inline_label_placement::draw_label_near_pos,
 };
 
@@ -532,10 +532,27 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
     let node_sizer = &controller.partition_controller.node_sizer;
     let graph = controller.graph();
 
+    // At the minimal detail level, DB-loaded annotation tracks are hidden entirely (too
+    // busy at that zoom); ad-hoc/single annotations and the path highlight still paint.
+    // At the truncated level, a span confined to a partial slice of a single node is also
+    // dropped (mirrors the label suppression below), since its painted cells would land on
+    // a collapsed node with no room to convey which part of it they cover.
     let mut span_indices: Vec<usize> = overlays
         .iter()
         .enumerate()
-        .filter_map(|(idx, overlay)| overlay.span().map(|_| idx))
+        .filter_map(|(idx, overlay)| {
+            if detail_level == VisualDetail::Minimal
+                && matches!(overlay.source, OverlaySource::Track(_))
+            {
+                return None;
+            }
+            let span = overlay.span()?;
+            if detail_level == VisualDetail::Truncated && span_should_hide_in_truncated(span, graph)
+            {
+                return None;
+            }
+            Some(idx)
+        })
         .collect();
     span_indices.sort_by_key(|&idx| {
         let span = overlays[idx]
@@ -621,8 +638,15 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     controller: &GraphController<GenGraph, S>,
     overlays: &[GraphOverlay],
 ) -> bool {
+    let detail_level = controller.get_detail_level();
+    // At the minimal detail level, DB-loaded annotation tracks are hidden entirely (too
+    // busy at that zoom); ad-hoc/single annotations still get labelled.
     let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
         .iter()
+        .filter(|overlay| {
+            detail_level != VisualDetail::Minimal
+                || !matches!(overlay.source, OverlaySource::Track(_))
+        })
         .filter_map(|overlay| {
             overlay
                 .span()
@@ -643,7 +667,6 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
 
     let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
     let pos_map = viewport_pos_map(controller);
-    let detail_level = controller.get_detail_level();
     let theme = current_theme();
     let max_distance = if detail_level == VisualDetail::Minimal {
         10
@@ -1052,6 +1075,96 @@ mod tests {
             cell_highlights[2], node_c,
             "single-block span applied last despite its lone segment being longer than \
              either per-block segment of the multi-block span"
+        );
+    }
+
+    /// At the minimal detail level, a DB-loaded track overlay must not be painted at all
+    /// (too busy fully zoomed out), while an ad-hoc annotation overlay (Jupyter widget's
+    /// `add_annotation`) still paints.
+    #[test]
+    fn reapply_overlays_hides_track_overlays_at_minimal_detail() {
+        use gen_core::{HashId, Strand};
+        use gen_tui::graph_controller::HighlightKind;
+
+        use crate::views::{
+            annotation_track::{AnnotationSegment, AnnotationSpan},
+            graph_overlay::{OverlayContent, OverlaySource},
+        };
+
+        let node = GraphNode {
+            node_id: HashId::convert_str("block"),
+            sequence_start: 0,
+            sequence_end: 10,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let mut controller = create_gen_graph_controller(graph);
+        controller.set_detail_level(VisualDetail::Minimal);
+
+        // Both spans cover the node's full width, so the truncated-level rule (hide only
+        // partial-node spans) never suppresses them once zoomed past minimal detail.
+        let track_span = AnnotationSpan {
+            id: HashId::convert_str("track-span"),
+            name: "track".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 0,
+                end: 10,
+                strand: Strand::Forward,
+            }],
+        };
+        let adhoc_span = AnnotationSpan {
+            id: HashId::convert_str("adhoc-span"),
+            name: "adhoc".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 0,
+                end: 10,
+                strand: Strand::Forward,
+            }],
+        };
+
+        let mut overlays = vec![
+            GraphOverlay {
+                content: OverlayContent::Span(track_span),
+                source: OverlaySource::Track("file:1".to_string()),
+                style: PathStyle::new(Color::Cyan),
+            },
+            GraphOverlay {
+                content: OverlayContent::Span(adhoc_span),
+                source: OverlaySource::Adhoc,
+                style: PathStyle::new(Color::Yellow),
+            },
+        ];
+
+        let mut color_cache = AnnotationColorCache::new();
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+
+        let cell_highlights: Vec<GraphNode> = controller
+            .highlights
+            .iter()
+            .filter_map(|(kind, _)| match kind {
+                HighlightKind::Cells { node, .. } => Some(*node),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            cell_highlights.len(),
+            1,
+            "only the ad-hoc overlay should paint at minimal detail"
+        );
+
+        controller.set_detail_level(VisualDetail::Truncated);
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+        let cell_highlights_zoomed_in = controller
+            .highlights
+            .iter()
+            .filter(|(kind, _)| matches!(kind, HighlightKind::Cells { .. }))
+            .count();
+        assert_eq!(
+            cell_highlights_zoomed_in, 2,
+            "both overlays should paint once zoomed in past minimal detail"
         );
     }
 
