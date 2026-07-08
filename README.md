@@ -48,7 +48,6 @@ gen import fasta reference.fa --reference hg38
 
 ```sh
 # Branch before making changes
-gen branch --create experiment/na12878
 gen checkout --branch experiment/na12878
 
 # Apply variants from a VCF — Gen adds new edges to the graph without touching existing nodes
