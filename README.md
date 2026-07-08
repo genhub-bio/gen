@@ -1,6 +1,6 @@
 # Gen
 
-Gen brings version control to genetic sequences. With it, you can track variants and edits to single genes or whole genomes, across multiple generations and lineages. You can clone genome repositories, create branches, make edits, and push changes to a shared remote using the same workflow developers know from Git. It works across FASTA files, VCFs, GenBank records, and other common bioinformatics formats. Under the hood, Gen stores data as a sequence graph, allowing a single repository to represent a reference genome, known variants, and engineered modifications without repeatedly storing the same sequence.
+Gen brings version control to genetic sequences. With it, you can track variants and edits to genes or whole genomes, across multiple generations and lineages. You can clone genome repositories, create branches, make edits, and push changes to a shared remote using the same workflow developers know from Git. It works across FASTA files, VCFs, GenBank records, and other common bioinformatics formats. Under the hood, Gen stores data as a sequence graph, allowing a single repository to represent a reference genome, known variants, and engineered modifications without repeatedly storing the same sequence.
 
 [![PyPI](https://img.shields.io/pypi/v/gen.svg)](https://pypi.org/project/gen/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -8,9 +8,11 @@ Gen brings version control to genetic sequences. With it, you can track variants
 
 ## Install
 
-**CLI binary** — prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/genhub-bio/gen/releases): [macOS (.pkg)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), [Linux x86_64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip), [Linux arm64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
+**Gen client**: prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/genhub-bio/gen/releases): [macOS (.pkg)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), [Linux x86_64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip), [Linux arm64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
 
-**Python**
+**Python package**: this allows you to import, edit, export sequence graphs from Python. The Gen client is not
+required to use the Python package, but actions involving remote repositories (`push`/`pull`) are currently
+only available through the client. Install on macOS, Linux, or Windows using:
 
 ```sh
 pip install gen
@@ -22,7 +24,7 @@ Install the `jupyter` extra to include an interactive graph widget for Jupyter a
 pip install gen[jupyter]
 ```
 
-**R** — see the [installation guide](https://www.genhub.bio/docs/installation) for platform-specific instructions. On macOS (Apple silicon):
+**R package**: run Gen operations directly from R. Install on macOS (Apple silicon) using the `remotes` package:
 
 ```r
 install.packages("remotes")
@@ -32,7 +34,6 @@ remotes::install_url(
 ```
 
 Windows builds are published as `genr-windows-<version>.zip` on the same [releases page](https://github.com/genhub-bio/gen/releases).
-
 
 ## Quick start
 
@@ -75,7 +76,7 @@ Subsequent pushes from this repository only need `gen push`.
 
 ### Python and R bindings
 
-Python and R libraries expose the same operations. The R bindings are compatible with Bioconductor types such as DNAStringSet and GRanges. The Python API exposes samples and sequence graphs as rich objects that provide a programmatic equivalent for every action available through the CLI. The `jupyter` extra provides an interactive widget for graph visualization and exploration. The Python module was built with AI agents in mind, for example by embedding a textual representation of graph visualizations in notebook files alongside the pixel data. 
+Python and R libraries expose the same operations. The R bindings are compatible with Bioconductor types such as DNAStringSet and GRanges. The Python API exposes samples and sequence graphs as rich objects that provide a programmatic equivalent for every action available through the CLI. The `jupyter` extra provides an interactive widget for graph visualization and exploration. The Python module was built with AI agents in mind, for example by embedding a textual representation of graph visualizations in notebook files alongside the pixel data.
 
 Example Python code to initialize or load a repository, import a sequence as reference, applying variants from a
 VCF file, and viewing the resulting sequence graph:
@@ -111,13 +112,15 @@ plot(sample)
 
 ## Screenshots
 
-**Python bindings**: Claude reasons about a DNA graph and its protein translation, concluding that one of two SNPs is silent.
+<p align="center">
+  <img src="docs/figures/screenshot_cc.png" alt="Claude Code session using the Gen Python module to inspect a sequence variant DNA graph and its translated protein graph, identifying which of two SNPs is non-synonymous" width="600"><br>
+  <sub><b>Python bindings</b>: Claude reasons about a DNA graph and its protein translation, concluding that one of two SNPs is silent.</sub>
+</p>
 
-![Claude Code session using the Gen Python module to inspect a sequence variant DNA graph and its translated protein graph, identifying which of two SNPs is non-synonymous](docs/figures/screenshot_cc.png)
-
-**RStudio viewer**: highlighting a BsmBI site that straddles a part junction in a combinatorial expression-cassette library, from [`yeast_expression_library.Rmd`](gen-r/vignettes/yeast_expression_library.Rmd).
-
-![RStudio viewer showing an annotated expression-cassette graph with a highlighted restriction site at the TEF1p to crtE_native junction](docs/figures/screenshot_rstudio.png)
+<p align="center">
+  <img src="docs/figures/screenshot_rstudio.png" alt="RStudio viewer showing an annotated expression-cassette graph with a highlighted restriction site at the TEF1p to crtE_native junction" width="599"><br>
+  <sub><b>RStudio viewer</b>: highlighting a BsmBI site that straddles a part junction in a combinatorial expression-cassette library, from <a href="gen-r/vignettes/yeast_expression_library.Rmd"><code>yeast_expression_library.Rmd</code></a>.</sub>
+</p>
 
 ## Example workflows
 
