@@ -59,7 +59,7 @@ jobs:
 
       - name: Install R package dependencies
         env:
-          GITHUB_PAT: ${{ github.token }}
+          GITHUB_PAT: ${{ secrets.MINIMAL_RO_PAT }}
         run: |
           Rscript -e "install.packages(c('remotes', 'testthat'), repos = 'https://cloud.r-project.org')"
           Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget@be23d31587b3b0986febef00ba27567e46dc3338', upgrade = 'never')"
