@@ -197,6 +197,27 @@ remotes::install_github(
 
 ## Development
 
+### Building PDF vignettes
+
+Vignettes render as HTML by default. To build a PDF instead (e.g.
+`introduction.Rmd`), install the optional PDF-only dependencies and a LaTeX
+distribution, then render with `output_format` set explicitly:
+
+```r
+install.packages(c("webshot2", "htmlwidgets"))
+if (!tinytex::is_tinytex()) tinytex::install_tinytex()
+
+rmarkdown::render(
+  "gen-r/vignettes/introduction.Rmd",
+  output_format = "rmarkdown::pdf_document"
+)
+```
+
+Same call works for `yeast_expression_library.Rmd`. `webshot2` rasterizes
+each `gen_plot` widget to a PNG for the LaTeX output (see
+`knit_print.gen_plot` in `R/high_level.R`); `xelatex` is required for the
+unicode characters (α, β, ×, →) used in the vignette text.
+
 ### Docker install test
 
 Build from the repository root so the nested Rust crate can see the workspace:
