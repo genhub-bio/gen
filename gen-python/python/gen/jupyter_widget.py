@@ -443,7 +443,7 @@ class GraphWidget(anywidget.AnyWidget):
         self._controller.prev_page()
         self._render()
 
-    def go_to(self, target) -> None:
+    def go_to(self, target, *, center: bool = False) -> None:
         """Instantly move the camera to a graph position, locus, or annotation.
 
         Parameters
@@ -452,6 +452,9 @@ class GraphWidget(anywidget.AnyWidget):
             A ``Position`` (from ``locus.start()`` / ``locus.end()``),
             a ``Locus`` (from ``repo.search()``), or
             an ``Annotation`` object (e.g. from ``widget.list_annotations()``).
+        center:
+            When ``True``, center the target in the viewport instead of the
+            default snap-left placement.
 
         Example
         -------
@@ -460,6 +463,7 @@ class GraphWidget(anywidget.AnyWidget):
             matches = repo.search(bg, "ACGT...")
             widget.go_to(matches[0].start())
             widget.go_to(matches[0])
+            widget.go_to(matches[0], center=True)
 
             records = widget.list_annotations()
             widget.go_to(records[0])
@@ -469,14 +473,14 @@ class GraphWidget(anywidget.AnyWidget):
         from gen import Annotation, Locus  # noqa: PLC0415
 
         if isinstance(target, Annotation):
-            self._controller.go_to_annotation_obj(target)
+            self._controller.go_to_annotation_obj(target, center)
         elif isinstance(target, Locus):
-            self._controller.go_to_locus(target)
+            self._controller.go_to_locus(target, center)
         else:
-            self._controller.go_to_pos(target)
+            self._controller.go_to_pos(target, center)
         self._render()
 
-    def show(self, target, color: str | None = None) -> None:
+    def show(self, target, color: str | None = None, *, center: bool = False) -> None:
         """Navigate to and highlight a graph locus or annotation in one call.
 
         Parameters
@@ -489,6 +493,9 @@ class GraphWidget(anywidget.AnyWidget):
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
             (``"#ff8800"``).  When omitted the next unused theme accent
             colour is chosen automatically.
+        center:
+            When ``True``, center the target in the viewport instead of the
+            default snap-left placement.
 
         Example
         -------
@@ -505,10 +512,10 @@ class GraphWidget(anywidget.AnyWidget):
         from gen import Annotation  # noqa: PLC0415
 
         if isinstance(target, Annotation):
-            self._controller.go_to_annotation_obj(target)
+            self._controller.go_to_annotation_obj(target, center)
             self._controller.highlight_annotation_obj(target, color)
         else:
-            self._controller.go_to_pos(target.start())
+            self._controller.go_to_pos(target.start(), center)
             self._controller.highlight_match(target, color)
         self._render()
 

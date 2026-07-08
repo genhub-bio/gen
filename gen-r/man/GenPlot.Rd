@@ -46,7 +46,7 @@ A \code{gen_plot} environment with methods:
 \item{\code{handle_click(col, row)}}{Send a mouse click; returns \code{TRUE} if a node was hit.}
 \item{\code{set_detail(detail)}}{Change node detail level (\code{"normal"}, \code{"compressed"}, or \code{"full"}). Returns self invisibly.}
 \item{\code{render_frame(cols, rows)}}{Render to JSON string (used internally by the widget).}
-\item{\code{goto_match(match_locus)}}{Center the viewport on a search result locus. Sets detail to \code{"full"}. Returns self invisibly.}
+\item{\code{go_to_match(match_locus, center = FALSE)}}{Move the viewport to a search result locus, snapping it left by default or centering it when \code{center = TRUE}. Sets detail to \code{"full"}. Returns self invisibly.}
 \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be a named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}) or a CSS hex string (e.g. \code{"#4393c3"}). Returns self invisibly.}
 \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
 \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file and render annotations as inline graph highlights with floating labels. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}

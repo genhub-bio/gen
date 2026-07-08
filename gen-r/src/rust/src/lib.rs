@@ -809,7 +809,7 @@ fn apply_graph_ops(
                     .map_err(|err| format!("Invalid click row in '{op}': {err}"))?;
                 let _ = controller.handle_click(col, row);
             }
-            Some("goto") => {
+            Some("goto") | Some("gotoc") => {
                 if parts.len() != 5 {
                     return Err(format!("Invalid goto op: {op}"));
                 }
@@ -843,8 +843,16 @@ fn apply_graph_ops(
                 }
                 let domain_idx = NodeIndex::new(NodeIndexable::to_index(controller.graph(), node));
                 controller.go_to_node(domain_idx, (frac_x, 0.5));
-                controller.queue_snap_left();
+                if parts[0] == "goto" {
+                    controller.queue_snap_left();
+                }
                 controller.hide_cursor();
+                // Resolve the pending goto's camera move now rather than leaving it
+                // deferred to the final widget render, so later ops in this batch
+                // (e.g. "m" pan) apply on top of it instead of being overwritten by it.
+                controller
+                    .rebuild_viewport_graph()
+                    .map_err(|err| format!("Failed to resolve goto in '{op}': {err}"))?;
             }
             Some("hl") => deferred_hl.push(op),
             Some("clrhl") => {
@@ -923,9 +931,26 @@ fn graph_locus_record(locus: &GraphLocus) -> Robj {
             }
         }
     };
+    // Centering on `start` would leave the cursor at the match's edge; the on-screen-cursor
+    // invariant in gen-tui's camera-follow would then keep tugging the view back toward it
+    // for any sufficiently long match. Precomputing the true sequence midpoint here lets R
+    // send the cursor straight there for `go_to_match(center = TRUE)`.
+    let midpoint = locus
+        .midpoint()
+        .map(|(slice, offset)| {
+            position_record(
+                slice.block.node_id,
+                slice.block.sequence_start,
+                slice.block.sequence_end,
+                offset,
+                slice.strand,
+            )
+        })
+        .unwrap_or_else(|| NULL.into());
     let mut obj = r!(list!(
         start = start,
         end = end,
+        midpoint = midpoint,
         slices = List::from_values(slices),
         strand = overall_strand
     ));

@@ -190,8 +190,9 @@ always use a full scan regardless.
 ### Navigate and highlight search results
 
 Each entry in the `matches` list is a locus record with `start`, `end`,
-`blocks`, and `strand`. Pass a locus directly to `goto_match` to centre
-the viewport on it, and to `highlight_match` to colour it on the canvas.
+`blocks`, and `strand`. Pass a locus directly to `go_to_match` to move
+the viewport to it (or `go_to_match(locus, center = TRUE)` to center
+it instead), and to `highlight_match` to colour it on the canvas.
 
 The convenience method `go_to()` accepts both search match loci and
 annotation records returned by `list_annotations()`. Annotations from
@@ -206,7 +207,7 @@ sample points to exactly the same graph nodes that appear in the
 matches <- hits[[1]]$matches
 
 # Jump to the first BsaI site and highlight both sites.
-p_gg$goto_match(matches[[1]])
+p_gg$go_to_match(matches[[1]])
 p_gg$highlight_match(matches[[1]], color = "cyan")
 p_gg$highlight_match(matches[[2]], color = "cyan")
 p_gg

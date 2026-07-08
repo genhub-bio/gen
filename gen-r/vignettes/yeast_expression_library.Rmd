@@ -288,13 +288,12 @@ terminator is chosen.
 ## Highlight the BsmBI site on the graph
 
 ```{r highlight-site}
-p2 <- plot(sg, rows = 20L,
+p2 <- plot(sg, rows=15L, cols = 60L,
            colors = function(ann) ROLE_COLORS[[NAME_ROLE[[ann$name]]]])
 
 m <- hits[[1]]$matches[[1]]
-p2$goto_match(m)
+p2$go_to_match(m, center = TRUE)
 p2$highlight_match(m, color = "red")
-
 p2
 ```
 

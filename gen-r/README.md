@@ -103,7 +103,7 @@ Track overlays and search highlights:
 ```r
 p$add_track_file("annotations.gff3", name = "genes", sample = "ref")
 results <- repo$search("ATCGATCG")
-p$goto_match(results[[1]]$matches[[1]])
+p$go_to_match(results[[1]]$matches[[1]])
 p$highlight_match(results[[1]]$matches[[1]], color = "yellow")
 p
 ```
