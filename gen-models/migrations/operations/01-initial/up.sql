@@ -51,6 +51,8 @@ CREATE TABLE annotation_files (
   file_addition_id BLOB NOT NULL,
   index_file_addition_id BLOB,
   name TEXT,
+  file_path TEXT NOT NULL DEFAULT '',
+  index_file_path TEXT,
   FOREIGN KEY(operation_hash) REFERENCES operations(hash),
   FOREIGN KEY(file_addition_id) REFERENCES file_additions(id),
   FOREIGN KEY(index_file_addition_id) REFERENCES file_additions(id)

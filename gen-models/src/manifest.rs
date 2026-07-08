@@ -80,6 +80,8 @@ pub struct ManifestAnnotationFileAddition {
     pub file_addition: FileAddition,
     pub index_file_addition: Option<FileAddition>,
     pub name: Option<String>,
+    pub file_path: String,
+    pub index_file_path: Option<String>,
 }
 
 impl<'a> Capnp<'a> for ManifestAnnotationFileAddition {
@@ -101,6 +103,14 @@ impl<'a> Capnp<'a> for ManifestAnnotationFileAddition {
             }
             None => builder.reborrow().get_index_file_addition().set_none(()),
         }
+        builder.set_file_path(&self.file_path);
+        match &self.index_file_path {
+            Some(index_file_path) => builder
+                .reborrow()
+                .get_index_file_path()
+                .set_some(index_file_path),
+            None => builder.reborrow().get_index_file_path().set_none(()),
+        }
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -117,10 +127,18 @@ impl<'a> Capnp<'a> for ManifestAnnotationFileAddition {
                 Some(FileAddition::read_capnp(file_reader.unwrap()))
             }
         };
+        let index_file_path = match reader.get_index_file_path().which().unwrap() {
+            manifest_annotation_file_addition::index_file_path::None(()) => None,
+            manifest_annotation_file_addition::index_file_path::Some(path_reader) => {
+                Some(path_reader.unwrap().to_string().unwrap())
+            }
+        };
         ManifestAnnotationFileAddition {
             file_addition,
             index_file_addition,
             name,
+            file_path: reader.get_file_path().unwrap().to_string().unwrap(),
+            index_file_path,
         }
     }
 }
@@ -202,6 +220,8 @@ impl<'a> Capnp<'a> for ManifestOperation {
                     file_addition: FileAddition::read_capnp(file_addition_reader),
                     index_file_addition: None,
                     name: None,
+                    file_path: String::new(),
+                    index_file_path: None,
                 })
                 .collect()
         };
@@ -363,6 +383,8 @@ impl<'a> ManifestGenerator<'a> {
                                 file_addition: entry.file_addition,
                                 index_file_addition: entry.index_file_addition,
                                 name: entry.name,
+                                file_path: entry.file_path,
+                                index_file_path: entry.index_file_path,
                             })
                             .collect();
                     let operation_summary = OperationSummary::query(
@@ -513,6 +535,8 @@ mod tests {
                 },
                 index_file_addition: None,
                 name: Some("track-a".to_string()),
+                file_path: "fixtures/annotation.gff3".to_string(),
+                index_file_path: None,
             }],
             operation_summary: Some(OperationSummary {
                 id: 1,
@@ -756,6 +780,8 @@ mod tests {
                 file_addition,
                 index_file_addition: None,
                 name: Some("manifest-track".to_string()),
+                file_path: "fixtures/manifest_annotation.gff3".to_string(),
+                index_file_path: None,
             }]
         );
     }

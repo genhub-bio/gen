@@ -20,8 +20,8 @@ use gen_models::{
     errors::{BranchError, ChangesetError, FileAdditionError, OperationError, RemoteError},
     file_types::FileTypes,
     manifest::{
-        ManifestComparer, ManifestDiff, ManifestDiffError, ManifestError, ManifestGenerator,
-        ManifestOperation, ManifestOperationFileAddition,
+        ManifestAnnotationFileAddition, ManifestComparer, ManifestDiff, ManifestDiffError,
+        ManifestError, ManifestGenerator, ManifestOperation, ManifestOperationFileAddition,
     },
     metadata::get_db_uuid,
     operations::{
@@ -619,6 +619,7 @@ fn apply_operations_to_remote(
                         dst_path.to_string_lossy().to_string(),
                     )
                 })?;
+                materialize_annotation_file(remote_workspace, annotation_file, &dst_path)?;
             }
             if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref() {
                 let src_path = local_base.join(index_file_addition.file_path());
@@ -634,6 +635,12 @@ fn apply_operations_to_remote(
                             dst_path.to_string_lossy().to_string(),
                         )
                     })?;
+                    materialize_annotation_index_file(
+                        remote_workspace,
+                        annotation_file,
+                        index_file_addition,
+                        &dst_path,
+                    )?;
                 }
             }
         }
@@ -717,6 +724,8 @@ fn apply_operations_to_remote(
                             .as_ref()
                             .map(|index_file| &index_file.id),
                         annotation_file.name.as_deref(),
+                        &annotation_file.file_path,
+                        annotation_file.index_file_path.as_deref(),
                     )?;
                 }
                 Operation::add_database(remote_op_conn, &operation.hash, &remote_db_uuid)?;
@@ -1191,6 +1200,8 @@ fn ingest_manifest_operation(
                         .as_ref()
                         .map(|index_file| &index_file.id),
                     annotation_file.name.as_deref(),
+                    &annotation_file.file_path,
+                    annotation_file.index_file_path.as_deref(),
                 )?;
             }
             Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
@@ -1292,6 +1303,7 @@ fn copy_operation_from_remote_fs(
                     dst_path.to_string_lossy().to_string(),
                 )
             })?;
+            materialize_annotation_file(local_workspace, annotation_file, &dst_path)?;
         }
         if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref() {
             let src_path = remote_path.join(index_file_addition.file_path());
@@ -1307,6 +1319,12 @@ fn copy_operation_from_remote_fs(
                         dst_path.to_string_lossy().to_string(),
                     )
                 })?;
+                materialize_annotation_index_file(
+                    local_workspace,
+                    annotation_file,
+                    index_file_addition,
+                    &dst_path,
+                )?;
             }
         }
     }
@@ -1323,19 +1341,58 @@ fn materialize_operation_file(
     file_addition: &ManifestOperationFileAddition,
     stored_asset_path: &FilePath,
 ) -> Result<(), RemoteOperationError> {
-    let operation_file_path = file_addition.file_path.clone();
-    if operation_file_path == file_addition.file_addition.file_path()
-        || !LocalAssetUri::is_asset_relative_path(
-            workspace,
-            file_addition.file_addition.file_path(),
-        )?
+    materialize_asset_file(
+        workspace,
+        &file_addition.file_addition,
+        &file_addition.file_path,
+        stored_asset_path,
+    )
+}
+
+fn materialize_annotation_file(
+    workspace: &Workspace,
+    annotation_file: &ManifestAnnotationFileAddition,
+    stored_asset_path: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    materialize_asset_file(
+        workspace,
+        &annotation_file.file_addition,
+        &annotation_file.file_path,
+        stored_asset_path,
+    )
+}
+
+fn materialize_annotation_index_file(
+    workspace: &Workspace,
+    annotation_file: &ManifestAnnotationFileAddition,
+    index_file_addition: &FileAddition,
+    stored_asset_path: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    let Some(index_file_path) = annotation_file.index_file_path.as_deref() else {
+        return Ok(());
+    };
+    materialize_asset_file(
+        workspace,
+        index_file_addition,
+        index_file_path,
+        stored_asset_path,
+    )
+}
+
+fn materialize_asset_file(
+    workspace: &Workspace,
+    file_addition: &FileAddition,
+    file_path: &str,
+    stored_asset_path: &FilePath,
+) -> Result<(), RemoteOperationError> {
+    if file_path == file_addition.file_path()
+        || !LocalAssetUri::is_asset_relative_path(workspace, file_addition.file_path())?
     {
         return Ok(());
     }
 
-    let user_dst_path =
-        LocalAssetUri::repo_relative_destination_path(workspace, &operation_file_path)
-            .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
+    let user_dst_path = LocalAssetUri::repo_relative_destination_path(workspace, file_path)
+        .map_err(|err| RemoteOperationError::IOError(std::io::Error::other(err)))?;
     if user_dst_path.exists() {
         info!(
             "Skipping copy for existing file {}",
@@ -1349,7 +1406,7 @@ fn materialize_operation_file(
     }
     fs::copy(stored_asset_path, &user_dst_path).map_err(|_| {
         RemoteOperationError::FileTransferError(
-            operation_file_path,
+            file_path.to_string(),
             stored_asset_path.to_string_lossy().to_string(),
             user_dst_path.to_string_lossy().to_string(),
         )
@@ -1432,22 +1489,31 @@ fn download_remote_operation_assets(
     }
 
     for annotation_file in &manifest_operation.annotation_file_additions {
-        download_remote_file_addition_asset(
+        if let Some(stored_asset_actual_path) = download_remote_file_addition_asset(
             client,
             auth_token,
             &asset_response.files,
             &workspace,
             &annotation_file.file_addition,
-            None,
-        )?;
-        if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref() {
-            download_remote_file_addition_asset(
+            Some(annotation_file.file_path.as_str()),
+        )? {
+            materialize_annotation_file(&workspace, annotation_file, &stored_asset_actual_path)?;
+        }
+        if let Some(index_file_addition) = annotation_file.index_file_addition.as_ref()
+            && let Some(stored_asset_actual_path) = download_remote_file_addition_asset(
                 client,
                 auth_token,
                 &asset_response.files,
                 &workspace,
                 index_file_addition,
-                None,
+                annotation_file.index_file_path.as_deref(),
+            )?
+        {
+            materialize_annotation_index_file(
+                &workspace,
+                annotation_file,
+                index_file_addition,
+                &stored_asset_actual_path,
             )?;
         }
     }
@@ -3045,6 +3111,90 @@ mod tests {
                 .expect("should match annotation asset by stored filename");
 
             assert_eq!(matched.url, "https://example.com/annotation");
+        }
+
+        #[test]
+        fn test_materialize_annotation_file_copies_to_manifest_path() {
+            let context = setup_gen();
+            let workspace = context.workspace();
+            let asset_contents = "##gff-version 3\n";
+            let asset_dir = workspace.asset_dir().unwrap();
+            fs::create_dir_all(&asset_dir).unwrap();
+            let asset_path = asset_dir.join("annotation.gff3");
+            fs::write(&asset_path, asset_contents).unwrap();
+            let checksum = calculate_file_checksum(&asset_path).unwrap();
+            let stored_asset_path = ".gen/assets/annotation.gff3".to_string();
+            let annotation_file = ManifestAnnotationFileAddition {
+                file_addition: FileAddition {
+                    id: HashId::random_str(),
+                    asset_uri: LocalAssetUri::asset_uri(&stored_asset_path),
+                    file_type: FileTypes::Gff3,
+                    checksum,
+                },
+                index_file_addition: None,
+                name: Some("track".to_string()),
+                file_path: "annotations/annotation.gff3".to_string(),
+                index_file_path: None,
+            };
+
+            materialize_annotation_file(workspace, &annotation_file, &asset_path).unwrap();
+
+            let materialized_path = workspace
+                .repo_root()
+                .unwrap()
+                .join("annotations/annotation.gff3");
+            assert_eq!(
+                fs::read_to_string(materialized_path).unwrap(),
+                asset_contents
+            );
+        }
+
+        #[test]
+        fn test_materialize_annotation_index_file_copies_to_manifest_path() {
+            let context = setup_gen();
+            let workspace = context.workspace();
+            let asset_contents = "index";
+            let asset_dir = workspace.asset_dir().unwrap();
+            fs::create_dir_all(&asset_dir).unwrap();
+            let asset_path = asset_dir.join("annotation.gff3.tbi");
+            fs::write(&asset_path, asset_contents).unwrap();
+            let checksum = calculate_file_checksum(&asset_path).unwrap();
+            let stored_asset_path = ".gen/assets/annotation.gff3.tbi".to_string();
+            let index_file_addition = FileAddition {
+                id: HashId::random_str(),
+                asset_uri: LocalAssetUri::asset_uri(&stored_asset_path),
+                file_type: FileTypes::Tabix,
+                checksum,
+            };
+            let annotation_file = ManifestAnnotationFileAddition {
+                file_addition: FileAddition {
+                    id: HashId::random_str(),
+                    asset_uri: LocalAssetUri::asset_uri(".gen/assets/annotation.gff3"),
+                    file_type: FileTypes::Gff3,
+                    checksum: HashId::random_str(),
+                },
+                index_file_addition: Some(index_file_addition.clone()),
+                name: Some("track".to_string()),
+                file_path: "annotations/annotation.gff3".to_string(),
+                index_file_path: Some("annotations/annotation.gff3.tbi".to_string()),
+            };
+
+            materialize_annotation_index_file(
+                workspace,
+                &annotation_file,
+                &index_file_addition,
+                &asset_path,
+            )
+            .unwrap();
+
+            let materialized_path = workspace
+                .repo_root()
+                .unwrap()
+                .join("annotations/annotation.gff3.tbi");
+            assert_eq!(
+                fs::read_to_string(materialized_path).unwrap(),
+                asset_contents
+            );
         }
 
         #[test]
