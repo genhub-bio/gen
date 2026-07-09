@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pandoc \
     r-base \
     r-base-dev \
+    r-bioc-biostrings \
+    r-bioc-s4vectors \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work/gen
