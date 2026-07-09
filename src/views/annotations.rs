@@ -18,7 +18,6 @@ use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
     file_types::FileTypes,
-    operations::FileAddition,
     reference_alias::ReferenceAlias,
     traits::Query,
 };
@@ -26,7 +25,7 @@ use noodles::{bed, core::Region, gff, tabix};
 use petgraph::Direction;
 
 use crate::views::{
-    annotation_files::AnnotationFileEntry,
+    annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
     annotation_groups::AnnotationGroupEntry,
     annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
 };
@@ -156,12 +155,12 @@ fn load_group_annotations(
     // a combinatorial library). Clip them onto the block group's full graph so an
     // annotation still covers every surviving fragment of its original range, on every
     // branch, with a gap wherever an edit spliced in unrelated sequence.
-    let graph =
-        BlockGroup::get_graph(conn, &current_block_group.id).unwrap_or_else(|_| GenGraph::new());
+    let graph = BlockGroup::get_graph(conn, &current_block_group.id, None)
+        .unwrap_or_else(|_| GenGraph::new());
     Ok(annotations
         .into_iter()
         .filter_map(|annotation| {
-            let _ = Accession::get_by_id(conn, &annotation.accession_id)?;
+            let _ = Accession::get_by_id(conn, &annotation.accession_id, None)?;
             let accession_segments = annotation_projection::annotation_segments(conn, &annotation);
             let full_segments = clip_segments_to_graph(&accession_segments, &graph);
             if spans_whole_block_group(&full_segments, &graph) {
@@ -372,7 +371,7 @@ pub fn parse_translated_bed<R: BufRead>(
 
 fn resolve_annotation_file_path(
     workspace: &Workspace,
-    file_addition: &FileAddition,
+    file_addition: &AnnotationAssetEntry,
 ) -> Option<PathBuf> {
     if let Ok(repo_root) = workspace.repo_root() {
         let repo_path = repo_root.join(file_addition.file_path());
@@ -405,12 +404,23 @@ fn tabix_index_path(file_path: &FsPath) -> PathBuf {
     PathBuf::from(format!("{}.tbi", file_path.display()))
 }
 
+fn annotation_index_is_tabix(entry: &AnnotationFileEntry) -> bool {
+    entry
+        .index_file_addition
+        .as_ref()
+        .is_some_and(|index_file_addition| index_file_addition.file_type == FileTypes::Tabix)
+}
+
 fn resolve_annotation_index_file_path(
     workspace: &Workspace,
     entry: &AnnotationFileEntry,
     file_path: &FsPath,
 ) -> Option<PathBuf> {
-    if let Some(index_file_addition) = entry.index_file_addition.as_ref() {
+    if annotation_index_is_tabix(entry) {
+        let index_file_addition = entry
+            .index_file_addition
+            .as_ref()
+            .expect("should have index file addition when index type is tabix");
         return resolve_annotation_file_path(workspace, index_file_addition);
     }
     let index_path = tabix_index_path(file_path);
@@ -621,8 +631,12 @@ mod tests {
 
     use gen_core::{HashId, Strand};
     use gen_graph::{GenGraph, GraphNode};
+    use gen_models::file_types::FileTypes;
 
-    use super::{AnnotationSegment, parse_translated_bed, spans_whole_block_group};
+    use super::{
+        AnnotationSegment, annotation_index_is_tabix, parse_translated_bed, spans_whole_block_group,
+    };
+    use crate::views::annotation_files::{AnnotationAssetEntry, AnnotationFileEntry};
 
     #[test]
     fn parse_translated_bed_preserves_strand() {
@@ -713,14 +727,11 @@ mod tests {
         use crate::{
             imports::genbank::{GenBankImportOptions, import_genbank},
             test_helpers::setup_gen,
-            track_database,
             views::annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
         };
 
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
         let file = File::open(&path).unwrap();
@@ -740,9 +751,9 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, "fixtures", "puc19-sample");
+        let block_groups = Sample::get_block_groups(conn, "fixtures", "puc19-sample", None);
         let block_group = &block_groups[0];
-        let graph = BlockGroup::get_graph(conn, &block_group.id).unwrap();
+        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
         let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
 
         let groups =
@@ -789,14 +800,11 @@ mod tests {
             graphs::combinatorial_library::parse_library,
             imports::library::import_library,
             test_helpers::setup_gen,
-            track_database,
             views::annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin},
         };
 
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test";
         let library_name = "m123";
@@ -818,10 +826,10 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let block_group = &block_groups[0];
 
-        let graph = BlockGroup::get_graph(conn, &block_group.id).unwrap();
+        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
         let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
 
         let entry = AnnotationGroupEntry {
@@ -882,5 +890,38 @@ mod tests {
             strand: Strand::Forward,
         }];
         assert!(spans_whole_block_group(&segments, &graph));
+    }
+
+    #[test]
+    fn test_annotation_index_is_tabix_only_for_tabix_sidecars() {
+        let annotation_entry = AnnotationFileEntry {
+            file_addition: AnnotationAssetEntry {
+                id: HashId::convert_str("annotation"),
+                asset_uri: "file:///tmp/annotation.gff3".to_string(),
+                file_type: FileTypes::Gff3,
+                checksum: HashId::convert_str("annotation-checksum"),
+            },
+            index_file_addition: Some(AnnotationAssetEntry {
+                id: HashId::convert_str("index"),
+                asset_uri: "file:///tmp/annotation.csi".to_string(),
+                file_type: FileTypes::None,
+                checksum: HashId::convert_str("index-checksum"),
+            }),
+            name: None,
+            display_name: "annotation".to_string(),
+        };
+        assert!(!annotation_index_is_tabix(&annotation_entry));
+
+        let tabix_entry = AnnotationFileEntry {
+            index_file_addition: Some(AnnotationAssetEntry {
+                file_type: FileTypes::Tabix,
+                ..annotation_entry
+                    .index_file_addition
+                    .clone()
+                    .expect("should have index sidecar")
+            }),
+            ..annotation_entry
+        };
+        assert!(annotation_index_is_tabix(&tabix_entry));
     }
 }

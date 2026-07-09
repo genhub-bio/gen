@@ -1,8 +1,10 @@
 use std::{collections::HashMap, rc::Rc};
 
-use gen_core::{HashId, calculate_hash, traits::Capnp};
-use rusqlite::{self, Row, params, types::Value};
+use gen_core::{HashId, traits::Capnp};
+use indexmap::IndexSet;
+use rusqlite::{self, Row, ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
+use xxhash_rust::xxh3::xxh3_128;
 
 use crate::{
     db::GraphConnection,
@@ -81,10 +83,18 @@ pub struct BlockGroupEdgeData {
 
 impl BlockGroupEdgeData {
     pub fn id_hash(&self) -> HashId {
-        HashId(calculate_hash(&format!(
-            "{}:{}:{}:{}",
-            self.block_group_id, self.edge_id, self.chromosome_index, self.phased
-        )))
+        let half = xxh3_128(
+            format!(
+                "{}:{}:{}:{}",
+                self.block_group_id, self.edge_id, self.chromosome_index, self.phased
+            )
+            .as_bytes(),
+        )
+        .to_le_bytes();
+        let mut hash = [0_u8; 32];
+        hash[..16].copy_from_slice(&half);
+        hash[16..].copy_from_slice(&half);
+        HashId(hash)
     }
 }
 
@@ -133,34 +143,44 @@ impl Query for BlockGroupEdge {
 
 impl BlockGroupEdge {
     #[cfg_attr(
-        all(debug_assertions, feature = "profiling"),
+        feature = "profiling",
         tracing::instrument(skip(conn, block_group_edges))
     )]
     pub fn bulk_create(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
+        let unique_block_group_edges = block_group_edges
+            .iter()
+            .collect::<IndexSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if unique_block_group_edges.is_empty() {
+            return;
+        }
         let batch_size = max_rows_per_batch(conn, 6);
 
-        for chunk in block_group_edges.chunks(batch_size) {
+        for chunk in unique_block_group_edges.chunks(batch_size) {
+            let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
             let mut sql = String::from(
                 "INSERT OR IGNORE INTO block_group_edges
                  (id, block_group_id, edge_id, chromosome_index, phased, created_on) VALUES ",
             );
-            let mut rows_to_insert = vec![];
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-            for block_group_edge in chunk {
-                rows_to_insert.push("(?, ?, ?, ?, ?, ?)".to_string());
-                let hash = block_group_edge.id_hash();
-                params.push(Box::new(hash));
-                params.push(Box::new(block_group_edge.block_group_id));
-                params.push(Box::new(block_group_edge.edge_id));
-                params.push(Box::new(block_group_edge.chromosome_index));
-                params.push(Box::new(block_group_edge.phased));
-                params.push(Box::new(timestamp));
+            for row_index in 0..chunk.len() {
+                if row_index > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?, ?, ?, ?, ?, ?)");
             }
-
-            sql.push_str(&rows_to_insert.join(", "));
-
-            let mut stmt = conn.prepare(&sql).unwrap();
+            sql.push(';');
+            let mut params = Vec::with_capacity(chunk.len() * 6);
+            for block_group_edge in chunk {
+                params.push(Value::from(block_group_edge.id_hash()));
+                params.push(Value::from(block_group_edge.block_group_id));
+                params.push(Value::from(block_group_edge.edge_id));
+                params.push(Value::from(block_group_edge.chromosome_index));
+                params.push(Value::from(block_group_edge.phased));
+                params.push(Value::from(timestamp));
+            }
+            let mut stmt = conn.prepare_cached(&sql).unwrap();
             stmt.execute(rusqlite::params_from_iter(params)).unwrap();
         }
     }
@@ -180,17 +200,22 @@ impl BlockGroupEdge {
     pub fn edges_for_block_group(
         conn: &GraphConnection,
         block_group_id: &HashId,
+        history_ref: Option<&str>,
     ) -> Vec<AugmentedEdge> {
-        let block_group_edges = BlockGroupEdge::query(
-            conn,
-            "select * from block_group_edges where block_group_id = ?1 ORDER BY created_on DESC;",
-            params![block_group_id],
+        let query = format!(
+            "select * from {} where block_group_id = :block_group_id ORDER BY created_on DESC;",
+            Self::table_name_with_history_ref(history_ref),
         );
+        let mut params: Vec<(&str, &dyn ToSql)> = vec![(":block_group_id", block_group_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        let block_group_edges = BlockGroupEdge::query(conn, &query, &params[..]);
         let edge_ids = block_group_edges
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids);
+        let edges = Edge::query_by_ids(conn, &edge_ids, history_ref);
         let edge_map = edges
             .iter()
             .map(|edge| (&edge.id, edge))
@@ -231,7 +256,7 @@ impl BlockGroupEdge {
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids);
+        let edges = Edge::query_by_ids(conn, &edge_ids, None);
 
         let edge_map = edges
             .iter()
@@ -283,5 +308,25 @@ mod tests {
 
         let deserialized = BlockGroupEdge::read_capnp(root.into_reader());
         assert_eq!(block_group_edge, deserialized);
+    }
+
+    #[test]
+    fn test_block_group_edge_data_id_hash_is_deterministic() {
+        let block_group_edge = BlockGroupEdgeData {
+            block_group_id: HashId::convert_str("block-group"),
+            edge_id: HashId::convert_str("edge"),
+            chromosome_index: -7,
+            phased: 11,
+        };
+        let changed_block_group_edge = BlockGroupEdgeData {
+            phased: 12,
+            ..block_group_edge.clone()
+        };
+
+        assert_eq!(block_group_edge.id_hash(), block_group_edge.id_hash());
+        assert_ne!(
+            block_group_edge.id_hash(),
+            changed_block_group_edge.id_hash()
+        );
     }
 }

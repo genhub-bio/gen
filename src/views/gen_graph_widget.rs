@@ -111,7 +111,7 @@ impl<'a> GenGraphNodeRenderer<'a> {
             node_key.sequence_start,
             node_key.sequence_end,
         );
-        let sequences = Node::get_sequences_by_node_ids(self.conn, &[db_node_id]);
+        let sequences = Node::get_sequences_by_node_ids(self.conn, &[db_node_id], None);
         let sequence = match sequences.get(&db_node_id) {
             Some(seq) => seq.get_sequence(start, end)?,
             None => "?".repeat((end - start).max(0) as usize),
@@ -792,14 +792,12 @@ mod tests {
         use ratatui::widgets::StatefulWidget as _;
 
         use crate::{
-            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
+            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk,
             updates::vcf::update_with_vcf,
         };
 
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test";
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -832,7 +830,7 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1").unwrap();
+        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1", None).unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);
@@ -869,14 +867,10 @@ mod tests {
         use gen_models::{locus::GraphLocus, sample::Sample};
         use ratatui::{layout::Rect, style::Color};
 
-        use crate::{
-            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
-        };
+        use crate::{imports::fasta::import_fasta, test_helpers::setup_gen_on_disk};
 
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test";
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -893,7 +887,7 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, Sample::DEFAULT_NAME).unwrap();
+        let gen_graph = Sample::get_graph(conn, collection, Sample::DEFAULT_NAME, None).unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let block = controller

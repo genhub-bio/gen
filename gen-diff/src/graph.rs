@@ -1,28 +1,57 @@
-use std::collections::{HashMap, HashSet};
-
-use gen_core::{
-    HashId,
-    Strand::{self, Forward},
-    is_end_node, is_start_node, is_terminal,
-};
+use gen_core::HashId;
+#[cfg(test)]
+use gen_core::Strand;
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
-use gen_models::{
-    block_group_edge::BlockGroupEdge, changesets::ChangesetModels, edge::Edge, node::Node,
-    sequence::Sequence, session_operations::DependencyModels,
-};
-use itertools::Itertools;
-use petgraph::{Direction, graphmap::DiGraphMap};
+use petgraph::graphmap::DiGraphMap;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub enum DiffChangeKind {
+    Unchanged,
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct DiffChange {
+    pub kind: DiffChangeKind,
+    pub operation: Option<HashId>,
+}
+
+impl DiffChange {
+    pub const fn unchanged() -> Self {
+        Self {
+            kind: DiffChangeKind::Unchanged,
+            operation: None,
+        }
+    }
+
+    pub const fn new(kind: DiffChangeKind, operation: Option<HashId>) -> Self {
+        Self { kind, operation }
+    }
+
+    pub fn operation_or(self, default_operation: HashId) -> HashId {
+        self.operation.unwrap_or(default_operation)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub enum DiffPresence {
+    SourceOnly,
+    TargetOnly,
+    Both,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct DiffGraphNode {
     pub node: GraphNode,
-    pub is_new: bool,
+    pub change: DiffChange,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct DiffGraphEdge {
     pub edge: GraphEdge,
-    pub is_new: bool,
+    pub change: DiffChange,
 }
 
 pub type DiffGenGraph = DiGraphMap<DiffGraphNode, Vec<DiffGraphEdge>>;
@@ -61,238 +90,9 @@ impl From<DiffGraphEdge> for GraphEdge {
     }
 }
 
-pub fn get_diff_graph(
-    changes: &ChangesetModels,
-    dependencies: &DependencyModels,
-) -> HashMap<HashId, DiffGenGraph> {
-    let start_node = Node::get_start_node();
-    let end_node = Node::get_end_node();
-    let mut bges_by_bg: HashMap<HashId, Vec<&BlockGroupEdge>> = HashMap::new();
-    // the bool is marking whether or not the Edge/Node is new
-    let mut edges_by_id: HashMap<HashId, (&Edge, bool)> = HashMap::new();
-    let mut nodes_by_id: HashMap<HashId, (&Node, bool)> = HashMap::new();
-    nodes_by_id.insert(start_node.id, (&start_node, false));
-    nodes_by_id.insert(end_node.id, (&end_node, false));
-    let mut sequences_by_hash: HashMap<HashId, &Sequence> = HashMap::new();
-    let mut block_graphs: HashMap<HashId, DiffGenGraph> = HashMap::new();
-
-    for bge in changes.block_group_edges.iter() {
-        bges_by_bg
-            .entry(bge.block_group_id)
-            .and_modify(|l| l.push(bge))
-            .or_insert_with(|| vec![bge]);
-    }
-    for edge in dependencies.edges.iter() {
-        edges_by_id.insert(edge.id, (edge, false));
-    }
-    for edge in changes.edges.iter() {
-        edges_by_id.insert(edge.id, (edge, true));
-    }
-    for node in dependencies.nodes.iter() {
-        nodes_by_id.insert(node.id, (node, false));
-    }
-    for node in changes.nodes.iter() {
-        nodes_by_id.insert(node.id, (node, true));
-    }
-    for seq in dependencies
-        .sequences
-        .iter()
-        .chain(changes.sequences.iter())
-    {
-        sequences_by_hash.insert(seq.hash, seq);
-    }
-
-    for (bg_id, bg_edges) in bges_by_bg.iter() {
-        let mut graph: DiGraphMap<HashId, Vec<(i64, i64, bool)>> = DiGraphMap::new();
-        let mut block_graph = DiffGenGraph::new();
-        block_graph.add_node(DiffGraphNode {
-            node: GraphNode {
-                node_id: start_node.id,
-                sequence_start: 0,
-                sequence_end: 0,
-            },
-            is_new: false,
-        });
-        block_graph.add_node(DiffGraphNode {
-            node: GraphNode {
-                node_id: end_node.id,
-                sequence_start: 0,
-                sequence_end: 0,
-            },
-            is_new: false,
-        });
-        for bg_edge in bg_edges {
-            let (edge, edge_is_new) = *edges_by_id.get(&bg_edge.edge_id).unwrap();
-            if let Some(weights) = graph.edge_weight_mut(edge.source_node_id, edge.target_node_id) {
-                weights.push((edge.source_coordinate, edge.target_coordinate, edge_is_new));
-            } else {
-                graph.add_edge(
-                    edge.source_node_id,
-                    edge.target_node_id,
-                    vec![(edge.source_coordinate, edge.target_coordinate, edge_is_new)],
-                );
-            }
-        }
-
-        for node in graph.nodes() {
-            if is_terminal(node) {
-                continue;
-            }
-            let in_ports = graph
-                .edges_directed(node, Direction::Incoming)
-                .flat_map(|(_src, _dest, weights)| {
-                    weights.iter().map(|(_, tp, _)| *tp).collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            let out_ports = graph
-                .edges_directed(node, Direction::Outgoing)
-                .flat_map(|(_src, _dest, weights)| {
-                    weights.iter().map(|(fp, _tp, _)| *fp).collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-
-            let (node_obj, node_is_new) = *nodes_by_id.get(&node).unwrap();
-            let sequence = *sequences_by_hash.get(&node_obj.sequence_hash).unwrap();
-            let s_len = sequence.length;
-            let mut block_starts: HashSet<i64> = HashSet::from_iter(in_ports.iter().copied());
-            block_starts.insert(0);
-            for x in out_ports.iter() {
-                if *x < s_len - 1 {
-                    block_starts.insert(*x);
-                }
-            }
-            let mut block_ends: HashSet<i64> = HashSet::from_iter(out_ports.iter().copied());
-            block_ends.insert(s_len);
-            for x in in_ports.iter() {
-                if *x > 0 {
-                    block_ends.insert(*x);
-                }
-            }
-
-            let block_starts = block_starts.into_iter().sorted().collect::<Vec<_>>();
-            let block_ends = block_ends.into_iter().sorted().collect::<Vec<_>>();
-
-            let mut blocks = vec![];
-            for (i, j) in block_starts.iter().zip(block_ends.iter()) {
-                let node = DiffGraphNode {
-                    node: GraphNode {
-                        node_id: node,
-                        sequence_start: *i,
-                        sequence_end: *j,
-                    },
-                    is_new: node_is_new,
-                };
-                block_graph.add_node(node);
-                blocks.push(node);
-            }
-
-            for (i, j) in blocks.iter().tuple_windows() {
-                block_graph.add_edge(
-                    *i,
-                    *j,
-                    vec![DiffGraphEdge {
-                        edge: GraphEdge {
-                            edge_id: HashId::pad_str(1),
-                            source_strand: Strand::Forward,
-                            target_strand: Forward,
-                            chromosome_index: 0,
-                            phased: 0,
-                            created_on: 0,
-                        },
-                        is_new: node_is_new,
-                    }],
-                );
-            }
-        }
-
-        for (src, dest, weights) in graph.all_edges() {
-            for (fp, tp, edge_is_new) in weights {
-                if !(is_end_node(src) && is_start_node(dest)) {
-                    let source_block = block_graph
-                        .nodes()
-                        .find(|node| node.node.node_id == src && node.node.sequence_end == *fp)
-                        .unwrap();
-                    let dest_block = block_graph
-                        .nodes()
-                        .find(|node| node.node.node_id == dest && node.node.sequence_start == *tp)
-                        .unwrap();
-                    block_graph.add_edge(
-                        source_block,
-                        dest_block,
-                        vec![DiffGraphEdge {
-                            edge: GraphEdge {
-                                edge_id: HashId::pad_str(1),
-                                source_strand: Strand::Forward,
-                                target_strand: Forward,
-                                chromosome_index: 0,
-                                phased: 0,
-                                created_on: 0,
-                            },
-                            is_new: *edge_is_new,
-                        }],
-                    );
-                }
-            }
-        }
-
-        block_graphs.insert(*bg_id, block_graph);
-    }
-
-    block_graphs
-}
-
 #[cfg(test)]
 mod tests {
-    use gen_core::{HashId, Strand};
-    use gen_graph::{GraphEdge, GraphNode};
-    use gen_models::{
-        block_group::BlockGroup,
-        block_group_edge::BlockGroupEdge,
-        changesets::ChangesetModels,
-        edge::Edge,
-        node::Node,
-        sequence::{NewSequence, Sequence},
-        session_operations::DependencyModels,
-    };
-
     use super::*;
-
-    fn base_dependencies(start_node: &Node, end_node: &Node) -> DependencyModels {
-        let mut start_sequence = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("")
-            .name("start")
-            .build();
-        start_sequence.hash = start_node.sequence_hash;
-        let mut end_sequence = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("")
-            .name("end")
-            .build();
-        end_sequence.hash = end_node.sequence_hash;
-        DependencyModels {
-            collections: vec![],
-            samples: vec![],
-            sequences: vec![start_sequence, end_sequence],
-            block_group: vec![],
-            nodes: vec![start_node.clone(), end_node.clone()],
-            edges: vec![],
-            paths: vec![],
-            accessions: vec![],
-            accession_nodes: vec![],
-        }
-    }
-
-    fn find_edge(
-        graph: &DiffGenGraph,
-        src: DiffGraphNode,
-        dest: DiffGraphNode,
-    ) -> Option<&Vec<DiffGraphEdge>> {
-        graph
-            .all_edges()
-            .find(|(edge_src, edge_dest, _)| *edge_src == src && *edge_dest == dest)
-            .map(|(_, _, edges)| edges)
-    }
 
     #[test]
     fn diff_graph_to_gen_graph_maps_nodes_and_edges() {
@@ -302,7 +102,10 @@ mod tests {
                 sequence_start: 0,
                 sequence_end: 5,
             },
-            is_new: true,
+            change: DiffChange {
+                kind: DiffChangeKind::Added,
+                operation: Some(HashId::pad_str(10)),
+            },
         };
         let node_b = DiffGraphNode {
             node: GraphNode {
@@ -310,7 +113,7 @@ mod tests {
                 sequence_start: 5,
                 sequence_end: 10,
             },
-            is_new: false,
+            change: DiffChange::unchanged(),
         };
         let mut diff_graph = DiffGenGraph::new();
         diff_graph.add_node(node_a);
@@ -324,7 +127,10 @@ mod tests {
                 phased: 0,
                 created_on: 0,
             },
-            is_new: true,
+            change: DiffChange {
+                kind: DiffChangeKind::Added,
+                operation: Some(HashId::pad_str(10)),
+            },
         };
         diff_graph.add_edge(node_a, node_b, vec![edge]);
 
@@ -337,146 +143,5 @@ mod tests {
             .map(|(_, _, edges)| edges.clone())
             .expect("graph edge");
         assert_eq!(weights, vec![edge.edge]);
-    }
-
-    #[test]
-    fn get_diff_graph_splits_blocks_and_marks_new() {
-        let start_node = Node::get_start_node();
-        let end_node = Node::get_end_node();
-        let block_group = BlockGroup {
-            id: HashId::pad_str(10),
-            collection_name: "collection".to_string(),
-            sample_name: "sample".to_string(),
-            name: "bg".to_string(),
-            created_on: 0,
-            parent_block_group_id: None,
-            is_default: false,
-        };
-        let seq = NewSequence::new()
-            .sequence_type("dna")
-            .sequence("AAAAAAAAAA")
-            .name("seq")
-            .build();
-        let node = Node {
-            id: HashId::pad_str(11),
-            sequence_hash: seq.hash,
-        };
-        let old_edges = vec![
-            Edge {
-                id: HashId::convert_str("start-node"),
-                source_node_id: start_node.id,
-                source_coordinate: 0,
-                source_strand: Strand::Forward,
-                target_node_id: node.id,
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-            },
-            Edge {
-                id: HashId::convert_str("node-deletion"),
-                source_node_id: node.id,
-                source_coordinate: 3,
-                source_strand: Strand::Forward,
-                target_node_id: node.id,
-                target_coordinate: 5,
-                target_strand: Strand::Forward,
-            },
-            Edge {
-                id: HashId::convert_str("node-end"),
-                source_node_id: node.id,
-                source_coordinate: seq.length,
-                source_strand: Strand::Forward,
-                target_node_id: end_node.id,
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-            },
-        ];
-        let new_seq = NewSequence::new()
-            .sequence_type("dna")
-            .sequence("TTTT")
-            .name("new-seq")
-            .build();
-        let new_node = Node {
-            id: HashId::pad_str(12),
-            sequence_hash: new_seq.hash,
-        };
-        let edges = vec![
-            Edge {
-                id: HashId::convert_str("node-insertion-start"),
-                source_node_id: node.id,
-                source_coordinate: 5,
-                source_strand: Strand::Forward,
-                target_node_id: new_node.id,
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-            },
-            Edge {
-                id: HashId::convert_str("node-insertion-end"),
-                source_node_id: new_node.id,
-                source_coordinate: new_seq.length,
-                source_strand: Strand::Forward,
-                target_node_id: node.id,
-                target_coordinate: 8,
-                target_strand: Strand::Forward,
-            },
-        ];
-        let block_group_edges = edges
-            .iter()
-            .enumerate()
-            .map(|(index, edge)| BlockGroupEdge {
-                id: HashId::convert_str(&format!("bge-{index}")),
-                block_group_id: block_group.id,
-                edge_id: edge.id,
-                chromosome_index: 0,
-                phased: 0,
-                created_on: 0,
-            })
-            .collect::<Vec<_>>();
-        let changes = ChangesetModels {
-            collections: vec![],
-            samples: vec![],
-            sample_lineages: vec![],
-            sequences: vec![new_seq.clone()],
-            block_groups: vec![block_group.clone()],
-            nodes: vec![new_node.clone()],
-            edges,
-            block_group_edges,
-            paths: vec![],
-            path_edges: vec![],
-            accessions: vec![],
-            accession_nodes: vec![],
-            annotation_groups: vec![],
-            annotations: vec![],
-            annotation_group_samples: vec![],
-        };
-        let mut dependencies = base_dependencies(&start_node, &end_node);
-        dependencies.sequences.push(seq.clone());
-        dependencies.nodes.push(node.clone());
-        dependencies.edges.extend(old_edges);
-
-        let diff_graphs = get_diff_graph(&changes, &dependencies);
-        let graph = diff_graphs.get(&block_group.id).expect("block group graph");
-
-        let block_nodes = graph
-            .nodes()
-            .filter(|node_ref| node_ref.node.node_id == node.id)
-            .collect::<Vec<_>>();
-        assert_eq!(block_nodes.len(), 3);
-        assert!(block_nodes.iter().all(|node_ref| !node_ref.is_new));
-
-        let new_node_block = graph
-            .nodes()
-            .find(|node_ref| node_ref.node.node_id == new_node.id)
-            .expect("new node block");
-        assert!(new_node_block.is_new);
-
-        let block_node_insert_start = graph
-            .nodes()
-            .find(|node_ref| node_ref.node.node_id == node.id && node_ref.node.sequence_end == 5)
-            .expect("insert node block");
-
-        let internal_edges =
-            find_edge(graph, block_node_insert_start, new_node_block).expect("internal edge");
-        assert_eq!(internal_edges.len(), 1);
-        assert!(internal_edges[0].is_new);
     }
 }

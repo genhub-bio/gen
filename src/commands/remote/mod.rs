@@ -1,9 +1,10 @@
 use clap::Subcommand;
 use gen_models::{
-    db::OperationsConnection,
+    db::ConfigConnection,
     operations::{Defaults, Remote},
 };
 use reqwest::{blocking::Client, redirect::Policy};
+use serde::Deserialize;
 use thiserror::Error;
 
 pub mod server;
@@ -45,8 +46,72 @@ pub enum RemoteError {
     NoRedirectUrl(String),
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoteDiscoveryResponse {
+    remote: DiscoveredRemote,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoveredRemote {
+    url: String,
+}
+
+fn discovery_endpoint(remote_url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(remote_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let segments = parsed.path_segments()?.collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+    if segments.last() == Some(&"remote") {
+        return Some(remote_url.to_string());
+    }
+    if segments.contains(&"dolt") {
+        return None;
+    }
+
+    let repos_index = segments.iter().position(|segment| *segment == "repos")?;
+    if segments.len() < repos_index + 3 {
+        return None;
+    }
+
+    let discovery_path = format!("/{}/remote", segments[..repos_index + 3].join("/"));
+    parsed.set_path(&discovery_path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Some(parsed.to_string())
+}
+
+pub fn discover_dolt_remote_url(
+    remote_url: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(discovery_url) = discovery_endpoint(remote_url) else {
+        return Ok(None);
+    };
+
+    let client = Client::builder().redirect(Policy::none()).build()?;
+    let response = client.get(discovery_url).send()?.error_for_status()?;
+    let discovery: RemoteDiscoveryResponse = response.json()?;
+    Ok(Some(discovery.remote.url))
+}
+
+pub fn validate_dolt_remote_url(remote_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if remote_url.starts_with("file://") || remote_url.starts_with("http://") {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Dolt remote URL `{remote_url}` is not supported by the current Doltlite build. \
+Supported remote schemes are `file://` and unauthenticated `http://` only."
+    )
+    .into())
+}
+
 pub fn remove_remote(
-    conn: &OperationsConnection,
+    conn: &ConfigConnection,
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(default_remote) = Defaults::get_default_remote(conn)
@@ -62,7 +127,7 @@ pub fn remove_remote(
 }
 
 pub fn login_remote(
-    conn: &OperationsConnection,
+    conn: &ConfigConnection,
     name: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let remote_name = name
@@ -122,7 +187,7 @@ pub fn login_remote(
 
 /// Handle remote management commands with comprehensive error handling
 pub fn handle_remote_command(
-    conn: &OperationsConnection,
+    conn: &ConfigConnection,
     command: &RemoteCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
@@ -191,6 +256,12 @@ pub fn handle_remote_command(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
     use super::*;
     use crate::test_helpers::setup_gen;
 
@@ -201,7 +272,7 @@ mod tests {
         #[test]
         fn test_remote_add_command() {
             let context = setup_gen();
-            let op_conn = context.operations().conn();
+            let op_conn = context.config().conn();
 
             // Test successful add
             let cmd = RemoteCommand::Add {
@@ -226,7 +297,7 @@ mod tests {
         #[test]
         fn test_remote_add_validation_errors() {
             let context = setup_gen();
-            let op_conn = context.operations().conn();
+            let op_conn = context.config().conn();
 
             // Test invalid name
             let cmd_invalid_name = RemoteCommand::Add {
@@ -260,7 +331,7 @@ mod tests {
         #[test]
         fn test_remote_list_command() {
             let context = setup_gen();
-            let op_conn = context.operations().conn();
+            let op_conn = context.config().conn();
 
             // Test list with no remotes
             let cmd_list = RemoteCommand::List;
@@ -277,7 +348,7 @@ mod tests {
         #[test]
         fn test_remote_remove_command() {
             let context = setup_gen();
-            let op_conn = context.operations().conn();
+            let op_conn = context.config().conn();
 
             // Add a remote first
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -301,7 +372,7 @@ mod tests {
         #[test]
         fn test_remote_remove_clears_default() {
             let context = setup_gen();
-            let op_conn = context.operations().conn();
+            let op_conn = context.config().conn();
 
             // Add a remote and set it as default
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -326,7 +397,7 @@ mod tests {
         #[test]
         fn test_remote_set_default_command() {
             let context = setup_gen();
-            let op_conn = context.operations().conn();
+            let op_conn = context.config().conn();
 
             // Add a remote first
             Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
@@ -353,7 +424,7 @@ mod tests {
         #[test]
         fn test_remote_get_default_command() {
             let context = setup_gen();
-            let op_conn = context.operations().conn();
+            let op_conn = context.config().conn();
 
             // Test get default when none is set
             let cmd_get_default = RemoteCommand::GetDefault;
@@ -365,6 +436,81 @@ mod tests {
 
             // Test get default when one is set
             assert!(handle_remote_command(op_conn, &cmd_get_default).is_ok());
+        }
+
+        #[test]
+        fn test_discovery_endpoint_from_genhub_repo_url() {
+            assert_eq!(
+                discovery_endpoint("https://genhub.bio/api/repos/david/example"),
+                Some("https://genhub.bio/api/repos/david/example/remote".to_string())
+            );
+            assert_eq!(
+                discovery_endpoint("https://genhub.bio/api/repos/david/example/"),
+                Some("https://genhub.bio/api/repos/david/example/remote".to_string())
+            );
+        }
+
+        #[test]
+        fn test_discovery_endpoint_skips_existing_dolt_url() {
+            assert_eq!(
+                discovery_endpoint("https://genhub.bio/api/repos/david/example/dolt"),
+                None
+            );
+        }
+
+        #[test]
+        fn test_discover_dolt_remote_url_uses_genhub_remote_endpoint() {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("should bind test listener");
+            let address = listener
+                .local_addr()
+                .expect("should read test listener address");
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("should accept request");
+                let mut buffer = [0_u8; 2048];
+                let bytes_read = stream.read(&mut buffer).expect("should read request");
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                assert!(
+                    request.starts_with("GET /api/repos/david/example/remote HTTP/1.1"),
+                    "unexpected request: {request}"
+                );
+
+                let body = r#"{"remote":{"url":"http://127.0.0.1/dolt-endpoint"}}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("should write response");
+            });
+
+            let remote_url = format!("http://{address}/api/repos/david/example");
+            let discovered_url =
+                discover_dolt_remote_url(&remote_url).expect("should resolve discovery URL");
+            server.join().expect("should finish test server");
+
+            assert_eq!(
+                discovered_url,
+                Some("http://127.0.0.1/dolt-endpoint".to_string())
+            );
+        }
+
+        #[test]
+        fn test_validate_dolt_remote_url_accepts_file_and_http() {
+            assert!(validate_dolt_remote_url("file:///tmp/repo/.gen/default.db").is_ok());
+            assert!(validate_dolt_remote_url("http://127.0.0.1:9000/repo").is_ok());
+        }
+
+        #[test]
+        fn test_validate_dolt_remote_url_rejects_https() {
+            let err = validate_dolt_remote_url("https://genhub.bio/api/repos/david/example/dolt")
+                .expect_err("should reject https remotes");
+            assert!(
+                err.to_string().contains(
+                    "Supported remote schemes are `file://` and unauthenticated `http://` only"
+                ),
+                "unexpected error: {err}"
+            );
         }
     }
 }

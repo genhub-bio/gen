@@ -6,7 +6,7 @@ use std::{
 };
 
 use flate2::read::MultiGzDecoder;
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_core::{CommitHash, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     assets::AssetUri,
     block_group::{BlockGroup, NewBlockGroup},
@@ -17,11 +17,10 @@ use gen_models::{
     errors::{CollectionError, SampleError},
     file_types::FileTypes,
     node::Node,
-    operations::{Operation, OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, commit_graph_operation},
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
 };
 use noodles::{bgzf, fasta};
 
@@ -29,7 +28,6 @@ use crate::{
     fasta::FastaError,
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
-
 #[cfg_attr(
     all(debug_assertions, feature = "profiling"),
     tracing::instrument(skip(context, fasta, collection_name, sample))
@@ -40,10 +38,9 @@ pub fn import_fasta(
     collection_name: &str,
     sample: &str,
     shallow: bool,
-) -> Result<Operation, FastaError> {
+) -> Result<CommitHash, FastaError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let mut session = start_operation(conn);
     let path = PathBuf::from(fasta);
 
     let asset_uri = <dyn AssetUri>::new(context.workspace(), fasta);
@@ -177,9 +174,8 @@ pub fn import_fasta(
     })?;
 
     let bar = add_saving_operation_bar(&progress_bar);
-    let op = end_operation(
+    let operation = commit_graph_operation(
         context,
-        &mut session,
         &OperationInfo {
             files: vec![
                 OperationFile::new(fasta.to_string())
@@ -189,11 +185,10 @@ pub fn import_fasta(
             description: "fasta_addition".to_string(),
         },
         &summary_str,
-        None,
     )
     .map_err(FastaError::OperationError);
     bar.finish();
-    op
+    operation
 }
 
 #[cfg(test)]
@@ -201,22 +196,26 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{errors::OperationError, traits::*};
+    use gen_models::{
+        assets::tables::OperationLog,
+        errors::OperationError,
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        traits::*,
+    };
 
     use super::*;
-    use crate::{test_helpers::setup_gen, track_database};
+    use crate::test_helpers::setup_gen;
 
     #[test]
     fn test_add_fasta() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
+        let history_store = DoltHistoryStore::new(conn);
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
 
-        import_fasta(
+        let commit_hash = import_fasta(
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
@@ -224,6 +223,14 @@ mod tests {
             false,
         )
         .unwrap();
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
+        let operation_logs = OperationLog::query(
+            conn,
+            "SELECT * FROM gen_operation_log ORDER BY created_on DESC",
+            [],
+        );
+        assert_eq!(operation_logs[0].operation_kind, "fasta_addition");
+
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap(),
@@ -232,7 +239,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn).unwrap(),
+            path.sequence(conn, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }
@@ -241,8 +248,6 @@ mod tests {
     fn test_supports_normal_gz_fasta() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/gzipped.fa.gz");
@@ -266,8 +271,6 @@ mod tests {
     fn test_large_gz_fasta() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22.fa.gz");
 
@@ -292,8 +295,6 @@ mod tests {
     fn test_supports_bgzip_fasta() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz");
@@ -317,8 +318,6 @@ mod tests {
     fn test_add_fasta_creates_sample() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
@@ -339,7 +338,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn).unwrap(),
+            path.sequence(conn, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
         assert_eq!(
@@ -352,8 +351,6 @@ mod tests {
     fn test_add_fasta_shallow() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
@@ -374,7 +371,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn).unwrap(),
+            path.sequence(conn, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }
@@ -383,8 +380,6 @@ mod tests {
     fn test_deduplicates_nodes() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");

@@ -60,7 +60,7 @@ pub fn get_path(
     } else {
         match resolved_region.path {
             Some(path) => Ok(path),
-            None => Ok(BlockGroup::get_current_path(conn, &block_group_id)?),
+            None => Ok(BlockGroup::get_current_path(conn, &block_group_id, None)?),
         }
     }
 }
@@ -104,10 +104,10 @@ pub fn derive_chunks(
         backbone,
     )?;
 
-    let current_path_length = current_path.length(conn)?;
+    let current_path_length = current_path.length(conn, None)?;
 
     let current_intervaltree = current_path.intervaltree(conn)?;
-    let current_path_edges = PathEdge::edges_for_path(conn, &current_path.id);
+    let current_path_edges = PathEdge::edges_for_path(conn, &current_path.id, None);
 
     let chunk_ranges_length = chunk_ranges.len();
 
@@ -153,7 +153,7 @@ pub fn derive_chunks(
             })
             .map(|x| x.value)
             .collect::<Vec<_>>();
-        blocks.sort_by(|a, b| a.start.cmp(&b.start));
+        blocks.sort_by_key(|a| a.start);
         let start_block = blocks[0];
         let start_node_coordinate =
             start_coordinate - start_block.start + start_block.sequence_start;
@@ -174,7 +174,7 @@ pub fn derive_chunks(
         )?;
 
         let child_block_group_edges =
-            BlockGroupEdge::edges_for_block_group(conn, &child_block_group_id);
+            BlockGroupEdge::edges_for_block_group(conn, &child_block_group_id, None);
 
         let child_edge_ids_by_key = child_block_group_edges
             .iter()
@@ -268,7 +268,7 @@ pub fn derive_chunks(
             )?;
         }
 
-        let path_edges = Edge::query_by_ids(conn, &new_path_edge_ids);
+        let path_edges = Edge::query_by_ids(conn, &new_path_edge_ids, None);
 
         block_group_chunks.push(BlockGroupChunk {
             entry_node_points: vec![start_node_point.clone()],
@@ -308,7 +308,7 @@ pub fn make_stitch(
 ) -> Result<(), GraphOperationError> {
     let conn = context.graph().conn();
 
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
+    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name, None);
 
     let mut block_groups_by_name = HashMap::new();
     for block_group in &block_groups {
@@ -343,7 +343,7 @@ pub fn make_stitch(
             let chunk = load_block_group_chunk(conn, block_group.id);
             block_group_chunks.push(chunk.clone());
 
-            let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+            let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
 
             let nonterminal_edges: Vec<_> = edges
                 .iter()
@@ -452,7 +452,6 @@ mod tests {
     use crate::{
         imports::fasta::import_fasta,
         test_helpers::{setup_block_group, setup_gen},
-        track_database,
         updates::fasta::update_with_fasta,
     };
 
@@ -466,9 +465,6 @@ mod tests {
          */
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         Collection::create(conn, "test").unwrap();
         let (block_group1_id, original_path) = setup_block_group(conn);
@@ -551,7 +547,7 @@ mod tests {
             .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
             .unwrap();
         assert_eq!(
-            insert_path.sequence(conn).unwrap(),
+            insert_path.sequence(conn, None).unwrap(),
             "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
         );
 
@@ -577,7 +573,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME);
+        let block_groups = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME, None);
         let block_group2 = block_groups.iter().find(|x| x.name == "chr1").unwrap();
 
         let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
@@ -586,8 +582,8 @@ mod tests {
             HashSet::from_iter(vec!["TTTTTCCCCC".to_string(), "TAAAAAAAAC".to_string(),])
         );
 
-        let new_path = BlockGroup::get_current_path(conn, &block_group2.id).unwrap();
-        assert_eq!(new_path.sequence(conn).unwrap(), "TAAAAAAAAC");
+        let new_path = BlockGroup::get_current_path(conn, &block_group2.id, None).unwrap();
+        assert_eq!(new_path.sequence(conn, None).unwrap(), "TAAAAAAAAC");
     }
 
     #[test]
@@ -599,9 +595,6 @@ mod tests {
 
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test";
 
@@ -637,7 +630,7 @@ mod tests {
         .unwrap();
 
         let original_block_groups =
-            Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
+            Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let original_block_group_id = &original_block_groups[0].id;
         let all_original_sequences =
             BlockGroup::get_all_sequences(conn, original_block_group_id, false).unwrap();
@@ -646,7 +639,7 @@ mod tests {
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
 
-        let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2");
+        let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2", None);
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
         let all_grandchild_sequences =
             BlockGroup::get_all_sequences(conn, grandchild_block_group_id, false).unwrap();
@@ -678,7 +671,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, "test3");
+        let block_groups = Sample::get_block_groups(conn, collection, "test3", None);
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
         let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
@@ -687,8 +680,8 @@ mod tests {
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
         );
 
-        let path2 = BlockGroup::get_current_path(conn, &block_group2.id).unwrap();
-        assert_eq!(path2.sequence(conn).unwrap(), "TCAATCG");
+        let path2 = BlockGroup::get_current_path(conn, &block_group2.id, None).unwrap();
+        assert_eq!(path2.sequence(conn, None).unwrap(), "TCAATCG");
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
         let all_sequences3 = BlockGroup::get_all_sequences(conn, &block_group3.id, false).unwrap();
@@ -700,8 +693,8 @@ mod tests {
             ])
         );
 
-        let path3 = BlockGroup::get_current_path(conn, &block_group3.id).unwrap();
-        assert_eq!(path3.sequence(conn).unwrap(), "ATCGATCAAGGAACACA");
+        let path3 = BlockGroup::get_current_path(conn, &block_group3.id, None).unwrap();
+        assert_eq!(path3.sequence(conn, None).unwrap(), "ATCGATCAAGGAACACA");
     }
 
     #[test]
@@ -713,9 +706,6 @@ mod tests {
 
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test";
 
@@ -751,7 +741,7 @@ mod tests {
         .unwrap();
 
         let original_block_groups =
-            Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
+            Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let original_block_group_id = &original_block_groups[0].id;
         let all_original_sequences =
             BlockGroup::get_all_sequences(conn, original_block_group_id, false).unwrap();
@@ -760,7 +750,7 @@ mod tests {
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
 
-        let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2");
+        let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2", None);
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
         let all_grandchild_sequences =
             BlockGroup::get_all_sequences(conn, grandchild_block_group_id, false).unwrap();
@@ -792,7 +782,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, "test3");
+        let block_groups = Sample::get_block_groups(conn, collection, "test3", None);
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
         let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
@@ -801,8 +791,8 @@ mod tests {
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
         );
 
-        let path2 = BlockGroup::get_current_path(conn, &block_group2.id).unwrap();
-        assert_eq!(path2.sequence(conn).unwrap(), "TCAATCG");
+        let path2 = BlockGroup::get_current_path(conn, &block_group2.id, None).unwrap();
+        assert_eq!(path2.sequence(conn, None).unwrap(), "TCAATCG");
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
         let all_sequences3 = BlockGroup::get_all_sequences(conn, &block_group3.id, false).unwrap();
@@ -814,8 +804,8 @@ mod tests {
             ])
         );
 
-        let path3 = BlockGroup::get_current_path(conn, &block_group3.id).unwrap();
-        assert_eq!(path3.sequence(conn).unwrap(), "ATCGATCAAGGAACACA");
+        let path3 = BlockGroup::get_current_path(conn, &block_group3.id, None).unwrap();
+        assert_eq!(path3.sequence(conn, None).unwrap(), "ATCGATCAAGGAACACA");
 
         // Stitch the two main chunks back together in same order
         make_stitch(
@@ -828,7 +818,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, "test4");
+        let block_groups = Sample::get_block_groups(conn, collection, "test4", None);
         let block_group4 = block_groups
             .iter()
             .find(|x| x.name == "m123.stitched")
@@ -845,9 +835,12 @@ mod tests {
             ])
         );
 
-        let path4 = BlockGroup::get_current_path(conn, &block_group4.id).unwrap();
+        let path4 = BlockGroup::get_current_path(conn, &block_group4.id, None).unwrap();
         // path2 + path3 concatenated
-        assert_eq!(path4.sequence(conn).unwrap(), "TCAATCGATCGATCAAGGAACACA");
+        assert_eq!(
+            path4.sequence(conn, None).unwrap(),
+            "TCAATCGATCGATCAAGGAACACA"
+        );
 
         // Stitch the two main chunks together but in reverse order
         make_stitch(
@@ -860,7 +853,7 @@ mod tests {
         )
         .unwrap();
 
-        let block_groups = Sample::get_block_groups(conn, collection, "test5");
+        let block_groups = Sample::get_block_groups(conn, collection, "test5", None);
         let block_group5 = block_groups
             .iter()
             .find(|x| x.name == "m123.reverse-stitched")
@@ -877,8 +870,11 @@ mod tests {
             ])
         );
 
-        let path5 = BlockGroup::get_current_path(conn, &block_group5.id).unwrap();
+        let path5 = BlockGroup::get_current_path(conn, &block_group5.id, None).unwrap();
         // path3 + path2 concatenated
-        assert_eq!(path5.sequence(conn).unwrap(), "ATCGATCAAGGAACACATCAATCG");
+        assert_eq!(
+            path5.sequence(conn, None).unwrap(),
+            "ATCGATCAAGGAACACATCAATCG"
+        );
     }
 }

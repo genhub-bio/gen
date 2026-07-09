@@ -27,9 +27,11 @@ pub fn load_annotation_group_entries(
     block_group: &BlockGroup,
 ) -> Vec<AnnotationGroupEntry> {
     let mut entries = Vec::new();
-    let parent_sample_name = block_group
-        .parent_block_group_id
-        .map(|parent_id| BlockGroup::get_by_id(conn, &parent_id).unwrap().sample_name);
+    let parent_sample_name = block_group.parent_block_group_id.map(|parent_id| {
+        BlockGroup::get_by_id(conn, &parent_id, None)
+            .unwrap()
+            .sample_name
+    });
     let ancestor_samples = SampleLineage::get_ancestors(conn, &block_group.sample_name, None);
     let sample_order = std::iter::once(block_group.sample_name.clone())
         .chain(ancestor_samples.iter().cloned())
@@ -200,7 +202,7 @@ mod tests {
         AnnotationGroupSample::create(conn, "parent-group", "parent").unwrap();
         AnnotationGroupSample::create(conn, "grand-group", "grand").unwrap();
 
-        let child = BlockGroup::get_by_id(conn, &child.id).unwrap();
+        let child = BlockGroup::get_by_id(conn, &child.id, None).unwrap();
         let entries = load_annotation_group_entries(conn, &child);
 
         assert_eq!(

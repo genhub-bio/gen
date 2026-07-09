@@ -16,6 +16,8 @@ use crate::{
     operations::{FileAddition, calculate_reader_checksum},
 };
 
+pub mod tables;
+
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -362,6 +364,62 @@ impl dyn AssetUri {
             _ => Box::new(RemoteAssetUri::new(uri)),
         }
     }
+}
+
+pub fn materialization_destination_path(
+    workspace: &Workspace,
+    asset_uri: &str,
+    checksum: Option<&HashId>,
+    logical_path: Option<&str>,
+) -> Result<PathBuf, FileAdditionError> {
+    if let Some(logical_path) = logical_path.filter(|path| !path.is_empty()) {
+        return LocalAssetUri::repo_relative_destination_path(workspace, logical_path);
+    }
+
+    let checksum = checksum.ok_or_else(|| {
+        FileAdditionError::FileReadError(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot materialize asset without checksum: {asset_uri}"),
+        ))
+    })?;
+    Ok(workspace
+        .asset_dir()?
+        .join(<dyn AssetUri>::from_uri(asset_uri).hashed_filename(checksum)))
+}
+
+/// Incomplete scaffolding for clone/pull asset support. This is meant to be
+/// wired up when clone/pull starts fetching asset payloads from stored asset
+/// references.
+pub fn materialize_asset_uri_to_workspace(
+    workspace: &Workspace,
+    asset_uri: &str,
+    checksum: Option<&HashId>,
+    logical_path: Option<&str>,
+) -> Result<PathBuf, FileAdditionError> {
+    let destination_path =
+        materialization_destination_path(workspace, asset_uri, checksum, logical_path)?;
+    if destination_path.exists() {
+        return Ok(destination_path);
+    }
+
+    if LocalAssetUri::is_local_path_or_file_uri(asset_uri) {
+        let source_path = LocalAssetUri::resolve_source_path(workspace, asset_uri)?;
+        if source_path == destination_path {
+            return Ok(destination_path);
+        }
+    }
+
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent).map_err(FileAdditionError::FileReadError)?;
+    }
+
+    let mut reader = <dyn AssetUri>::from_uri(asset_uri).reader(workspace)?;
+    let mut writer =
+        fs::File::create(&destination_path).map_err(FileAdditionError::FileReadError)?;
+    io::copy(&mut reader, &mut writer).map_err(FileAdditionError::FileReadError)?;
+    writer.flush().map_err(FileAdditionError::FileReadError)?;
+
+    Ok(destination_path)
 }
 
 pub struct LocalAssetUri {

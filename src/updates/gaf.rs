@@ -17,7 +17,7 @@ use gen_models::{
     errors::{NodeError, OperationError, SampleError, SequenceError},
     file_types::FileTypes,
     node::Node,
-    operations::{OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, commit_graph_operation},
     sample::Sample,
     sequence::Sequence,
     traits::*,
@@ -106,8 +106,6 @@ where
     // Given a gaf, this will incorporate the alignment into the specified graph, creating new nodes.
 
     let conn = context.graph().conn();
-    let mut session = gen_models::session_operations::start_operation(conn);
-
     let parent_samples = parent_sample
         .map(|parent_sample| vec![parent_sample.to_string()])
         .unwrap_or_default();
@@ -401,9 +399,8 @@ where
         }
     }
 
-    gen_models::session_operations::end_operation(
+    commit_graph_operation(
         context,
-        &mut session,
         &OperationInfo {
             files: vec![
                 OperationFile::new(gaf_path.as_ref().to_str().unwrap().to_string())
@@ -412,7 +409,6 @@ where
             description: "insert_via_gaf".to_string(),
         },
         &format!("{change_count} updates."),
-        None,
     )
     .map_err(GafUpdateError::Operation)?;
 
@@ -428,7 +424,7 @@ mod tests {
     use petgraph::Direction;
 
     use super::*;
-    use crate::{imports::gfa::import_gfa, test_helpers::setup_gen, track_database};
+    use crate::{imports::gfa::import_gfa, test_helpers::setup_gen};
 
     mod test_transform {
         use super::*;
@@ -484,13 +480,12 @@ mod tests {
             let results = String::from_utf8(buffer).unwrap();
             assert_eq!(
                 results,
-                format!(
-                    "\
+                "\
             >extreme_left_left\n\
             aaa\n\
             >extreme_right_right\n\
             ggg\n"
-                )
+                    .to_string()
             );
         }
     }
@@ -500,9 +495,6 @@ mod tests {
     fn test_insertion_from_gaf() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -512,7 +504,7 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection, "");
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
         update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
-        let graph = Sample::get_graph(conn, "test", "child").unwrap();
+        let graph = Sample::get_graph(conn, "test", "child", None).unwrap();
 
         let query = Node::query(
             conn,
@@ -568,9 +560,6 @@ mod tests {
     fn test_insertion_from_gaf_extremes() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -580,7 +569,7 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection, "");
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
         update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
-        let graph = Sample::get_graph(conn, "test", "child").unwrap();
+        let graph = Sample::get_graph(conn, "test", "child", None).unwrap();
 
         // we should end up with a new edge putting our insert to the beginning of the graph, which is node 3.
         let query = Node::query(

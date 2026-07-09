@@ -38,11 +38,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with fasta called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
-    let conn = context.graph().conn();
-
-    conn.execute("BEGIN TRANSACTION", [])?;
-    operation_conn.execute("BEGIN TRANSACTION", [])?;
+    let operation_conn = context.config().conn();
 
     let name = &cmd
         .name
@@ -58,13 +54,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path,
         cmd.no_reference_path_update,
     ) {
-        conn.execute("ROLLBACK TRANSACTION;", [])?;
-        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
         return Err(err.into());
     }
-
-    conn.execute("END TRANSACTION;", [])?;
-    operation_conn.execute("END TRANSACTION;", [])?;
 
     Ok(())
 }

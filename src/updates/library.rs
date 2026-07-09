@@ -7,9 +7,9 @@ use gen_models::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
     edge::Edge,
-    errors::{BlockGroupError, PathError, SampleError},
+    errors::{BlockGroupError, OperationError, PathError, SampleError},
     file_types::FileTypes,
-    operations::{OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, commit_graph_operation},
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
 };
@@ -100,6 +100,8 @@ pub enum UpdateWithLibraryError {
     MissingCoordinates(String),
     #[error("Unsupported region type for library update: {0}")]
     UnsupportedRegionType(String),
+    #[error("Operation error: {0}")]
+    Operation(#[from] OperationError),
 }
 
 impl From<CombinatorialLibraryParseError> for UpdateWithLibraryError {
@@ -142,7 +144,6 @@ pub fn update_with_library(
     parts_file_path: Option<&str>,
 ) -> Result<(), UpdateWithLibraryError> {
     let conn = context.graph().conn();
-    let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
         resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
@@ -158,17 +159,14 @@ pub fn update_with_library(
 
     let files = operation_files(library_file_path, parts_file_path);
     let summary_str = format!("{region_name} created.\n");
-    gen_models::session_operations::end_operation(
+    commit_graph_operation(
         context,
-        &mut session,
         &OperationInfo {
             files,
             description: "library_csv_update".to_string(),
         },
         &summary_str,
-        None,
-    )
-    .unwrap();
+    )?;
 
     Ok(())
 }
@@ -237,7 +235,7 @@ fn target_library_block_groups(
         new_sample_name,
         vec![parent_sample_name.to_string()],
     )?;
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
+    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name, None);
 
     let mut target_block_groups = vec![];
     for block_group in block_groups {
@@ -274,7 +272,7 @@ fn update_path_library(
 ) -> Result<(), UpdateWithLibraryError> {
     let conn = context.graph().conn();
     let parent_path = resolved_region.path.clone().unwrap();
-    let parent_path_length = parent_path.length(conn)?;
+    let parent_path_length = parent_path.length(conn, None)?;
     let start_coordinate = resolved_region.start;
     let end_coordinate = resolved_region.end;
     let mut chunk_ranges = vec![];
@@ -514,15 +512,13 @@ mod tests {
     use super::*;
     use crate::{
         graphs::combinatorial_library::parse_library, imports::fasta::import_fasta,
-        test_helpers::setup_gen, track_database,
+        test_helpers::setup_gen,
     };
 
     #[test]
     fn makes_a_pool() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -556,7 +552,7 @@ mod tests {
             Some(library_path),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
@@ -583,8 +579,6 @@ mod tests {
     fn one_column_of_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -616,7 +610,7 @@ mod tests {
             Some(library_path),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
@@ -630,9 +624,9 @@ mod tests {
             ])
         );
 
-        let path = BlockGroup::get_current_path(conn, &block_group.id).unwrap();
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
         assert_eq!(
-            path.sequence(conn).unwrap(),
+            path.sequence(conn, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
         assert_eq!(
@@ -647,8 +641,6 @@ mod tests {
     fn annotation_update_does_not_require_target_path() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -704,8 +696,6 @@ mod tests {
     fn annotation_update_can_use_resolved_bounds() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -756,8 +746,6 @@ mod tests {
     fn two_columns_of_same_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -789,7 +777,7 @@ mod tests {
             Some(library_path),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
         let mut expected_sequences = vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()];
@@ -815,8 +803,6 @@ mod tests {
     fn one_column_of_parts_full_replacement() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -848,7 +834,7 @@ mod tests {
             Some(library_path),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
@@ -869,8 +855,6 @@ mod tests {
     fn two_columns_of_same_parts_full_replacement() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -902,7 +886,7 @@ mod tests {
             Some(library_path),
         );
 
-        let block_groups = Sample::get_block_groups(conn, "test", "new sample");
+        let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
         let mut expected_sequences = vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()];
@@ -928,8 +912,6 @@ mod tests {
     fn reusing_a_part_name_at_a_different_locus_does_not_collide() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();

@@ -1,12 +1,18 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
-use r#gen::{get_connection, get_operation_connection, track_database};
+use r#gen::{end_transaction_if_active, get_config_connection, get_connection};
 use gen_core::config::Workspace;
 use gen_models::{
-    block_group::BlockGroup, collection::Collection, db::DbContext, node::Node,
-    operations::Defaults, sample::Sample, traits::Query,
+    block_group::BlockGroup,
+    collection::Collection,
+    db::{ConfigConnection, DbContext, GraphConnection},
+    node::Node,
+    operations::Defaults,
+    sample::Sample,
+    traits::Query,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use rusqlite::Connection;
 
 use super::{
     block_group::PySequenceGraph,
@@ -25,9 +31,7 @@ pub mod updates;
 
 fn tx_begin(context: &DbContext) -> PyResult<()> {
     let conn = context.graph().conn();
-    let op_conn = context.operations().conn();
-    track_database(conn, op_conn)
-        .map_err(|e| PyRuntimeError::new_err(format!("Error tracking database: {e}")))?;
+    let op_conn = context.config().conn();
     conn.execute("BEGIN TRANSACTION", [])
         .map_err(sqlite_err_to_pyerr)?;
     op_conn
@@ -37,22 +41,14 @@ fn tx_begin(context: &DbContext) -> PyResult<()> {
 }
 
 fn tx_commit(context: &DbContext) -> PyResult<()> {
-    context
-        .graph()
-        .conn()
-        .execute("END TRANSACTION", [])
-        .map_err(sqlite_err_to_pyerr)?;
-    context
-        .operations()
-        .conn()
-        .execute("END TRANSACTION", [])
-        .map_err(sqlite_err_to_pyerr)?;
+    end_transaction_if_active(context.graph().conn()).map_err(sqlite_err_to_pyerr)?;
+    end_transaction_if_active(context.config().conn()).map_err(sqlite_err_to_pyerr)?;
     Ok(())
 }
 
 fn tx_rollback(context: &DbContext) {
     context.graph().conn().execute("ROLLBACK", []).ok();
-    context.operations().conn().execute("ROLLBACK", []).ok();
+    context.config().conn().execute("ROLLBACK", []).ok();
 }
 
 pub(crate) fn run_write<F, T>(context: &DbContext, managed: bool, op: F) -> PyResult<T>
@@ -87,11 +83,12 @@ where
 pub struct PyRepository {
     pub context: DbContext,
     pub in_transaction: bool,
+    transaction_snapshot_dir: Option<PathBuf>,
 }
 
 impl PyRepository {
     pub(crate) fn get_default_collection(&self) -> String {
-        Defaults::get(self.context.operations().conn())
+        Defaults::get(self.context.config().conn())
             .and_then(|d| d.collection_name)
             .unwrap_or_else(|| "default".to_string())
     }
@@ -112,11 +109,15 @@ impl PyRepository {
         collection_name: &str,
         sample_name: &str,
     ) -> PySample {
-        let block_groups =
-            Sample::get_block_groups(self.context.graph().conn(), collection_name, sample_name)
-                .into_iter()
-                .map(|bg| self.to_py_block_group(bg))
-                .collect();
+        let block_groups = Sample::get_block_groups(
+            self.context.graph().conn(),
+            collection_name,
+            sample_name,
+            None,
+        )
+        .into_iter()
+        .map(|bg| self.to_py_block_group(bg))
+        .collect();
         PySample::new(
             collection_name.to_string(),
             sample_name.to_string(),
@@ -131,7 +132,12 @@ impl PyRepository {
         sample_name: &str,
         name: &str,
     ) -> PyResult<PySequenceGraph> {
-        Sample::get_block_groups(self.context.graph().conn(), collection_name, sample_name)
+        Sample::get_block_groups(
+            self.context.graph().conn(),
+            collection_name,
+            sample_name,
+            None,
+        )
             .into_iter()
             .find(|bg| bg.name == name)
             .map(|bg| self.to_py_block_group(bg))
@@ -156,13 +162,10 @@ impl PyRepository {
 
         let gen_dir = workspace.ensure_gen_dir();
         let ops_path = gen_dir.join("gen.db");
-        let ops_conn = get_operation_connection(Some(ops_path))
+        let ops_conn = get_config_connection(Some(ops_path))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-        let db_path = Defaults::get(&ops_conn)
-            .and_then(|d| d.db_name)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| gen_dir.join("default.db"));
+        let db_path = gen_dir.join("default.db");
 
         let graph_conn = get_connection(db_path.clone()).map_err(|err| {
             PyRuntimeError::new_err(format!(
@@ -172,8 +175,10 @@ impl PyRepository {
         })?;
 
         Ok(PyRepository {
-            context: DbContext::new(workspace, graph_conn, ops_conn),
+            context: DbContext::new(workspace, graph_conn, ops_conn)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
             in_transaction: false,
+            transaction_snapshot_dir: None,
         })
     }
 
@@ -184,11 +189,11 @@ impl PyRepository {
 
     #[getter]
     fn get_db_path(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let defaults = Defaults::get(self.context.operations().conn());
-        let path = defaults
-            .and_then(|d| d.db_name)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.context.workspace().ensure_gen_dir().join("default.db"));
+        let path = self
+            .context
+            .workspace()
+            .graph_db_path()
+            .unwrap_or_else(|_| self.context.workspace().ensure_gen_dir().join("default.db"));
         path_to_py_path(py, &path)
     }
 
@@ -206,7 +211,7 @@ impl PyRepository {
     }
 
     fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<()> {
-        tx_begin(&slf.context)?;
+        slf.transaction_snapshot_dir = Some(create_transaction_snapshot(slf.context.workspace())?);
         slf.in_transaction = true;
         Ok(())
     }
@@ -218,11 +223,26 @@ impl PyRepository {
         _exc_tb: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
         slf.in_transaction = false;
+        let snapshot_dir = slf.transaction_snapshot_dir.take();
         if exc_type.is_some() {
-            tx_rollback(&slf.context);
-        } else if let Err(e) = tx_commit(&slf.context) {
-            tx_rollback(&slf.context);
-            return Err(e);
+            if let Some(snapshot_dir) = snapshot_dir {
+                restore_transaction_snapshot(&mut slf, &snapshot_dir)?;
+            } else {
+                tx_rollback(&slf.context);
+            }
+        } else {
+            if let Err(err) = tx_commit(&slf.context) {
+                if let Some(snapshot_dir) = snapshot_dir {
+                    restore_transaction_snapshot(&mut slf, &snapshot_dir)?;
+                } else {
+                    tx_rollback(&slf.context);
+                }
+                return Err(err);
+            }
+
+            if let Some(snapshot_dir) = snapshot_dir {
+                fs::remove_dir_all(snapshot_dir).ok();
+            }
         }
         Ok(false)
     }
@@ -247,7 +267,7 @@ impl PyRepository {
     fn get_sequence_graph_by_id(&self, id: &PyHashId) -> PyResult<PySequenceGraph> {
         let conn = self.context.graph().conn();
         let block_group =
-            BlockGroup::get_by_id(conn, &id.hash_id).map_err(block_group_err_to_pyerr)?;
+            BlockGroup::get_by_id(conn, &id.hash_id, None).map_err(block_group_err_to_pyerr)?;
         Ok(self.to_py_block_group(block_group))
     }
 
@@ -264,7 +284,7 @@ impl PyRepository {
         collection_name: &str,
     ) -> PyResult<Vec<PySequenceGraph>> {
         let conn = self.context.graph().conn();
-        Ok(Collection::get_block_groups(conn, collection_name)
+        Ok(Collection::get_block_groups(conn, collection_name, None)
             .into_iter()
             .map(|bg| self.to_py_block_group(bg))
             .collect())
@@ -313,7 +333,7 @@ impl PyRepository {
 
     fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
         let sequences_by_node_id =
-            Node::get_sequences_by_node_ids(self.context.graph().conn(), &[node_key.node_id]);
+            Node::get_sequences_by_node_ids(self.context.graph().conn(), &[node_key.node_id], None);
         let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "Node with id {:?} not found",
@@ -324,6 +344,82 @@ impl PyRepository {
             .get_sequence(node_key.sequence_start, node_key.sequence_end)
             .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
     }
+}
+
+fn create_transaction_snapshot(workspace: &Workspace) -> PyResult<PathBuf> {
+    let gen_dir = workspace.ensure_gen_dir();
+    let snapshot_dir = std::env::temp_dir().join(format!(
+        "gen-python-transaction-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("should create snapshot timestamp")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&snapshot_dir).map_err(|err| {
+        PyRuntimeError::new_err(format!(
+            "Failed to create transaction snapshot directory '{}': {err}",
+            snapshot_dir.display()
+        ))
+    })?;
+
+    for file_name in ["default.db", "gen.db"] {
+        let source = gen_dir.join(file_name);
+        if source.exists() {
+            fs::copy(&source, snapshot_dir.join(file_name)).map_err(|err| {
+                PyRuntimeError::new_err(format!("Failed to snapshot '{}': {err}", source.display()))
+            })?;
+        }
+    }
+
+    Ok(snapshot_dir)
+}
+
+fn restore_transaction_snapshot(
+    repository: &mut PyRepository,
+    snapshot_dir: &PathBuf,
+) -> PyResult<()> {
+    let workspace = repository.context.workspace().clone();
+    repository.context = DbContext::new_raw(
+        workspace.clone(),
+        GraphConnection(Connection::open_in_memory().map_err(sqlite_err_to_pyerr)?),
+        ConfigConnection(Connection::open_in_memory().map_err(sqlite_err_to_pyerr)?),
+    );
+
+    let gen_dir = workspace.ensure_gen_dir();
+    for file_name in ["default.db", "gen.db"] {
+        let snapshot = snapshot_dir.join(file_name);
+        let destination = gen_dir.join(file_name);
+        if snapshot.exists() {
+            fs::copy(&snapshot, &destination).map_err(|err| {
+                PyRuntimeError::new_err(format!(
+                    "Failed to restore '{}': {err}",
+                    destination.display()
+                ))
+            })?;
+        } else if destination.exists() {
+            fs::remove_file(&destination).map_err(|err| {
+                PyRuntimeError::new_err(format!(
+                    "Failed to remove '{}': {err}",
+                    destination.display()
+                ))
+            })?;
+        }
+    }
+
+    let graph_conn = get_connection(workspace.graph_db_path().map_err(|err| {
+        PyRuntimeError::new_err(format!("Failed to resolve graph db path: {err}"))
+    })?)
+    .map_err(|err| PyRuntimeError::new_err(format!("Failed to reopen graph database: {err}")))?;
+    let config_conn = get_config_connection(Some(workspace.gen_db_path().map_err(|err| {
+        PyRuntimeError::new_err(format!("Failed to resolve operations db path: {err}"))
+    })?))
+    .map_err(|err| {
+        PyRuntimeError::new_err(format!("Failed to reopen operations database: {err}"))
+    })?;
+    repository.context = DbContext::new(workspace, graph_conn, config_conn)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    fs::remove_dir_all(snapshot_dir).ok();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -343,6 +439,7 @@ mod python_tests {
             PyRepository {
                 context: ctx,
                 in_transaction: false,
+                transaction_snapshot_dir: None,
             },
         )
         .unwrap()

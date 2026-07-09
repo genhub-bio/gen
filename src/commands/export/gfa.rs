@@ -28,7 +28,7 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("GFA export called");
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
     // initialize the selected database if needed.
@@ -46,6 +46,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &PathBuf::from(cmd.path),
         cmd.sample.as_str(),
         cmd.node_max,
+        cli_context.history_ref,
     )?;
 
     conn.execute("END TRANSACTION", [])?;

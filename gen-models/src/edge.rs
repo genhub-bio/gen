@@ -4,19 +4,17 @@ use std::{
     rc::Rc,
 };
 
-use gen_core::{
-    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash, is_terminal,
-    traits::Capnp,
-};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal, traits::Capnp};
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use rusqlite::{Row, params, types::Value};
+use rusqlite::{Row, ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use xxhash_rust::xxh3::xxh3_128;
 
 use crate::{
-    block_group_edge::AugmentedEdge,
+    block_group_edge::{AugmentedEdge, BlockGroupEdge},
     db::GraphConnection,
     errors::NodeError,
     gen_models_capnp::edge,
@@ -101,15 +99,23 @@ pub struct EdgeData {
 
 impl EdgeData {
     pub fn id_hash(&self) -> HashId {
-        HashId(calculate_hash(&format!(
-            "{}:{}:{}:{}:{}:{}",
-            self.source_node_id,
-            self.source_coordinate,
-            self.source_strand,
-            self.target_node_id,
-            self.target_coordinate,
-            self.target_strand,
-        )))
+        let half = xxh3_128(
+            format!(
+                "{}:{}:{}:{}:{}:{}",
+                self.source_node_id,
+                self.source_coordinate,
+                self.source_strand,
+                self.target_node_id,
+                self.target_coordinate,
+                self.target_strand
+            )
+            .as_bytes(),
+        )
+        .to_le_bytes();
+        let mut hash = [0_u8; 32];
+        hash[..16].copy_from_slice(&half);
+        hash[16..].copy_from_slice(&half);
+        HashId(hash)
     }
 }
 
@@ -236,9 +242,15 @@ impl Edge {
         target_coordinate: i64,
         target_strand: Strand,
     ) -> Result<Edge, EdgeError> {
-        let hash = HashId(calculate_hash(&format!(
-            "{source_node_id}:{source_coordinate}:{source_strand}:{target_node_id}:{target_coordinate}:{target_strand}"
-        )));
+        let hash = EdgeData {
+            source_node_id,
+            source_coordinate,
+            source_strand,
+            target_node_id,
+            target_coordinate,
+            target_strand,
+        }
+        .id_hash();
         let query = "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
         let mut stmt = match conn.prepare(query) {
             Ok(s) => s,
@@ -280,13 +292,12 @@ impl Edge {
         }
     }
 
-    #[cfg_attr(
-        all(debug_assertions, feature = "profiling"),
-        tracing::instrument(skip(conn, edges))
-    )]
+    #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, edges)))]
     pub fn bulk_create(conn: &GraphConnection, edges: &[EdgeData]) -> Vec<HashId> {
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
-        let query = Edge::query_by_ids(conn, &edge_ids);
+        let batch_size = max_rows_per_batch(conn, 7);
+
+        let query = Edge::query_by_ids(conn, &edge_ids, None);
         let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
 
         let mut edges_to_insert = IndexSet::new();
@@ -296,26 +307,31 @@ impl Edge {
             }
         }
 
-        let batch_size = max_rows_per_batch(conn, 7);
-
         for chunk in &edges_to_insert.iter().chunks(batch_size) {
-            let mut rows = vec![];
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            for edge in chunk {
-                params.push(Box::new(edge.id_hash()));
-                params.push(Box::new(edge.source_node_id));
-                params.push(Box::new(edge.source_coordinate));
-                params.push(Box::new(edge.source_strand));
-                params.push(Box::new(edge.target_node_id));
-                params.push(Box::new(edge.target_coordinate));
-                params.push(Box::new(edge.target_strand));
-                rows.push("(?, ?, ?, ?, ?, ?, ?)");
-            }
-            let sql = format!(
-                "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES {};",
-                rows.join(",")
+            let chunk = chunk.collect::<Vec<_>>();
+            let mut sql = String::from(
+                "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES ",
             );
-            conn.execute(&sql, rusqlite::params_from_iter(params))
+            for row_index in 0..chunk.len() {
+                if row_index > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
+            }
+            let mut params = Vec::with_capacity(chunk.len() * 7);
+            for edge in chunk {
+                params.push(Value::from(edge.id_hash()));
+                params.push(Value::from(edge.source_node_id));
+                params.push(Value::from(edge.source_coordinate));
+                params.push(Value::from(edge.source_strand));
+                params.push(Value::from(edge.target_node_id));
+                params.push(Value::from(edge.target_coordinate));
+                params.push(Value::from(edge.target_strand));
+            }
+            sql.push(';');
+            let mut statement = conn.prepare_cached(&sql).unwrap();
+            statement
+                .execute(rusqlite::params_from_iter(params))
                 .unwrap();
         }
         edge_ids
@@ -336,6 +352,7 @@ impl Edge {
         conn: &GraphConnection,
         block_group_id: &HashId,
         node_ids: &[HashId],
+        history_ref: Option<&str>,
     ) -> Result<Vec<AugmentedEdge>, EdgeError> {
         if node_ids.is_empty() {
             return Ok(vec![]);
@@ -343,7 +360,8 @@ impl Edge {
 
         let mut edges = vec![];
         let batch_size = max_rows_per_batch(conn, 1);
-        let query = "\
+        let query = format!(
+            "\
             SELECT
                 e.id,
                 e.source_node_id,
@@ -355,16 +373,27 @@ impl Edge {
                 bge.chromosome_index,
                 bge.phased,
                 bge.created_on
-            FROM block_group_edges bge
-            JOIN edges e ON e.id = bge.edge_id
-            WHERE bge.block_group_id = ?1
-              AND (e.source_node_id IN rarray(?2) OR e.target_node_id IN rarray(?2))
-            ORDER BY bge.created_on DESC;";
+            FROM {} bge
+            JOIN {} e ON e.id = bge.edge_id
+            WHERE bge.block_group_id = :block_group_id
+              AND (e.source_node_id IN rarray(:node_ids) OR e.target_node_id IN rarray(:node_ids))
+            ORDER BY bge.created_on DESC;",
+            BlockGroupEdge::table_name_with_history_ref(history_ref),
+            Self::table_name_with_history_ref(history_ref),
+        );
 
         for chunk in node_ids.chunks(batch_size) {
             let values = chunk.iter().copied().map(Value::from).collect::<Vec<_>>();
-            let mut stmt = conn.prepare_cached(query)?;
-            let rows = stmt.query_map(params![block_group_id, Rc::new(values)], |row| {
+            let mut stmt = conn.prepare(&query)?;
+            let node_ids = Rc::new(values);
+            let mut params: Vec<(&str, &dyn ToSql)> = vec![
+                (":block_group_id", block_group_id),
+                (":node_ids", &node_ids),
+            ];
+            if let Some(history_ref) = history_ref.as_ref() {
+                params.push((":history_ref", history_ref));
+            }
+            let rows = stmt.query_map(&params[..], |row| {
                 Ok(AugmentedEdge {
                     edge: Edge {
                         id: row.get(0)?,
@@ -380,7 +409,6 @@ impl Edge {
                     created_on: row.get(9)?,
                 })
             })?;
-
             for row in rows {
                 edges.push(row?);
             }
@@ -411,6 +439,7 @@ impl Edge {
         conn: &GraphConnection,
         block_group_id: &HashId,
         edges: &[AugmentedEdge],
+        history_ref: Option<&str>,
     ) -> Result<Vec<GroupBlock>, EdgeError> {
         let mut node_ids = IndexSet::new();
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
@@ -456,10 +485,14 @@ impl Edge {
             queried_node_ids.extend(incomplete_node_ids.iter().copied());
             let mut next_incomplete_node_ids = HashSet::new();
 
-            for edge in
-                Edge::edges_for_block_group_nodes(conn, block_group_id, &incomplete_node_ids)?
-                    .iter()
-                    .map(|augmented_edge| &augmented_edge.edge)
+            for edge in Edge::edges_for_block_group_nodes(
+                conn,
+                block_group_id,
+                &incomplete_node_ids,
+                history_ref,
+            )?
+            .iter()
+            .map(|augmented_edge| &augmented_edge.edge)
             {
                 if !is_terminal(edge.source_node_id) {
                     node_ids.insert(edge.source_node_id);
@@ -493,6 +526,7 @@ impl Edge {
         let sequences_by_node_id = Node::get_sequences_by_node_ids(
             conn,
             &node_ids.iter().copied().collect::<Vec<HashId>>(),
+            history_ref,
         );
 
         let mut blocks = vec![];
@@ -732,7 +766,7 @@ mod tests {
 
         let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
         assert_eq!(edge_ids.len(), 3);
-        let edges = Edge::query_by_ids(conn, &edge_ids);
+        let edges = Edge::query_by_ids(conn, &edge_ids, None);
         assert_eq!(edges.len(), 3);
 
         let edges_by_source_node_id = edges
@@ -799,7 +833,7 @@ mod tests {
         let edge_ids1 = Edge::bulk_create(conn, &edges);
         assert_eq!(edge_ids1.len(), 2);
         for (index, id) in edge_ids1.iter().enumerate() {
-            let edge = Edge::get_by_id(conn, id).unwrap();
+            let edge = Edge::get_by_id(conn, id, None).unwrap();
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
 
@@ -809,7 +843,7 @@ mod tests {
         assert_eq!(edge_ids2[2], edge_ids1[1]);
         assert_eq!(edge_ids2.len(), 3);
         for (index, id) in edge_ids2.iter().enumerate() {
-            let edge = Edge::get_by_id(conn, id).unwrap();
+            let edge = Edge::get_by_id(conn, id, None).unwrap();
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
     }
@@ -900,7 +934,7 @@ mod tests {
             .collect::<Vec<_>>();
         BlockGroupEdge::bulk_create(&conn, &block_group_edges);
 
-        let edges = Edge::edges_for_block_group_nodes(&conn, &bg.id, &[n_a]).unwrap();
+        let edges = Edge::edges_for_block_group_nodes(&conn, &bg.id, &[n_a], None).unwrap();
         let edge_ids = edges
             .iter()
             .map(|augmented_edge| augmented_edge.edge.id)
@@ -1068,7 +1102,7 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges).unwrap();
+        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges, None).unwrap();
 
         // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
         // 2 terminal blocks: START, END
@@ -1196,7 +1230,7 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges).unwrap();
+        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges, None).unwrap();
         let node_blocks = blocks
             .iter()
             .filter(|block| block.node_id == node_id)
@@ -1324,7 +1358,7 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges).unwrap();
+        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges, None).unwrap();
         let mid_intervals = blocks
             .iter()
             .filter(|block| block.node_id == n_mid)
@@ -1410,6 +1444,7 @@ mod tests {
                 phased: 0,
                 created_on: 0,
             }],
+            None,
         )
         .unwrap();
 
@@ -1481,7 +1516,7 @@ mod tests {
 
         let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
         assert_eq!(edge_ids.len(), 3);
-        let edges = Edge::query_by_ids(conn, &edge_ids);
+        let edges = Edge::query_by_ids(conn, &edge_ids, None);
         assert_eq!(edges.len(), 3);
 
         let edges_by_source_node_id = edges
@@ -1507,12 +1542,45 @@ mod tests {
     }
 
     #[test]
+    fn test_edge_data_id_hash_matches_edge_create() {
+        let conn = &mut get_connection(None).unwrap();
+        Collection::create(conn, "test collection").unwrap();
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("ATCGATCG")
+            .save(conn)
+            .unwrap();
+        let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str("target")).unwrap();
+        let edge = EdgeData {
+            source_node_id: HashId::convert_str("source"),
+            source_coordinate: -12_345,
+            source_strand: Strand::Reverse,
+            target_node_id: node_id,
+            target_coordinate: 67_890,
+            target_strand: Strand::ImportantButUnknown,
+        };
+
+        let created_edge = Edge::create(
+            conn,
+            edge.source_node_id,
+            edge.source_coordinate,
+            edge.source_strand,
+            edge.target_node_id,
+            edge.target_coordinate,
+            edge.target_strand,
+        )
+        .expect("should create edge with xxhash-derived id");
+
+        assert_eq!(edge.id_hash(), created_edge.id);
+    }
+
+    #[test]
     fn test_blocks_from_edges() {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
 
-        let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges).unwrap();
+        let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id, None);
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges, None).unwrap();
 
         // 4 actual sequences: 10-length ones of all A, all T, all C, all G
         // 2 terminal node blocks (start/end)
@@ -1545,9 +1613,9 @@ mod tests {
             preserve_edge: true,
         };
         BlockGroup::insert_change(&conn, &change).unwrap();
-        let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id);
+        let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id, None);
 
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges).unwrap();
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges, None).unwrap();
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence
@@ -1558,7 +1626,7 @@ mod tests {
 
         // Confirm that ordering doesn't matter
         edges.reverse();
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges).unwrap();
+        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges, None).unwrap();
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence

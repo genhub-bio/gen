@@ -47,6 +47,21 @@ pub fn is_end_node(node_id: HashId) -> bool {
     node_id == PATH_END_NODE_ID
 }
 
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+pub struct CommitHash(pub String);
+
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+pub struct CommitRef(pub String);
+
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
+pub struct BranchName(pub String);
+
 #[cfg_attr(feature = "python-bindings", pyclass)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HashId(pub [u8; 32]);

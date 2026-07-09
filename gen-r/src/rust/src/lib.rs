@@ -12,11 +12,12 @@ use r#gen::{
         derive_chunks::derive_chunks_operation, derive_subgraph::derive_subgraph_operation,
         make_stitch::make_stitch_operation,
     },
+    end_transaction_if_active,
     exports::{
         fasta::export_fasta as fasta_export, genbank::export_genbank as genbank_export,
         gfa::export_gfa as gfa_export,
     },
-    get_connection, get_operation_connection,
+    get_config_connection, get_connection,
     graphs::{
         combinatorial_library::{SequencePart, parse_library},
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
@@ -89,50 +90,46 @@ fn nullable_i64_to_option(value: Nullable<i64>) -> Option<i64> {
 }
 
 fn resolve_collection_name(
-    operations_conn: &gen_models::db::OperationsConnection,
+    config_conn: &gen_models::db::ConfigConnection,
     collection_name: Option<String>,
 ) -> std::result::Result<String, String> {
     match collection_name {
         Some(name) => Ok(name),
-        None => Ok(Defaults::get(operations_conn)
+        None => Ok(Defaults::get(config_conn)
             .and_then(|d| d.collection_name)
             .unwrap_or_else(|| "default".to_string())),
     }
 }
 
 fn begin_transactions(context: &GenDbContext) -> std::result::Result<(), String> {
-    let operations_conn = context.operations().conn();
+    let config_conn = context.config().conn();
     let graph_conn = context.graph().conn();
 
-    r#gen::track_database(graph_conn, operations_conn)
-        .map_err(|err| format!("Failed to track database: {err}"))?;
     graph_conn
         .execute("BEGIN TRANSACTION", [])
         .map_err(|err| format!("Failed to begin graph transaction: {err}"))?;
-    operations_conn
+    config_conn
         .execute("BEGIN TRANSACTION", [])
         .map_err(|err| format!("Failed to begin operations transaction: {err}"))?;
     Ok(())
 }
 
 fn end_transactions(context: &GenDbContext) -> std::result::Result<(), String> {
-    let operations_conn = context.operations().conn();
+    let config_conn = context.config().conn();
     let graph_conn = context.graph().conn();
 
-    graph_conn
-        .execute("END TRANSACTION;", [])
+    end_transaction_if_active(graph_conn)
         .map_err(|err| format!("Failed to commit graph transaction: {err}"))?;
-    operations_conn
-        .execute("END TRANSACTION;", [])
+    end_transaction_if_active(config_conn)
         .map_err(|err| format!("Failed to commit operations transaction: {err}"))?;
     Ok(())
 }
 
 fn rollback_transactions(context: &GenDbContext) {
-    let operations_conn = context.operations().conn();
+    let config_conn = context.config().conn();
     let graph_conn = context.graph().conn();
     let _ = graph_conn.execute("ROLLBACK TRANSACTION;", []);
-    let _ = operations_conn.execute("ROLLBACK TRANSACTION;", []);
+    let _ = config_conn.execute("ROLLBACK TRANSACTION;", []);
 }
 
 fn hash_id_from_string(value: &str) -> std::result::Result<HashId, String> {
@@ -281,8 +278,8 @@ fn list_annotation_records(
     sample_name: &str,
     name: &str,
 ) -> std::result::Result<List, Error> {
-    let graph =
-        BlockGroup::get_graph(conn, block_group_id).map_err(|e| Error::Other(e.to_string()))?;
+    let graph = BlockGroup::get_graph(conn, block_group_id, None)
+        .map_err(|e| Error::Other(e.to_string()))?;
     let annotations = Annotation::query_with_lineage(conn, collection_name, sample_name, name)
         .map_err(|e| Error::Other(e.to_string()))?;
     let records: Vec<Robj> = annotations
@@ -300,10 +297,6 @@ fn run_translation_operation<F>(
 where
     F: FnOnce() -> std::result::Result<BlockGroup, r#gen::graphs::translation::TranslationError>,
 {
-    let graph_conn = context.graph().conn();
-    let operations_conn = context.operations().conn();
-    r#gen::track_database(graph_conn, operations_conn)
-        .map_err(|e| Error::Other(format!("Failed to track database: {e}")))?;
     with_translation_operation(context, label, f).map_err(|e| Error::Other(e.to_string()))
 }
 
@@ -577,7 +570,7 @@ fn load_tracks_from_specs(
     for spec in specs {
         match spec {
             TrackSpec::Group { name } => {
-                if let Ok(bg) = BlockGroup::get_by_id(conn, sequence_graph_id) {
+                if let Ok(bg) = BlockGroup::get_by_id(conn, sequence_graph_id, None) {
                     let entry = AnnotationGroupEntry {
                         id: name.clone(),
                         name: name.clone(),
@@ -627,7 +620,9 @@ fn load_annotation_file_as_track(
         .unwrap_or("")
         .to_lowercase();
 
-    if let (Some(sample_name), Ok(bg)) = (sample, BlockGroup::get_by_id(conn, sequence_graph_id)) {
+    if let (Some(sample_name), Ok(bg)) =
+        (sample, BlockGroup::get_by_id(conn, sequence_graph_id, None))
+    {
         let mut buffer: Vec<u8> = Vec::new();
         let translated = match ext.as_str() {
             "gff" | "gff3" => File::open(file_path)
@@ -952,12 +947,9 @@ impl Repository {
         };
         let gen_dir = workspace.ensure_gen_dir();
         let ops_path = gen_dir.join("gen.db");
-        let ops_conn = get_operation_connection(Some(ops_path))
+        let ops_conn = get_config_connection(Some(ops_path))
             .map_err(|e| Error::Other(format!("Failed to open operations database: {e}")))?;
-        let db_path = Defaults::get(&ops_conn)
-            .and_then(|d| d.db_name)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| gen_dir.join("default.db"));
+        let db_path = gen_dir.join("default.db");
         let graph_conn = get_connection(db_path.clone()).map_err(|e| {
             Error::Other(format!(
                 "Failed to open database '{}': {e}",
@@ -965,7 +957,8 @@ impl Repository {
             ))
         })?;
         Ok(Repository {
-            context: GenDbContext::new(workspace, graph_conn, ops_conn),
+            context: GenDbContext::new(workspace, graph_conn, ops_conn)
+                .map_err(|err| Error::Other(err.to_string()))?,
         })
     }
 
@@ -1009,7 +1002,8 @@ impl Repository {
     fn get_sequence_graph_by_id(&self, id: String) -> std::result::Result<SequenceGraph, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&id).map_err(Error::Other)?;
-        let bg = BlockGroup::get_by_id(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
+        let bg =
+            BlockGroup::get_by_id(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
         Ok(self.to_sequence_graph(bg))
     }
 
@@ -1069,7 +1063,7 @@ impl Repository {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let nid = hash_id_from_string(&node_id).map_err(Error::Other)?;
-        let sequences = Node::get_sequences_by_node_ids(conn, &[nid]);
+        let sequences = Node::get_sequences_by_node_ids(conn, &[nid], None);
         let seq = sequences
             .get(&nid)
             .ok_or_else(|| Error::Other(format!("Node with id {nid} not found")))?;
@@ -1085,7 +1079,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1120,7 +1114,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1172,7 +1166,7 @@ impl Repository {
             ));
         }
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1221,7 +1215,7 @@ impl Repository {
             return Err(Error::Other("region_names, region_seq_names, region_starts, and region_ends must all have the same length".to_string()));
         }
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1266,7 +1260,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<SequenceGraph, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1299,7 +1293,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1342,7 +1336,7 @@ impl Repository {
         let parts_list = parse_library(&parts, &library)
             .map_err(|e| Error::Other(format!("Problem parsing library files: {e}")))?;
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1382,7 +1376,7 @@ impl Repository {
     ) -> std::result::Result<SequenceGraph, Error> {
         let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1424,7 +1418,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1461,7 +1455,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1493,7 +1487,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1527,7 +1521,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<List, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1572,7 +1566,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1615,7 +1609,7 @@ impl Repository {
         let parts_list = parse_library(&parts, &library)
             .map_err(|e| Error::Other(format!("Couldn't parse library files: {e}")))?;
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1651,7 +1645,7 @@ impl Repository {
     ) -> std::result::Result<Robj, Error> {
         let rust_parts_list = parse_parts_list(parts_list).map_err(Error::Other)?;
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1689,7 +1683,7 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1721,20 +1715,16 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<String, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
-        r#gen::track_database(
-            self.context.graph().conn(),
-            self.context.operations().conn(),
-        )
-        .map_err(|e| Error::Other(format!("Failed to track database: {e}")))?;
         r#gen::exports::fasta::export_fasta(
             self.context.graph().conn(),
             &collection_name,
             nullable_string_to_option(sample).as_deref(),
             &PathBuf::from(&filename),
+            None,
         )
         .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))?;
         Ok(filename)
@@ -1748,21 +1738,17 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<String, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
-        r#gen::track_database(
-            self.context.graph().conn(),
-            self.context.operations().conn(),
-        )
-        .map_err(|e| Error::Other(format!("Failed to track database: {e}")))?;
         r#gen::exports::gfa::export_gfa(
             self.context.graph().conn(),
             &collection_name,
             &PathBuf::from(&filename),
             &sample,
             nullable_i64_to_option(node_max),
+            None,
         )
         .map_err(|e| Error::Other(format!("GFA export failed: {e}")))?;
         Ok(filename)
@@ -1775,15 +1761,10 @@ impl Repository {
         collection: Nullable<String>,
     ) -> std::result::Result<String, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
-        r#gen::track_database(
-            self.context.graph().conn(),
-            self.context.operations().conn(),
-        )
-        .map_err(|e| Error::Other(format!("Failed to track database: {e}")))?;
         let writer = BufWriter::new(File::create(&filename).map_err(|e| {
             Error::Other(format!("Failed to create GenBank file '{filename}': {e}"))
         })?);
@@ -1792,6 +1773,7 @@ impl Repository {
             &collection_name,
             &sample,
             writer,
+            None,
         )
         .map_err(|e| Error::Other(format!("GenBank export failed: {e}")))?;
         Ok(filename)
@@ -1844,12 +1826,12 @@ impl Repository {
             sequence_graph_ids
                 .iter()
                 .filter_map(|id| hash_id_from_string(id).ok())
-                .filter_map(|id| BlockGroup::get_by_id(conn, &id).ok())
+                .filter_map(|id| BlockGroup::get_by_id(conn, &id, None).ok())
                 .collect()
         };
         for bg in bgs {
-            let graph =
-                BlockGroup::get_graph(conn, &bg.id).map_err(|e| Error::Other(e.to_string()))?;
+            let graph = BlockGroup::get_graph(conn, &bg.id, None)
+                .map_err(|e| Error::Other(e.to_string()))?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index = SeedIndex::build(&matcher, k as usize, normalized);
             let path = index_dir.join(format!("{}.bin", bg.id));
@@ -1876,7 +1858,7 @@ impl Repository {
             sequence_graph_ids
                 .iter()
                 .filter_map(|id| hash_id_from_string(id).ok())
-                .filter_map(|id| BlockGroup::get_by_id(conn, &id).ok())
+                .filter_map(|id| BlockGroup::get_by_id(conn, &id, None).ok())
                 .collect()
         };
         let query_bytes = query.as_bytes();
@@ -1887,8 +1869,8 @@ impl Repository {
             .join("search_index");
         let mut results = Vec::new();
         for bg in bgs {
-            let graph =
-                BlockGroup::get_graph(conn, &bg.id).map_err(|e| Error::Other(e.to_string()))?;
+            let graph = BlockGroup::get_graph(conn, &bg.id, None)
+                .map_err(|e| Error::Other(e.to_string()))?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index_path = index_dir.join(format!("{}.bin", bg.id));
             let index = fs::read(&index_path)
@@ -1953,7 +1935,7 @@ impl Repository {
         backbone: Nullable<String>,
     ) -> std::result::Result<SequenceGraph, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -1987,7 +1969,7 @@ impl Repository {
         chunk_size: Nullable<i64>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
-            self.context.operations().conn(),
+            self.context.config().conn(),
             nullable_string_to_option(collection),
         )
         .map_err(Error::Other)?;
@@ -2015,7 +1997,7 @@ impl Repository {
     ) -> std::result::Result<Vec<String>, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let bg = BlockGroup::get_by_id(conn, &bg_id)
+        let bg = BlockGroup::get_by_id(conn, &bg_id, None)
             .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
         Ok(annotation_group_names(conn, &bg))
     }
@@ -2023,7 +2005,7 @@ impl Repository {
     fn list_annotations(&self, sequence_graph_id: String) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let bg = BlockGroup::get_by_id(conn, &bg_id)
+        let bg = BlockGroup::get_by_id(conn, &bg_id, None)
             .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
         list_annotation_records(conn, &bg.id, &bg.collection_name, &bg.sample_name, &bg.name)
     }
@@ -2040,7 +2022,8 @@ impl Repository {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
+        let graph =
+            BlockGroup::get_graph(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
@@ -2126,7 +2109,8 @@ impl Repository {
     ) -> std::result::Result<bool, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = BlockGroup::get_graph(conn, &bg_id).map_err(|e| Error::Other(e.to_string()))?;
+        let graph =
+            BlockGroup::get_graph(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
@@ -2150,7 +2134,7 @@ impl Repository {
     /// All block groups currently in `(collection, sample)`, as a `gen_sample` record.
     fn block_groups_in_sample(&self, collection_name: &str, sample_name: &str) -> Robj {
         let conn = self.context.graph().conn();
-        let block_groups = Sample::get_block_groups(conn, collection_name, sample_name)
+        let block_groups = Sample::get_block_groups(conn, collection_name, sample_name, None)
             .into_iter()
             .map(|bg| r!(self.to_sequence_graph(bg)))
             .collect();
@@ -2165,7 +2149,7 @@ impl Repository {
         name: &str,
     ) -> std::result::Result<SequenceGraph, Error> {
         let conn = self.context.graph().conn();
-        Sample::get_block_groups(conn, collection_name, sample_name)
+        Sample::get_block_groups(conn, collection_name, sample_name, None)
             .into_iter()
             .find(|bg| bg.name == name)
             .map(|bg| self.to_sequence_graph(bg))
@@ -2242,6 +2226,7 @@ impl SequenceGraph {
             &self.collection_name,
             Some(&self.sample_name),
             &PathBuf::from(&filename),
+            None,
         )
         .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))
     }
@@ -2258,6 +2243,7 @@ impl SequenceGraph {
             &PathBuf::from(&filename),
             &self.sample_name,
             nullable_i64_to_option(node_max),
+            None,
         )
         .map_err(|e| Error::Other(format!("GFA export failed: {e}")))
     }
@@ -2268,7 +2254,7 @@ impl SequenceGraph {
             File::create(&filename)
                 .map_err(|e| Error::Other(format!("Failed to create file '{filename}': {e}")))?,
         );
-        genbank_export(conn, &self.collection_name, &self.sample_name, writer)
+        genbank_export(conn, &self.collection_name, &self.sample_name, writer, None)
             .map_err(|e| Error::Other(format!("GenBank export failed: {e}")))
     }
 
@@ -2284,7 +2270,7 @@ impl SequenceGraph {
         fs::create_dir_all(&index_dir)
             .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
         let graph =
-            BlockGroup::get_graph(conn, &self.id).map_err(|e| Error::Other(e.to_string()))?;
+            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let index = SeedIndex::build(&matcher, k as usize, normalized);
         let path = index_dir.join(format!("{}.bin", self.id));
@@ -2298,7 +2284,7 @@ impl SequenceGraph {
         let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
         let conn = self.context.graph().conn();
         let graph =
-            BlockGroup::get_graph(conn, &self.id).map_err(|e| Error::Other(e.to_string()))?;
+            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let index_dir = self
             .context
@@ -2342,7 +2328,7 @@ impl SequenceGraph {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let nid = hash_id_from_string(&node_id).map_err(Error::Other)?;
-        let sequences = Node::get_sequences_by_node_ids(conn, &[nid]);
+        let sequences = Node::get_sequences_by_node_ids(conn, &[nid], None);
         let seq = sequences
             .get(&nid)
             .ok_or_else(|| Error::Other(format!("Node with id {nid} not found")))?;
@@ -2432,7 +2418,7 @@ impl SequenceGraph {
     fn to_dict(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
         let graph =
-            BlockGroup::get_graph(conn, &self.id).map_err(|e| Error::Other(e.to_string()))?;
+            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
 
         let nodes = graph
             .nodes()
@@ -2608,7 +2594,7 @@ impl SequenceGraph {
                 })?
             }
         } else if let Some(id) = gen_annotation_record_id(&region)? {
-            let annotation = Annotation::get_by_id(conn, &id)
+            let annotation = Annotation::get_by_id(conn, &id, None)
                 .ok_or_else(|| Error::Other(format!("Annotation with id '{id}' not found")))?;
             let label = annotation.name.clone();
             run_translation_operation(&self.context, &label, || {

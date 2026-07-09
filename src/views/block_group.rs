@@ -81,7 +81,7 @@ fn get_block_group_path_nodes(
     .map_err(|e| format!("Failed to query path: {}", e))?;
 
     let path_blocks = path
-        .blocks(conn)
+        .blocks(conn, None)
         .map_err(|err| format!("Failed to load path blocks: {err}"))?;
 
     let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
@@ -196,14 +196,19 @@ fn load_annotation_groups_for_viewport(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CLI entrypoint needs to forward explicit view selection and history state"
+)]
 pub fn view_block_group(
     conn: &GraphConnection,
-    op_conn: &gen_models::db::OperationsConnection,
+    op_conn: &gen_models::db::ConfigConnection,
     workspace: &gen_core::config::Workspace,
     name: Option<String>,
     sample_name: Option<String>,
     collection_name: &str,
     position: Option<String>, // Node ID and offset
+    history_ref: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
@@ -251,7 +256,7 @@ pub fn view_block_group(
 
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, &block_group.id)?;
+        block_graph = BlockGroup::get_graph(conn, &block_group.id, history_ref)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -270,13 +275,15 @@ pub fn view_block_group(
     let mut annotation_file_loaded_windows: std::collections::HashMap<HashId, (i64, i64)> =
         std::collections::HashMap::new();
     let mut current_block_group =
-        block_group_id.map(|bg_id| match BlockGroup::get_by_id(conn, &bg_id) {
-            Ok(bg) => bg,
-            Err(err) => {
-                // TODO: Handle these with messages instead of panic'ing
-                panic!("Failed to load block group {bg_id}: {err}");
-            }
-        });
+        block_group_id.map(
+            |bg_id| match BlockGroup::get_by_id(conn, &bg_id, history_ref) {
+                Ok(bg) => bg,
+                Err(err) => {
+                    // TODO: Handle these with messages instead of panic'ing
+                    panic!("Failed to load block group {bg_id}: {err}");
+                }
+            },
+        );
 
     // Create explorer and its state that persists across frames
     let mut explorer = CollectionExplorer::new(
@@ -456,10 +463,8 @@ pub fn view_block_group(
                                 focus_zone = FocusZone::Canvas;
                                 tui_layout_change = true;
                             }
-                            KeyCode::Char('c') => {
-                                if panel_mode == PanelMode::Messages {
-                                    messages.clear();
-                                }
+                            KeyCode::Char('c') if panel_mode == PanelMode::Messages => {
+                                messages.clear();
                             }
                             _ => {}
                         },
@@ -1190,10 +1195,10 @@ pub fn view_block_group(
         // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, new_block_group_id)?;
+            block_graph = BlockGroup::get_graph(conn, new_block_group_id, None)?;
             // Update the graph controller
             graph_controller = create_gen_graph_controller(block_graph.clone());
-            let block_group = match BlockGroup::get_by_id(conn, new_block_group_id) {
+            let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, None) {
                 Ok(bg) => bg,
                 Err(err) => {
                     // TODO: Handle these with messages instead of panic'ing

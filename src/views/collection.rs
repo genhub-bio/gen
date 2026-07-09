@@ -8,7 +8,7 @@ use gen_core::HashId;
 use gen_models::{
     block_group::BlockGroup,
     collection::Collection,
-    db::{GraphConnection, OperationsConnection},
+    db::{ConfigConnection, GraphConnection},
     file_types::FileTypes,
     sample::Sample,
     sample_lineage::SampleLineage,
@@ -135,7 +135,7 @@ pub struct CollectionExplorerData {
 /// block groups, sample block groups, and immediate sub-collections.
 pub fn gather_collection_explorer_data(
     conn: &GraphConnection,
-    op_conn: &OperationsConnection,
+    op_conn: &ConfigConnection,
     selected_block_group: Option<&BlockGroup>,
     full_collection_name: &str,
 ) -> CollectionExplorerData {
@@ -148,7 +148,7 @@ pub fn gather_collection_explorer_data(
         .collect::<HashSet<_>>();
 
     // 3) Gather all samples associated with the entire collection
-    let all_blocks = Collection::get_block_groups(conn, full_collection_name);
+    let all_blocks = Collection::get_block_groups(conn, full_collection_name, None);
     let mut sample_names: HashSet<String> =
         all_blocks.iter().map(|bg| bg.sample_name.clone()).collect();
     let mut collection_samples: Vec<String> = sample_names.drain().collect();
@@ -191,7 +191,7 @@ pub fn gather_collection_explorer_data(
     // 4) For each sample, retrieve block groups
     let mut sample_block_groups = HashMap::new();
     for sample in &collection_samples {
-        let bgs = Sample::get_block_groups(conn, full_collection_name, sample);
+        let bgs = Sample::get_block_groups(conn, full_collection_name, sample, None);
         let pairs = bgs
             .iter()
             .map(|bg| (bg.id, bg.name.clone()))
@@ -199,7 +199,8 @@ pub fn gather_collection_explorer_data(
         sample_block_groups.insert(sample.clone(), pairs);
     }
 
-    let annotation_files = load_annotation_file_entries(op_conn);
+    let _ = op_conn;
+    let annotation_files = load_annotation_file_entries(conn);
     let annotation_groups = selected_block_group
         .map(|block_group| load_annotation_group_entries(conn, block_group))
         .unwrap_or_default();
@@ -404,7 +405,7 @@ pub struct CollectionExplorer {
 impl CollectionExplorer {
     pub fn new(
         conn: &GraphConnection,
-        op_conn: &gen_models::db::OperationsConnection,
+        op_conn: &gen_models::db::ConfigConnection,
         sample_name: Option<&str>,
         selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
@@ -423,7 +424,7 @@ impl CollectionExplorer {
     pub fn refresh(
         &mut self,
         conn: &GraphConnection,
-        op_conn: &gen_models::db::OperationsConnection,
+        op_conn: &gen_models::db::ConfigConnection,
         sample_name: Option<&str>,
         selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
@@ -1077,7 +1078,7 @@ mod tests {
         .unwrap();
 
         // Call the function under test—notice we pass the full path
-        let op_conn = context.operations().conn();
+        let op_conn = context.config().conn();
         let explorer_data = gather_collection_explorer_data(conn, op_conn, None, "/foo/bar");
 
         // Verify results

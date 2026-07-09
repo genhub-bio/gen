@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_core::{CommitHash, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -9,23 +9,20 @@ use gen_models::{
     edge::Edge,
     errors::{CollectionError, SampleError},
     node::Node,
-    operations::{Operation, OperationInfo},
+    operations::{OperationInfo, commit_graph_operation},
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
 };
 
 use crate::fasta::FastaError;
-
 pub fn import_sequences(
     context: &DbContext,
     entries: &[(String, String)],
     collection_name: &str,
     sample: &str,
-) -> Result<Operation, FastaError> {
+) -> Result<CommitHash, FastaError> {
     let conn = context.graph().conn();
-    let mut session = start_operation(conn);
 
     let collection = match Collection::create(conn, collection_name) {
         Ok(collection) => collection,
@@ -115,17 +112,16 @@ pub fn import_sequences(
         summary_str.push_str(&format!(" {path_name}: {change_count} changes.\n"));
     }
 
-    end_operation(
+    let commit_hash = commit_graph_operation(
         context,
-        &mut session,
         &OperationInfo {
             files: vec![],
             description: "sequence_addition".to_string(),
         },
         &summary_str,
-        None,
     )
-    .map_err(FastaError::OperationError)
+    .map_err(FastaError::OperationError)?;
+    Ok(commit_hash)
 }
 
 /// Stores each reference sequence as a node (idempotent — same sequence hash reuses the same
@@ -138,9 +134,8 @@ pub fn import_genomic_regions(
     regions: &[(String, String, i64, i64)],
     collection_name: &str,
     sample: &str,
-) -> Result<Operation, FastaError> {
+) -> Result<CommitHash, FastaError> {
     let conn = context.graph().conn();
-    let mut session = start_operation(conn);
 
     let collection = match Collection::create(conn, collection_name) {
         Ok(collection) => collection,
@@ -249,15 +244,90 @@ pub fn import_genomic_regions(
         summary_str.push_str(&format!(" {path_name}: {change_count} changes.\n"));
     }
 
-    end_operation(
+    let commit_hash = commit_graph_operation(
         context,
-        &mut session,
         &OperationInfo {
             files: vec![],
             description: "genomic_region_addition".to_string(),
         },
         &summary_str,
-        None,
     )
-    .map_err(FastaError::OperationError)
+    .map_err(FastaError::OperationError)?;
+    Ok(commit_hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use gen_models::{
+        assets::tables::OperationLog,
+        errors::OperationError,
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        traits::Query,
+    };
+
+    use super::*;
+    use crate::test_helpers::setup_gen;
+
+    #[test]
+    fn test_import_sequences_detects_no_changes() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let history_store = DoltHistoryStore::new(conn);
+        let entries = vec![("chr1".to_string(), "ATCG".to_string())];
+
+        let commit_hash =
+            import_sequences(&context, &entries, "test", Sample::DEFAULT_NAME).unwrap();
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
+        let operation_logs = OperationLog::query(
+            conn,
+            "SELECT * FROM gen_operation_log ORDER BY created_on DESC",
+            [],
+        );
+        assert_eq!(operation_logs[0].operation_kind, "sequence_addition");
+
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "chr1", None);
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap(),
+            HashSet::from_iter(vec!["ATCG".to_string()])
+        );
+
+        let err = import_sequences(&context, &entries, "test", Sample::DEFAULT_NAME).unwrap_err();
+        assert!(matches!(
+            err,
+            FastaError::OperationError(OperationError::NoChanges)
+        ));
+    }
+
+    #[test]
+    fn test_import_genomic_regions_returns_commit_hash() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let history_store = DoltHistoryStore::new(conn);
+        let reference_sequences = vec![("chr1".to_string(), "ATCGAT".to_string())];
+        let regions = vec![("region-a".to_string(), "chr1".to_string(), 1, 5)];
+
+        let commit_hash = import_genomic_regions(
+            &context,
+            &reference_sequences,
+            &regions,
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .unwrap();
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
+        let operation_logs = OperationLog::query(
+            conn,
+            "SELECT * FROM gen_operation_log ORDER BY created_on DESC",
+            [],
+        );
+        assert_eq!(operation_logs[0].operation_kind, "genomic_region_addition");
+
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "region-a", None);
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap(),
+            HashSet::from_iter(vec!["TCGA".to_string()])
+        );
+    }
 }

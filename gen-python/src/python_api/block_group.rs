@@ -188,7 +188,8 @@ impl PySequenceGraph {
             )
         })?;
         let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
 
         let gen_dir = context.workspace().ensure_gen_dir();
@@ -249,7 +250,8 @@ impl PySequenceGraph {
         fs::create_dir_all(&index_dir)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
         let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let normalized = kind != SequenceKind::Exact;
         let index = SeedIndex::build(&matcher, k, normalized);
@@ -296,7 +298,7 @@ impl PySequenceGraph {
     /// ``Repository``.
     fn get_node_sequence(&self, node: &PyGraphNode) -> PyResult<String> {
         let conn = self.require_context("get_node_sequence()")?.graph().conn();
-        let sequences = Node::get_sequences_by_node_ids(conn, &[node.node_id]);
+        let sequences = Node::get_sequences_by_node_ids(conn, &[node.node_id], None);
         let sequence = sequences.get(&node.node_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "Node with id {:?} not found",
@@ -310,7 +312,8 @@ impl PySequenceGraph {
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_dict()")?.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         let dict = PyDict::new(py);
         let nodes: Vec<PyGraphNode> = graph
             .nodes()
@@ -345,7 +348,8 @@ impl PySequenceGraph {
 
     fn to_rustworkx(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_rustworkx()")?.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         {
             let rustworkx = PyModule::import(py, "rustworkx").map_err(|_| {
                 pyo3::exceptions::PyModuleNotFoundError::new_err(
@@ -386,7 +390,8 @@ impl PySequenceGraph {
 
     fn to_networkx(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_networkx()")?.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         {
             let networkx = PyModule::import(py, "networkx").map_err(|_| {
                 pyo3::exceptions::PyModuleNotFoundError::new_err(
@@ -449,6 +454,7 @@ impl PySequenceGraph {
             &self.collection_name,
             Some(&self.sample_name),
             &PathBuf::from(&filename),
+            None,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export FASTA '{}': {e}", filename)))
     }
@@ -470,6 +476,7 @@ impl PySequenceGraph {
             &PathBuf::from(&filename),
             &self.sample_name,
             node_max,
+            None,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export GFA '{}': {e}", filename)))
     }
@@ -485,7 +492,7 @@ impl PySequenceGraph {
         let writer = fs::File::create(&filename).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create '{}': {e}", filename))
         })?;
-        export_genbank(conn, &self.collection_name, &self.sample_name, writer).map_err(|e| {
+        export_genbank(conn, &self.collection_name, &self.sample_name, writer, None).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to export GenBank '{}': {e}", filename))
         })
     }
@@ -694,7 +701,7 @@ impl PySequenceGraph {
             &self.name,
             Some(&self.id),
         );
-        let found = BlockGroup::get_by_id(conn, &child_id)
+        let found = BlockGroup::get_by_id(conn, &child_id, None)
             .map_err(|e| PyRuntimeError::new_err(format!("Subgraph created but not found: {e}")))?;
         Ok(self.to_py_block_group(found))
     }
@@ -733,7 +740,7 @@ impl PySequenceGraph {
         let conn = ctx.graph().conn();
         let prefix = format!("{}.", self.name);
         Ok(
-            Sample::get_block_groups(conn, &self.collection_name, &new_sample)
+            Sample::get_block_groups(conn, &self.collection_name, &new_sample, None)
                 .into_iter()
                 .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
                 .map(|bg| self.to_py_block_group(bg))

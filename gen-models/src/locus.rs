@@ -32,7 +32,7 @@ impl GraphLocus {
     /// Concatenate the sequence bytes covered by this locus.
     pub fn sequence(&self, conn: &GraphConnection) -> Vec<u8> {
         let node_ids: Vec<HashId> = self.slices.iter().map(|s| s.block.node_id).collect();
-        let sequences = Node::get_sequences_by_node_ids(conn, &node_ids);
+        let sequences = Node::get_sequences_by_node_ids(conn, &node_ids, None);
 
         let mut out = Vec::new();
         for s in &self.slices {

@@ -1,13 +1,13 @@
 use anyhow::Result;
+use gen_core::CommitHash;
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     collection::Collection,
     db::DbContext,
     errors::{BlockGroupError, CollectionError, OperationError},
     file_types::FileTypes,
-    operations::{Operation, OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, commit_graph_operation},
     sample::Sample,
-    session_operations,
 };
 use thiserror::Error;
 
@@ -15,7 +15,6 @@ use crate::graphs::combinatorial_library::{
     CombinatorialLibraryCreationError, CombinatorialLibraryParseError, SequencePart,
     create_library, create_part_annotations,
 };
-
 #[derive(Error, Debug)]
 pub enum LibraryImportError {
     #[error("No changes were made to the library")]
@@ -52,9 +51,8 @@ pub fn import_library(
     parts_list: Vec<Vec<SequencePart>>,
     parts_file_path: Option<&str>,
     library_file_path: Option<&str>,
-) -> Result<Operation, LibraryImportError> {
+) -> Result<CommitHash, LibraryImportError> {
     let conn = context.graph().conn();
-    let mut session = session_operations::start_operation(conn);
     match Collection::create(conn, collection_name) {
         Ok(_) => {}
         Err(CollectionError::Duplicate(_)) => {}
@@ -110,38 +108,37 @@ pub fn import_library(
     }
 
     let summary_str = format!("{library_name} created.\n");
-    let op = session_operations::end_operation(
+    commit_graph_operation(
         context,
-        &mut session,
         &OperationInfo {
             files,
             description: "library_csv_import".to_string(),
         },
         &summary_str,
-        None,
-    )?;
-
-    Ok(op)
+    )
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{annotations::Annotation, block_group::BlockGroup};
+    use gen_models::{
+        annotations::Annotation,
+        assets::tables::OperationLog,
+        block_group::BlockGroup,
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        traits::Query,
+    };
 
     use super::*;
-    use crate::{
-        graphs::combinatorial_library::parse_library, test_helpers::setup_gen, track_database,
-    };
+    use crate::{graphs::combinatorial_library::parse_library, test_helpers::setup_gen};
 
     #[test]
     fn imports_a_library() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let history_store = DoltHistoryStore::new(conn);
         let collection = "test";
 
         let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/affix_parts.fa");
@@ -152,7 +149,7 @@ mod tests {
 
         let parts_list = parse_library(parts_path, library_path)?;
 
-        let _ = import_library(
+        let commit_hash = import_library(
             &context,
             collection,
             Sample::DEFAULT_NAME,
@@ -160,9 +157,16 @@ mod tests {
             parts_list,
             Some(parts_path),
             Some(library_path),
+        )?;
+        assert_eq!(history_store.current_head()?, Some(commit_hash));
+        let operation_logs = OperationLog::query(
+            conn,
+            "SELECT * FROM gen_operation_log ORDER BY created_on DESC",
+            [],
         );
+        assert_eq!(operation_logs[0].operation_kind, "library_csv_import");
 
-        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let block_group = &block_groups[0];
 
         let mut expected_sequences = HashSet::new();
@@ -184,9 +188,9 @@ mod tests {
         let actual_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
         assert_eq!(actual_sequences, expected_sequences);
 
-        let current_path = BlockGroup::get_current_path(conn, &block_group.id).unwrap();
+        let current_path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
         assert_eq!(
-            current_path.sequence(conn).unwrap(),
+            current_path.sequence(conn, None).unwrap(),
             "TCTAGAGAAAGAGGGGACAAACTAGATGCGTAAAGGAGAAGAACTTTAA"
         );
 
@@ -197,9 +201,6 @@ mod tests {
     fn one_column_of_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let collection = "test";
 
         let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
@@ -221,7 +222,7 @@ mod tests {
             Some(library_path),
         );
 
-        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let block_group = &block_groups[0];
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
@@ -241,9 +242,6 @@ mod tests {
     fn two_columns_of_same_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let collection = "test";
 
         let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
@@ -265,7 +263,7 @@ mod tests {
             Some(library_path),
         );
 
-        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME);
+        let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let block_group = &block_groups[0];
 
         let mut expected_sequences = vec![];
@@ -290,9 +288,6 @@ mod tests {
     fn annotations_created_for_all_parts() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let collection = "test";
         let library_name = "m123";
 
@@ -327,9 +322,6 @@ mod tests {
     fn annotations_created_for_distinct_columns() -> Result<()> {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let collection = "test";
         let library_name = "m123";
 

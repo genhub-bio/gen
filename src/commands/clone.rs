@@ -6,18 +6,65 @@ use std::{
 
 use gen_core::config::Workspace;
 use gen_models::{
-    db::DbContext,
+    db::{DbContext, GraphConnection},
+    history::{
+        HistoryStore,
+        dolt::{DoltHistoryStore, clone_remote},
+    },
     operations::{Defaults, Remote},
 };
+use rusqlite::Connection;
+use thiserror::Error;
 
 use crate::{
-    commands::remote::login_remote,
-    get_connection, get_operation_connection,
-    operation_management::{RemoteOperationError, pull},
-    track_database,
+    commands::remote::{discover_dolt_remote_url, login_remote, validate_dolt_remote_url},
+    get_config_connection,
 };
 
 const ORIGIN: &str = "origin";
+
+#[derive(Debug, Error)]
+enum RemoteOperationError {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "constructed in focused auth/URL retry tests")
+    )]
+    #[error("Remote url is not valid: {0}")]
+    InvalidRemoteUrl(String),
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "constructed in focused auth/URL retry tests")
+    )]
+    #[error("Auth Error: {0}")]
+    AuthError(String),
+    #[error("SQLite Error: {0}")]
+    SqliteError(#[from] rusqlite::Error),
+}
+
+fn dolt_remote_url(remote_url: &str) -> String {
+    let Ok(parsed_url) = url::Url::parse(remote_url) else {
+        return remote_url.to_string();
+    };
+    if parsed_url.scheme() != "file" {
+        return remote_url.to_string();
+    }
+
+    let Ok(remote_path) = parsed_url.to_file_path() else {
+        return remote_url.to_string();
+    };
+    if remote_path.extension().and_then(|value| value.to_str()) == Some("db") {
+        return remote_url.to_string();
+    }
+
+    let graph_db_path = remote_path.join(".gen").join("default.db");
+    if !graph_db_path.exists() {
+        return remote_url.to_string();
+    }
+
+    url::Url::from_file_path(graph_db_path)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|()| remote_url.to_string())
+}
 
 pub fn execute(url: &str, workspace: &Workspace) -> Result<(), Box<dyn std::error::Error>> {
     let repo_name = infer_repo_name(url)?;
@@ -29,22 +76,36 @@ pub fn execute(url: &str, workspace: &Workspace) -> Result<(), Box<dyn std::erro
     workspace.ensure_gen_dir();
     println!("Gen repository initialized.");
 
-    let operation_conn = get_operation_connection(Some(workspace.gen_db_path()?))?;
+    let operation_conn = get_config_connection(Some(workspace.gen_db_path()?))?;
     Remote::create(&operation_conn, ORIGIN, url)?;
     println!("Remote '{ORIGIN}' added successfully");
 
     Defaults::set_default_remote(&operation_conn, Some(ORIGIN))?;
     println!("Default remote set to '{ORIGIN}'");
 
-    let graph_conn = get_connection(workspace.ensure_gen_dir().join("default.db"))?;
-    let context = DbContext::new(workspace, graph_conn, operation_conn);
-    track_database(context.graph().conn(), context.operations().conn())?;
+    let graph_conn = open_clone_graph_connection(&workspace)?;
+    let context = DbContext::new(workspace, graph_conn, operation_conn)?;
+    let dolt_remote_url = discover_dolt_remote_url(url)?.unwrap_or_else(|| dolt_remote_url(url));
+    validate_dolt_remote_url(&dolt_remote_url)?;
     pull_with_login_on_auth_error(
-        || pull(&context, None),
-        || login_remote(context.operations().conn(), Some(ORIGIN)),
+        || {
+            clone_remote(context.graph().conn(), &dolt_remote_url)
+                .map_err(RemoteOperationError::from)
+        },
+        || login_remote(context.config().conn(), Some(ORIGIN)),
     )?;
+    let _ = DoltHistoryStore::new(context.graph().conn()).current_branch()?;
 
     Ok(())
+}
+
+fn open_clone_graph_connection(
+    workspace: &Workspace,
+) -> Result<GraphConnection, Box<dyn std::error::Error>> {
+    let graph_db_path = workspace.graph_db_path()?;
+    let connection = Connection::open(graph_db_path)?;
+    rusqlite::vtab::array::load_module(&connection)?;
+    Ok(GraphConnection(connection))
 }
 
 fn create_clone_directory(repo_path: &Path) -> io::Result<()> {
@@ -98,17 +159,9 @@ fn infer_repo_name(repo_url: &str) -> Result<String, Box<dyn std::error::Error>>
 mod tests {
     use std::{cell::Cell, io};
 
-    use gen_core::HashId;
-    use gen_models::{
-        file_types::FileTypes,
-        manifest::ManifestGenerator,
-        operations::{Branch, Operation},
-        traits::Query,
-    };
     use tempfile::tempdir;
 
     use super::*;
-    use crate::test_helpers::{create_operation, setup_gen_on_disk};
 
     #[test]
     fn test_infer_repo_name_from_genhub_url() {
@@ -145,67 +198,6 @@ mod tests {
         create_clone_directory(&repo_path).unwrap();
 
         assert!(repo_path.is_dir());
-    }
-
-    #[test]
-    fn test_clone_from_file_remote_materializes_asset_files() {
-        let remote_context = setup_gen_on_disk();
-        let remote_conn = remote_context.graph().conn();
-        let remote_op_conn = remote_context.operations().conn();
-        track_database(remote_conn, remote_op_conn).unwrap();
-
-        let remote_operation = create_operation(
-            &remote_context,
-            "fastas/clone_file.fa",
-            FileTypes::Fasta,
-            "remote operation",
-            HashId::random_str(),
-        );
-        let remote_branch = Branch::get_by_name(remote_op_conn, "main").unwrap();
-        let remote_manifest = ManifestGenerator::new(remote_op_conn)
-            .generate_manifest("main", remote_branch.current_operation_hash.as_ref())
-            .unwrap();
-        let manifest_operation = remote_manifest
-            .operations
-            .iter()
-            .find(|op| op.operation.hash == remote_operation.hash)
-            .unwrap();
-        let remote_asset_path = remote_context.workspace().repo_root().unwrap().join(
-            manifest_operation.file_additions[0]
-                .file_addition
-                .file_path(),
-        );
-        fs::remove_file(
-            remote_context
-                .workspace()
-                .repo_root()
-                .unwrap()
-                .join("fastas/clone_file.fa"),
-        )
-        .unwrap();
-
-        let clone_parent = tempdir().unwrap();
-        let remote_url = format!(
-            "file://{}",
-            remote_context.workspace().base_dir().to_string_lossy()
-        );
-        let clone_parent_workspace = Workspace::new(clone_parent.path());
-        execute(&remote_url, &clone_parent_workspace).unwrap();
-
-        let cloned_repo_path = clone_parent
-            .path()
-            .join(remote_context.workspace().base_dir().file_name().unwrap());
-        let cloned_file_path = cloned_repo_path.join("fastas/clone_file.fa");
-        assert!(cloned_file_path.exists());
-        assert_eq!(
-            fs::read(cloned_file_path).unwrap(),
-            fs::read(remote_asset_path).unwrap()
-        );
-
-        let operation_conn =
-            get_operation_connection(Some(cloned_repo_path.join(".gen/gen.db"))).unwrap();
-        let cloned_ops = Operation::all(&operation_conn);
-        assert!(cloned_ops.iter().any(|op| op.hash == remote_operation.hash));
     }
 
     #[test]

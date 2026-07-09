@@ -24,7 +24,7 @@ pub fn derive_translation_operation(
     db_context: &DbContext,
     args: DeriveTranslationArgs,
 ) -> Result<(), Error> {
-    let operation_conn = db_context.operations().conn();
+    let operation_conn = db_context.config().conn();
     let graph_conn = db_context.graph().conn();
 
     let collection_name = match args.collection {

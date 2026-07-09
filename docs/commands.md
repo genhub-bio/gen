@@ -41,7 +41,10 @@ will be prefixed with a `>`.
 # Patches
 
 Like git, patches are the mechanism for bundling together pieces of work for distribution. Patches can be created via
-the `patch-create` command and applied via `patch-apply`.
+the `patch-create` command and applied via `patch-apply`. Patch archives are versioned, bundle any tracked asset data
+needed to replay the selected operations offline, and can be created from a non-checked-out branch with
+`patch-create --branch <branch-name> HEAD` to export the commits reachable from that branch head but not from the
+current head.
 
 # Checkout
 

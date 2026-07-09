@@ -1,63 +1,86 @@
-use std::{collections::HashMap, io, rc::Rc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    time::Instant,
+};
 
-use crossterm::event::{self, KeyCode, KeyModifiers};
-use gen_core::PATH_START_NODE_ID;
+use crossterm::event::{self, KeyCode};
+use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_diff::operations::{BlockGroupDiff, collect_operation_diff};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{
-    db::DbContext,
-    operations::{Operation, OperationSummary},
-    traits::Query,
-};
+use gen_models::{db::DbContext, history::HistoryEntry};
 use gen_tui::{graph_controller::GraphController, theme::current_theme};
-use rat_text::{
-    HasScreenCursor,
-    text_area::{TextArea, TextAreaState},
-};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    prelude::{StatefulWidget, Style},
+    prelude::Style,
     style::Modifier,
     widgets::{Block, List, ListItem, Row, Table},
 };
-use rusqlite::{params, types::Value};
 
 use crate::views::{
     diff_graph::{
         DiffGraphComponent, apply_diff_highlights, block_group_label, build_diff_graph_component,
-        highlight_color_for_change_label, split_connected_components,
+        change_label_for_block_group,
     },
     gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget},
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
     tui_runtime::TuiSession,
 };
 
-fn clip_text(t: &str, limit: usize) -> String {
-    let t = t.replace("\n", " ");
-    if t.len() > limit - 3 {
-        format!("{trunc}...", trunc = &t[0..limit - 3])
+fn clip_text(text: &str, limit: usize) -> String {
+    let normalized = text.replace('\n', " ");
+    if normalized.len() > limit.saturating_sub(3) {
+        format!("{}...", &normalized[..limit - 3])
     } else {
-        t.to_string()
+        normalized
     }
 }
 
-struct OperationRow<'a> {
-    operation: &'a Operation,
-    summary: OperationSummary,
+struct OperationDiffComponent {
+    render: DiffGraphComponent,
+    block_group: String,
+    change_label: &'static str,
 }
 
-type OperationDiffComponent = DiffGraphComponent;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SampleStatus {
+    Added,
+    Removed,
+    Modified,
+}
+
+impl SampleStatus {
+    fn title(self) -> &'static str {
+        match self {
+            SampleStatus::Added => "Added Samples",
+            SampleStatus::Removed => "Removed Samples",
+            SampleStatus::Modified => "Modified Samples",
+        }
+    }
+}
+
+struct OperationSampleComponent {
+    collection: String,
+    sample: String,
+    status: SampleStatus,
+    block_groups: Vec<OperationDiffComponent>,
+}
+
+struct ExplorerEntry {
+    label: String,
+    sample_index: Option<usize>,
+    block_group_index: Option<usize>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperationPanel {
     Operations,
-    MessageEditor,
     GraphView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GraphViewFocus {
-    DiffList,
+    List,
     GraphCanvas,
 }
 
@@ -80,147 +103,208 @@ fn graph_subpanel_border_style(
     }
 }
 
-fn collect_diff_components(
-    db_path: &str,
-    graph_diffs: &[BlockGroupDiff],
-    change_label: &'static str,
-) -> Vec<OperationDiffComponent> {
-    let highlight_color = highlight_color_for_change_label(change_label);
-    let mut components = Vec::new();
+fn collect_diff_samples(graph_diffs: &[BlockGroupDiff]) -> Vec<OperationSampleComponent> {
+    let mut grouped =
+        BTreeMap::<(SampleStatus, String, String), Vec<OperationDiffComponent>>::new();
 
     for graph_diff in graph_diffs {
-        let base_title = format!(
-            "{change_label} [{db_path}] {block_group}",
-            block_group = block_group_label(graph_diff)
-        );
-        let parts = split_connected_components(&graph_diff.graph);
-        if parts.len() <= 1 {
-            components.push(build_diff_graph_component(
-                &graph_diff.graph,
-                base_title,
-                highlight_color,
-            ));
-            continue;
-        }
-
-        let total = parts.len();
-        for (index, diff_graph) in parts.into_iter().enumerate() {
-            components.push(build_diff_graph_component(
-                &diff_graph,
-                format!("{base_title} (part {}/{total})", index + 1),
-                highlight_color,
-            ));
-        }
+        let change_label = change_label_for_block_group(graph_diff);
+        let (collection, sample, block_group) = if let Some(block_group) = &graph_diff.block_group {
+            (
+                block_group.collection_name.clone(),
+                block_group.sample_name.clone(),
+                block_group.name.clone(),
+            )
+        } else {
+            (
+                String::from("Unknown"),
+                String::from("Unknown"),
+                String::from("Unknown"),
+            )
+        };
+        let status = sample_status_for_block_group(graph_diff);
+        grouped
+            .entry((status, collection.clone(), sample.clone()))
+            .or_default()
+            .push(OperationDiffComponent {
+                render: build_diff_graph_component(
+                    &graph_diff.graph,
+                    format!("{change_label} {}", block_group_label(graph_diff)),
+                ),
+                block_group,
+                change_label,
+            });
     }
 
-    components
+    grouped
+        .into_iter()
+        .map(|((status, collection, sample), mut block_groups)| {
+            block_groups.sort_by(|left, right| left.block_group.cmp(&right.block_group));
+            OperationSampleComponent {
+                collection,
+                sample,
+                status,
+                block_groups,
+            }
+        })
+        .collect()
 }
 
-fn load_diff_components_for_operation(
+fn load_diff_samples_for_entry(
     context: &DbContext,
-    operation: &Operation,
-) -> Vec<OperationDiffComponent> {
-    let op_conn = context.operations().conn();
-    let diffs = match collect_operation_diff(
-        context.workspace(),
-        op_conn,
-        operation.parent_hash,
-        operation.hash,
-        None,
-    ) {
+    history_entries: &[HistoryEntry],
+    selected_index: usize,
+) -> Vec<OperationSampleComponent> {
+    let history_entry = &history_entries[selected_index];
+    let commit_hash = HashId::pad_str(&history_entry.commit_hash.0);
+    let parent_hash = history_entries
+        .get(selected_index + 1)
+        .map(|entry| HashId::pad_str(&entry.commit_hash.0));
+    let diffs = match collect_operation_diff(context.graph().conn(), parent_hash, commit_hash) {
         Ok(diffs) => diffs,
         Err(_) => return Vec::new(),
     };
-    let mut db_order = diffs.keys().cloned().collect::<Vec<_>>();
-    db_order.sort();
-
-    let mut components = Vec::new();
-    for db_path in db_order {
-        if let Some(diff) = diffs.get(&db_path)
-            && let Some(db_diff) = diff.dbs.get(&db_path)
-        {
-            components.extend(collect_diff_components(
-                &db_path,
-                &db_diff.added_block_groups,
-                "Add",
-            ));
-            components.extend(collect_diff_components(
-                &db_path,
-                &db_diff.removed_block_groups,
-                "Remove",
-            ));
-        }
-    }
-
-    components
+    collect_diff_samples(&diffs.diff_graph)
 }
 
 fn build_graph_controller(
-    components: &[OperationDiffComponent],
-    selected_component: usize,
+    samples: &[OperationSampleComponent],
+    entries: &[ExplorerEntry],
+    selected_entry: usize,
     empty_graph: &GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
-    if let Some(component) = components.get(selected_component) {
-        let mut controller = create_gen_graph_controller(component.graph.clone());
-        apply_diff_highlights(&mut controller, component);
+    if let Some(component) = resolve_current_component(samples, entries, selected_entry) {
+        let mut controller = create_gen_graph_controller(component.render.graph.clone());
+        apply_diff_highlights(&mut controller, &component.render);
         controller
     } else {
         create_gen_graph_controller(empty_graph.clone())
     }
 }
 
-pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<(), io::Error> {
-    let conn = context.graph().conn();
-    let op_conn = context.operations().conn();
+fn build_explorer_entries(
+    samples: &[OperationSampleComponent],
+    expanded_samples: &BTreeSet<usize>,
+) -> Vec<ExplorerEntry> {
+    let mut entries: Vec<ExplorerEntry> = Vec::new();
+    let mut current_status = None;
+    for (sample_index, sample) in samples.iter().enumerate() {
+        if current_status != Some(sample.status) {
+            current_status = Some(sample.status);
+            entries.push(ExplorerEntry {
+                label: sample.status.title().to_string(),
+                sample_index: None,
+                block_group_index: None,
+            });
+        }
 
-    let operation_by_hash: HashMap<_, &Operation> = HashMap::from_iter(
-        operations
-            .iter()
-            .map(|op| (op.hash, op))
-            .collect::<Vec<(_, &Operation)>>(),
-    );
-    let summaries = OperationSummary::query(
-        op_conn,
-        "select * from operation_summaries where operation_hash in rarray(?1)",
-        params![Rc::new(
-            operations
-                .iter()
-                .map(|x| Value::from(x.hash))
-                .collect::<Vec<Value>>()
-        )],
-    );
-    let mut operation_summaries = summaries
+        let expanded = expanded_samples.contains(&sample_index);
+        let marker = if expanded { "v" } else { ">" };
+        entries.push(ExplorerEntry {
+            label: format!("{marker} {}", sample_label(sample)),
+            sample_index: Some(sample_index),
+            block_group_index: None,
+        });
+
+        if expanded {
+            for (block_group_index, block_group) in sample.block_groups.iter().enumerate() {
+                entries.push(ExplorerEntry {
+                    label: format!(
+                        "  {} | {}",
+                        block_group.change_label, block_group.block_group
+                    ),
+                    sample_index: Some(sample_index),
+                    block_group_index: Some(block_group_index),
+                });
+            }
+        }
+    }
+
+    entries
+}
+
+fn sample_label(sample: &OperationSampleComponent) -> String {
+    if sample.collection == "Default" || sample.collection.is_empty() {
+        sample.sample.clone()
+    } else {
+        format!("{} | {}", sample.collection, sample.sample)
+    }
+}
+
+fn resolve_current_component<'a>(
+    samples: &'a [OperationSampleComponent],
+    entries: &[ExplorerEntry],
+    selected_entry: usize,
+) -> Option<&'a OperationDiffComponent> {
+    let entry = entries.get(selected_entry)?;
+    let sample = samples.get(entry.sample_index?)?;
+    let block_group_index = entry.block_group_index.unwrap_or(0);
+    sample.block_groups.get(block_group_index)
+}
+
+fn first_selectable_entry(entries: &[ExplorerEntry]) -> Option<usize> {
+    entries
         .iter()
-        .map(|summary| OperationRow {
-            operation: operation_by_hash[&summary.operation_hash],
-            summary: summary.clone(),
-        })
-        .collect::<Vec<_>>();
+        .position(|entry| entry.sample_index.is_some())
+}
+
+fn previous_selectable_entry(entries: &[ExplorerEntry], selected_entry: usize) -> Option<usize> {
+    entries[..selected_entry]
+        .iter()
+        .rposition(|entry| entry.sample_index.is_some())
+}
+
+fn next_selectable_entry(entries: &[ExplorerEntry], selected_entry: usize) -> Option<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .skip(selected_entry + 1)
+        .find_map(|(index, entry)| entry.sample_index.map(|_| index))
+}
+
+fn sample_row_index(entries: &[ExplorerEntry], sample_index: usize) -> Option<usize> {
+    entries.iter().position(|entry| {
+        entry.sample_index == Some(sample_index) && entry.block_group_index.is_none()
+    })
+}
+
+fn sample_status_for_block_group(diff: &BlockGroupDiff) -> SampleStatus {
+    match diff.presence {
+        gen_diff::graph::DiffPresence::TargetOnly => SampleStatus::Added,
+        gen_diff::graph::DiffPresence::SourceOnly => SampleStatus::Removed,
+        gen_diff::graph::DiffPresence::Both => SampleStatus::Modified,
+    }
+}
+
+pub fn view_operations(
+    context: &DbContext,
+    history_entries: &[HistoryEntry],
+) -> Result<(), io::Error> {
+    let conn = context.graph().conn();
 
     let mut session = TuiSession::enter()?;
     let terminal = session.terminal_mut();
 
-    let mut textarea = TextAreaState::new();
-    let mut empty_graph: GenGraph = GenGraph::new();
-    let mut diff_components: Vec<OperationDiffComponent> = vec![];
-    let mut selected_diff_component: usize = 0;
+    let mut empty_graph = GenGraph::new();
     empty_graph.add_node(GraphNode {
         node_id: PATH_START_NODE_ID,
         sequence_start: 0,
         sequence_end: 1,
     });
 
-    let mut graph_controller =
-        build_graph_controller(&diff_components, selected_diff_component, &empty_graph);
+    let mut diff_samples: Vec<OperationSampleComponent> = Vec::new();
+    let mut expanded_samples = BTreeSet::new();
+    let mut entries: Vec<ExplorerEntry> = Vec::new();
+    let mut selected_entry = 0usize;
+    let mut graph_controller = create_gen_graph_controller(empty_graph.clone());
 
-    let mut view_message_panel = false;
     let mut view_graph = false;
-    let mut graph_view_focus = GraphViewFocus::DiffList;
+    let mut graph_view_focus = GraphViewFocus::List;
     let mut panel_focus = PanelFocus::new(OperationPanel::Operations);
     let panel_styles = PanelStyles::default();
     let status_bar_height: u16 = 1;
 
-    let mut selected = 0;
+    let mut selected = 0usize;
     let mut last_frame_time = Instant::now();
 
     loop {
@@ -228,21 +312,22 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
         let frame_delta = now.duration_since(last_frame_time);
         last_frame_time = now;
 
-        terminal.draw(|f| {
-            let rows: Vec<Row> = operation_summaries
+        terminal.draw(|frame| {
+            let rows: Vec<Row> = history_entries
                 .iter()
                 .enumerate()
-                .map(|(i, op)| {
-                    let style = if i == selected {
+                .map(|(index, entry)| {
+                    let style = if index == selected {
                         Style::default().add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
 
+                    let short_hash = entry.commit_hash.0.chars().take(12).collect::<String>();
                     Row::new(vec![
-                        clip_text(&op.operation.hash.to_string(), 40),
-                        clip_text(&op.operation.change_type, 20),
-                        clip_text(&op.summary.summary, 50),
+                        short_hash,
+                        clip_text(&entry.date, 24),
+                        clip_text(&entry.message, 72),
                     ])
                     .style(style)
                 })
@@ -251,13 +336,13 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
             let table = Table::new(
                 rows,
                 [
-                    Constraint::Length(40),
-                    Constraint::Length(20),
-                    Constraint::Length(50),
+                    Constraint::Length(14),
+                    Constraint::Length(24),
+                    Constraint::Min(24),
                 ],
             )
             .header(
-                Row::new(vec!["Operation Hash", "Change Type", "Summary"])
+                Row::new(vec!["Commit", "Date", "Summary"])
                     .style(Style::default().add_modifier(Modifier::UNDERLINED)),
             )
             .block(panel_block(
@@ -273,86 +358,48 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     Constraint::Min(1),
                     Constraint::Length(status_bar_height),
                 ])
-                .split(f.area());
+                .split(frame.area());
 
             let main_area = outer_layout[0];
             let status_bar_area = outer_layout[1];
 
             let panel_messages = if panel_focus.is_navigation() {
-                let mut msg = "*tab/arrows* navigate | *enter* activate panel".to_string();
-                if matches!(
-                    panel_focus.current(),
-                    OperationPanel::MessageEditor | OperationPanel::GraphView
-                ) {
-                    msg.push_str(" | *x* close panel");
+                let mut message = "*tab/arrows* navigate | *enter* activate panel".to_string();
+                if panel_focus.current() == OperationPanel::GraphView {
+                    message.push_str(" | *x* close panel");
                 }
-                msg.push_str(" | *q* quit");
-                msg
+                message.push_str(" | *q* quit");
+                message
             } else {
                 match panel_focus.current() {
                     OperationPanel::Operations => {
-                        "*↑↓* select | *e* edit msg | *v* view graph | *esc* leave panel"
-                            .to_string()
-                    }
-                    OperationPanel::MessageEditor => {
-                        "*ctrl+s* save | *esc* leave panel".to_string()
+                        "*↑↓* select | *v* view graph | *esc* leave panel".to_string()
                     }
                     OperationPanel::GraphView => {
-                        if graph_view_focus == GraphViewFocus::DiffList {
-                            "*↑↓* select diff part | *tab* graph | *esc* leave panel".to_string()
+                        if graph_view_focus == GraphViewFocus::List {
+                            "*↑↓* select | *enter/right* expand | *left* collapse | *tab* graph | *esc* leave panel"
+                                .to_string()
                         } else {
-                            "*←→↑↓* pan | *+/-* zoom | *tab* diff list | *esc* leave panel"
+                            "*←→↑↓* pan | *+/-* zoom | *tab* list | *esc* leave panel"
                                 .to_string()
                         }
                     }
                 }
             };
 
-            let msg_editor_block = panel_block(
-                "Operation Summary",
-                &panel_focus,
-                OperationPanel::MessageEditor,
-                panel_styles,
-            );
-
-            let canvas_area = if view_message_panel {
+            let canvas_area = if view_graph {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
-                f.render_widget(table, chunks[0]);
-                if view_graph {
-                    let sub_chunk = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                        .split(chunks[1]);
-                    TextArea::new().block(msg_editor_block.clone()).render(
-                        sub_chunk[0],
-                        f.buffer_mut(),
-                        &mut textarea,
-                    );
-                    Some(sub_chunk[1])
-                } else {
-                    TextArea::new().block(msg_editor_block.clone()).render(
-                        chunks[1],
-                        f.buffer_mut(),
-                        &mut textarea,
-                    );
-                    None
-                }
-            } else if view_graph {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(main_area);
-                f.render_widget(table, chunks[0]);
+                frame.render_widget(table, chunks[0]);
                 Some(chunks[1])
             } else {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(100)].as_ref())
                     .split(main_area);
-                f.render_widget(table, chunks[0]);
+                frame.render_widget(table, chunks[0]);
                 None
             };
 
@@ -364,46 +411,50 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     panel_styles,
                 );
                 let panel_inner = graph_panel.inner(canvas_area);
-                f.render_widget(graph_panel, canvas_area);
+                frame.render_widget(graph_panel, canvas_area);
 
                 let graph_chunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(45), Constraint::Min(1)])
+                    .constraints([Constraint::Length(60), Constraint::Min(1)])
                     .split(panel_inner);
 
-                let list_items: Vec<ListItem> = diff_components
+                let list_items: Vec<ListItem> = entries
                     .iter()
                     .enumerate()
-                    .map(|(index, component)| {
-                        let item_style = if index == selected_diff_component {
+                    .map(|(index, entry)| {
+                        let style = if index == selected_entry {
                             Style::default()
                                 .fg(ratatui::style::Color::Cyan)
                                 .add_modifier(Modifier::BOLD)
+                        } else if entry.sample_index.is_none() {
+                            Style::default().add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         };
-                        ListItem::new(component.title.clone()).style(item_style)
+                        ListItem::new(entry.label.clone()).style(style)
                     })
                     .collect();
 
                 let list_border_style = graph_subpanel_border_style(
                     &panel_focus,
                     graph_view_focus,
-                    GraphViewFocus::DiffList,
+                    GraphViewFocus::List,
                     panel_styles,
                 );
                 let list = List::new(list_items).block(
                     Block::default()
-                        .title("Diff Parts")
+                        .title("Samples")
                         .borders(ratatui::widgets::Borders::ALL)
                         .border_style(list_border_style),
                 );
-                f.render_widget(list, graph_chunks[0]);
+                frame.render_widget(list, graph_chunks[0]);
 
-                let graph_title = if diff_components.is_empty() {
-                    "No Diff Parts".to_string()
+                let graph_title = if let Some(component) =
+                    resolve_current_component(&diff_samples, &entries, selected_entry)
+                {
+                    component.render.title.clone()
                 } else {
-                    diff_components[selected_diff_component].title.clone()
+                    "No Diff Graph".to_string()
                 };
                 let graph_border_style = graph_subpanel_border_style(
                     &panel_focus,
@@ -416,7 +467,7 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     .borders(ratatui::widgets::Borders::ALL)
                     .border_style(graph_border_style);
                 let inner_canvas = graph_block.inner(graph_chunks[1]);
-                f.render_widget(graph_block, graph_chunks[1]);
+                frame.render_widget(graph_block, graph_chunks[1]);
 
                 graph_controller.viewport_state.focus();
                 graph_controller.viewport_state.viewport_bounds = inner_canvas;
@@ -427,17 +478,10 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                     .detail_level(graph_controller.get_detail_level())
                     .style(canvas_style)
                     .cursor();
-                f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
+                frame.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
             }
 
-            render_status_bar(f, status_bar_area, &panel_messages);
-
-            if view_message_panel
-                && panel_focus.is_active_panel(OperationPanel::MessageEditor)
-                && let Some((cursor_x, cursor_y)) = textarea.screen_cursor()
-            {
-                f.set_cursor_position((cursor_x, cursor_y));
-            }
+            render_status_bar(frame, status_bar_area, &panel_messages);
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))?
@@ -455,39 +499,19 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                         panel_focus.focus(OperationPanel::Operations);
                     }
                     KeyCode::Down => {
-                        if panel_focus.current() == OperationPanel::Operations {
-                            if view_message_panel {
-                                panel_focus.focus(OperationPanel::MessageEditor);
-                            } else if view_graph {
-                                panel_focus.focus(OperationPanel::GraphView);
-                            }
-                        }
-                    }
-                    KeyCode::Left => {
-                        if panel_focus.current() == OperationPanel::GraphView && view_message_panel
-                        {
-                            panel_focus.focus(OperationPanel::MessageEditor);
-                        }
-                    }
-                    KeyCode::Right => {
-                        if panel_focus.current() == OperationPanel::MessageEditor && view_graph {
+                        if panel_focus.current() == OperationPanel::Operations && view_graph {
                             panel_focus.focus(OperationPanel::GraphView);
                         }
                     }
                     KeyCode::Enter => {
                         panel_focus.activate();
                     }
-                    KeyCode::Char('x') => match panel_focus.current() {
-                        OperationPanel::MessageEditor => {
-                            view_message_panel = false;
-                            panel_focus.remove_panel(OperationPanel::MessageEditor);
-                        }
-                        OperationPanel::GraphView => {
+                    KeyCode::Char('x') => {
+                        if panel_focus.current() == OperationPanel::GraphView {
                             view_graph = false;
                             panel_focus.remove_panel(OperationPanel::GraphView);
                         }
-                        OperationPanel::Operations => {}
-                    },
+                    }
                     KeyCode::Char('q') => {
                         break;
                     }
@@ -499,127 +523,141 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
                 match panel_focus.current() {
                     OperationPanel::Operations => match key.code {
                         KeyCode::Up => {
-                            if operation_summaries.is_empty() {
-                                continue;
-                            }
-                            let previous_selected = selected;
                             if selected > 0 {
                                 selected = selected.saturating_sub(1);
                             }
-                            if view_graph && selected != previous_selected {
-                                diff_components = load_diff_components_for_operation(
-                                    context,
-                                    operation_summaries[selected].operation,
-                                );
-                                selected_diff_component = 0;
+                            if view_graph {
+                                diff_samples =
+                                    load_diff_samples_for_entry(context, history_entries, selected);
+                                expanded_samples.clear();
+                                if !diff_samples.is_empty() {
+                                    expanded_samples.insert(0);
+                                }
+                                entries = build_explorer_entries(&diff_samples, &expanded_samples);
+                                selected_entry = first_selectable_entry(&entries).unwrap_or(0);
                                 graph_controller = build_graph_controller(
-                                    &diff_components,
-                                    selected_diff_component,
+                                    &diff_samples,
+                                    &entries,
+                                    selected_entry,
                                     &empty_graph,
                                 );
                             }
                         }
                         KeyCode::Down => {
-                            if operation_summaries.is_empty() {
-                                continue;
-                            }
-                            let previous_selected = selected;
-                            if selected + 1 < operation_summaries.len() {
+                            if selected + 1 < history_entries.len() {
                                 selected += 1;
                             }
-                            if view_graph && selected != previous_selected {
-                                diff_components = load_diff_components_for_operation(
-                                    context,
-                                    operation_summaries[selected].operation,
-                                );
-                                selected_diff_component = 0;
+                            if view_graph {
+                                diff_samples =
+                                    load_diff_samples_for_entry(context, history_entries, selected);
+                                expanded_samples.clear();
+                                if !diff_samples.is_empty() {
+                                    expanded_samples.insert(0);
+                                }
+                                entries = build_explorer_entries(&diff_samples, &expanded_samples);
+                                selected_entry = first_selectable_entry(&entries).unwrap_or(0);
                                 graph_controller = build_graph_controller(
-                                    &diff_components,
-                                    selected_diff_component,
+                                    &diff_samples,
+                                    &entries,
+                                    selected_entry,
                                     &empty_graph,
                                 );
                             }
                         }
-                        KeyCode::Char('e') => {
-                            if operation_summaries.is_empty() {
-                                continue;
-                            }
-                            textarea.set_text(&operation_summaries[selected].summary.summary);
-                            view_message_panel = true;
-                            panel_focus.include_panel(OperationPanel::MessageEditor);
-                            panel_focus.focus(OperationPanel::MessageEditor);
-                            panel_focus.activate();
-                        }
                         KeyCode::Char('v') => {
-                            if operation_summaries.is_empty() {
-                                continue;
-                            }
                             view_graph = true;
-                            graph_view_focus = GraphViewFocus::DiffList;
+                            graph_view_focus = GraphViewFocus::List;
                             panel_focus.include_panel(OperationPanel::GraphView);
                             panel_focus.focus(OperationPanel::GraphView);
                             panel_focus.activate();
 
-                            diff_components = load_diff_components_for_operation(
-                                context,
-                                operation_summaries[selected].operation,
-                            );
-                            selected_diff_component = 0;
+                            diff_samples =
+                                load_diff_samples_for_entry(context, history_entries, selected);
+                            expanded_samples.clear();
+                            if !diff_samples.is_empty() {
+                                expanded_samples.insert(0);
+                            }
+                            entries = build_explorer_entries(&diff_samples, &expanded_samples);
+                            selected_entry = first_selectable_entry(&entries).unwrap_or(0);
                             graph_controller = build_graph_controller(
-                                &diff_components,
-                                selected_diff_component,
+                                &diff_samples,
+                                &entries,
+                                selected_entry,
                                 &empty_graph,
                             );
                         }
                         _ => {}
                     },
-                    OperationPanel::MessageEditor => {
-                        if key.code == KeyCode::Char('s')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            if operation_summaries.is_empty() {
-                                continue;
-                            }
-                            let new_summary = textarea.text();
-                            let _ = OperationSummary::set_message(
-                                op_conn,
-                                operation_summaries[selected].summary.id,
-                                &new_summary,
-                            );
-                            operation_summaries[selected].summary.summary = new_summary;
-                        } else {
-                            let _outcome = rat_text::text_area::handle_events(
-                                &mut textarea,
-                                true,
-                                &crossterm::event::Event::Key(key),
-                            );
-                        }
-                    }
                     OperationPanel::GraphView => {
                         if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
-                            graph_view_focus = if graph_view_focus == GraphViewFocus::DiffList {
+                            graph_view_focus = if graph_view_focus == GraphViewFocus::List {
                                 GraphViewFocus::GraphCanvas
                             } else {
-                                GraphViewFocus::DiffList
+                                GraphViewFocus::List
                             };
-                        } else if graph_view_focus == GraphViewFocus::DiffList {
+                        } else if graph_view_focus == GraphViewFocus::List {
                             match key.code {
                                 KeyCode::Up => {
-                                    if selected_diff_component > 0 {
-                                        selected_diff_component -= 1;
+                                    if let Some(previous_entry) =
+                                        previous_selectable_entry(&entries, selected_entry)
+                                    {
+                                        selected_entry = previous_entry;
                                         graph_controller = build_graph_controller(
-                                            &diff_components,
-                                            selected_diff_component,
+                                            &diff_samples,
+                                            &entries,
+                                            selected_entry,
                                             &empty_graph,
                                         );
                                     }
                                 }
                                 KeyCode::Down => {
-                                    if selected_diff_component + 1 < diff_components.len() {
-                                        selected_diff_component += 1;
+                                    if let Some(next_entry) =
+                                        next_selectable_entry(&entries, selected_entry)
+                                    {
+                                        selected_entry = next_entry;
                                         graph_controller = build_graph_controller(
-                                            &diff_components,
-                                            selected_diff_component,
+                                            &diff_samples,
+                                            &entries,
+                                            selected_entry,
+                                            &empty_graph,
+                                        );
+                                    }
+                                }
+                                KeyCode::Enter | KeyCode::Right => {
+                                    if let Some(sample_index) = entries[selected_entry].sample_index
+                                        && entries[selected_entry].block_group_index.is_none()
+                                    {
+                                        expanded_samples.insert(sample_index);
+                                        entries = build_explorer_entries(
+                                            &diff_samples,
+                                            &expanded_samples,
+                                        );
+                                        selected_entry = sample_row_index(&entries, sample_index)
+                                            .unwrap_or(selected_entry);
+                                        graph_controller = build_graph_controller(
+                                            &diff_samples,
+                                            &entries,
+                                            selected_entry,
+                                            &empty_graph,
+                                        );
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if let Some(sample_index) = entries[selected_entry].sample_index
+                                        && (entries[selected_entry].block_group_index.is_some()
+                                            || expanded_samples.contains(&sample_index))
+                                    {
+                                        expanded_samples.remove(&sample_index);
+                                        entries = build_explorer_entries(
+                                            &diff_samples,
+                                            &expanded_samples,
+                                        );
+                                        selected_entry = sample_row_index(&entries, sample_index)
+                                            .unwrap_or(selected_entry);
+                                        graph_controller = build_graph_controller(
+                                            &diff_samples,
+                                            &entries,
+                                            selected_entry,
                                             &empty_graph,
                                         );
                                     }
@@ -636,4 +674,130 @@ pub fn view_operations(context: &DbContext, operations: &[Operation]) -> Result<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use gen_core::HashId;
+    use gen_diff::{
+        graph::{
+            DiffChange, DiffChangeKind, DiffGenGraph, DiffGraphEdge, DiffGraphNode, DiffPresence,
+        },
+        operations::BlockGroupDiff,
+    };
+    use gen_graph::{GraphEdge, GraphNode};
+    use gen_models::block_group::BlockGroup;
+
+    use super::{
+        SampleStatus, build_explorer_entries, collect_diff_samples, sample_label,
+        sample_status_for_block_group,
+    };
+
+    fn graph_node(id: i64, start: i64, end: i64, is_new: bool) -> DiffGraphNode {
+        DiffGraphNode {
+            node: GraphNode {
+                node_id: HashId::pad_str(id),
+                sequence_start: start,
+                sequence_end: end,
+            },
+            change: if is_new {
+                DiffChange::new(DiffChangeKind::Added, Some(HashId::pad_str(100)))
+            } else {
+                DiffChange::unchanged()
+            },
+        }
+    }
+
+    fn graph_edge(id: i64, is_new: bool) -> Vec<DiffGraphEdge> {
+        vec![DiffGraphEdge {
+            edge: GraphEdge {
+                edge_id: HashId::pad_str(id),
+                source_strand: gen_core::Strand::Forward,
+                target_strand: gen_core::Strand::Forward,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            },
+            change: if is_new {
+                DiffChange::new(DiffChangeKind::Added, Some(HashId::pad_str(100)))
+            } else {
+                DiffChange::unchanged()
+            },
+        }]
+    }
+
+    fn block_group_diff_with_two_components() -> BlockGroupDiff {
+        let left_start = graph_node(1, 0, 3, true);
+        let left_end = graph_node(2, 3, 6, true);
+        let right_start = graph_node(3, 0, 2, true);
+        let right_end = graph_node(4, 2, 4, true);
+
+        let mut graph = DiffGenGraph::new();
+        graph.add_edge(left_start, left_end, graph_edge(10, true));
+        graph.add_edge(right_start, right_end, graph_edge(11, true));
+
+        BlockGroupDiff {
+            id: HashId::pad_str(99),
+            block_group: Some(BlockGroup {
+                id: HashId::pad_str(99),
+                collection_name: "Default".to_string(),
+                sample_name: "sample".to_string(),
+                name: "block-group".to_string(),
+                created_on: 0,
+                parent_block_group_id: None,
+                is_default: false,
+            }),
+            presence: DiffPresence::TargetOnly,
+            graph,
+        }
+    }
+
+    #[test]
+    fn test_collect_diff_samples_keeps_block_group_unified() {
+        let block_group_diff = block_group_diff_with_two_components();
+
+        let samples = collect_diff_samples(&[block_group_diff]);
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].status, SampleStatus::Added);
+        assert_eq!(samples[0].block_groups.len(), 1);
+        assert_eq!(
+            samples[0].block_groups[0].render.title,
+            "Add Default sample block-group"
+        );
+    }
+
+    #[test]
+    fn test_sample_label_omits_default_collection() {
+        let block_group_diff = block_group_diff_with_two_components();
+        let samples = collect_diff_samples(&[block_group_diff]);
+
+        assert_eq!(sample_label(&samples[0]), "sample");
+    }
+
+    #[test]
+    fn test_build_explorer_entries_expands_sample_inline() {
+        let block_group_diff = block_group_diff_with_two_components();
+        let samples = collect_diff_samples(&[block_group_diff]);
+        let mut expanded_samples = BTreeSet::new();
+        expanded_samples.insert(0);
+
+        let entries = build_explorer_entries(&samples, &expanded_samples);
+
+        assert_eq!(entries[0].label, "Added Samples");
+        assert_eq!(entries[1].label, "v sample");
+        assert_eq!(entries[2].label, "  Add | block-group");
+    }
+
+    #[test]
+    fn test_sample_status_for_created_block_group_is_added() {
+        let block_group_diff = block_group_diff_with_two_components();
+
+        assert_eq!(
+            sample_status_for_block_group(&block_group_diff),
+            SampleStatus::Added
+        );
+    }
 }

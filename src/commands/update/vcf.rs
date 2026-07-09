@@ -4,6 +4,7 @@ use gen_models::errors::OperationError;
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
+    end_transaction_if_active,
     updates::vcf::{VcfError, update_with_vcf},
 };
 
@@ -34,15 +35,12 @@ pub struct Command {
     in_place: bool,
 }
 
-#[cfg_attr(
-    all(debug_assertions, feature = "profiling"),
-    tracing::instrument(skip(cli_context, cmd))
-)]
+#[cfg_attr(feature = "profiling", tracing::instrument(skip(cli_context, cmd)))]
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with VCF called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
     if cmd.sample.is_none() && cmd.parent_samples.is_empty() {
@@ -69,8 +67,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.in_place,
     ) {
         Ok(_) => {
-            conn.execute("END TRANSACTION;", [])?;
-            operation_conn.execute("END TRANSACTION;", [])?;
+            end_transaction_if_active(conn)?;
+            end_transaction_if_active(operation_conn)?;
         }
         Err(VcfError::OperationError(OperationError::NoChanges)) => {
             conn.execute("ROLLBACK TRANSACTION;", [])?;

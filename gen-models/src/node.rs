@@ -96,8 +96,9 @@ impl Node {
     pub fn get_sequences_by_node_ids(
         conn: &GraphConnection,
         node_ids: &[HashId],
+        history_ref: Option<&str>,
     ) -> HashMap<HashId, Sequence> {
-        let nodes = Node::query_by_ids(conn, node_ids);
+        let nodes = Node::query_by_ids(conn, node_ids, history_ref);
         let sequence_hashes_by_node_id = nodes
             .iter()
             .map(|node| (node.id, node.sequence_hash))
@@ -109,6 +110,7 @@ impl Node {
                     .values()
                     .cloned()
                     .collect::<Vec<_>>(),
+                history_ref,
             )
             .iter()
             .map(|seq| (seq.hash, seq.clone())),

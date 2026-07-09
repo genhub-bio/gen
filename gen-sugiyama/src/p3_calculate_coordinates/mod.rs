@@ -95,7 +95,7 @@ pub(crate) fn calculate_relative_coords(
     // sort all 4 coordinates per vertex in ascending order
     for l in &aligned_layouts {
         let mut v = l.iter().collect::<Vec<_>>();
-        v.sort_by(|a, b| a.0.index().cmp(&b.0.index()));
+        v.sort_by_key(|a| a.0.index());
         // format to NodeIndex: (x, y), width, height
         // println!("{v:?}\n");
     }

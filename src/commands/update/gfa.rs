@@ -4,6 +4,7 @@ use gen_models::sample::Sample;
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
+    end_transaction_if_active,
     updates::gfa::update_with_gfa,
 };
 
@@ -32,7 +33,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with GFA called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", [])?;
@@ -51,8 +52,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path,
     ) {
         Ok(_) => {
-            conn.execute("END TRANSACTION;", [])?;
-            operation_conn.execute("END TRANSACTION;", [])?;
+            end_transaction_if_active(conn)?;
+            end_transaction_if_active(operation_conn)?;
         }
         Err(e) => {
             conn.execute("ROLLBACK TRANSACTION;", [])?;

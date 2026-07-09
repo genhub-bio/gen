@@ -25,7 +25,7 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("GFA export called");
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
     // initialize the selected database if needed.
@@ -38,7 +38,13 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .clone()
         .unwrap_or_else(|| get_default_collection(operation_conn));
     let file = File::create(PathBuf::from(cmd.path))?;
-    export_genbank(conn, name, cmd.sample.as_str(), file)?;
+    export_genbank(
+        conn,
+        name,
+        cmd.sample.as_str(),
+        file,
+        cli_context.history_ref,
+    )?;
 
     conn.execute("END TRANSACTION", [])?;
     operation_conn.execute("END TRANSACTION", [])?;

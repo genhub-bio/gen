@@ -5,12 +5,13 @@ use gen_core::region::Region;
 use gen_models::{
     db::DbContext,
     errors::OperationError,
-    operations::OperationInfo,
-    session_operations::{end_operation, start_operation},
+    operations::{OperationInfo, commit_graph_operation},
 };
 use thiserror::Error;
 
-use crate::{commands::get_default_collection, graphs::operators::derive_chunks};
+use crate::{
+    commands::get_default_collection, end_transaction_if_active, graphs::operators::derive_chunks,
+};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum DeriveSubgraphOperationError {
@@ -32,10 +33,8 @@ pub fn derive_subgraph_operation(
     region: String,
     backbone: Option<String>,
 ) -> Result<(), Error> {
-    let operation_conn = db_context.operations().conn();
+    let operation_conn = db_context.config().conn();
     let graph_conn = db_context.graph().conn();
-
-    let mut session = start_operation(graph_conn);
 
     graph_conn.execute("BEGIN TRANSACTION", [])?;
     operation_conn.execute("BEGIN TRANSACTION", [])?;
@@ -79,20 +78,18 @@ pub fn derive_subgraph_operation(
 
     let summary_str = format!(" {}: new derived block group", new_sample_name,);
 
-    let _op = end_operation(
+    let _op = commit_graph_operation(
         db_context,
-        &mut session,
         &OperationInfo {
             files: vec![],
             description: "derive subgraph".to_string(),
         },
         &summary_str,
-        None,
     )
     .map_err(DeriveSubgraphOperationError::OperationError)?;
 
-    graph_conn.execute("END TRANSACTION;", [])?;
-    operation_conn.execute("END TRANSACTION;", [])?;
+    end_transaction_if_active(graph_conn)?;
+    end_transaction_if_active(operation_conn)?;
 
     println!("Derive subgraph succeeded.");
 

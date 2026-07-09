@@ -9,6 +9,7 @@ use gen_models::{
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
+    end_transaction_if_active,
     imports::gfa::{GFAImportError, import_gfa},
 };
 
@@ -37,7 +38,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("GFA import called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
@@ -63,8 +64,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     match import_gfa(context, &PathBuf::from(cmd.path.clone()), name, sample_name) {
         Ok(_) => {
             println!("GFA imported.");
-            conn.execute("END TRANSACTION;", []).unwrap();
-            operation_conn.execute("END TRANSACTION;", []).unwrap();
+            end_transaction_if_active(conn).unwrap();
+            end_transaction_if_active(operation_conn).unwrap();
             Ok(())
         }
         Err(GFAImportError::OperationError(OperationError::NoChanges)) => {

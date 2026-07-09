@@ -25,7 +25,7 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("FASTA export called");
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
     // initialize the selected database if needed.
@@ -42,6 +42,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         name,
         Some(cmd.sample.as_str()),
         &PathBuf::from(cmd.path),
+        cli_context.history_ref,
     )?;
 
     conn.execute("END TRANSACTION", [])?;

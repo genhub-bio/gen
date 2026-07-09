@@ -13,13 +13,14 @@ use gen_models::{
     edge::Edge,
     errors::OperationError,
     node::Node,
-    operations::OperationInfo,
+    operations::{OperationInfo, commit_graph_operation},
     path::revcomp,
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
 };
 use petgraph::{Direction, graphmap::DiGraphMap, visit::EdgeRef};
 use thiserror::Error;
+
+use crate::end_transaction_if_active;
 
 // NCBI table 1 – Standard
 const STANDARD_TABLE: [u8; 64] =
@@ -584,7 +585,7 @@ pub fn translate_block_group(
     block_group_id: &HashId,
     params: TranslationParams<'_>,
 ) -> Result<BlockGroup, TranslationError> {
-    let block_group = BlockGroup::get_by_id(conn, block_group_id)
+    let block_group = BlockGroup::get_by_id(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
     let subgraph = extract_full_graph(conn, block_group_id)?;
     let strand = params.strand.unwrap_or(Strand::Forward);
@@ -610,7 +611,7 @@ fn extract_full_graph(
     conn: &GraphConnection,
     block_group_id: &HashId,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, block_group_id)
+    let gen_graph = BlockGroup::get_graph(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
     let start_node = gen_graph
         .nodes()
@@ -697,7 +698,7 @@ fn extract_from_entry(
     entry_node_id: HashId,
     entry_coord: i64,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, block_group_id)
+    let gen_graph = BlockGroup::get_graph(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let entry_node = gen_graph
@@ -808,7 +809,7 @@ pub fn translate_annotation(
     let block_group_id = block_group_id.ok_or_else(|| {
         TranslationError::BlockGroupError("translation requires a sequence graph id".into())
     })?;
-    let block_group = BlockGroup::get_by_id(conn, block_group_id)
+    let block_group = BlockGroup::get_by_id(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let segments = projection::annotation_segments(conn, annotation);
@@ -861,9 +862,9 @@ pub fn translate_from_path(
     coordinate: i64,
     params: TranslationParams<'_>,
 ) -> Result<BlockGroup, TranslationError> {
-    let block_group = BlockGroup::get_by_id(conn, block_group_id)
+    let block_group = BlockGroup::get_by_id(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
-    let path = BlockGroup::get_current_path(conn, block_group_id)
+    let path = BlockGroup::get_current_path(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
     let tree = path
         .intervaltree(conn)
@@ -920,8 +921,7 @@ where
     F: FnOnce() -> Result<BlockGroup, TranslationError>,
 {
     let graph_conn = context.graph().conn();
-    let operation_conn = context.operations().conn();
-    let mut session = start_operation(graph_conn);
+    let operation_conn = context.config().conn();
 
     graph_conn
         .execute("BEGIN TRANSACTION", [])
@@ -943,26 +943,22 @@ where
         " {}: protein sequence graph derived from {label}",
         protein_bg.name
     );
-    if let Err(e) = end_operation(
+    if let Err(e) = commit_graph_operation(
         context,
-        &mut session,
         &OperationInfo {
             files: vec![],
             description: "translate annotation".to_string(),
         },
         &summary,
-        None,
     ) {
         let _ = graph_conn.execute("ROLLBACK TRANSACTION;", []);
         let _ = operation_conn.execute("ROLLBACK TRANSACTION;", []);
         return Err(TranslationOperationError::OperationTracking(e));
     }
 
-    graph_conn
-        .execute("END TRANSACTION;", [])
+    end_transaction_if_active(graph_conn)
         .map_err(|e| TranslationOperationError::Transaction(e.to_string()))?;
-    operation_conn
-        .execute("END TRANSACTION;", [])
+    end_transaction_if_active(operation_conn)
         .map_err(|e| TranslationOperationError::Transaction(e.to_string()))?;
 
     Ok(protein_bg)
@@ -1011,7 +1007,7 @@ fn translate_from(
             .filter_map(|(nid, _, _)| if seen.insert(*nid) { Some(*nid) } else { None })
             .collect()
     };
-    let sequences_by_node = Node::get_sequences_by_node_ids(conn, &real_node_ids);
+    let sequences_by_node = Node::get_sequences_by_node_ids(conn, &real_node_ids, None);
 
     let mut dna_by_node: HashMap<HashId, String> = HashMap::new();
     for virtual_node_id in subgraph.nodes() {
@@ -1129,7 +1125,7 @@ fn translate_from(
             let split = codon_count * 3;
             let mut amino_acids: Vec<u8> = Vec::with_capacity(codon_count);
             let mut is_terminal = false;
-            for codon in body[..split].chunks_exact(3) {
+            for codon in body[..split].as_chunks::<3>().0 {
                 let amino_acid = params.codon_table.translate_codon(codon);
                 if amino_acid == STOP_CODON {
                     // The first in-frame stop ends the walk; it gets its own shared
@@ -1174,7 +1170,7 @@ fn translate_from(
         block_group_name,
         None,
     );
-    if BlockGroup::get_by_id(conn, &existing_id).is_ok() {
+    if BlockGroup::get_by_id(conn, &existing_id, None).is_ok() {
         return Err(TranslationError::DuplicateBlockGroup(
             block_group_name.to_string(),
         ));
@@ -1901,7 +1897,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         block_group_id: &HashId,
         amino_acid: &str,
     ) -> usize {
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None);
         let mut node_ids: HashSet<HashId> = HashSet::new();
         for augmented_edge in &augmented_edges {
             node_ids.insert(augmented_edge.edge.source_node_id);
@@ -1909,7 +1905,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         }
         node_ids.retain(|id| *id != PATH_START_NODE_ID && *id != PATH_END_NODE_ID);
         let node_ids_vec: Vec<HashId> = node_ids.into_iter().collect();
-        let sequences_by_node = Node::get_sequences_by_node_ids(conn, &node_ids_vec);
+        let sequences_by_node = Node::get_sequences_by_node_ids(conn, &node_ids_vec, None);
         sequences_by_node
             .values()
             .filter(|seq| {
@@ -1921,7 +1917,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
     /// Whether PATH_END is reachable from PATH_START in the protein graph.
     fn start_reaches_end(conn: &GraphConnection, block_group_id: &HashId) -> bool {
-        let graph = BlockGroup::get_graph(conn, block_group_id).expect("should load protein graph");
+        let graph =
+            BlockGroup::get_graph(conn, block_group_id, None).expect("should load protein graph");
         let start = graph.nodes().find(|n| n.node_id == PATH_START_NODE_ID);
         let end = graph.nodes().find(|n| n.node_id == PATH_END_NODE_ID);
         match (start, end) {
@@ -2168,7 +2165,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         // The protein graph must contain both the wildtype (chromosome_index 0) and variant (chromosome_index 1)
         // paths so they remain distinguishable.
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id, None);
         assert!(
             augmented_edges.iter().any(|e| e.chromosome_index == 1),
             "no chromosome_index=1 edge found in protein graph; variant path was lost"
@@ -2204,7 +2201,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         // The variant path is still tracked: chromosome_index = 1 must appear on
         // at least one edge (the two parallel edges from M→E).
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id, None);
         assert!(
             augmented_edges.iter().any(|e| e.chromosome_index == 1),
             "no chromosome_index=1 edge found; synonymous variant path was lost"
@@ -2235,7 +2232,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
 
         // Variant edge must be present.
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id);
+        let augmented_edges = BlockGroupEdge::edges_for_block_group(&conn, &protein.id, None);
         assert!(
             augmented_edges.iter().any(|e| e.chromosome_index == 1),
             "no chromosome_index=1 edge found; junction variant path was lost"
@@ -2292,7 +2289,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             "protein graph has no PATH_START → PATH_END path (disconnected)"
         );
         let protein_graph =
-            BlockGroup::get_graph(&conn, &protein.id).expect("should load protein graph");
+            BlockGroup::get_graph(&conn, &protein.id, None).expect("should load protein graph");
         assert_eq!(
             connected_components(&protein_graph),
             1,

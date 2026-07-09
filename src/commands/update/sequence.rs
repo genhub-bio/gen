@@ -4,6 +4,7 @@ use gen_models::sample::Sample;
 
 use crate::{
     commands::{cli_context::CliContext, get_default_collection},
+    end_transaction_if_active,
     updates::sequence::update_with_sequence,
 };
 
@@ -34,7 +35,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with sequence called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", [])?;
@@ -59,8 +60,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         return Err(err.into());
     }
 
-    conn.execute("END TRANSACTION;", [])?;
-    operation_conn.execute("END TRANSACTION;", [])?;
+    end_transaction_if_active(conn)?;
+    end_transaction_if_active(operation_conn)?;
 
     Ok(())
 }

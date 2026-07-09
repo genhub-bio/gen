@@ -17,12 +17,10 @@ SystemRequirements: Prebuilt release binaries require no external toolchain;
     source builds require Cargo (Rust toolchain), libclang, and Cap'n Proto
 Depends: R (>= 4.2)
 Imports:
-    anyhtmlwidget,
     jsonlite,
     methods
-Remotes:
-    keller-mark/anyhtmlwidget
 Suggests:
+    anyhtmlwidget,
     knitr,
     rmarkdown,
     testthat (>= 3.0.0)

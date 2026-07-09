@@ -43,7 +43,7 @@ where
     let mut gff_reader = gff::io::Reader::new(reader);
     let mut gff_writer = gff::io::Writer::new(writer);
 
-    let bgs = Sample::get_block_groups(conn, collection, sample);
+    let bgs = Sample::get_block_groups(conn, collection, sample, None);
     let sample_bgs: HashMap<String, &BlockGroup> = HashMap::from_iter(
         bgs.iter()
             .map(|bg| (bg.name.clone(), bg))
@@ -69,11 +69,11 @@ where
             let projection = match paths.entry(bg.id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let path = BlockGroup::get_current_path(conn, &bg.id)?;
-                    let graph = BlockGroup::get_graph(conn, &bg.id)?;
+                    let path = BlockGroup::get_current_path(conn, &bg.id, None)?;
+                    let graph = BlockGroup::get_graph(conn, &bg.id, None)?;
                     let mut tree = IntervalTree::default();
                     let mut position: i64 = 0;
-                    for (node, strand) in project_path(&graph, &path.blocks(conn)?) {
+                    for (node, strand) in project_path(&graph, &path.blocks(conn, None)?) {
                         if !is_terminal(node.node_id) {
                             // GFF indexing is one based, inclusive, so we add 1 to the start.
                             // Take a sequence that is 1-4 in our coordinates, this converts to:

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use gen_models::db::OperationsConnection;
+use gen_models::db::ConfigConnection;
 
 pub mod cli_context;
 pub mod clone;
@@ -7,7 +7,7 @@ pub mod derive;
 pub mod export;
 pub mod graph_operations;
 pub mod import;
-#[cfg(all(debug_assertions, feature = "profiling"))]
+#[cfg(feature = "profiling")]
 pub mod profile;
 pub mod remote;
 pub mod update;
@@ -25,8 +25,8 @@ pub enum Commands {
         #[clap(index = 1)]
         url: String,
     },
-    #[cfg(all(debug_assertions, feature = "profiling"))]
-    /// Profile a command in a dev build and print cumulative per-function timings.
+    #[cfg(feature = "profiling")]
+    /// Profile a command and print cumulative per-function timings.
     #[command(arg_required_else_help(true))]
     Profile(profile::Command),
     /// Commands for importing
@@ -64,6 +64,9 @@ pub enum Commands {
         /// The name of the graph to view
         #[clap(index = 1)]
         graph: Option<String>,
+        /// Read graph state from a historical ref instead of the current checkout
+        #[arg(long = "ref")]
+        history_ref: Option<String>,
         /// Optional sample to open directly. If omitted, choose it in the UI.
         #[arg(short, long)]
         sample: Option<String>,
@@ -190,12 +193,18 @@ pub enum Commands {
     /// Configure default options
     #[command(arg_required_else_help(true))]
     Defaults {
-        /// The default database to use
+        /// Deprecated. Gen now always uses `.gen/default.db`.
         #[arg(short, long)]
         database: Option<String>,
         /// The default collection to use
         #[arg(short, long)]
         collection: Option<String>,
+        /// The default committer name for Dolt-backed commits
+        #[arg(long)]
+        committer_name: Option<String>,
+        /// The default committer email for Dolt-backed commits
+        #[arg(long)]
+        committer_email: Option<String>,
     },
     /// Manage remote repositories
     #[command(subcommand)]
@@ -320,10 +329,17 @@ pub enum Commands {
         collection: Option<String>,
     },
     /// List all samples in the current collection
-    ListSamples {},
+    ListSamples {
+        /// Read graph state from a historical ref instead of the current checkout
+        #[arg(long = "ref")]
+        history_ref: Option<String>,
+    },
     #[command()]
     /// List all regions/contigs in the current collection and given sample
     ListGraphs {
+        /// Read graph state from a historical ref instead of the current checkout
+        #[arg(long = "ref")]
+        history_ref: Option<String>,
         /// The name of the collection to list graphs for
         #[arg(short, long)]
         name: Option<String>,
@@ -334,6 +350,9 @@ pub enum Commands {
     /// Extract a sequence from a graph
     #[command(arg_required_else_help(true))]
     GetSequence {
+        /// Read graph state from a historical ref instead of the current checkout
+        #[arg(long = "ref")]
+        history_ref: Option<String>,
         /// The name of the collection containing the sequence
         #[arg(short, long)]
         name: Option<String>,
@@ -421,17 +440,48 @@ pub enum Commands {
 #[derive(Parser)]
 #[command(version, about, long_about = None, arg_required_else_help(true))]
 pub struct Cli {
-    /// The path to the database you wish to utilize
+    /// Deprecated. Gen now always uses `.gen/default.db`.
     #[arg(short, long)]
     pub db: Option<String>,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
 
-pub fn get_default_collection(conn: &OperationsConnection) -> String {
+pub fn get_default_collection(conn: &ConfigConnection) -> String {
     let mut stmt = conn
         .prepare("select collection_name from defaults where id = 1")
         .unwrap();
     stmt.query_row((), |row| row.get(0))
         .unwrap_or("default".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn test_defaults_parses_committer_fields() {
+        let cli = Cli::parse_from([
+            "gen",
+            "defaults",
+            "--committer-name",
+            "Test User",
+            "--committer-email",
+            "test@example.com",
+        ]);
+
+        match cli.command {
+            Some(Commands::Defaults {
+                committer_name,
+                committer_email,
+                ..
+            }) => {
+                assert_eq!(committer_name.as_deref(), Some("Test User"));
+                assert_eq!(committer_email.as_deref(), Some("test@example.com"));
+            }
+            _ => panic!("expected defaults command"),
+        }
+    }
 }

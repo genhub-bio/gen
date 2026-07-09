@@ -48,7 +48,7 @@ where
     let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
     let mut bed_writer = bed::io::Writer::<6, _>::new(writer);
 
-    let bgs = Sample::get_block_groups(conn, collection, sample);
+    let bgs = Sample::get_block_groups(conn, collection, sample, None);
     let sample_bgs: HashMap<String, &BlockGroup> = HashMap::from_iter(
         bgs.iter()
             .map(|bg| (bg.name.clone(), bg))
@@ -74,11 +74,11 @@ where
             let projection = match paths.entry(bg.id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let path = BlockGroup::get_current_path(conn, &bg.id)?;
-                    let graph = BlockGroup::get_graph(conn, &bg.id)?;
+                    let path = BlockGroup::get_current_path(conn, &bg.id, None)?;
+                    let graph = BlockGroup::get_graph(conn, &bg.id, None)?;
                     let mut tree = IntervalTree::default();
                     let mut position: i64 = 0;
-                    for (node, strand) in project_path(&graph, &path.blocks(conn)?) {
+                    for (node, strand) in project_path(&graph, &path.blocks(conn, None)?) {
                         if !is_terminal(node.node_id) {
                             let end_position = position + node.length();
                             tree.insert(position..end_position, (node, strand));

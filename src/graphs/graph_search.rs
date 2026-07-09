@@ -185,7 +185,7 @@ impl GenGraphMatcher {
         };
 
         let mut node_sequences: HashMap<HashId, Vec<u8>> =
-            Node::get_sequences_by_node_ids(conn, &node_ids)
+            Node::get_sequences_by_node_ids(conn, &node_ids, None)
                 .into_iter()
                 .map(|(node_id, seq)| {
                     (
@@ -784,7 +784,7 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
+        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
         GenGraphMatcher::new(conn, graph)
     }
 
@@ -793,7 +793,7 @@ mod tests {
         let conn = ctx.graph().conn();
         let _ = Collection::create(conn, "test");
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
+        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
         GenGraphMatcher::new_ssdna(conn, graph)
     }
 
@@ -802,7 +802,7 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
+        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
         GenGraphMatcher::new_protein(conn, graph)
     }
 
@@ -811,7 +811,7 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id).unwrap();
+        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
         GenGraphMatcher::new_with_sequence_kind(conn, graph, SequenceKind::Exact)
     }
 

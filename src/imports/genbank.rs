@@ -8,7 +8,7 @@ use std::{
 use gb_io::reader;
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{
-    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
+    CommitHash, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     range::{Range, merge_ordered_items},
 };
 use gen_models::{
@@ -21,12 +21,11 @@ use gen_models::{
     edge::Edge,
     errors::CollectionError,
     node::Node,
-    operations::{Operation, OperationInfo},
+    operations::{OperationInfo, commit_graph_operation},
     path::Path,
     region::ResolvedGenRegion,
     sample::Sample,
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
 };
 
 use crate::{
@@ -36,7 +35,6 @@ use crate::{
     },
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
-
 #[derive(Clone, Debug)]
 pub struct GenBankImportOptions {
     pub add_annotations: bool,
@@ -451,13 +449,12 @@ pub fn import_genbank<'a, R>(
     sample: &str,
     operation_info: OperationInfo,
     options: GenBankImportOptions,
-) -> Result<Operation, GenBankError>
+) -> Result<CommitHash, GenBankError>
 where
     R: Read,
 {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let mut session = start_operation(conn);
     let reader = reader::SeqReader::new(data);
     let collection = match Collection::create(conn, collection.into().unwrap_or_default()) {
         Ok(c) => c,
@@ -510,8 +507,8 @@ where
                     &sequence.hash,
                     &HashId::convert_str(&format!(
                         "{collection}.{contig}:{hash}",
-                        collection = &collection.name,
-                        contig = &locus.name,
+                        collection = collection.name,
+                        contig = locus.name,
                         hash = sequence.hash
                     )),
                 )?;
@@ -589,8 +586,8 @@ where
                                 &change_seq.hash,
                                 &HashId::convert_str(&format!(
                                     "{parent_hash}:{start}-{end}->{new_hash}",
-                                    parent_hash = &sequence.hash,
-                                    new_hash = &change_seq.hash,
+                                    parent_hash = sequence.hash,
+                                    new_hash = change_seq.hash,
                                 )),
                             )?;
                             (
@@ -662,9 +659,8 @@ where
     }
     bar.finish();
     let bar = add_saving_operation_bar(&progress_bar);
-    let op = end_operation(
+    let commit_hash = commit_graph_operation(
         context,
-        &mut session,
         &operation_info,
         &format!(
             "Genbank Import of {files}",
@@ -675,11 +671,10 @@ where
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        None,
     )
-    .map_err(GenBankError::OperationError);
+    .map_err(GenBankError::OperationError)?;
     bar.finish();
-    op
+    Ok(commit_hash)
 }
 
 #[cfg(test)]
@@ -688,14 +683,16 @@ mod tests {
 
     use gen_models::{
         annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
+        assets::tables::OperationLog,
         file_types::FileTypes,
+        history::{HistoryStore, dolt::DoltHistoryStore},
         operations::OperationFile,
         traits::Query,
     };
     use noodles::fasta;
 
     use super::*;
-    use crate::{test_helpers::setup_gen, track_database};
+    use crate::test_helpers::setup_gen;
 
     fn get_unmodified_sequence() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -984,9 +981,7 @@ mod tests {
     fn test_error_on_invalid_file() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let _history_store = DoltHistoryStore::new(conn);
 
         assert_eq!(
             import_genbank(
@@ -1013,9 +1008,7 @@ mod tests {
     fn test_records_operation() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let history_store = DoltHistoryStore::new(conn);
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
@@ -1035,19 +1028,19 @@ mod tests {
             GenBankImportOptions::default(),
         )
         .unwrap();
-        assert_eq!(
-            Operation::get_by_id(op_conn, &operation.hash).unwrap(),
-            operation
+        assert_eq!(history_store.current_head().unwrap(), Some(operation));
+        let operation_logs = OperationLog::query(
+            conn,
+            "SELECT * FROM gen_operation_log ORDER BY created_on DESC",
+            [],
         );
+        assert_eq!(operation_logs[0].operation_kind, "test");
     }
 
     #[test]
     fn test_creates_sample() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
@@ -1073,9 +1066,6 @@ mod tests {
     fn test_imports_puc19_annotations_by_default() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let _ = import_puc19(&context, "puc19-sample", GenBankImportOptions::default());
 
         let groups = AnnotationGroup::query_by_sample(conn, "puc19-sample");
@@ -1164,9 +1154,6 @@ mod tests {
     fn test_skips_puc19_annotations_with_option() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let _ = import_puc19(
             &context,
             "no-annotation-sample",
@@ -1185,16 +1172,13 @@ mod tests {
     #[cfg(test)]
     mod geneious_genbanks {
         use super::*;
-        use crate::{normalize_string, track_database};
+        use crate::normalize_string;
 
         #[test]
         fn test_parses_insertion() {
             // this file has an insertion from 1426-2220
             let context = setup_gen();
             let conn = context.graph().conn();
-            let op_conn = context.operations().conn();
-
-            track_database(conn, op_conn).unwrap();
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
@@ -1220,7 +1204,7 @@ mod tests {
                 seqs,
                 HashSet::from_iter([
                     seq.clone(),
-                    format!("{}{}", &seq[..1425].to_string(), &seq[2220..].to_string()).to_string()
+                    format!("{}{}", &seq[..1425], &seq[2220..]).to_string()
                 ])
             );
         }
@@ -1230,9 +1214,6 @@ mod tests {
             // this file has a deletion from 765-766
             let context = setup_gen();
             let conn = context.graph().conn();
-            let op_conn = context.operations().conn();
-
-            track_database(conn, op_conn).unwrap();
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/deletion.gb");
@@ -1271,12 +1252,7 @@ mod tests {
                 seqs,
                 HashSet::from_iter([
                     seq.clone(),
-                    format!(
-                        "{}{deleted}{}",
-                        &seq[..765].to_string(),
-                        &seq[765..].to_string()
-                    )
-                    .to_string()
+                    format!("{}{deleted}{}", &seq[..765], &seq[765..]).to_string()
                 ])
             );
         }
@@ -1285,9 +1261,6 @@ mod tests {
         fn test_parses_deletion_and_insertion() {
             let context = setup_gen();
             let conn = context.graph().conn();
-            let op_conn = context.operations().conn();
-
-            track_database(conn, op_conn).unwrap();
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/deletion_and_insertion.gb");
@@ -1331,12 +1304,7 @@ mod tests {
                 seqs,
                 HashSet::from_iter([
                     seq.clone(),
-                    format!(
-                        "{}{deleted}{}",
-                        &seq[..766].to_string(),
-                        &seq[1557..].to_string()
-                    )
-                    .to_string()
+                    format!("{}{deleted}{}", &seq[..766], &seq[1557..]).to_string()
                 ])
             );
         }
@@ -1347,9 +1315,6 @@ mod tests {
             // in the above test.
             let context = setup_gen();
             let conn = context.graph().conn();
-            let op_conn = context.operations().conn();
-
-            track_database(conn, op_conn).unwrap();
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/substitution.gb");
@@ -1393,12 +1358,7 @@ mod tests {
                 seqs,
                 HashSet::from_iter([
                     seq.clone(),
-                    format!(
-                        "{}{deleted}{}",
-                        &seq[..766].to_string(),
-                        &seq[1557..].to_string()
-                    )
-                    .to_string()
+                    format!("{}{deleted}{}", &seq[..766], &seq[1557..]).to_string()
                 ])
             );
         }
@@ -1407,9 +1367,6 @@ mod tests {
         fn test_parses_multiple_changes() {
             let context = setup_gen();
             let conn = context.graph().conn();
-            let op_conn = context.operations().conn();
-
-            track_database(conn, op_conn).unwrap();
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");

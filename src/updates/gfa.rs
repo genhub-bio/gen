@@ -11,11 +11,10 @@ use gen_models::{
     edge::{Edge, EdgeData},
     file_types::FileTypes,
     node::Node,
-    operations::{OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, commit_graph_operation},
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    session_operations,
 };
 
 use crate::{
@@ -46,7 +45,6 @@ pub fn update_with_gfa(
     for the unmatched path within the same block group as the existing path.
     */
     let conn = context.graph().conn();
-    let mut session = session_operations::start_operation(conn);
 
     let _new_sample = Sample::get_or_create_child(
         conn,
@@ -55,13 +53,13 @@ pub fn update_with_gfa(
         vec![parent_sample_name.to_string()],
     )
     .map_err(IOError::other)?;
-    let block_groups = Sample::get_block_groups(conn, collection_name, new_sample_name);
+    let block_groups = Sample::get_block_groups(conn, collection_name, new_sample_name, None);
 
     // NOTE: Only getting the current path for each block group because it's the most likely one to
     // be the basis for an update
     let existing_paths = block_groups
         .iter()
-        .map(|block_group| BlockGroup::get_current_path(conn, &block_group.id))
+        .map(|block_group| BlockGroup::get_current_path(conn, &block_group.id, None))
         .collect::<Result<Vec<Path>, _>>()?;
 
     let gfa: Gfa<String, (), ()> = Gfa::parse_gfa_file(gfa_path);
@@ -95,7 +93,7 @@ pub fn update_with_gfa(
             .collect::<Vec<String>>()
             .join("");
         for existing_path in existing_paths.iter() {
-            if existing_path.sequence(conn)? == path_sequence {
+            if existing_path.sequence(conn, None)? == path_sequence {
                 existing_path_ids_by_new_path_name.insert(path.name.clone(), existing_path.id);
             }
         }
@@ -122,7 +120,7 @@ pub fn update_with_gfa(
             .collect::<Vec<String>>()
             .join("");
         for existing_path in existing_paths.iter() {
-            if existing_path.sequence(conn)? == walk_sequence {
+            if existing_path.sequence(conn, None)? == walk_sequence {
                 existing_path_ids_by_new_path_name.insert(walk_name.clone(), existing_path.id);
             }
         }
@@ -218,15 +216,13 @@ pub fn update_with_gfa(
 
     let summary_str = format!("{new_paths_added} new paths added");
 
-    session_operations::end_operation(
+    commit_graph_operation(
         context,
-        &mut session,
         &OperationInfo {
             files: vec![OperationFile::new(gfa_path.to_string()).set_file_type(FileTypes::GFA)],
             description: "gfa_update".to_string(),
         },
         &summary_str,
-        None,
     )
     .unwrap();
 
@@ -367,7 +363,7 @@ fn create_new_path_from_existing(
                 &sequence.hash,
                 &HashId::convert_str(&format!(
                     "{unmatched_path_name}_{segment_id}_{hash}",
-                    hash = &sequence.hash
+                    hash = sequence.hash
                 )),
             )?;
             let next_node_strand =
@@ -500,7 +496,7 @@ mod tests {
     use rusqlite::types::Value as SQLValue;
 
     use super::*;
-    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen, track_database};
+    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen};
 
     #[test]
     fn test_basic_update() {
@@ -512,8 +508,6 @@ mod tests {
         // 5. Confirm the fasta update and the GFA update match
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
@@ -564,8 +558,6 @@ mod tests {
         // Same as previous test, but with walks instead of paths in the GFA
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");

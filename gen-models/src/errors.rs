@@ -1,4 +1,4 @@
-use gen_core::errors::{ConfigError, ConnectionError, StrandError};
+use gen_core::errors::{ConfigError, ConnectionError};
 use thiserror::Error;
 
 pub use crate::{
@@ -8,7 +8,6 @@ pub use crate::{
     collection::CollectionError,
     edge::EdgeError,
     node::NodeError,
-    operations::BranchError,
     path::PathError,
     path_edge::PathEdgeError,
     sample::SampleError,
@@ -23,40 +22,8 @@ pub enum QueryError {
     ResultsNotFound(String),
 }
 
-#[derive(Debug, Error, PartialEq)]
-pub enum ChangesetError {
-    #[error("Strand Error: {0}")]
-    StrandError(#[from] StrandError),
-    #[error("Missing Model: {0}")]
-    MissingModel(String),
-    #[error("Query error: {0}")]
-    QueryError(#[from] QueryError),
-    #[error("Serialization Error: {0}")]
-    SerializationError(String),
-    #[error("SQLite Error: {0}")]
-    SqliteError(#[from] rusqlite::Error),
-    #[error("Collection creation error: {0}")]
-    CollectionError(#[from] CollectionError),
-    #[error("Sample creation error: {0}")]
-    SampleError(#[from] SampleError),
-    #[error("Node creation error: {0}")]
-    NodeError(#[from] NodeError),
-    #[error("Path creation error: {0}")]
-    PathError(#[from] PathError),
-    #[error("Accession creation error: {0}")]
-    AccessionError(#[from] AccessionError),
-    #[error("Accession node creation error: {0}")]
-    AccessionNodeError(#[from] AccessionNodeError),
-    #[error("Sequence save error: {0}")]
-    SequenceError(#[from] SequenceError),
-    #[error("Block group creation error: {0}")]
-    BlockGroupError(#[from] BlockGroupError),
-}
-
 #[derive(Debug, PartialEq, Error)]
 pub enum OperationError {
-    #[error("Changeset Error: {0}")]
-    ChangesetError(#[from] ChangesetError),
     #[error("Changeset Error: {0}")]
     ConnectionError(#[from] ConnectionError),
     #[error("No Changes")]
@@ -65,6 +32,8 @@ pub enum OperationError {
     OperationExists,
     #[error("Operation {0} Does Not Exist")]
     NoOperation(String),
+    #[error("Invalid operation hash for Dolt commit: {0}")]
+    InvalidOperationHash(String),
     #[error("SQL Error: {0}")]
     SQLError(String),
     #[error("SQLite Error: {0}")]
@@ -172,12 +141,12 @@ mod tests {
     mod remote_error_tests {
         use super::*;
         use crate::{
-            db::OperationsConnection,
-            operations::{Branch, Defaults, Remote},
+            db::ConfigConnection,
+            operations::{Defaults, Remote, RemoteBranch},
             test_helpers::get_operation_connection,
         };
 
-        fn setup_test_db() -> OperationsConnection {
+        fn setup_test_db() -> ConfigConnection {
             get_operation_connection(None).unwrap()
         }
 
@@ -577,12 +546,7 @@ mod tests {
 
             // Create a remote and branch
             Remote::create(&conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
-
-            // For this test, we'll assume branch ID 1 exists (this would be set up by the test framework)
-            // In a real scenario, you'd create a branch first
-            let branch_id = 1i64;
-
-            let result = Branch::set_remote_validated(&conn, branch_id, Some("origin"));
+            let result = RemoteBranch::set_remote_validated(&conn, "main", Some("origin"));
             assert!(result.is_ok());
         }
 
@@ -590,9 +554,7 @@ mod tests {
         fn test_branch_set_remote_validated_remote_not_found() {
             let conn = setup_test_db();
 
-            let branch_id = 1i64;
-
-            let result = Branch::set_remote_validated(&conn, branch_id, Some("nonexistent"));
+            let result = RemoteBranch::set_remote_validated(&conn, "main", Some("nonexistent"));
             assert_eq!(
                 result,
                 Err(RemoteError::RemoteNotFound("nonexistent".to_string()))
@@ -603,9 +565,7 @@ mod tests {
         fn test_branch_set_remote_validated_clear() {
             let conn = setup_test_db();
 
-            let branch_id = 1i64;
-
-            let result = Branch::set_remote_validated(&conn, branch_id, None);
+            let result = RemoteBranch::set_remote_validated(&conn, "main", None);
             assert!(result.is_ok());
         }
 

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.90-bookworm
+FROM rust:1.95-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
 
