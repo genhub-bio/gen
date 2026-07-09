@@ -127,8 +127,8 @@ See `inst/examples/combinatorial_expression_cassette.R` and
 
 ## Vignettes
 
-- [Introduction](https://htmlpreview.github.io/?https://github.com/genhub-bio/gen/blob/main/docs/vignettes/introduction.html) — pUC19 import, editing, and export walkthrough.
-- [Yeast expression library](https://htmlpreview.github.io/?https://github.com/genhub-bio/gen/blob/main/docs/vignettes/yeast_expression_library.html) — combinatorial library design for a carotenoid pathway.
+- [Introduction](https://genhub-bio.github.io/gen/vignettes/introduction.html) — pUC19 import, editing, and export walkthrough.
+- [Yeast expression library](https://genhub-bio.github.io/gen/vignettes/yeast_expression_library.html) — combinatorial library design for a carotenoid pathway.
 
 The rendered HTML is checked into `docs/vignettes/`. After changing a vignette,
 rebuild it with `Rscript -e "tools::buildVignettes(dir='gen-r', tangle=FALSE)"`

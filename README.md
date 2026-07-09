@@ -127,7 +127,7 @@ Agents can interact with Gen through the command line or the Python API, which w
 
 - [Model a yeast cross](examples/yeast_crosses/Analysis.md): cross two beer-yeast strains from the 1002 Yeast Genomes collection, building the combined graph from either VCF variant calls or whole-genome alignment.
 - [Explore a brewing-yeast variant graph in Python](gen-python/examples/flo11_brq_demo.ipynb): analyse the *FLO11* locus on a 9.1 kb *S. cerevisiae* chrIX fragment, searching and navigating the variant graph in the interactive widget.
-- [Screen a combinatorial library in R](https://htmlpreview.github.io/?https://github.com/genhub-bio/gen/blob/main/docs/vignettes/yeast_expression_library.html): build a combinatorial YTK expression-cassette library, easily detecting a restriction site that appears only at one part junction, not in any individual part.
+- [Screen a combinatorial library in R](https://genhub-bio.github.io/gen/vignettes/yeast_expression_library.html): build a combinatorial YTK expression-cassette library, easily detecting a restriction site that appears only at one part junction, not in any individual part.
 
 ## Data model
 
