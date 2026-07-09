@@ -1,8 +1,8 @@
 # Gen
 
-Gen brings version control to genetic sequences. With it, you can track variants and edits to genes or whole genomes, across multiple generations and lineages. You can clone genome repositories, create branches, make edits, and push changes to a shared remote using the same workflow developers know from Git. It works across FASTA files, VCFs, GenBank records, and other common bioinformatics formats. Under the hood, Gen stores data as a sequence graph, allowing a single repository to represent a reference genome, known variants, and engineered modifications without repeatedly storing the same sequence.
+[![CI](https://github.com/genhub-bio/gen/actions/workflows/test.yml/badge.svg)](https://github.com/genhub-bio/gen/actions/workflows/test.yml) [![Crates.io](https://img.shields.io/crates/v/gen.svg)](https://crates.io/crates/gen) [![PyPI](https://img.shields.io/pypi/v/gen.svg)](https://pypi.org/project/gen/) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-[![PyPI](https://img.shields.io/pypi/v/gen.svg)](https://pypi.org/project/gen/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+Gen brings version control to genetic sequences. With it, you can track variants and edits to genes or whole genomes, across multiple generations and lineages. You can clone genome repositories, create branches, make edits, and push changes to a shared remote using the same workflow developers know from Git. It works across FASTA files, VCFs, GenBank records, and other common bioinformatics formats. Under the hood, Gen stores data as a sequence graph, allowing a single repository to represent a reference genome, known variants, and engineered modifications without repeatedly storing the same sequence.
 
 ![Checking out a branch, merging in sequencing results, and browsing the combined graph in the terminal viewer](docs/demo/demo.gif)
 
