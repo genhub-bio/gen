@@ -4,7 +4,7 @@ Gen brings version control to genetic sequences. With it, you can track variants
 
 [![PyPI](https://img.shields.io/pypi/v/gen.svg)](https://pypi.org/project/gen/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-![Checking out a branch, merging in sequencing results, and browsing the combined graph in the terminal viewer](demo.gif)
+![Checking out a branch, merging in sequencing results, and browsing the combined graph in the terminal viewer](docs/demo/demo.gif)
 
 ## Install
 
