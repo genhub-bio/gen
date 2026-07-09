@@ -15,7 +15,8 @@ use r#gen::{
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, reapply_overlays,
+            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, locus_midpoint,
+            reapply_overlays,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
@@ -128,7 +129,7 @@ fn is_false(b: &bool) -> bool {
 /// slice's start (snapped left by the caller). `None` for an empty locus.
 fn locus_target_pos(locus: &GraphLocus, center: bool) -> Option<PyGraphPos> {
     if center {
-        let (slice, offset) = locus.midpoint()?;
+        let (slice, offset) = locus_midpoint(locus)?;
         return Some(PyGraphPos::new(slice.block, offset));
     }
     let slice = locus.slices.first()?;

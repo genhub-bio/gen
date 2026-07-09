@@ -716,6 +716,30 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     any_hidden
 }
 
+/// The slice and local offset (0-based, within that slice's block) at the
+/// midpoint of a locus's total sequence length. `None` for an empty locus.
+pub fn locus_midpoint(locus: &GraphLocus) -> Option<(GraphNodeSlice, usize)> {
+    let total: usize = locus
+        .slices
+        .iter()
+        .map(|slice| slice.end - slice.start)
+        .sum();
+    if total == 0 {
+        return None;
+    }
+    let half = total / 2;
+    let mut consumed = 0;
+    for (index, slice) in locus.slices.iter().enumerate() {
+        let len = slice.end - slice.start;
+        let is_last = index == locus.slices.len() - 1;
+        if consumed + len > half || is_last {
+            return Some((*slice, slice.start + (half - consumed)));
+        }
+        consumed += len;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1375,5 +1399,56 @@ mod tests {
             color_b, color_b_again,
             "span b's color should survive a reload"
         );
+    }
+
+    fn midpoint_node(id: u8, start: i64, end: i64) -> GraphNode {
+        GraphNode {
+            node_id: HashId([id; 32]),
+            sequence_start: start,
+            sequence_end: end,
+        }
+    }
+
+    fn midpoint_slice(block: GraphNode, start: usize, end: usize) -> GraphNodeSlice {
+        GraphNodeSlice {
+            block,
+            start,
+            end,
+            strand: Strand::Forward,
+        }
+    }
+
+    #[test]
+    fn test_midpoint_single_slice_is_centered_within_it() {
+        let block = midpoint_node(1, 0, 10);
+        let locus = GraphLocus {
+            slices: vec![midpoint_slice(block, 2, 8)],
+        };
+        // length 6, half = 3, so local offset = start(2) + 3 = 5
+        assert_eq!(
+            locus_midpoint(&locus),
+            Some((midpoint_slice(block, 2, 8), 5))
+        );
+    }
+
+    #[test]
+    fn test_midpoint_spans_into_second_slice() {
+        let first = midpoint_node(1, 0, 10);
+        let second = midpoint_node(2, 0, 10);
+        let locus = GraphLocus {
+            slices: vec![midpoint_slice(first, 8, 10), midpoint_slice(second, 0, 10)],
+        };
+        // total length 12, half = 6; first slice covers 2 bases (consumed=2),
+        // midpoint falls 4 bases into the second slice.
+        assert_eq!(
+            locus_midpoint(&locus),
+            Some((midpoint_slice(second, 0, 10), 4))
+        );
+    }
+
+    #[test]
+    fn test_midpoint_of_empty_locus_is_none() {
+        let locus = GraphLocus { slices: vec![] };
+        assert_eq!(locus_midpoint(&locus), None);
     }
 }
