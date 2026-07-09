@@ -11,11 +11,7 @@ Set Padding 20
 #   1. Build the CLI:   cargo build --release --bin gen   (from the repo root)
 #   2. Build the repo:  ./build_demo_repo.sh              (creates /tmp/gen-demo)
 #   3. Record:          cd docs/demo && vhs demo.tape
-#
-# The heavy setup lives in build_demo_repo.sh, not here, so this tape records no
-# blank lead-in while imports and library expansion run. The repo it produces is
-# checked out on main, which already carries an independent QC annotation, so
-# branching sequencing_results off of it and merging back is a genuine merge.
+
 Hide
 Type "cd /tmp/gen-demo"
 Enter
@@ -46,11 +42,11 @@ Enter
 Sleep 3s
 
 Right
-Sleep 700ms
+Sleep 500ms
 Right
-Sleep 700ms
-Right
-Sleep 1s
+Sleep 500ms
+Up
+Sleep 500ms
 
 Type "+"
 Sleep 1.2s
@@ -69,7 +65,7 @@ Sleep 500ms
 # --- Switch back to main and bring the sequencing result in ---
 # Checkout's own output is hidden from the recording: it reverts the vcf
 # operation to leave sequencing_results, which prints the same hash the
-# next command re-applies via merge — redundant to show twice.
+# next command re-applies via merge (redundant to show twice).
 Sleep 800ms
 Type "gen checkout main"
 Sleep 1.2s
@@ -81,4 +77,4 @@ Show
 Type "gen merge sequencing_results"
 Sleep 1.2s
 Enter
-Sleep 2s
+Sleep 3s

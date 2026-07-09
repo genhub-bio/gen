@@ -113,15 +113,18 @@ Agents can interact with Gen through the command line or the Python API, which w
 
 ## Screenshots
 
-<p align="center">
-  <img src="docs/figures/screenshot_cc.png" alt="Claude Code session using the Gen Python module to inspect a sequence variant DNA graph and its translated protein graph, identifying which of two SNPs is non-synonymous" width="600"><br>
-  <sub><b>Python bindings</b>: Claude reasons about a DNA graph and its protein translation, concluding that one of two SNPs is silent.</sub>
-</p>
-
-<p align="center">
-  <img src="docs/figures/screenshot_rstudio.png" alt="RStudio viewer showing an annotated expression-cassette graph with a highlighted restriction site at the TEF1p to crtE_native junction" width="599"><br>
-  <sub><b>RStudio viewer</b>: highlighting a BsmBI site that straddles a part junction in a combinatorial expression-cassette library, from <a href="gen-r/vignettes/yeast_expression_library.Rmd"><code>yeast_expression_library.Rmd</code></a>.</sub>
-</p>
+<table>
+  <tr>
+    <td width="50%" valign="top" align="center">
+      <img src="docs/figures/screenshot_cc.png" alt="Claude Code session using the Gen Python module to inspect a sequence variant DNA graph and its translated protein graph, identifying which of two SNPs is non-synonymous" width="100%"><br>
+      <sub><b>Python</b>: Claude reasons about a DNA graph and its protein translation, concluding that one of two SNPs is silent.</sub>
+    </td>
+    <td width="50%" valign="top" align="center">
+      <img src="docs/figures/screenshot_rstudio.png" alt="RStudio viewer showing an annotated expression-cassette graph with a highlighted restriction site at the TEF1p to crtE_native junction" width="100%"><br>
+      <sub><b>R</b>: finding a restriction site that stradles the junction between parts, from <a href="gen-r/vignettes/yeast_expression_library.Rmd"><code>yeast_expression_library.Rmd</code></a>.</sub>
+    </td>
+  </tr>
+</table>
 
 ## Example workflows
 

@@ -284,12 +284,13 @@ terminator is chosen.
 
 ## Highlight the BsmBI site on the graph
 
-```{r highlight-site}
-p2 <- plot(sg, rows = 20L,
-           colors = function(ann) ROLE_COLORS[[ann$metadata$role]])
 
+```{r highlight-site}
+hits <- repo$search("CGTCTC", c(sg$id()), "dna")
+p2 <- plot(sg, rows=16L, cols=56L,
+           colors = function(ann) ROLE_COLORS[[ann$metadata$role]])
 m <- hits[[1]]$matches[[1]]
-p2$go_to_match(m)
+p2$go_to_match(m, center = TRUE)
 p2$highlight_match(m, color = "red")
 
 p2
