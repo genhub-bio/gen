@@ -5,14 +5,16 @@ NULL
   if (is.null(x)) y else x
 }
 
-.gen_serialize_mcols <- function(xss) {
-  mc <- tryCatch(S4Vectors::mcols(xss), error = function(e) NULL)
-  if (is.null(mc) || ncol(mc) == 0L) return(NULL)
-  df <- as.data.frame(mc)
-  vapply(seq_len(nrow(df)), function(i) {
-    jsonlite::toJSON(as.list(df[i, , drop = FALSE]), auto_unbox = TRUE)
-  }, character(1))
-}
+# Unused: per-part mcols metadata is no longer imported, so this serializer
+# has no caller. Kept commented as a reference for a future metadata path.
+# .gen_serialize_mcols <- function(xss) {
+#   mc <- tryCatch(S4Vectors::mcols(xss), error = function(e) NULL)
+#   if (is.null(mc) || ncol(mc) == 0L) return(NULL)
+#   df <- as.data.frame(mc)
+#   vapply(seq_len(nrow(df)), function(i) {
+#     jsonlite::toJSON(as.list(df[i, , drop = FALSE]), auto_unbox = TRUE)
+#   }, character(1))
+# }
 
 # Extract the genome string from a sequence container.
 # Supported: BSgenome, DNAStringSet (with metadata$genome set), FaFile, TwoBitFile.
