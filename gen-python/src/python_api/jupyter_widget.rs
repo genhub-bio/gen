@@ -124,10 +124,8 @@ fn is_false(b: &bool) -> bool {
     !b
 }
 
-/// Resolve a `GraphLocus` to the position `go_to_pos` should target: the locus's
-/// sequence midpoint when `center` is requested (so the whole span is balanced
-/// around the viewport center, not just its start), otherwise its first slice's
-/// start (paired with `go_to_pos`'s snap-left placement). `None` for an empty locus.
+/// Target position for `go_to_pos`: the locus midpoint when `center`, else its first
+/// slice's start (snapped left by the caller). `None` for an empty locus.
 fn locus_target_pos(locus: &GraphLocus, center: bool) -> Option<PyGraphPos> {
     if center {
         let (slice, offset) = locus.midpoint()?;
@@ -430,11 +428,8 @@ impl GraphPage {
 
     /// Re-register every overlay highlight on the controller from the current overlay list.
     ///
-    /// Called after any mutation of `overlays`, and unconditionally at the top of
-    /// `render_into` on every render. The latter is required, not just defensive: which
-    /// spans get registered depends on the current detail level (tracks are hidden at
-    /// minimal detail, partial single-node spans at truncated), so a zoom/detail change
-    /// between mutations must also rerun this, not just self-heal column positions.
+    /// Must run on every render, not just after `overlays` mutates: which spans register
+    /// depends on the current detail level, so a zoom/detail change alone can change the result.
     fn reapply(&mut self) {
         reapply_overlays(
             &mut self.controller,
@@ -512,10 +507,7 @@ impl GraphPage {
     /// Shared by the standalone `render_frame` pymethod and `PySampleController`,
     /// which renders a header row above the graph and offsets `graph_area` accordingly.
     fn render_into(&mut self, buf: &mut Buffer, graph_area: Rect) -> PyResult<()> {
-        // Re-register overlay highlights before rendering. Which spans get registered
-        // depends on the current detail level (tracks are hidden at minimal detail, partial
-        // single-node spans at truncated), so this must rerun after zoom/detail changes too,
-        // not only after `overlays` is mutated.
+        // Re-register overlays: detail level affects which spans register (see `reapply`).
         self.reapply();
         {
             let conn = self.open_conn()?;

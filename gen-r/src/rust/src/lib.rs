@@ -931,10 +931,8 @@ fn graph_locus_record(locus: &GraphLocus) -> Robj {
             }
         }
     };
-    // Centering on `start` would leave the cursor at the match's edge; the on-screen-cursor
-    // invariant in gen-tui's camera-follow would then keep tugging the view back toward it
-    // for any sufficiently long match. Precomputing the true sequence midpoint here lets R
-    // send the cursor straight there for `go_to_match(center = TRUE)`.
+    // center = TRUE targets the span's true midpoint (computed here) rather than its start,
+    // so the match sits balanced in the viewport instead of against the edge.
     let midpoint = locus
         .midpoint()
         .map(|(slice, offset)| {

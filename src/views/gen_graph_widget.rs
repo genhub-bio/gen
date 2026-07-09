@@ -1061,9 +1061,8 @@ mod tests {
         );
     }
 
-    /// At the minimal detail level, a DB-loaded track overlay must not be painted at all
-    /// (too busy fully zoomed out), while an ad-hoc annotation overlay (Jupyter widget's
-    /// `add_annotation`) still paints.
+    /// At minimal detail, DB-loaded track overlays are hidden but ad-hoc annotation
+    /// overlays still paint.
     #[test]
     fn test_reapply_overlays_hides_track_overlays_at_minimal_detail() {
         let node = GraphNode {

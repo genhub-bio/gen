@@ -258,11 +258,8 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
 
   ctrl$go_to_match <- function(match_locus, center = FALSE) {
     ctrl$detail <- "full"
-    # Centering targets `midpoint` (the locus's true sequence midpoint, precomputed in
-    # Rust) rather than `start`. The cursor is placed there too, not just the camera:
-    # gen-tui's camera-follow keeps the cursor on screen at all times, so if the cursor
-    # stayed at the match's start while the camera aimed at the midpoint, a long match
-    # would immediately tug the camera back toward that start.
+    # center = TRUE aims the camera at the span's midpoint (precomputed in Rust) rather
+    # than its start, so a long match sits balanced in the viewport instead of hugging the edge.
     pos <- if (isTRUE(center)) match_locus$midpoint else match_locus$start
     node <- pos$node
     offset <- pos$offset
