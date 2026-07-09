@@ -289,7 +289,7 @@ p2 <- plot(sg, rows = 20L,
            colors = function(ann) ROLE_COLORS[[ann$metadata$role]])
 
 m <- hits[[1]]$matches[[1]]
-p2$goto_match(m)
+p2$go_to_match(m)
 p2$highlight_match(m, color = "red")
 
 p2
