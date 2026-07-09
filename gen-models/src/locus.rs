@@ -76,10 +76,10 @@ impl GraphLocus {
 
 #[cfg(test)]
 mod tests {
-    use gen_core::HashId;
+    use gen_core::{HashId, Strand};
     use gen_graph::GraphNode;
 
-    use super::*;
+    use super::{GraphLocus, GraphNodeSlice};
 
     fn node(id: u8, start: i64, end: i64) -> GraphNode {
         GraphNode {
