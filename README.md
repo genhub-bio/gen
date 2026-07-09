@@ -1,120 +1,151 @@
 # Gen
-Gen is a version control system for genetic sequences. It efficiently stores genome-length sequences and sequence
-variations, with native support for polyploid genomes and pooled genotypes. Each project is organized into a repository,
-where collections of sequences and associated data are stored and tracked over time. Within a repository, branches can
-be created to explore different modifications or variations without affecting the main project. These branches can later
-be merged to integrate results from different experiments or collaborators.
 
-The gen client can import standard sequence file formats from sources like NCBI and genetic design tools. The sequence
-model takes the form of a graph structure as shown in the figure below. Each molecule is made up out of a network of
-_nodes_ that represent sequence fragments, and _edges_ that define how sequence fragments are connected. Multiple
-molecules are organized into _collections_ that could represent the different chromosomes in a reference genome,
-proteins in a proteome, or pieces of DNA in a cloning reaction mixture. Molecules generally start out as a node that
-holds the reference sequence, and new edges and nodes are added for every sequence variant that is designed or observed.
-To reconstitute a linear sequence, the client walks from node to node along a defined _path_. This data model allows the
-representation of a wide range of biological complexity -- from a single molecule to complex cultivars and cell lines,
-including any naturally occurring variation in addition to intended engineering.
+Gen brings version control to genetic sequences. With it, you can track variants and edits to genes or whole genomes, across multiple generations and lineages. You can clone genome repositories, create branches, make edits, and push changes to a shared remote using the same workflow developers know from Git. It works across FASTA files, VCFs, GenBank records, and other common bioinformatics formats. Under the hood, Gen stores data as a sequence graph, allowing a single repository to represent a reference genome, known variants, and engineered modifications without repeatedly storing the same sequence.
 
-![Figure 1](docs/figures/figure_1.svg)
+[![PyPI](https://img.shields.io/pypi/v/gen.svg)](https://pypi.org/project/gen/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**_Figure 1_**: _Block graph model representation of a sequence variant where two nucleotides AT are replaced by TG;
-the modified sequence (shown in bold) is stored as a path over a list of edges that address specific coordinates._
+![Checking out a branch, merging in sequencing results, and browsing the combined graph in the terminal viewer](demo.gif)
 
-The block graph model is designed to be additive: new sequence variants only add to the graph, existing nodes are stable
-and do not have to be split to accomodate the new topology. This is different from the more commonly used segment graph 
-model shown in Figure 2, and gen automatically converts between formats as needed. 
+## Install
 
-![Figure 2](docs/figures/figure_2.svg)
+**Gen client**: prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/genhub-bio/gen/releases): [macOS (.pkg)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), [Linux x86_64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip), [Linux arm64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
 
-**_Figure 2_**: _Segment graph model corresponding to the sequence variant in Figure 1. The original sequence was
-split into 3 parts; the modified sequence path is defined by a list of nodes that refer to these segments. Nodes are
-labeled by their parent ID and starting coordinate, new edges internal to the reference are shown as dashed arrows._ 
-
-Individual chromosomes or contigs are stored as _block groups_ that refer to a specific grouping of edges from the main
-graph. Block groups are adressed on three facets: name, sample, and collection. The name is an identifier like
-"chromosome II", and the sample could refer to a real individual or a virtual outcome of an experiment. The meaning of a
-collection is flexible, and for example could refer to the type of data (genomic, protein, ...) or experiment.
-
-## Prebuilt binaries
-
-For a download link, visit our [Installation page](https://www.genhub.bio/docs/installation).
-
-Prebuilt binaries exist for Mac OS X and Linux on the [Release
-page](https://github.com/genhub-bio/gen/releases). The latest version can be found
-[here](https://github.com/genhub-bio/gen/releases/tag/nightly).  We do not currently support a Windows native
-binary.
-
-## Python library
-
-Gen is available as a package on [pypi.org](https://pypi.org/), so you can install it with
-
-```
+**Python package**: install on macOS, Linux, or Windows using:
+```sh
 pip install gen
 ```
 
-## Installing from Source
-Make sure you have a Rust compiler installed on your system. You can install the Rust toolset using the [rustup
-installer](https://rustup.rs/).
-
-
-1. Clone the [source](https://github.com/genhub-bio/gen) with `git`:
-
-   ```sh
-   git clone https://github.com/genhub-bio/gen.git
-   cd rust
-   ```
-
-2. Compile the gen package and its dependencies:
-
-    ```
-    cargo build --release
-    ```
-
-3. You can find the gen executable in ./target/release/ or execute it via cargo:
-
-    ```
-    cargo run -- <arguments>
-    ```
-
-To cross-compile gen to run on a different architecture, you need to first add a target to the Rust toolchain and
-install a linker. For macOS to Linux this can be done as follows:
-
-    ```
-    rustup target add x86_64-unknown-linux-gnu
-    brew install SergioBenitez/osxct/x86_64-unknown-linux-gnu
-    cargo build --release --target=x86_64-unknown-linux-gnu
-    ```
-
-The executable will be placed in ./target/x86_64-unknown-linux-gnu/release/
-
-## Usage
-Gen is a command line tool with multiple subcommands that each have their own flags and arguments. The currently
-available commands are listed below and described in more detail [here](docs/commands.md) or built-in help pages (`gen
-[COMMAND] --help`).
-
+Install the `jupyter` extra to include an interactive graph widget for Jupyter and other anywidget-compatible notebooks:
+```sh
+pip install gen[jupyter]
 ```
-Usage: gen [OPTIONS] [COMMAND]
 
-Commands:
-  import      Import a new sequence collection
-  update      Update a sequence collection with new data
-  init        Initialize a gen repository
-  branch      Manage and create branches
-  checkout    Migrate a database to a given operation
-  reset       
-  operations  View operations carried out against a database
-  apply       
-  export      Export a sequence collection
-  defaults    Set a default database and collection to use
-  help        Print this message or the help of the given subcommand(s)
-
-Options:
-  -d, --db <DB>  The path to the database you wish to utilize
-  -h, --help     Print help
-  -V, --version  Print version
+**R package**: install on macOS (Apple silicon) using the `remotes` package:
+```r
+install.packages("remotes")
+remotes::install_url(
+  "https://github.com/genhub-bio/gen/releases/download/v0.2.0/genr_0.2.0-macos-arm64.tgz"
+)
 ```
-Typical workflows are illustrated in these example workflows:
 
-- [Mapping reads to the human genome, taking into account all known variants](examples/human_variation_aware_alignment/Analysis.ipynb)
-- [Design and analysis of a combinatorial plasmid library constructed via one-pot cloning](examples/combinatorial_plasmid_design/combinatorial_design.md)
-- [Modeling a cross between two yeast strains starting from variant calls or genome assemblies](examples/yeast_crosses/Analysis.md)
+Windows builds are published as `genr-windows-<version>.zip` on the same [releases page](https://github.com/genhub-bio/gen/releases).
+
+## Quick start
+
+### Set up a repository
+
+```sh
+gen init
+gen import fasta reference.fa --reference hg38
+```
+
+### Branch, update, and inspect
+
+```sh
+# Branch before making changes
+gen checkout --branch experiment/na12878
+
+# Apply variants from a VCF
+gen update vcf variants.vcf --reference hg38 --sample NA12878
+
+# Review the operation log
+gen operations
+
+# Browse the graph in the terminal
+gen view
+```
+
+### Push to a remote
+
+In order to upload data to a remote repository, you have to add a remote repository (call it `origin` here), log in to authenticate and optionally make it the default remote for this repository, and then run the push command:
+
+```sh
+gen remote add origin https://www.genhub.bio/api/repos/<user>/<repo>
+gen remote login origin
+gen remote set-default origin
+gen push
+```
+
+Subsequent pushes from this repository only need `gen push`.
+
+### Python and R bindings
+
+The Python package lets you import, edit, and export sequence graphs from Python. The R package covers the same workflows and interoperates with Bioconductor types such as DNAStringSet and GRanges. The `jupyter` extra adds an interactive widget for graph visualization and exploration. Remote operations (`push` and `pull`) require the client for now.
+
+Example Python code to initialize or load a repository, import a sequence as reference, applying variants from a
+VCF file, and viewing the resulting sequence graph:
+
+```python
+import gen
+
+repo = gen.Repository(".")
+repo.import_reference_fasta("reference.fa", "hg38")
+sample = repo.update_with_vcf("variants.vcf", reference="hg38", sample="NA12878")[0]
+sample.plot()
+```
+
+Equivalent R code:
+```r
+library(genr)
+
+repo <- Repository(".")
+repo$import_reference_fasta("reference.fa", reference = "hg38")
+sample <- repo$update_with_vcf(filename = "variants.vcf", sample = "NA12878", reference = "hg38")[[1]]
+plot(sample)
+```
+
+## Features
+
+- Every import, update, and merge is a recorded operation. You can roll back to any prior state with `gen checkout`, compare two branches with `gen view-diff`, or share a set of changes as a patch file.
+- Gen can import from FASTA, GenBank, GFA, VCF, GAF, and combinatorial part libraries, and export to FASTA, GenBank, or GFA for downstream tools like `vg` or Bandage.
+- Sequence search works across all paths in a graph, including IUPAC ambiguity codes, via `gen search` or `repo.search()` in Python and R.
+- GFF3 annotation tracks are visible in both the terminal viewer and the interactive widget.
+- For combinatorial library design, you define a parts list and a slot table; Gen builds the graph of all combinations without enumerating the sequences explicitly.
+- `gen clone`, `gen push`, and `gen pull` work against network-mounted filesystems or genhub.bio. Any public repository is clonable with a single URL.
+- The R package includes direct import from Bioconductor `DNAStringSet` and `GRanges` objects.
+
+## Designed for AI agents
+
+Agents can interact with Gen through the command line or the Python API, which was designed with AI agents in mind. Nearly every user action has a programmatic equivalent, with methods returning samples and sequence graphs as Python objects that can be passed directly into subsequent operations. Graph visualizations in Python notebooks include embedded text representations that LLMs can interpret directly. Because every operation is recorded in the repository, agents can inspect history, compare revisions, and recover from failures.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%" valign="top" align="center">
+      <img src="docs/figures/screenshot_cc.png" alt="Claude Code session using the Gen Python module to inspect a sequence variant DNA graph and its translated protein graph, identifying which of two SNPs is non-synonymous" width="100%"><br>
+      <sub><b>Python</b>: Claude reasons about a DNA graph and its protein translation, concluding that one of two SNPs is silent.</sub>
+    </td>
+    <td width="50%" valign="top" align="center">
+      <img src="docs/figures/screenshot_rstudio.png" alt="RStudio viewer showing an annotated expression-cassette graph with a highlighted restriction site at the TEF1p to crtE_native junction" width="100%"><br>
+      <sub><b>R</b>: finding a restriction site that stradles the junction between parts, from <a href="gen-r/vignettes/yeast_expression_library.Rmd"><code>yeast_expression_library.Rmd</code></a>.</sub>
+    </td>
+  </tr>
+</table>
+
+## Example workflows
+
+- [Model a yeast cross](examples/yeast_crosses/Analysis.md): cross two beer-yeast strains from the 1002 Yeast Genomes collection, building the combined graph from either VCF variant calls or whole-genome alignment.
+- [Explore a brewing-yeast variant graph in Python](gen-python/examples/flo11_brq_demo.ipynb): analyse the *FLO11* locus on a 9.1 kb *S. cerevisiae* chrIX fragment, searching and navigating the variant graph in the interactive widget.
+- [Screen a combinatorial library in R](https://genhub-bio.github.io/gen/vignettes/yeast_expression_library.html): build a combinatorial YTK expression-cassette library, easily detecting a restriction site that appears only at one part junction, not in any individual part.
+
+## Data model
+
+Gen represents sequences as a sequence graph: nodes hold sequence fragments, edges connect them, and any linear sequence is reconstructed by walking a defined path. New variants extend the graph without splitting existing nodes, so node IDs remain stable across updates. This differs from the segment graph model used by tools like vg, where the reference sequence is split into pieces to accommodate each variant; Gen converts between the two formats on GFA export. See [docs/coordinates.md](docs/coordinates.md) for a full explanation with diagrams.
+
+## Documentation
+
+Full command reference, Python and R API docs, and tutorials are at [genhub.bio/docs](https://www.genhub.bio/docs).
+
+## Building from source
+
+Requires a Rust toolchain ([rustup](https://rustup.rs/)).
+
+```sh
+git clone https://github.com/genhub-bio/gen.git
+cd gen
+cargo build --release
+# binary at ./target/release/gen
+```
+
+For Python and R bindings, see [gen-python/README.md](gen-python/README.md) and [gen-r/README.md](gen-r/README.md).
