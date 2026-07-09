@@ -1,6 +1,6 @@
 Package: genr
 Title: R Bindings for the Gen Sequence Graph Database
-Version: 0.2.0
+Version: 0.2.1
 Authors@R:
     person("GenHub", "Bio", email = "opensource@genhub.bio", role = c("aut", "cre"))
 Description: R bindings for the Gen sequence graph database and version control
