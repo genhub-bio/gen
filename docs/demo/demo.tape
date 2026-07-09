@@ -7,6 +7,10 @@ Set Theme "Catppuccin Mocha"
 Set Shell "bash"
 Set Padding 20
 
+# To re-record: `make gif` from the repo root rebuilds every demo repo and
+# re-records its tape. To do it by hand: ./build_demo_repo.sh (seeds /tmp/gen-demo),
+# then vhs demo.tape from this directory.
+
 Hide
 Type "cd /tmp/gen-demo"
 Enter
