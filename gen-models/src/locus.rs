@@ -56,7 +56,11 @@ impl GraphLocus {
     /// The slice and local offset (0-based, within that slice's block) at the
     /// midpoint of this locus's total sequence length. `None` for an empty locus.
     pub fn midpoint(&self) -> Option<(GraphNodeSlice, usize)> {
-        let total: usize = self.slices.iter().map(|s| s.end - s.start).sum();
+        let total: usize = self
+            .slices
+            .iter()
+            .map(|slice| slice.end - slice.start)
+            .sum();
         if total == 0 {
             return None;
         }
@@ -99,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn midpoint_single_slice_is_centered_within_it() {
+    fn test_midpoint_single_slice_is_centered_within_it() {
         let block = node(1, 0, 10);
         let locus = GraphLocus {
             slices: vec![slice(block, 2, 8)],
@@ -109,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn midpoint_spans_into_second_slice() {
+    fn test_midpoint_spans_into_second_slice() {
         let first = node(1, 0, 10);
         let second = node(2, 0, 10);
         let locus = GraphLocus {
@@ -121,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn midpoint_of_empty_locus_is_none() {
+    fn test_midpoint_of_empty_locus_is_none() {
         let locus = GraphLocus { slices: vec![] };
         assert_eq!(locus.midpoint(), None);
     }

@@ -718,13 +718,26 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use gen_core::{HashId, Strand};
+    use gen_models::sample::Sample;
     use gen_tui::{
         geometry::WorldPos,
+        graph_controller::HighlightKind,
+        testing::create_test_terminal,
         viewport_state::{ViewportState, WorldBuffer},
     };
-    use ratatui::backend::TestBackend;
+    use ratatui::{backend::TestBackend, widgets::StatefulWidget as _};
 
     use super::*;
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::setup_gen_on_disk,
+        track_database,
+        updates::vcf::update_with_vcf,
+        views::{annotation_track::AnnotationSegment, graph_overlay::OverlayContent},
+    };
 
     /// Test coordinate handling for very large genomic sequences
     ///
@@ -807,18 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_zygosity_pruned_edges() {
-        use std::path::PathBuf;
-
-        use gen_models::sample::Sample;
-        use gen_tui::{graph_widget::GraphWidget, testing::create_test_terminal};
-        use ratatui::widgets::StatefulWidget as _;
-
-        use crate::{
-            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
-            updates::vcf::update_with_vcf,
-        };
-
+    fn test_snapshot_zygosity_pruned_edges() {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -884,18 +886,7 @@ mod tests {
     /// as `AAAAA...BBBBB` (13 cells), raw column 2 stays at cell 2 while raw column
     /// 31 (three from the end) lands at cell 10.
     #[test]
-    fn cell_highlight_remaps_on_detail_change() {
-        use std::path::PathBuf;
-
-        use gen_core::strand::Strand;
-        use gen_graph::GraphNodeSlice;
-        use gen_models::{locus::GraphLocus, sample::Sample};
-        use ratatui::{layout::Rect, style::Color};
-
-        use crate::{
-            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
-        };
-
+    fn test_cell_highlight_remaps_on_detail_change() {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -958,15 +949,7 @@ mod tests {
     /// covered block, and overlay application order must be by total annotation
     /// length, not by the length of any individual per-block segment.
     #[test]
-    fn reapply_overlays_covers_each_block_and_orders_by_total_length() {
-        use gen_core::{HashId, Strand};
-        use gen_tui::graph_controller::HighlightKind;
-
-        use crate::views::{
-            annotation_track::{AnnotationSegment, AnnotationSpan},
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_covers_each_block_and_orders_by_total_length() {
         let node_a = GraphNode {
             node_id: HashId::convert_str("block-a"),
             sequence_start: 0,
@@ -1082,15 +1065,7 @@ mod tests {
     /// (too busy fully zoomed out), while an ad-hoc annotation overlay (Jupyter widget's
     /// `add_annotation`) still paints.
     #[test]
-    fn reapply_overlays_hides_track_overlays_at_minimal_detail() {
-        use gen_core::{HashId, Strand};
-        use gen_tui::graph_controller::HighlightKind;
-
-        use crate::views::{
-            annotation_track::{AnnotationSegment, AnnotationSpan},
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_hides_track_overlays_at_minimal_detail() {
         let node = GraphNode {
             node_id: HashId::convert_str("block"),
             sequence_start: 0,
@@ -1174,14 +1149,7 @@ mod tests {
     /// either, so nothing forces it away from whatever color the rotation gives it next —
     /// collision-avoidance should only kick in for annotations that actually touch.
     #[test]
-    fn reapply_overlays_avoids_color_collisions_between_overlapping_spans() {
-        use gen_core::{HashId, Strand};
-
-        use crate::views::{
-            annotation_track::AnnotationSegment,
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_avoids_color_collisions_between_overlapping_spans() {
         let shared_node = GraphNode {
             node_id: HashId::convert_str("shared-block"),
             sequence_start: 0,
@@ -1268,14 +1236,7 @@ mod tests {
     /// than deriving a color from each annotation's id, so two arbitrary unrelated
     /// annotations don't coincidentally land on the same one.
     #[test]
-    fn reapply_overlays_cycles_colors_for_new_non_conflicting_spans() {
-        use gen_core::{HashId, Strand};
-
-        use crate::views::{
-            annotation_track::AnnotationSegment,
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_cycles_colors_for_new_non_conflicting_spans() {
         let mut graph = GenGraph::new();
         let nodes: Vec<GraphNode> = (0..3)
             .map(|i| {
@@ -1326,14 +1287,7 @@ mod tests {
     /// the overlays happen to be given in a different order, so annotations don't flicker
     /// between colors as the user scrolls.
     #[test]
-    fn reapply_overlays_keeps_colors_stable_across_repeated_calls() {
-        use gen_core::{HashId, Strand};
-
-        use crate::views::{
-            annotation_track::AnnotationSegment,
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_keeps_colors_stable_across_repeated_calls() {
         let node = GraphNode {
             node_id: HashId::convert_str("block"),
             sequence_start: 0,
