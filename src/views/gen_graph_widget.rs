@@ -532,26 +532,26 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
     let node_sizer = &controller.partition_controller.node_sizer;
     let graph = controller.graph();
 
-    // At the minimal detail level, DB-loaded annotation tracks are hidden entirely (too
-    // busy at that zoom); ad-hoc/single annotations and the path highlight still paint.
-    // At the truncated level, a span confined to a partial slice of a single node is also
-    // dropped (mirrors the label suppression below), since its painted cells would land on
-    // a collapsed node with no room to convey which part of it they cover.
+    // DB-loaded tracks are too busy to paint at minimal detail; a span confined to a
+    // partial slice of a single node is also dropped at truncated detail, mirroring the
+    // label suppression below.
     let mut span_indices: Vec<usize> = overlays
         .iter()
         .enumerate()
         .filter_map(|(idx, overlay)| {
-            if detail_level == VisualDetail::Minimal
-                && matches!(overlay.source, OverlaySource::Track(_))
-            {
-                return None;
-            }
-            let span = overlay.span()?;
-            if detail_level == VisualDetail::Truncated && span_should_hide_in_truncated(span, graph)
-            {
-                return None;
-            }
-            Some(idx)
+            overlay
+                .span()
+                .filter(|_| {
+                    !matches!(
+                        (detail_level, &overlay.source),
+                        (VisualDetail::Minimal, OverlaySource::Track(_))
+                    )
+                })
+                .filter(|span| {
+                    detail_level != VisualDetail::Truncated
+                        || !span_should_hide_in_truncated(span, graph)
+                })
+                .map(|_| idx)
         })
         .collect();
     span_indices.sort_by_key(|&idx| {
@@ -639,18 +639,18 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     overlays: &[GraphOverlay],
 ) -> bool {
     let detail_level = controller.get_detail_level();
-    // At the minimal detail level, DB-loaded annotation tracks are hidden entirely (too
-    // busy at that zoom); ad-hoc/single annotations still get labelled.
     let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
         .iter()
-        .filter(|overlay| {
-            detail_level != VisualDetail::Minimal
-                || !matches!(overlay.source, OverlaySource::Track(_))
-        })
         .filter_map(|overlay| {
             overlay
                 .span()
                 .filter(|span| !span.name.is_empty())
+                .filter(|_| {
+                    !matches!(
+                        (detail_level, &overlay.source),
+                        (VisualDetail::Minimal, OverlaySource::Track(_))
+                    )
+                })
                 .map(|span| (span, overlay.style))
         })
         .collect();
