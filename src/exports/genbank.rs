@@ -89,20 +89,23 @@ fn export_annotations(
     path_blocks: &[PathBlock],
     seq: &mut gb_io::seq::Seq,
     sample_name: &str,
+    history_ref: Option<&str>,
 ) -> Result<(), GenbankExportError> {
-    let annotations = Annotation::query_by_sample(conn, sample_name)?;
+    let annotations = Annotation::query_by_sample(conn, sample_name, history_ref)?;
     for annotation in annotations {
-        let Some(accession) = Accession::get_by_id(conn, &annotation.accession_id) else {
+        let Some(accession) = Accession::get_by_id(conn, &annotation.accession_id, history_ref)
+        else {
             continue;
         };
         if accession.block_group_id != path.block_group_id {
             continue;
         }
 
-        let accession_segments = Accession::get_nodes_by_id(conn, &annotation.accession_id)
-            .iter()
-            .map(AnnotationSegment::from)
-            .collect::<Vec<_>>();
+        let accession_segments =
+            Accession::get_nodes_by_id(conn, &annotation.accession_id, history_ref)
+                .iter()
+                .map(AnnotationSegment::from)
+                .collect::<Vec<_>>();
         let genbank_extra = annotation
             .extra
             .as_ref()
@@ -254,6 +257,7 @@ pub fn export_genbank(
     collection_name: &str,
     sample_name: &str,
     writer: impl Write,
+    history_ref: Option<&str>,
 ) -> Result<(), GenbankExportError> {
     // GenBank don't really support graph like structures. Programs like Geneious use features to
     // mark where changes have occurred, and for now we replicate this approach. However, we are
@@ -269,24 +273,31 @@ pub fn export_genbank(
     // sequence returned. Once again, we assume there is only one graph bubble when we encounter
     // them, so there is only 1 change to represent. We do not guard against this being an incorrect
     // assumption.
-    let block_groups = Sample::get_block_groups(conn, collection_name, sample_name);
+    let block_groups = Sample::get_block_groups(conn, collection_name, sample_name, history_ref);
 
     let mut writer = gb_io::writer::SeqWriter::new(writer);
 
     for block_group in block_groups.iter() {
-        let path = BlockGroup::get_current_path(conn, &block_group.id)?;
+        let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
         let path_blocks = path
-            .blocks(conn)?
+            .blocks(conn, history_ref)?
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
         let mut seq = gb_io::seq::Seq::empty();
         seq.name = Some(block_group.name.clone());
-        seq.seq = path.sequence(conn)?.into_bytes();
-        export_annotations(conn, &path, &path_blocks, &mut seq, sample_name)?;
+        seq.seq = path.sequence(conn, history_ref)?.into_bytes();
+        export_annotations(
+            conn,
+            &path,
+            &path_blocks,
+            &mut seq,
+            sample_name,
+            history_ref,
+        )?;
 
         // Identify the node traversal corresponding to our path.
-        let graph = BlockGroup::get_graph(conn, &block_group.id)?;
+        let graph = BlockGroup::get_graph(conn, &block_group.id, history_ref)?;
         let path_nodes = get_path_nodes(&graph, &path_blocks);
         let path_node_set: HashSet<&GraphNode> = HashSet::from_iter(&path_nodes);
         let mut node_it = path_nodes.iter().peekable();
@@ -320,7 +331,7 @@ pub fn export_genbank(
 
                     let mut sequence = String::new();
                     for sub_node in sub_path.iter() {
-                        let seqs = Node::get_sequences_by_node_ids(conn, &[sub_node.node_id]);
+                        let seqs = Node::get_sequences_by_node_ids(conn, &[sub_node.node_id], None);
                         let seq = &seqs[&sub_node.node_id];
                         sequence.push_str(
                             &seq.get_sequence(sub_node.sequence_start, sub_node.sequence_end)?,
@@ -441,7 +452,7 @@ mod tests {
         annotations::{Annotation, AnnotationExtra, GenBankExtra, GenBankLocationOperator},
         block_group::BlockGroup,
         file_types::FileTypes,
-        metadata,
+        history::dolt::commit_all,
         operations::{OperationFile, OperationInfo},
         path::Path,
     };
@@ -449,8 +460,7 @@ mod tests {
     use super::*;
     use crate::{
         imports::genbank::{GenBankImportOptions, import_genbank},
-        test_helpers::{setup_block_group, setup_gen},
-        track_database,
+        test_helpers::{setup_block_group, setup_gen, setup_gen_on_disk},
     };
 
     fn compare_genbanks(a: &std::path::Path, b: &[u8]) {
@@ -533,7 +543,7 @@ mod tests {
         sample_name: &str,
     ) {
         let blocks = path
-            .blocks(conn)
+            .blocks(conn, None)
             .unwrap()
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
@@ -584,9 +594,7 @@ mod tests {
     fn test_import_then_export_insertion() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let op_conn = context.config().conn();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
@@ -607,7 +615,7 @@ mod tests {
         )
         .unwrap();
         let mut output = Vec::new();
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output, None).unwrap();
         compare_genbanks(&path, &output);
     }
 
@@ -615,9 +623,7 @@ mod tests {
     fn test_import_then_export_replacement() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let op_conn = context.config().conn();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/deletion_and_insertion.gb");
@@ -638,7 +644,7 @@ mod tests {
         )
         .unwrap();
         let mut output = Vec::new();
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output, None).unwrap();
         compare_genbanks(&path, &output);
     }
 
@@ -646,9 +652,7 @@ mod tests {
     fn test_import_then_export_multiple_operations() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let op_conn = context.config().conn();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");
@@ -669,7 +673,7 @@ mod tests {
         )
         .unwrap();
         let mut output = Vec::new();
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output).unwrap();
+        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output, None).unwrap();
         compare_genbanks(&path, &output);
     }
 
@@ -677,9 +681,7 @@ mod tests {
     fn test_import_then_export_annotations() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let op_conn = context.config().conn();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
         let file = File::open(&path).unwrap();
@@ -700,7 +702,7 @@ mod tests {
         .unwrap();
 
         let mut output = Vec::new();
-        export_genbank(conn, "fixtures", "puc19-export", &mut output).unwrap();
+        export_genbank(conn, "fixtures", "puc19-export", &mut output, None).unwrap();
 
         let parsed = reader::parse_slice(&output).unwrap();
         let features = &parsed[0].features;
@@ -828,7 +830,7 @@ mod tests {
         );
 
         let mut output = Vec::new();
-        export_genbank(conn, "test", "test", &mut output).unwrap();
+        export_genbank(conn, "test", "test", &mut output, None).unwrap();
 
         let parsed = reader::parse_slice(&output).unwrap();
         let features = &parsed[0].features;
@@ -930,7 +932,7 @@ mod tests {
             "test",
         );
 
-        let annotation = Annotation::query_by_group(conn, "export-track")
+        let annotation = Annotation::query_by_group(conn, "export-track", None)
             .unwrap()
             .into_iter()
             .find(|annotation| annotation.name == "legacy-note")
@@ -955,7 +957,7 @@ mod tests {
         .unwrap();
 
         let mut output = Vec::new();
-        export_genbank(conn, "test", "test", &mut output).unwrap();
+        export_genbank(conn, "test", "test", &mut output, None).unwrap();
 
         let exported_text = String::from_utf8(output).unwrap();
         assert!(
@@ -970,6 +972,54 @@ mod tests {
             ),
             "export should not preserve blank lines from legacy stored qualifier text"
         );
+    }
+
+    #[test]
+    fn test_export_genbank_reads_annotations_from_history_ref() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let (_block_group_id, path) = setup_block_group(conn);
+        let base_commit = commit_all(conn, "base graph").expect("should commit base graph");
+
+        create_annotation_with_segments(
+            conn,
+            &path,
+            "later-annotation",
+            &[(0, 0, 5, Strand::Forward)],
+            None,
+            "test",
+        );
+        commit_all(conn, "add later annotation").expect("should commit annotation");
+        let base_ref = base_commit.to_string();
+
+        let mut historical_output = Vec::new();
+        export_genbank(
+            conn,
+            "test",
+            "test",
+            &mut historical_output,
+            Some(&base_ref),
+        )
+        .expect("should export historical GenBank");
+        let historical_labels = reader::parse_slice(&historical_output)
+            .expect("should parse historical GenBank")
+            .into_iter()
+            .flat_map(|sequence| sequence.features)
+            .filter_map(|feature| feature_label(&feature))
+            .collect::<HashSet<_>>();
+
+        let mut current_output = Vec::new();
+        export_genbank(conn, "test", "test", &mut current_output, None)
+            .expect("should export current GenBank");
+        let current_labels = reader::parse_slice(&current_output)
+            .expect("should parse current GenBank")
+            .into_iter()
+            .flat_map(|sequence| sequence.features)
+            .filter_map(|feature| feature_label(&feature))
+            .collect::<HashSet<_>>();
+
+        assert!(!historical_labels.contains("later-annotation"));
+        assert!(current_labels.contains("later-annotation"));
     }
 
     #[test]

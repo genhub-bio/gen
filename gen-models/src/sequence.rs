@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs, str, sync};
 
 use cached::proc_macro::cached;
-use gen_core::{HashId, traits::Capnp};
+use gen_core::{HashId, Sha256Hash, traits::Capnp};
 use noodles::{
     bgzf::{self, gzi},
     core::Region,
@@ -16,7 +16,7 @@ use crate::{db::GraphConnection, gen_models_capnp::sequence, traits::*};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct Sequence {
-    pub hash: HashId,
+    pub hash: Sha256Hash,
     pub sequence_type: String,
     sequence: String,
     // these 2 fields are only relevant when the sequence is stored externally
@@ -156,7 +156,7 @@ impl<'a> NewSequence<'a> {
         self
     }
 
-    pub fn hash(&self) -> HashId {
+    pub fn hash(&self) -> Sha256Hash {
         let mut hasher = Sha256::new();
         hasher.update(self.sequence_type.expect("Sequence type must be defined."));
         hasher.update(";");
@@ -179,7 +179,7 @@ impl<'a> NewSequence<'a> {
         }
         hasher.update(";");
 
-        HashId(hasher.finalize().into())
+        Sha256Hash(hasher.finalize().into())
     }
 
     pub fn build(self) -> Sequence {
@@ -220,7 +220,7 @@ impl<'a> NewSequence<'a> {
         match conn.query_row(
             "SELECT hash from sequences where hash = ?1;",
             [hash],
-            |row| row.get::<_, HashId>(0),
+            |row| row.get::<_, Sha256Hash>(0),
         ) {
             Ok(_) => {}
             Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -469,7 +469,7 @@ impl Sequence {
         sequence_slice(&self.sequence, start, end, self.is_circular())
     }
 
-    pub fn delete_by_hash(conn: &GraphConnection, hash: &HashId) {
+    pub fn delete_by_hash(conn: &GraphConnection, hash: &Sha256Hash) {
         let mut stmt = conn
             .prepare("delete from sequences where hash = ?1;")
             .unwrap();
@@ -497,7 +497,7 @@ impl Query for Sequence {
         if !file_path.is_empty() {
             external_sequence = true;
         }
-        let hash: HashId = row.get(0).unwrap();
+        let hash: Sha256Hash = row.get(0).unwrap();
         let sequence = row.get(2).unwrap();
         Sequence {
             hash,
@@ -783,7 +783,7 @@ mod tests {
         use capnp::message::TypedBuilder;
 
         let sequence = Sequence {
-            hash: HashId::convert_str("test_hash"),
+            hash: Sha256Hash::convert_str("test_hash"),
             sequence_type: "DNA".to_string(),
             sequence: "ATCG".to_string(),
             name: "test_seq".to_string(),

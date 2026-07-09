@@ -12,16 +12,13 @@ use crate::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
-    db::{DbContext, GraphConnection, OperationsConnection},
+    db::{ConfigConnection, DbContext, GraphConnection},
     edge::Edge,
-    file_types::FileTypes,
     migrations::{run_migrations, run_operation_migrations},
     node::Node,
-    operations::{Operation, OperationFile, OperationInfo},
     path::Path,
     sample::{NewSample, Sample},
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
 };
 
 pub fn create_bg(
@@ -68,9 +65,9 @@ pub fn get_connection<'a>(
     Ok(GraphConnection(conn))
 }
 
-pub fn get_operation_connection<'a>(
+pub fn get_config_connection<'a>(
     db_path: impl Into<Option<&'a str>>,
-) -> Result<OperationsConnection, ConnectionError> {
+) -> Result<ConfigConnection, ConnectionError> {
     let path: Option<&str> = db_path.into();
     let mut conn;
     if let Some(v) = path {
@@ -83,7 +80,7 @@ pub fn get_operation_connection<'a>(
     }
     rusqlite::vtab::array::load_module(&conn)?;
     run_operation_migrations(&mut conn);
-    Ok(OperationsConnection(conn))
+    Ok(ConfigConnection(conn))
 }
 
 pub fn setup_gen() -> DbContext {
@@ -91,8 +88,17 @@ pub fn setup_gen() -> DbContext {
     let workspace = Workspace::new(tmp_dir);
     workspace.ensure_gen_dir();
     let graph_conn = get_connection(None).unwrap();
-    let operation_conn = get_operation_connection(None).unwrap();
-    DbContext::new(workspace, graph_conn, operation_conn)
+    let operation_conn = get_config_connection(None).unwrap();
+    DbContext::new(workspace, graph_conn, operation_conn).unwrap()
+}
+
+pub fn setup_gen_on_disk() -> DbContext {
+    let tmp_dir = tempdir().unwrap().keep();
+    let workspace = Workspace::new(tmp_dir);
+    workspace.ensure_gen_dir();
+    let graph_conn = get_connection(workspace.graph_db_path().unwrap().to_str().unwrap()).unwrap();
+    let operation_conn = get_config_connection(workspace.gen_db_path().unwrap().to_str()).unwrap();
+    DbContext::new(workspace, graph_conn, operation_conn).unwrap()
 }
 
 pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
@@ -234,43 +240,19 @@ where
     v1.sort();
     let mut v2: Vec<_> = tree.query(i..(i + 1)).map(|x| x.value).collect();
     v2.sort();
+    let mut expected = expected.to_vec();
+    expected.sort();
     assert_eq!(v1, expected);
     assert_eq!(v2, expected);
 }
 
-pub fn create_operation(
-    context: &DbContext,
-    file_path: &str,
-    file_type: FileTypes,
-    description: &str,
-    hash: impl Into<Option<HashId>>,
-) -> Operation {
-    let repo_root = context.repo_root().unwrap();
-    if !file_path.is_empty() && file_type != FileTypes::Changeset {
-        let full_path = if std::path::Path::new(file_path).is_absolute() {
-            std::path::PathBuf::from(file_path)
-        } else {
-            repo_root.join(file_path)
-        };
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        if !full_path.exists() {
-            fs::write(&full_path, b"test file content").unwrap();
-        }
-    }
-
-    let conn = context.graph().conn();
-    let mut session = start_operation(conn);
-    end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
-            files: vec![OperationFile::new(file_path.to_string()).set_file_type(file_type)],
-            description: description.to_string(),
-        },
-        "test operation",
-        hash,
-    )
-    .unwrap()
+pub fn run_query(conn: &Connection, query: &str) {
+    let mut stmt = conn.prepare(query).unwrap();
+    for _ in stmt
+        .query_map([], |row| {
+            dbg!(&row);
+            Ok(())
+        })
+        .unwrap()
+    {}
 }

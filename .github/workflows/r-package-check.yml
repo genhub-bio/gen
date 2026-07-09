@@ -16,9 +16,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          disable_annotations: true
+
+      - name: Prepare sccache build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/sccache-build-context"
+          cp "$SCCACHE_PATH" "$RUNNER_TEMP/sccache-build-context/sccache"
+          chmod +x "$RUNNER_TEMP/sccache-build-context/sccache"
+
       - name: Build Docker install test image
         env:
           GITHUB_PAT: ${{ secrets.MINIMAL_RO_PAT }}
         run: |
-          DOCKER_BUILDKIT=1 docker build -f gen-r/Dockerfile --secret id=github_pat,env=GITHUB_PAT -t gen-r-install-test .
+          DOCKER_BUILDKIT=1 docker build \
+            -f gen-r/Dockerfile \
+            --build-context sccache="$RUNNER_TEMP/sccache-build-context" \
+            --secret id=github_pat,env=GITHUB_PAT \
+            --secret id=actions_results_url,env=ACTIONS_RESULTS_URL \
+            --secret id=actions_runtime_token,env=ACTIONS_RUNTIME_TOKEN \
+            -t gen-r-install-test \
+            .
           docker run --rm gen-r-install-test

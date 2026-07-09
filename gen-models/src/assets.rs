@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
@@ -6,14 +7,20 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-use gen_core::{HashId, Workspace, calculate_hash};
+use gen_core::{HashId, Sha256Hash, Workspace, calculate_hash};
 use opendal::{blocking, services};
+use rusqlite::{
+    Row, ToSql, named_params, params,
+    types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
+};
 use sha2::{Digest, Sha256};
 use url::{Position, Url};
 
 use crate::{
-    errors::{FileAdditionError, FileStoreError},
+    db::GraphConnection,
+    errors::{FileAdditionError, FileStoreError, QueryError},
     operations::{FileAddition, calculate_reader_checksum},
+    traits::Query,
 };
 
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
@@ -22,6 +29,65 @@ static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .build()
         .expect("failed to build OpenDAL runtime")
 });
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum OperationKind {
+    AddFile,
+    AnnotationFile,
+    HistoryCommit,
+    Other(String),
+}
+
+impl OperationKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            OperationKind::AddFile => "add-file",
+            OperationKind::AnnotationFile => "annotation-file",
+            OperationKind::HistoryCommit => "history-commit",
+            OperationKind::Other(kind) => kind.as_str(),
+        }
+    }
+}
+
+impl From<&str> for OperationKind {
+    fn from(kind: &str) -> Self {
+        match kind {
+            "add-file" => OperationKind::AddFile,
+            "annotation-file" => OperationKind::AnnotationFile,
+            "history-commit" => OperationKind::HistoryCommit,
+            other => OperationKind::Other(other.to_string()),
+        }
+    }
+}
+
+impl From<String> for OperationKind {
+    fn from(kind: String) -> Self {
+        match kind.as_str() {
+            "add-file" => OperationKind::AddFile,
+            "annotation-file" => OperationKind::AnnotationFile,
+            "history-commit" => OperationKind::HistoryCommit,
+            _ => OperationKind::Other(kind),
+        }
+    }
+}
+
+impl core::fmt::Display for OperationKind {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl ToSql for OperationKind {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
+impl FromSql for OperationKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value.as_str().map(OperationKind::from)
+    }
+}
 
 fn with_opendal_runtime<T>(f: impl FnOnce() -> T) -> T {
     let _guard = OPENDAL_RUNTIME.enter();
@@ -36,6 +102,350 @@ fn opendal_file_store_error(err: opendal::Error) -> FileStoreError {
     FileStoreError::IoError(io::Error::other(err))
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum AssetRole {
+    Input,
+    Annotation,
+    AnnotationIndex,
+    Other(String),
+}
+
+impl AssetRole {
+    pub fn as_str(&self) -> &str {
+        match self {
+            AssetRole::Input => "input",
+            AssetRole::Annotation => "annotation",
+            AssetRole::AnnotationIndex => "annotation-index",
+            AssetRole::Other(role) => role.as_str(),
+        }
+    }
+}
+
+impl From<&str> for AssetRole {
+    fn from(role: &str) -> Self {
+        match role {
+            "input" => AssetRole::Input,
+            "annotation" => AssetRole::Annotation,
+            "annotation-index" => AssetRole::AnnotationIndex,
+            other => AssetRole::Other(other.to_string()),
+        }
+    }
+}
+
+impl From<String> for AssetRole {
+    fn from(role: String) -> Self {
+        match role.as_str() {
+            "input" => AssetRole::Input,
+            "annotation" => AssetRole::Annotation,
+            "annotation-index" => AssetRole::AnnotationIndex,
+            _ => AssetRole::Other(role),
+        }
+    }
+}
+
+impl core::fmt::Display for AssetRole {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl ToSql for AssetRole {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
+impl FromSql for AssetRole {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value.as_str().map(AssetRole::from)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetRef {
+    pub id: HashId,
+    pub uri: String,
+    pub file_type: String,
+    pub checksum: Option<Sha256Hash>,
+    pub size: Option<i64>,
+    pub role: AssetRole,
+    pub logical_path: Option<String>,
+    pub name: Option<String>,
+    pub created_on: i64,
+}
+
+pub struct Assets;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotationFileAssets {
+    pub log_id: HashId,
+    pub annotation: AssetRef,
+    pub index: Option<AssetRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationLog {
+    pub id: HashId,
+    pub operation_kind: OperationKind,
+    pub command: String,
+    pub created_on: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationAsset {
+    pub log_id: HashId,
+    pub asset_ref_id: HashId,
+    pub role: AssetRole,
+}
+
+impl Query for AssetRef {
+    type Model = AssetRef;
+
+    const PRIMARY_KEY: &'static str = "id";
+    const TABLE_NAME: &'static str = "gen_asset_refs";
+
+    fn process_row(row: &Row) -> Self::Model {
+        Self {
+            id: row.get("id").unwrap(),
+            uri: row.get("uri").unwrap(),
+            file_type: row.get("file_type").unwrap(),
+            checksum: row.get("checksum").unwrap(),
+            size: row.get("size").unwrap(),
+            role: row.get("role").unwrap(),
+            logical_path: row.get("logical_path").unwrap(),
+            name: row.get("name").unwrap(),
+            created_on: row.get("created_on").unwrap(),
+        }
+    }
+}
+
+impl Query for OperationLog {
+    type Model = OperationLog;
+
+    const PRIMARY_KEY: &'static str = "id";
+    const TABLE_NAME: &'static str = "gen_operation_log";
+
+    fn process_row(row: &Row) -> Self::Model {
+        Self {
+            id: row.get("id").unwrap(),
+            operation_kind: row.get("operation_kind").unwrap(),
+            command: row.get("command").unwrap(),
+            created_on: row.get("created_on").unwrap(),
+        }
+    }
+}
+
+impl Query for OperationAsset {
+    type Model = OperationAsset;
+
+    const PRIMARY_KEY: &'static str = "log_id";
+    const TABLE_NAME: &'static str = "gen_operation_assets";
+
+    fn process_row(row: &Row) -> Self::Model {
+        Self {
+            log_id: row.get("log_id").unwrap(),
+            asset_ref_id: row.get("asset_ref_id").unwrap(),
+            role: row.get("role").unwrap(),
+        }
+    }
+}
+
+impl AssetRef {
+    pub fn id_hash(
+        uri: &str,
+        file_type: &str,
+        checksum: Option<&Sha256Hash>,
+        role: &AssetRole,
+        logical_path: Option<&str>,
+        name: Option<&str>,
+    ) -> HashId {
+        let checksum = checksum
+            .map(|checksum| checksum.to_string())
+            .unwrap_or_default();
+        HashId(calculate_hash(&format!(
+            "{uri}:{file_type}:{checksum}:{role}:{logical_path}:{name}",
+            role = role.as_str(),
+            logical_path = logical_path.unwrap_or_default(),
+            name = name.unwrap_or_default(),
+        )))
+    }
+
+    pub fn create(conn: &GraphConnection, asset_ref: &AssetRef) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT OR IGNORE INTO gen_asset_refs \
+             (id, uri, file_type, checksum, size, role, logical_path, name, created_on) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                asset_ref.id,
+                asset_ref.uri,
+                asset_ref.file_type,
+                asset_ref.checksum,
+                asset_ref.size,
+                &asset_ref.role,
+                asset_ref.logical_path,
+                asset_ref.name,
+                asset_ref.created_on
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+impl Assets {
+    pub fn get_branch_assets(
+        conn: &GraphConnection,
+        branch: &str,
+    ) -> Result<HashMap<HashId, AssetRef>, QueryError> {
+        let query = format!(
+            "SELECT * FROM {} ORDER BY id",
+            AssetRef::table_name_with_history_ref(Some(branch))
+        );
+        let assets = AssetRef::try_query(conn, &query, named_params! { ":history_ref": branch })?;
+        Ok(assets
+            .into_iter()
+            .filter(|asset| LocalAssetUri::is_file_uri(&asset.uri))
+            .map(|asset| (asset.id, asset))
+            .collect())
+    }
+
+    pub fn get_annotation_files(
+        conn: &GraphConnection,
+        history_ref: Option<&str>,
+    ) -> Result<Vec<AnnotationFileAssets>, QueryError> {
+        let operation_logs_table = OperationLog::table_name_with_history_ref(history_ref);
+        let operation_assets_table = OperationAsset::table_name_with_history_ref(history_ref);
+        let asset_refs_table = AssetRef::table_name_with_history_ref(history_ref);
+        let query = format!(
+            "SELECT operation_logs.id AS log_id, \
+                    annotation_assets.id AS annotation_id, \
+                    annotation_assets.uri AS annotation_uri, \
+                    annotation_assets.file_type AS annotation_file_type, \
+                    annotation_assets.checksum AS annotation_checksum, \
+                    annotation_assets.size AS annotation_size, \
+                    annotation_assets.role AS annotation_role, \
+                    annotation_assets.logical_path AS annotation_logical_path, \
+                    annotation_assets.name AS annotation_name, \
+                    annotation_assets.created_on AS annotation_created_on, \
+                    index_assets.id AS index_id, \
+                    index_assets.uri AS index_uri, \
+                    index_assets.file_type AS index_file_type, \
+                    index_assets.checksum AS index_checksum, \
+                    index_assets.size AS index_size, \
+                    index_assets.role AS index_role, \
+                    index_assets.logical_path AS index_logical_path, \
+                    index_assets.name AS index_name, \
+                    index_assets.created_on AS index_created_on \
+             FROM {operation_logs_table} operation_logs \
+             JOIN {operation_assets_table} annotation_operation_assets \
+               ON annotation_operation_assets.log_id = operation_logs.id \
+              AND annotation_operation_assets.role = :annotation_role \
+             JOIN {asset_refs_table} annotation_assets \
+               ON annotation_assets.id = annotation_operation_assets.asset_ref_id \
+             LEFT JOIN {operation_assets_table} index_operation_assets \
+               ON index_operation_assets.log_id = operation_logs.id \
+              AND index_operation_assets.role = :index_role \
+             LEFT JOIN {asset_refs_table} index_assets \
+               ON index_assets.id = index_operation_assets.asset_ref_id \
+             WHERE operation_logs.operation_kind = :operation_kind \
+             ORDER BY operation_logs.created_on, annotation_assets.created_on, \
+                      annotation_assets.name"
+        );
+        let operation_kind = OperationKind::AnnotationFile;
+        let annotation_role = AssetRole::Annotation;
+        let index_role = AssetRole::AnnotationIndex;
+        let mut query_params: Vec<(&str, &dyn ToSql)> = vec![
+            (":operation_kind", &operation_kind),
+            (":annotation_role", &annotation_role),
+            (":index_role", &index_role),
+        ];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        let mut statement = conn.prepare(&query)?;
+        let rows = statement.query_map(&query_params[..], |row| {
+            let index = match row.get::<_, Option<HashId>>("index_id")? {
+                Some(id) => Some(AssetRef {
+                    id,
+                    uri: row.get("index_uri")?,
+                    file_type: row.get("index_file_type")?,
+                    checksum: row.get("index_checksum")?,
+                    size: row.get("index_size")?,
+                    role: row.get("index_role")?,
+                    logical_path: row.get("index_logical_path")?,
+                    name: row.get("index_name")?,
+                    created_on: row.get("index_created_on")?,
+                }),
+                None => None,
+            };
+            Ok(AnnotationFileAssets {
+                log_id: row.get("log_id")?,
+                annotation: AssetRef {
+                    id: row.get("annotation_id")?,
+                    uri: row.get("annotation_uri")?,
+                    file_type: row.get("annotation_file_type")?,
+                    checksum: row.get("annotation_checksum")?,
+                    size: row.get("annotation_size")?,
+                    role: row.get("annotation_role")?,
+                    logical_path: row.get("annotation_logical_path")?,
+                    name: row.get("annotation_name")?,
+                    created_on: row.get("annotation_created_on")?,
+                },
+                index,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(QueryError::from)
+    }
+}
+
+impl OperationLog {
+    pub fn id_hash(operation_kind: &OperationKind, command: &str, created_on: i64) -> HashId {
+        HashId(calculate_hash(&format!(
+            "{operation_kind}:{command}:{created_on}"
+        )))
+    }
+
+    pub fn create(conn: &GraphConnection, operation_log: &OperationLog) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT OR IGNORE INTO gen_operation_log (id, operation_kind, command, created_on) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                operation_log.id,
+                &operation_log.operation_kind,
+                operation_log.command,
+                operation_log.created_on
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+impl OperationAsset {
+    pub fn create(
+        conn: &GraphConnection,
+        operation_asset: &OperationAsset,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT OR IGNORE INTO gen_operation_assets (log_id, asset_ref_id, role) \
+             VALUES (?1, ?2, ?3)",
+            params![
+                operation_asset.log_id,
+                operation_asset.asset_ref_id,
+                &operation_asset.role
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn by_log_id(conn: &GraphConnection, log_id: &HashId) -> Vec<Self> {
+        Self::query(
+            conn,
+            "SELECT * FROM gen_operation_assets WHERE log_id = ?1",
+            params![log_id],
+        )
+    }
+}
+
 #[doc(hidden)]
 pub struct OpenDalLocation {
     operator: blocking::Operator,
@@ -44,7 +454,7 @@ pub struct OpenDalLocation {
 
 struct ChecksumState {
     hasher: Sha256,
-    checksum: Option<HashId>,
+    checksum: Option<Sha256Hash>,
     complete: bool,
 }
 
@@ -54,12 +464,12 @@ pub struct ChecksumHandle {
 }
 
 impl ChecksumHandle {
-    pub fn checksum(&self) -> Option<HashId> {
+    pub fn checksum(&self) -> Option<Sha256Hash> {
         let state = self.state.lock().unwrap();
         if state.complete { state.checksum } else { None }
     }
 
-    pub fn finalized_checksum(&self) -> Option<HashId> {
+    pub fn finalized_checksum(&self) -> Option<Sha256Hash> {
         self.state.lock().unwrap().checksum
     }
 }
@@ -95,7 +505,7 @@ impl Read for ChecksummedReader {
         if bytes_read == 0 {
             if state.checksum.is_none() {
                 let finalized = state.hasher.clone().finalize();
-                state.checksum = Some(HashId(finalized.into()));
+                state.checksum = Some(Sha256Hash(finalized.into()));
             }
             state.complete = true;
         } else {
@@ -110,7 +520,7 @@ impl Drop for ChecksummedReader {
         let mut state = self.state.lock().unwrap();
         if state.checksum.is_none() {
             let finalized = state.hasher.clone().finalize();
-            state.checksum = Some(HashId(finalized.into()));
+            state.checksum = Some(Sha256Hash(finalized.into()));
         }
     }
 }
@@ -200,12 +610,12 @@ impl OpenDalLocation {
         Ok(ChecksummedReader::new(Box::new(reader)))
     }
 
-    fn checksum(&self, display_path: &str) -> Result<HashId, FileAdditionError> {
+    fn checksum(&self, display_path: &str) -> Result<Sha256Hash, FileAdditionError> {
         let reader = match self.operator.reader(&self.path) {
             Ok(reader) => reader,
             Err(err) => {
                 return match err.kind() {
-                    opendal::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
+                    opendal::ErrorKind::NotFound => Ok(Sha256Hash::convert_str("non-existent")),
                     opendal::ErrorKind::PermissionDenied => Err(
                         FileAdditionError::FilePermissionDenied(display_path.to_string()),
                     ),
@@ -219,7 +629,7 @@ impl OpenDalLocation {
         match calculate_reader_checksum(reader) {
             Ok(checksum) => Ok(checksum),
             Err(err) => match err.kind() {
-                io::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
+                io::ErrorKind::NotFound => Ok(Sha256Hash::convert_str("non-existent")),
                 io::ErrorKind::PermissionDenied => Err(FileAdditionError::FilePermissionDenied(
                     display_path.to_string(),
                 )),
@@ -260,19 +670,19 @@ pub trait AssetUri {
     fn checksum(
         &self,
         workspace: &Workspace,
-        checksum_override: Option<HashId>,
-    ) -> Result<HashId, FileAdditionError>;
+        checksum_override: Option<Sha256Hash>,
+    ) -> Result<Sha256Hash, FileAdditionError>;
 
     fn stored_asset_uri(
         &self,
         workspace: &Workspace,
-        checksum: &HashId,
+        checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError>;
 
     fn ensure_asset(
         &self,
         workspace: &Workspace,
-        checksum: &HashId,
+        checksum: &Sha256Hash,
     ) -> Result<(), FileAdditionError>;
 
     fn store_file(
@@ -281,12 +691,14 @@ pub trait AssetUri {
         workspace: &Workspace,
     ) -> Result<(), FileStoreError>;
 
-    fn hashed_filename(&self, checksum: &HashId) -> String {
+    fn hashed_filename(&self, checksum: &Sha256Hash) -> String {
         self.asset_filename(checksum)
     }
 
     fn suffix(&self) -> Option<String> {
-        let path = if LocalAssetUri::has_uri_scheme(self.uri()) {
+        let path = if LocalAssetUri::is_file_uri(self.uri()) {
+            LocalAssetUri::path_from_uri(self.uri())?
+        } else if LocalAssetUri::has_uri_scheme(self.uri()) {
             Url::parse(self.uri()).ok()?.path().to_string()
         } else {
             self.uri().to_string()
@@ -302,7 +714,7 @@ pub trait AssetUri {
             })
     }
 
-    fn generate_file_addition_id(checksum: &HashId, asset_uri: &str) -> HashId
+    fn generate_file_addition_id(checksum: &Sha256Hash, asset_uri: &str) -> HashId
     where
         Self: Sized,
     {
@@ -310,7 +722,7 @@ pub trait AssetUri {
         HashId(calculate_hash(&combined))
     }
 
-    fn asset_filename(&self, checksum: &HashId) -> String {
+    fn asset_filename(&self, checksum: &Sha256Hash) -> String {
         let suffix = self.suffix().unwrap_or_default();
         let suffix = suffix.strip_prefix('.').unwrap_or(&suffix);
         if suffix.is_empty() {
@@ -322,7 +734,7 @@ pub trait AssetUri {
     fn asset_relative_path(
         workspace: &Workspace,
         asset_uri: &Self,
-        checksum: &HashId,
+        checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError>
     where
         Self: Sized,
@@ -364,6 +776,27 @@ impl dyn AssetUri {
     }
 }
 
+pub fn materialization_destination_path(
+    workspace: &Workspace,
+    asset_uri: &str,
+    checksum: Option<&Sha256Hash>,
+    logical_path: Option<&str>,
+) -> Result<PathBuf, FileAdditionError> {
+    if let Some(logical_path) = logical_path.filter(|path| !path.is_empty()) {
+        return LocalAssetUri::repo_relative_destination_path(workspace, logical_path);
+    }
+
+    let checksum = checksum.ok_or_else(|| {
+        FileAdditionError::FileReadError(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot materialize asset without checksum: {asset_uri}"),
+        ))
+    })?;
+    Ok(workspace
+        .asset_dir()?
+        .join(<dyn AssetUri>::from_uri(asset_uri).hashed_filename(checksum)))
+}
+
 pub struct LocalAssetUri {
     asset_uri: String,
     source_path: Option<PathBuf>,
@@ -387,8 +820,8 @@ impl AssetUri for LocalAssetUri {
     fn checksum(
         &self,
         workspace: &Workspace,
-        checksum_override: Option<HashId>,
-    ) -> Result<HashId, FileAdditionError> {
+        checksum_override: Option<Sha256Hash>,
+    ) -> Result<Sha256Hash, FileAdditionError> {
         if let Some(checksum_override) = checksum_override {
             return Ok(checksum_override);
         }
@@ -407,9 +840,14 @@ impl AssetUri for LocalAssetUri {
     fn stored_asset_uri(
         &self,
         workspace: &Workspace,
-        checksum: &HashId,
+        checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
+        let repo_root = Self::canonicalize_or_normalize(&workspace.repo_root()?);
+        if !source_file_path.starts_with(&repo_root) {
+            return Ok(self.asset_uri.clone());
+        }
+
         let source_asset_uri = Self::new(&source_file_path.to_string_lossy());
         let relative_file_path = Self::asset_relative_path(workspace, &source_asset_uri, checksum)?;
         Ok(Self::asset_uri(&relative_file_path))
@@ -418,7 +856,7 @@ impl AssetUri for LocalAssetUri {
     fn ensure_asset(
         &self,
         workspace: &Workspace,
-        checksum: &HashId,
+        checksum: &Sha256Hash,
     ) -> Result<(), FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
         if source_file_path.is_file() {
@@ -437,6 +875,7 @@ impl AssetUri for LocalAssetUri {
 }
 
 impl LocalAssetUri {
+    pub const OUTSIDE_ROOT_DIRECTORY: &'static str = ".gen/outside_root";
     pub const SCHEME: &'static str = "file://";
 
     pub fn new(path_or_uri: &str) -> Self {
@@ -498,7 +937,7 @@ impl LocalAssetUri {
     pub fn operation_file_path(
         workspace: &Workspace,
         path_or_uri: &str,
-        checksum: &HashId,
+        checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError> {
         let source_path = if Self::is_file_uri(path_or_uri) {
             Self::resolve_source_path(workspace, path_or_uri)?
@@ -655,17 +1094,27 @@ impl LocalAssetUri {
             return Ok(relative_path.to_string_lossy().to_string());
         }
 
-        Ok(source_path
-            .strip_prefix(Path::new("/"))
-            .unwrap_or(&source_path)
-            .to_string_lossy()
-            .to_string())
+        source_path
+            .file_name()
+            .map(|file_name| {
+                format!(
+                    "{}/{}",
+                    Self::OUTSIDE_ROOT_DIRECTORY,
+                    file_name.to_string_lossy()
+                )
+            })
+            .ok_or_else(|| {
+                FileAdditionError::FileReadError(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("asset path has no filename: {}", source_path.display()),
+                ))
+            })
     }
 
     fn stored_relative_path(
         workspace: &Workspace,
         source_path: &Path,
-        checksum: &HashId,
+        checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError> {
         if source_path.as_os_str().is_empty() {
             return Ok(String::new());
@@ -749,7 +1198,7 @@ impl LocalAssetUri {
     pub fn ensure_asset_copy(
         workspace: &Workspace,
         source_path: &Path,
-        checksum: &HashId,
+        checksum: &Sha256Hash,
     ) -> Result<(), FileAdditionError> {
         let asset_uri = Self::new(&source_path.to_string_lossy());
         let asset_path = workspace
@@ -857,15 +1306,15 @@ impl AssetUri for RemoteAssetUri {
     fn checksum(
         &self,
         _workspace: &Workspace,
-        checksum_override: Option<HashId>,
-    ) -> Result<HashId, FileAdditionError> {
+        checksum_override: Option<Sha256Hash>,
+    ) -> Result<Sha256Hash, FileAdditionError> {
         Ok(Self::checksum_for_uri(&self.asset_uri, checksum_override))
     }
 
     fn stored_asset_uri(
         &self,
         _workspace: &Workspace,
-        _checksum: &HashId,
+        _checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError> {
         Ok(self.asset_uri.clone())
     }
@@ -873,7 +1322,7 @@ impl AssetUri for RemoteAssetUri {
     fn ensure_asset(
         &self,
         _workspace: &Workspace,
-        _checksum: &HashId,
+        _checksum: &Sha256Hash,
     ) -> Result<(), FileAdditionError> {
         Ok(())
     }
@@ -894,8 +1343,8 @@ impl RemoteAssetUri {
         }
     }
 
-    fn checksum_for_uri(asset_uri: &str, checksum_override: Option<HashId>) -> HashId {
-        checksum_override.unwrap_or_else(|| HashId(calculate_hash(asset_uri)))
+    fn checksum_for_uri(asset_uri: &str, checksum_override: Option<Sha256Hash>) -> Sha256Hash {
+        checksum_override.unwrap_or_else(|| Sha256Hash::convert_str(asset_uri))
     }
 }
 
@@ -911,11 +1360,155 @@ mod tests {
     };
 
     use super::*;
-    use crate::{operations::calculate_file_checksum, test_helpers::setup_gen};
+    use crate::{
+        history::dolt::commit_all, operations::calculate_file_checksum, test_helpers::setup_gen,
+        traits::Query,
+    };
+
+    #[test]
+    fn test_asset_reference_tables_round_trip() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let asset_ref = AssetRef {
+            id: HashId::convert_str("asset-ref"),
+            uri: "s3://bucket/reference.fa".to_string(),
+            file_type: "fasta".to_string(),
+            checksum: Some(Sha256Hash::convert_str("checksum")),
+            size: Some(1024),
+            role: AssetRole::Input,
+            logical_path: Some("refs/reference.fa".to_string()),
+            name: Some("reference.fa".to_string()),
+            created_on: 1,
+        };
+        let operation_log = OperationLog {
+            id: HashId::convert_str("log"),
+            operation_kind: OperationKind::Other("import".to_string()),
+            command: "gen import fasta".to_string(),
+            created_on: 1,
+        };
+        let operation_asset = OperationAsset {
+            log_id: operation_log.id,
+            asset_ref_id: asset_ref.id,
+            role: AssetRole::Input,
+        };
+
+        OperationLog::create(conn, &operation_log).expect("should insert operation log");
+        AssetRef::create(conn, &asset_ref).expect("should insert asset ref");
+        OperationAsset::create(conn, &operation_asset).expect("should insert operation asset");
+
+        let asset_refs = AssetRef::all(conn);
+        let operation_logs = OperationLog::all(conn);
+        let operation_assets = OperationAsset::all(conn);
+
+        assert_eq!(asset_refs, vec![asset_ref]);
+        assert_eq!(operation_logs, vec![operation_log]);
+        assert_eq!(operation_assets, vec![operation_asset]);
+    }
+
+    #[test]
+    fn test_get_annotation_files_pairs_annotation_and_index_in_one_query() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let log = OperationLog {
+            id: HashId::convert_str("annotation-log"),
+            operation_kind: OperationKind::AnnotationFile,
+            command: "add annotation".to_string(),
+            created_on: 1,
+        };
+        let annotation = AssetRef {
+            id: HashId::convert_str("annotation-asset"),
+            uri: "file://annotation.gff".to_string(),
+            file_type: "gff3".to_string(),
+            checksum: Some(Sha256Hash::convert_str("annotation-checksum")),
+            size: None,
+            role: AssetRole::Annotation,
+            logical_path: Some("annotation.gff".to_string()),
+            name: Some("genes".to_string()),
+            created_on: 1,
+        };
+        let index = AssetRef {
+            id: HashId::convert_str("annotation-index-asset"),
+            uri: "file://annotation.gff.tbi".to_string(),
+            file_type: "tabix".to_string(),
+            checksum: Some(Sha256Hash::convert_str("annotation-index-checksum")),
+            size: None,
+            role: AssetRole::AnnotationIndex,
+            logical_path: Some("annotation.gff.tbi".to_string()),
+            name: Some("genes".to_string()),
+            created_on: 1,
+        };
+        OperationLog::create(conn, &log).expect("should insert annotation log");
+        AssetRef::create(conn, &annotation).expect("should insert annotation asset");
+        AssetRef::create(conn, &index).expect("should insert annotation index asset");
+        OperationAsset::create(
+            conn,
+            &OperationAsset {
+                log_id: log.id,
+                asset_ref_id: annotation.id,
+                role: AssetRole::Annotation,
+            },
+        )
+        .expect("should associate annotation asset");
+        OperationAsset::create(
+            conn,
+            &OperationAsset {
+                log_id: log.id,
+                asset_ref_id: index.id,
+                role: AssetRole::AnnotationIndex,
+            },
+        )
+        .expect("should associate annotation index asset");
+        let commit = commit_all(conn, "add annotation assets").expect("should commit assets");
+
+        let expected = vec![AnnotationFileAssets {
+            log_id: log.id,
+            annotation,
+            index: Some(index),
+        }];
+        assert_eq!(
+            Assets::get_annotation_files(conn, None).expect("should query current annotations"),
+            expected
+        );
+        assert_eq!(
+            Assets::get_annotation_files(conn, Some(&commit.to_string()))
+                .expect("should query historical annotations"),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_get_branch_assets_returns_local_assets_from_the_requested_commit() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let local_asset = AssetRef {
+            id: HashId::convert_str("local-asset"),
+            uri: "file://inputs/reference.fa".to_string(),
+            file_type: "fasta".to_string(),
+            checksum: Some(Sha256Hash::convert_str("local-checksum")),
+            size: Some(4),
+            role: AssetRole::Input,
+            logical_path: Some("inputs/reference.fa".to_string()),
+            name: Some("reference.fa".to_string()),
+            created_on: 1,
+        };
+        let remote_asset = AssetRef {
+            id: HashId::convert_str("remote-asset"),
+            uri: "https://example.com/reference.fa".to_string(),
+            ..local_asset.clone()
+        };
+        AssetRef::create(conn, &local_asset).expect("should insert local asset");
+        AssetRef::create(conn, &remote_asset).expect("should insert remote asset");
+        let commit = commit_all(conn, "add assets").expect("should commit assets");
+
+        let assets = Assets::get_branch_assets(conn, &commit.to_string())
+            .expect("should read assets at commit");
+
+        assert_eq!(assets, HashMap::from([(local_asset.id, local_asset)]));
+    }
 
     #[test]
     fn test_generate_file_addition_id_consistency() {
-        let checksum = HashId([1u8; 32]);
+        let checksum = Sha256Hash([1u8; 32]);
         let file_path = "/path/to/file.txt";
 
         let id1 = LocalAssetUri::generate_file_addition_id(&checksum, file_path);
@@ -926,7 +1519,7 @@ mod tests {
 
     #[test]
     fn test_generate_file_addition_id_uniqueness_different_paths() {
-        let checksum = HashId([1u8; 32]);
+        let checksum = Sha256Hash([1u8; 32]);
         let file_path1 = "/path/to/file1.txt";
         let file_path2 = "/path/to/file2.txt";
 
@@ -938,8 +1531,8 @@ mod tests {
 
     #[test]
     fn test_generate_file_addition_id_uniqueness_different_checksums() {
-        let checksum1 = HashId([1u8; 32]);
-        let checksum2 = HashId([2u8; 32]);
+        let checksum1 = Sha256Hash([1u8; 32]);
+        let checksum2 = Sha256Hash([2u8; 32]);
         let file_path = "/path/to/file.txt";
 
         let id1 = LocalAssetUri::generate_file_addition_id(&checksum1, file_path);
@@ -1065,6 +1658,44 @@ mod tests {
     }
 
     #[test]
+    fn test_new_for_workspace_namespaces_path_outside_workspace() {
+        let context = setup_gen();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_path = outside_dir.path().join("simple.fa");
+        fs::write(&outside_path, b">seq\nACGT\n").unwrap();
+
+        let asset_uri =
+            LocalAssetUri::new_for_workspace(context.workspace(), &outside_path.to_string_lossy())
+                .unwrap();
+
+        assert_eq!(asset_uri.uri(), "file://.gen/outside_root/simple.fa");
+        assert_eq!(asset_uri.suffix().as_deref(), Some("fa"));
+    }
+
+    #[test]
+    fn test_new_for_workspace_distinguishes_external_file_from_workspace_root_file() {
+        let context = setup_gen();
+        let workspace_path = context.workspace().repo_root().unwrap().join("simple.fa");
+        fs::write(&workspace_path, b"workspace file").unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_path = outside_dir.path().join("simple.fa");
+        fs::write(&outside_path, b"external file").unwrap();
+
+        let workspace_asset = LocalAssetUri::new_for_workspace(
+            context.workspace(),
+            &workspace_path.to_string_lossy(),
+        )
+        .unwrap();
+        let outside_asset =
+            LocalAssetUri::new_for_workspace(context.workspace(), &outside_path.to_string_lossy())
+                .unwrap();
+
+        assert_eq!(workspace_asset.uri(), "file://simple.fa");
+        assert_eq!(outside_asset.uri(), "file://.gen/outside_root/simple.fa");
+        assert_ne!(workspace_asset.uri(), outside_asset.uri());
+    }
+
+    #[test]
     fn stored_relative_path_keeps_compression_suffix_for_asset_path() {
         let context = setup_gen();
         let workspace = context.workspace();
@@ -1128,7 +1759,7 @@ mod tests {
 
     #[test]
     fn hashed_filename_uses_http_uri_path_suffix() {
-        let checksum = HashId::convert_str("remote");
+        let checksum = Sha256Hash::convert_str("remote");
         let asset_uri = RemoteAssetUri::new("http://example.com/assets/fasta.fa.gz?download=1");
 
         let filename = asset_uri.hashed_filename(&checksum);
@@ -1294,7 +1925,7 @@ mod tests {
         let relative = LocalAssetUri::stored_relative_path(
             workspace,
             &workspace.repo_root().unwrap().join("detached/file.txt"),
-            &HashId::convert_str("detached"),
+            &Sha256Hash::convert_str("detached"),
         )
         .unwrap();
         assert_eq!(relative, "detached/file.txt");
@@ -1317,7 +1948,7 @@ mod tests {
         let relative_empty = LocalAssetUri::stored_relative_path(
             workspace,
             Path::new(""),
-            &HashId::convert_str("empty"),
+            &Sha256Hash::convert_str("empty"),
         )
         .unwrap();
         assert_eq!(relative_empty, "");

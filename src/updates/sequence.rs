@@ -6,7 +6,7 @@ use gen_models::{
     db::DbContext,
     edge::Edge,
     node::Node,
-    operations::{Operation, OperationInfo},
+    operations::{OperationInfo, OperationSummary},
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
@@ -20,7 +20,6 @@ use crate::{
         InsertChangeData, insert_update_change, resolve_update_region, target_update_region,
     },
 };
-
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_sequence(
     context: &DbContext,
@@ -30,9 +29,8 @@ pub fn update_with_sequence(
     region_name: &str,
     sequence: &str,
     disable_reference_path_update: bool,
-) -> Result<Operation, SequenceUpdateError> {
+) -> Result<OperationSummary, SequenceUpdateError> {
     let conn = context.graph().conn();
-    let mut session = gen_models::session_operations::start_operation(conn);
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
         resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
@@ -47,7 +45,7 @@ pub fn update_with_sequence(
         new_sample_name,
         vec![parent_sample_name.to_string()],
     )?;
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
+    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name, None);
 
     let mut target_block_groups = vec![];
     for block_group in block_groups {
@@ -69,7 +67,7 @@ pub fn update_with_sequence(
     }
 
     for target_block_group in &target_block_groups {
-        let path = BlockGroup::get_current_path(conn, &target_block_group.id)?;
+        let path = BlockGroup::get_current_path(conn, &target_block_group.id, None)?;
         let (start_coordinate, end_coordinate) = (resolved_region.start, resolved_region.end);
         let node_id = if sequence.is_empty() {
             let node_id = HashId::convert_str("");
@@ -157,21 +155,17 @@ pub fn update_with_sequence(
 
     let summary_str =
         format!("Sequences {mod}", mod=if sequence.is_empty() { "deleted" } else { "inserted" });
-    let op = gen_models::session_operations::end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
+    let operation_summary = OperationSummary::new(
+        OperationInfo {
             files: vec![],
             description: "fasta_update".to_string(),
         },
-        &summary_str,
-        None,
-    )
-    .unwrap();
+        summary_str,
+    );
 
     println!("Updated with sequence.");
 
-    Ok(op)
+    Ok(operation_summary)
 }
 
 fn insert_sequence_change(
@@ -194,7 +188,10 @@ mod tests {
     use gen_core::NO_CHROMOSOME_INDEX;
     use gen_models::{
         annotations::{Annotation, add_annotation},
+        assets::{OperationKind, OperationLog},
         block_group::{BlockGroup, BlockGroupChange, PathCache},
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        operations::commit_operation_summary,
         path::Path,
         region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
@@ -204,7 +201,6 @@ mod tests {
     use crate::{
         imports::fasta::import_fasta,
         test_helpers::{get_sample_bg, setup_block_group, setup_gen},
-        track_database,
     };
 
     fn insertion_block(
@@ -298,8 +294,6 @@ mod tests {
     fn update_sequence_with_annotation_negative_start_after_fasta_import() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -362,8 +356,7 @@ mod tests {
         */
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
+        let history_store = DoltHistoryStore::new(conn);
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -376,7 +369,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let _ = update_with_sequence(
+        let operation_summary = update_with_sequence(
             &context,
             &collection,
             Sample::DEFAULT_NAME,
@@ -384,6 +377,15 @@ mod tests {
             "m123:2-5",
             "AAAAAAAA",
             false,
+        )
+        .unwrap();
+        let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
+        let mut operation_logs = OperationLog::all(conn);
+        operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
+        assert_eq!(
+            operation_logs[0].operation_kind,
+            OperationKind::Other("fasta_update".to_string())
         );
 
         let expected_sequences = vec![
@@ -401,7 +403,7 @@ mod tests {
             HashSet::from_iter(expected_sequences),
         );
         assert_eq!(
-            SampleLineage::get_parents(conn, "child sample"),
+            SampleLineage::get_parents(conn, "child sample", None),
             vec![Sample::DEFAULT_NAME.to_string()],
         );
     }
@@ -412,8 +414,6 @@ mod tests {
         // is a single insert occurring
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -447,14 +447,14 @@ mod tests {
 
         let child_blockgroup = get_sample_bg(conn, &collection, "child sample").id;
         let other_blockgroup = get_sample_bg(conn, &collection, "other sample").id;
-        let child_path = BlockGroup::get_current_path(conn, &child_blockgroup).unwrap();
-        let other_path = BlockGroup::get_current_path(conn, &other_blockgroup).unwrap();
+        let child_path = BlockGroup::get_current_path(conn, &child_blockgroup, None).unwrap();
+        let other_path = BlockGroup::get_current_path(conn, &other_blockgroup, None).unwrap();
         assert_eq!(
-            child_path.sequence(conn).unwrap(),
+            child_path.sequence(conn, None).unwrap(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
         );
         assert_eq!(
-            other_path.sequence(conn).unwrap(),
+            other_path.sequence(conn, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
     }
@@ -469,8 +469,6 @@ mod tests {
         */
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -529,8 +527,6 @@ mod tests {
         */
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -595,8 +591,6 @@ mod tests {
         */
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -655,8 +649,6 @@ mod tests {
         */
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -715,8 +707,6 @@ mod tests {
         */
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -774,8 +764,6 @@ mod tests {
         */
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();
@@ -813,9 +801,9 @@ mod tests {
             HashSet::from_iter(expected_sequences),
         );
 
-        let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id).unwrap();
+        let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id, None).unwrap();
         assert_eq!(
-            latest_path.sequence(conn).unwrap(),
+            latest_path.sequence(conn, None).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
     }

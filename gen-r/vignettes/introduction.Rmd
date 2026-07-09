@@ -14,6 +14,16 @@ editor_options:
 
 ```{r, include = FALSE}
 knitr::opts_chunk$set(eval = TRUE)
+has_anyhtmlwidget <- requireNamespace("anyhtmlwidget", quietly = TRUE)
+
+maybe_show_plot <- function(plot_obj) {
+  if (has_anyhtmlwidget) {
+    plot_obj
+  } else {
+    cat("Interactive widget preview skipped because anyhtmlwidget is not installed.\n")
+    invisible(NULL)
+  }
+}
 ```
 
 Gen is a sequence version control system built around a graph database.
@@ -79,7 +89,7 @@ annotations <- sg_wt$list_annotations()
 mcs <- Filter(function(a) grepl("MCS|misc_feature|multiple.cloning", a$name, ignore.case = TRUE), annotations)
 if (length(mcs) > 0) p$go_to(mcs[[1]])
 
-p
+maybe_show_plot(p)
 ```
 
 The viewer renders a static snapshot of the sequence graph. Annotations
@@ -146,7 +156,7 @@ cat("BsaI sites found:", length(hits[[1]]$matches), "\n")
 ```{r plot-gg}
 p_gg <- plot(sg_gg)
 p_gg$go_to(hits[[1]]$matches[[1]])
-p_gg
+maybe_show_plot(p_gg)
 ```
 
 The viewer centres on the first BsaI site, which sits at the boundary of
@@ -210,7 +220,7 @@ matches <- hits[[1]]$matches
 p_gg$go_to_match(matches[[1]])
 p_gg$highlight_match(matches[[1]], color = "cyan")
 p_gg$highlight_match(matches[[2]], color = "cyan")
-p_gg
+maybe_show_plot(p_gg)
 ```
 
 `clear_highlights()` removes all highlights without affecting the
@@ -218,7 +228,7 @@ viewport:
 
 ```{r clear-highlights}
 p_gg$clear_highlights()
-p_gg
+maybe_show_plot(p_gg)
 ```
 
 ## Export and send for sequencing
@@ -251,7 +261,7 @@ Plot the sequenced sample:
 
 ```{r plot-sequenced}
 p_seq <- plot(sg_seq)
-p_seq
+maybe_show_plot(p_seq)
 ```
 
 The graph now shows a branch at position 1904, outside the MCS and inside
@@ -421,7 +431,7 @@ cassette_sg <- repo$import_library(
   sample       = "design-v1"
 )
 
-plot(cassette_sg)
+maybe_show_plot(plot(cassette_sg))
 ```
 
 `DNAStringSet` columns work identically to named character vectors and
@@ -469,7 +479,7 @@ sequence graph immediately:
 
 ```{r bg-subgraph, eval=FALSE}
 mcs_sg <- sg_gg$subgraph("mcs_v2", 390L, 460L, NULL)
-plot(mcs_sg)
+maybe_show_plot(plot(mcs_sg))
 ```
 
 #### Chunks and stitching
@@ -507,7 +517,7 @@ argument selects which sample's path defines the coordinate space:
 
 ```{r add-track-file, eval=FALSE}
 p_gg$add_track_file("features.gff3", name = "Features", sample = "gg_design")
-p_gg
+maybe_show_plot(p_gg)
 ```
 
 Annotation groups stored in the database (created automatically on
@@ -515,5 +525,5 @@ GenBank import) can be added by group name:
 
 ```{r add-track-group, eval=FALSE}
 p_gg$add_track_group("GenBank annotations")
-p_gg
+maybe_show_plot(p_gg)
 ```

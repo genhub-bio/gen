@@ -75,7 +75,7 @@ impl BlockGroupLineage {
         child_block_group_id: &HashId,
     ) -> Vec<BlockGroup> {
         let parent_ids = BlockGroupLineage::get_parents(conn, child_block_group_id);
-        BlockGroup::query_by_ids(conn, &parent_ids)
+        BlockGroup::query_by_ids(conn, &parent_ids, None)
     }
 
     pub fn get_ancestor_block_groups(
@@ -83,8 +83,9 @@ impl BlockGroupLineage {
         child_block_group_id: &HashId,
         max_depth: Option<usize>,
     ) -> Vec<BlockGroup> {
-        let ancestor_ids = BlockGroupLineage::get_ancestors(conn, child_block_group_id, max_depth);
-        BlockGroup::query_by_ids(conn, &ancestor_ids)
+        let ancestor_ids =
+            BlockGroupLineage::get_ancestors(conn, child_block_group_id, max_depth, None);
+        BlockGroup::query_by_ids(conn, &ancestor_ids, None)
     }
 
     pub fn get_descendant_block_groups(
@@ -94,6 +95,6 @@ impl BlockGroupLineage {
     ) -> Vec<BlockGroup> {
         let descendant_ids =
             BlockGroupLineage::get_descendants(conn, parent_block_group_id, max_depth);
-        BlockGroup::query_by_ids(conn, &descendant_ids)
+        BlockGroup::query_by_ids(conn, &descendant_ids, None)
     }
 }

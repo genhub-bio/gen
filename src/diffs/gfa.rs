@@ -57,16 +57,27 @@ pub fn gfa_sample_diff(
     We also create a GFA path for each path, which is just a list of the segments generated for that
     path.
     */
-    let source_block_groups = Sample::get_block_groups(conn, collection_name, from_sample_name);
-    let target_block_groups = Sample::get_block_groups(conn, collection_name, to_sample_name);
+    let source_block_groups =
+        Sample::get_block_groups(conn, collection_name, from_sample_name, None);
+    let target_block_groups = Sample::get_block_groups(conn, collection_name, to_sample_name, None);
 
     let source_paths_by_name = source_block_groups
         .iter()
-        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
+        .map(|bg| {
+            Ok((
+                bg.name.clone(),
+                BlockGroup::get_current_path(conn, &bg.id, None)?,
+            ))
+        })
         .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
     let target_paths_by_name = target_block_groups
         .iter()
-        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
+        .map(|bg| {
+            Ok((
+                bg.name.clone(),
+                BlockGroup::get_current_path(conn, &bg.id, None)?,
+            ))
+        })
         .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
 
     let mut segments = HashSet::new();
@@ -125,7 +136,7 @@ pub fn gfa_sample_diff(
         }
 
         if let Some(source_path) = source_path_result {
-            let source_sequence = source_path.sequence(conn)?;
+            let source_sequence = source_path.sequence(conn, None)?;
 
             let source_len = source_sequence.len() as i64;
             if last_source_position < source_len {
@@ -148,7 +159,7 @@ pub fn gfa_sample_diff(
         }
 
         if let Some(target_path) = target_path_result {
-            let target_sequence = target_path.sequence(conn)?;
+            let target_sequence = target_path.sequence(conn, None)?;
 
             let target_len = target_sequence.len() as i64;
             if last_target_position < target_len {
@@ -261,7 +272,6 @@ mod tests {
     use crate::{
         imports::gfa::import_gfa,
         test_helpers::{create_bg, setup_gen},
-        track_database,
     };
 
     #[test]
@@ -269,9 +279,6 @@ mod tests {
         // Sets up a basic graph and then exports it to a GFA file
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
@@ -374,7 +381,7 @@ mod tests {
         )
         .unwrap();
 
-        let child_block_groups = Sample::get_block_groups(conn, collection_name, "child");
+        let child_block_groups = Sample::get_block_groups(conn, collection_name, "child", None);
         let child_block_group = child_block_groups.first().unwrap();
         let child_edge_ids = [edge4.id, edge5.id];
         let child_block_group_edges = child_edge_ids
@@ -388,7 +395,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &child_block_group_edges);
         let original_child_path =
-            BlockGroup::get_current_path(conn, &child_block_group.id).unwrap();
+            BlockGroup::get_current_path(conn, &child_block_group.id, None).unwrap();
         let _child_path = original_child_path.new_path_with(conn, 2, 6, &edge4, &edge5);
 
         let temp_dir = tempdir().unwrap();
@@ -409,7 +416,7 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_child_block_group = Collection::get_block_groups(conn, "test collection 2")
+        let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
         let all_child_sequences =
@@ -459,7 +466,8 @@ mod tests {
         )
         .unwrap();
 
-        let grandchild_block_groups = Sample::get_block_groups(conn, collection_name, "grandchild");
+        let grandchild_block_groups =
+            Sample::get_block_groups(conn, collection_name, "grandchild", None);
         let grandchild_block_group = grandchild_block_groups.first().unwrap();
         let grandchild_edge_ids = [edge6.id, edge7.id];
         let grandchild_block_group_edges = grandchild_edge_ids
@@ -473,7 +481,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &grandchild_block_group_edges);
         let original_grandchild_path =
-            BlockGroup::get_current_path(conn, &grandchild_block_group.id).unwrap();
+            BlockGroup::get_current_path(conn, &grandchild_block_group.id, None).unwrap();
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 10, 14, &edge6, &edge7);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
@@ -492,9 +500,10 @@ mod tests {
             "test collection 3",
             Sample::DEFAULT_NAME,
         );
-        let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 3")
-            .pop()
-            .unwrap();
+        let new_grandchild_block_group =
+            Collection::get_block_groups(conn, "test collection 3", None)
+                .pop()
+                .unwrap();
         let all_grandchild_sequences =
             BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
 
@@ -522,9 +531,10 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 4")
-            .pop()
-            .unwrap();
+        let new_grandchild_block_group =
+            Collection::get_block_groups(conn, "test collection 4", None)
+                .pop()
+                .unwrap();
         let all_grandchild_sequences =
             BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
 
@@ -542,9 +552,6 @@ mod tests {
         // Confirm diff of a sample against nothing is just the sample
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
@@ -632,7 +639,7 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_block_group = Collection::get_block_groups(conn, "test collection 2")
+        let new_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
         let all_sequences =
@@ -652,9 +659,6 @@ mod tests {
         // Confirm diff of a sample to itself just results in a graph that's a single path
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
@@ -742,7 +746,7 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_block_group = Collection::get_block_groups(conn, "test collection 2")
+        let new_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
         let all_sequences =
@@ -762,9 +766,6 @@ mod tests {
         // Confirm diff of a sample to totally unrelated sample produces two separate paths
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
@@ -911,7 +912,7 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_block_group = Collection::get_block_groups(conn, "test collection 3")
+        let new_block_group = Collection::get_block_groups(conn, "test collection 3", None)
             .pop()
             .unwrap();
         let all_sequences =
@@ -932,9 +933,6 @@ mod tests {
         // results in two disjoint sequences
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
@@ -1081,7 +1079,7 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_block_group = Collection::get_block_groups(conn, "test collection 3")
+        let new_block_group = Collection::get_block_groups(conn, "test collection 3", None)
             .pop()
             .unwrap();
         let all_sequences =
@@ -1103,9 +1101,6 @@ mod tests {
         // (original, child, grandchild)
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection_name = "test collection";
         Collection::create(conn, collection_name).unwrap();
@@ -1192,7 +1187,7 @@ mod tests {
         )
         .unwrap();
 
-        let child_block_groups = Sample::get_block_groups(conn, collection_name, "child");
+        let child_block_groups = Sample::get_block_groups(conn, collection_name, "child", None);
         let child_block_group = child_block_groups.first().unwrap();
         let child_edge_ids = [edge3.id, edge4.id];
         let child_block_group_edges = child_edge_ids
@@ -1206,7 +1201,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &child_block_group_edges);
         let original_child_path =
-            BlockGroup::get_current_path(conn, &child_block_group.id).unwrap();
+            BlockGroup::get_current_path(conn, &child_block_group.id, None).unwrap();
         let _child_path = original_child_path.new_path_with(conn, 2, 6, &edge3, &edge4);
 
         let temp_dir = tempdir().unwrap();
@@ -1227,7 +1222,7 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_child_block_group = Collection::get_block_groups(conn, "test collection 2")
+        let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
         let all_child_sequences =
@@ -1277,7 +1272,8 @@ mod tests {
         )
         .unwrap();
 
-        let grandchild_block_groups = Sample::get_block_groups(conn, collection_name, "grandchild");
+        let grandchild_block_groups =
+            Sample::get_block_groups(conn, collection_name, "grandchild", None);
         let grandchild_block_group = grandchild_block_groups.first().unwrap();
         let grandchild_edge_ids = [edge5.id, edge6.id];
         let grandchild_block_group_edges = grandchild_edge_ids
@@ -1291,7 +1287,7 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &grandchild_block_group_edges);
         let original_grandchild_path =
-            BlockGroup::get_current_path(conn, &grandchild_block_group.id).unwrap();
+            BlockGroup::get_current_path(conn, &grandchild_block_group.id, None).unwrap();
         let _grandchild_path = original_grandchild_path.new_path_with(conn, 4, 10, &edge5, &edge6);
 
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
@@ -1311,9 +1307,10 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 3")
-            .pop()
-            .unwrap();
+        let new_grandchild_block_group =
+            Collection::get_block_groups(conn, "test collection 3", None)
+                .pop()
+                .unwrap();
         let all_grandchild_sequences =
             BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
 
@@ -1338,9 +1335,10 @@ mod tests {
             Sample::DEFAULT_NAME,
         );
 
-        let new_grandchild_block_group = Collection::get_block_groups(conn, "test collection 4")
-            .pop()
-            .unwrap();
+        let new_grandchild_block_group =
+            Collection::get_block_groups(conn, "test collection 4", None)
+                .pop()
+                .unwrap();
         let all_grandchild_sequences =
             BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
 

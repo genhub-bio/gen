@@ -86,7 +86,8 @@ plot(bg)                 # returns a gen_plot; displays in RStudio Viewer / Shin
 ## Graph viewer (GenPlot)
 
 `plot(bg)` returns a `gen_plot` object. Printing it in RStudio or Shiny
-renders an interactive canvas widget via `anyhtmlwidget`.
+renders an interactive canvas widget when the optional `anyhtmlwidget`
+package is installed.
 
 Navigate the view programmatically:
 
@@ -180,6 +181,12 @@ install Rust/cargo, `libclang`, and `capnp`, then use:
 
 ```r
 remotes::install_github("genhub-bio/gen", subdir = "gen-r", ref = "v0.1.31")
+```
+
+For interactive widget rendering, also install:
+
+```r
+remotes::install_github("keller-mark/anyhtmlwidget", upgrade = "never")
 ```
 
 ## Development

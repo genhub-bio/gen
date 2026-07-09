@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, calculate_hash, traits::Capnp};
+use gen_core::{
+    HashId, PATH_END_NODE_ID, PATH_END_SEQUENCE_HASH, PATH_START_NODE_ID, PATH_START_SEQUENCE_HASH,
+    Sha256Hash, traits::Capnp,
+};
 use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -15,7 +18,7 @@ use crate::{
 #[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq)]
 pub struct Node {
     pub id: HashId,
-    pub sequence_hash: HashId,
+    pub sequence_hash: Sha256Hash,
 }
 
 impl<'a> Capnp<'a> for Node {
@@ -73,7 +76,7 @@ impl Node {
     )]
     pub fn create(
         conn: &GraphConnection,
-        sequence_hash: &HashId,
+        sequence_hash: &Sha256Hash,
         node_hash: &HashId,
     ) -> Result<HashId, NodeError> {
         let insert_statement = "INSERT INTO nodes (id, sequence_hash) VALUES (?1, ?2);";
@@ -96,19 +99,21 @@ impl Node {
     pub fn get_sequences_by_node_ids(
         conn: &GraphConnection,
         node_ids: &[HashId],
+        history_ref: Option<&str>,
     ) -> HashMap<HashId, Sequence> {
-        let nodes = Node::query_by_ids(conn, node_ids);
+        let nodes = Node::query_by_ids(conn, node_ids, history_ref);
         let sequence_hashes_by_node_id = nodes
             .iter()
             .map(|node| (node.id, node.sequence_hash))
-            .collect::<HashMap<HashId, HashId>>();
-        let sequences_by_hash: HashMap<HashId, Sequence> = HashMap::from_iter(
+            .collect::<HashMap<HashId, Sha256Hash>>();
+        let sequences_by_hash: HashMap<Sha256Hash, Sequence> = HashMap::from_iter(
             Sequence::query_by_ids(
                 conn,
                 &sequence_hashes_by_node_id
                     .values()
                     .cloned()
                     .collect::<Vec<_>>(),
+                history_ref,
             )
             .iter()
             .map(|seq| (seq.hash, seq.clone())),
@@ -166,18 +171,14 @@ impl Node {
     pub fn get_start_node() -> Node {
         Node {
             id: PATH_START_NODE_ID,
-            sequence_hash: HashId(calculate_hash(
-                "start-node-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
-            )),
+            sequence_hash: PATH_START_SEQUENCE_HASH,
         }
     }
 
     pub fn get_end_node() -> Node {
         Node {
             id: PATH_END_NODE_ID,
-            sequence_hash: HashId(calculate_hash(
-                "end-node-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
-            )),
+            sequence_hash: PATH_END_SEQUENCE_HASH,
         }
     }
 }
@@ -191,7 +192,7 @@ mod tests {
     fn test_capnp_serialization() {
         let node = Node {
             id: HashId::convert_str("1"),
-            sequence_hash: HashId::convert_str("test_sequence_hash"),
+            sequence_hash: Sha256Hash::convert_str("test_sequence_hash"),
         };
 
         let mut message = TypedBuilder::<node::Owned>::new_default();

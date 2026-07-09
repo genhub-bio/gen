@@ -70,26 +70,46 @@ impl SqlLineage for SampleLineage {
 }
 
 impl SampleLineage {
-    pub fn get_parents(conn: &GraphConnection, child_sample_name: &str) -> Vec<String> {
-        SampleLineage::query(
-            conn,
-            "SELECT * FROM sample_lineage WHERE child_sample_name = ?1 ORDER BY parent_sample_name;",
-            params![child_sample_name],
-        )
-        .into_iter()
-        .map(|lineage| lineage.parent_sample_name)
-        .collect()
+    pub fn get_parents(
+        conn: &GraphConnection,
+        child_sample_name: &str,
+        history_ref: Option<&str>,
+    ) -> Vec<String> {
+        let query = format!(
+            "SELECT * FROM {} WHERE child_sample_name = :child_sample_name \
+             ORDER BY parent_sample_name;",
+            SampleLineage::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
+            vec![(":child_sample_name", &child_sample_name)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        SampleLineage::query(conn, &query, &params[..])
+            .into_iter()
+            .map(|lineage| lineage.parent_sample_name)
+            .collect()
     }
 
-    pub fn get_children(conn: &GraphConnection, parent_sample_name: &str) -> Vec<String> {
-        SampleLineage::query(
-            conn,
-            "SELECT * FROM sample_lineage WHERE parent_sample_name = ?1 ORDER BY child_sample_name;",
-            params![parent_sample_name],
-        )
-        .into_iter()
-        .map(|lineage| lineage.child_sample_name)
-        .collect()
+    pub fn get_children(
+        conn: &GraphConnection,
+        parent_sample_name: &str,
+        history_ref: Option<&str>,
+    ) -> Vec<String> {
+        let query = format!(
+            "SELECT * FROM {} WHERE parent_sample_name = :parent_sample_name \
+             ORDER BY child_sample_name;",
+            SampleLineage::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
+            vec![(":parent_sample_name", &parent_sample_name)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        SampleLineage::query(conn, &query, &params[..])
+            .into_iter()
+            .map(|lineage| lineage.child_sample_name)
+            .collect()
     }
 
     pub fn search_name(conn: &GraphConnection, name: &str) -> Vec<Self> {
@@ -139,6 +159,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        history::dolt::commit_all,
         lineage::SqlLineage,
         sample::{NewSample, Sample},
         test_helpers::get_connection,
@@ -180,23 +201,23 @@ mod tests {
         SampleLineage::create(&conn, "right", "leaf").unwrap();
         SampleLineage::create(&conn, "right", "sibling").unwrap();
 
-        let ancestors = SampleLineage::get_ancestors(&conn, &"leaf".to_string(), None);
+        let ancestors = SampleLineage::get_ancestors(&conn, &"leaf".to_string(), None, None);
         assert_eq!(ancestors, vec!["left", "right", "root"]);
         assert_eq!(
-            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(1)),
+            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(1), None),
             vec!["left", "right"]
         );
         assert_eq!(
-            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(0)),
+            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(0), None),
             Vec::<String>::new()
         );
 
         assert_eq!(
-            SampleLineage::get_parents(&conn, "leaf"),
+            SampleLineage::get_parents(&conn, "leaf", None),
             vec!["left".to_string(), "right".to_string()]
         );
         assert_eq!(
-            SampleLineage::get_children(&conn, "right"),
+            SampleLineage::get_children(&conn, "right", None),
             vec!["leaf".to_string(), "sibling".to_string()]
         );
 
@@ -289,11 +310,11 @@ mod tests {
         SampleLineage::create(&conn, "right", "sibling").unwrap();
 
         assert_eq!(
-            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(1)),
+            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(1), None),
             vec!["left", "right"]
         );
         assert_eq!(
-            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(2)),
+            SampleLineage::get_ancestors(&conn, &"leaf".to_string(), Some(2), None),
             vec!["left", "right", "root"]
         );
         assert_eq!(
@@ -303,6 +324,38 @@ mod tests {
         assert_eq!(
             SampleLineage::get_descendants(&conn, &"root".to_string(), Some(2)),
             vec!["left", "right", "leaf", "sibling"]
+        );
+    }
+
+    #[test]
+    fn test_get_ancestors_respects_history_ref() {
+        let conn = get_connection(None).unwrap();
+        for sample in ["grand", "parent", "child"] {
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name: sample,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        SampleLineage::create(&conn, "parent", "child").unwrap();
+        let base = commit_all(&conn, "parent lineage").unwrap();
+        SampleLineage::create(&conn, "grand", "parent").unwrap();
+
+        assert_eq!(
+            SampleLineage::get_ancestors(&conn, &"child".to_string(), None, None),
+            vec!["parent", "grand"]
+        );
+        assert_eq!(
+            SampleLineage::get_ancestors(
+                &conn,
+                &"child".to_string(),
+                None,
+                Some(&base.to_string()),
+            ),
+            vec!["parent"]
         );
     }
 

@@ -1,30 +1,113 @@
 use std::path::Path as FsPath;
 
-use gen_models::{annotations::AnnotationFile, db::OperationsConnection, operations::FileAddition};
+use gen_models::{
+    assets::{AssetRef, AssetUri, Assets},
+    db::GraphConnection,
+    file_types::FileTypes,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotationAssetEntry {
+    pub id: gen_core::HashId,
+    pub asset_uri: String,
+    pub file_type: FileTypes,
+    pub checksum: gen_core::Sha256Hash,
+}
+
+impl AnnotationAssetEntry {
+    pub fn file_path(&self) -> &str {
+        self.asset_uri
+            .strip_prefix("file://")
+            .unwrap_or(&self.asset_uri)
+    }
+
+    pub fn hashed_filename(&self) -> String {
+        <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationFileEntry {
-    pub file_addition: FileAddition,
-    pub index_file_addition: Option<FileAddition>,
+    pub file_addition: AnnotationAssetEntry,
+    pub index_file_addition: Option<AnnotationAssetEntry>,
     pub name: Option<String>,
     pub display_name: String,
 }
 
-pub fn load_annotation_file_entries(conn: &OperationsConnection) -> Vec<AnnotationFileEntry> {
-    let mut entries = Vec::new();
-    for info in AnnotationFile::get_all_files(conn) {
-        let display_name = info.name.clone().unwrap_or_else(|| {
-            FsPath::new(&info.file_addition.file_path())
+fn asset_entry_from_ref(asset_ref: &AssetRef) -> Option<AnnotationAssetEntry> {
+    Some(AnnotationAssetEntry {
+        id: asset_ref.id,
+        asset_uri: asset_ref.uri.clone(),
+        file_type: FileTypes::from_storage_tag(&asset_ref.file_type),
+        checksum: asset_ref.checksum?,
+    })
+}
+
+pub fn load_annotation_file_entries(
+    conn: &GraphConnection,
+    history_ref: Option<&str>,
+) -> Vec<AnnotationFileEntry> {
+    let annotation_files = Assets::get_annotation_files(conn, history_ref)
+        .expect("should load annotation file assets");
+    let mut entries = Vec::with_capacity(annotation_files.len());
+    for annotation_file in annotation_files {
+        let asset_ref = &annotation_file.annotation;
+        let Some(file_addition) = asset_entry_from_ref(asset_ref) else {
+            continue;
+        };
+        let index_file_addition = annotation_file
+            .index
+            .as_ref()
+            .and_then(asset_entry_from_ref);
+        let name = asset_ref.name.clone();
+        let display_name = name.clone().unwrap_or_else(|| {
+            FsPath::new(file_addition.file_path())
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| info.file_addition.file_path().to_string())
+                .unwrap_or_else(|| file_addition.file_path().to_string())
         });
         entries.push(AnnotationFileEntry {
-            file_addition: info.file_addition,
-            index_file_addition: info.index_file_addition,
-            name: info.name,
+            file_addition,
+            index_file_addition,
+            name,
             display_name,
         });
     }
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use gen_models::annotations::add_annotation_file;
+
+    use super::load_annotation_file_entries;
+    use crate::test_helpers::setup_gen_on_disk;
+
+    #[test]
+    fn test_loads_annotation_file_entries_from_graph_asset_refs() {
+        let context = setup_gen_on_disk();
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+
+        add_annotation_file(
+            &context,
+            fixture_path.to_str().expect("should encode fixture path"),
+            None,
+            None,
+            Some("fixture-track"),
+            Some("add-annotation"),
+        )
+        .expect("should create annotation file operation");
+
+        let entries = load_annotation_file_entries(context.graph().conn(), None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name.as_deref(), Some("fixture-track"));
+        assert_eq!(entries[0].display_name, "fixture-track");
+        assert_eq!(
+            entries[0].file_addition.file_type,
+            gen_models::file_types::FileTypes::Gff3
+        );
+        assert!(entries[0].index_file_addition.is_none());
+    }
 }

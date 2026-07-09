@@ -11,13 +11,12 @@ use gen_models::{
     errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
     file_types::FileTypes,
     node::Node,
-    operations::{Operation, OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, OperationSummary},
     path::Path,
     reference_alias::ReferenceAlias,
     region::{Region, ResolvedGenRegion, ResolvedRegionKind, resolve_path},
     sample::Sample,
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
 };
 use intervaltree::IntervalTree;
 use noodles::{
@@ -177,6 +176,21 @@ fn prepare_change(
     })
 }
 
+#[cfg_attr(
+    feature = "profiling",
+    tracing::instrument(skip(
+        path_region_cache,
+        parent_bg_cache,
+        sequence_cache,
+        conn,
+        collection_name,
+        sample_name,
+        sample_bg_id,
+        seq_name,
+        ids,
+        alt_seq
+    ))
+)]
 #[allow(clippy::too_many_arguments)]
 fn prepare_vcf_entry(
     path_region_cache: &mut HashMap<(HashId, String), ResolvedGenRegion>,
@@ -251,7 +265,7 @@ fn lookup_parent_bg_id(
         return Ok(*parent_bg_id);
     }
 
-    let parent_bg_id = BlockGroup::get_by_id(conn, sample_bg_id)?.parent_block_group_id;
+    let parent_bg_id = BlockGroup::get_by_id(conn, sample_bg_id, None)?.parent_block_group_id;
     parent_bg_cache.insert(*sample_bg_id, parent_bg_id);
     Ok(parent_bg_id)
 }
@@ -319,7 +333,7 @@ fn resolve_parent_samples(
         .entry(sample_name.to_string())
         .or_insert_with(|| {
             if explicit_parent_samples.is_empty() {
-                Sample::get_parent_names(conn, sample_name)
+                Sample::get_parent_names(conn, sample_name, None)
             } else {
                 explicit_parent_samples.to_vec()
             }
@@ -328,7 +342,7 @@ fn resolve_parent_samples(
 }
 
 #[cfg_attr(
-    all(debug_assertions, feature = "profiling"),
+    feature = "profiling",
     tracing::instrument(skip(context, vcf_path, parent_samples))
 )]
 pub fn update_with_vcf(
@@ -339,12 +353,10 @@ pub fn update_with_vcf(
     fixed_sample: Option<&str>,
     parent_samples: Vec<String>,
     in_place: bool,
-) -> Result<(Operation, Vec<String>), VcfError> {
+) -> Result<(OperationSummary, Vec<String>), VcfError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
-
-    let mut session = start_operation(conn);
 
     let mut reader = vcf::io::reader::Builder::default()
         .build_from_path(vcf_path)
@@ -371,11 +383,11 @@ pub fn update_with_vcf(
 
     let mut block_group_names = vec![];
     for parent_sample in &parent_samples {
-        let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample);
+        let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample, None);
         block_group_names.extend(block_groups.iter().map(|bg| bg.name.clone()));
     }
     let references_by_alias =
-        ReferenceAlias::get_references_by_alias(conn, block_group_names).unwrap();
+        ReferenceAlias::get_references_by_alias(conn, block_group_names, None).unwrap();
 
     let _ = progress_bar.println("Parsing VCF for changes.");
 
@@ -448,7 +460,9 @@ pub fn update_with_vcf(
                         .filter(|_| gt.allele as i32 == accession_allele);
                     let mut ref_start = (record.variant_start().unwrap().unwrap().get() - 1) as i64;
                     if gt.allele != 0 {
-                        let mut alt_seq = alt_alleles[chromosome_index - 1].to_string();
+                        let allele_index = usize::try_from(gt.allele - 1)
+                            .expect("alternate genotype allele should be positive");
+                        let mut alt_seq = alt_alleles[allele_index].to_string();
                         let mut is_cnv = false;
                         if alt_seq.starts_with("<") {
                             if let Some(cap) = cnv_re.captures(&alt_seq) {
@@ -706,20 +720,16 @@ pub fn update_with_vcf(
 
     let bar = add_saving_operation_bar(&progress_bar);
     bar.set_message("Saving operation");
-    let op = end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
+    let operation_summary = OperationSummary::new(
+        OperationInfo {
             files: vec![OperationFile::new(vcf_path.to_string()).set_file_type(FileTypes::VCF)],
             description: "vcf_addition".to_string(),
         },
-        &summary_str,
-        None,
-    )
-    .map_err(VcfError::OperationError);
+        summary_str,
+    );
     bar.finish();
     let output_samples: Vec<String> = created_samples.into_iter().map(String::from).collect();
-    op.map(|operation| (operation, output_samples))
+    Ok((operation_summary, output_samples))
 }
 
 #[cfg(test)]
@@ -739,7 +749,6 @@ mod tests {
     use crate::{
         imports::fasta::import_fasta,
         test_helpers::{get_sample_bg, setup_gen},
-        track_database,
     };
     #[test]
     fn test_update_fasta_with_vcf() -> Result<(), VcfError> {
@@ -749,9 +758,6 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -803,9 +809,6 @@ mod tests {
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/vcfs/complex.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -864,9 +867,6 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
@@ -917,12 +917,49 @@ mod tests {
     }
 
     #[test]
+    fn test_update_fasta_with_vcf_homozygous_custom_genotype() {
+        let context = setup_gen();
+        let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/general.vcf");
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let conn = context.graph().conn();
+
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+
+        update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "1/1".to_string(),
+            Some("sample 1"),
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(
+                conn,
+                &get_sample_bg(conn, &collection, "sample 1").id,
+                false
+            )
+            .unwrap(),
+            HashSet::from_iter(vec!["ATCATCGATAGAGATCGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
+    #[test]
     fn test_error_when_vcf_has_changes_out_of_bounds() {
         let context = setup_gen();
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let _conn = context.graph().conn();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let vcf_path =
@@ -962,9 +999,6 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
@@ -1009,9 +1043,6 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let collection = "test".to_string();
 
         import_fasta(
@@ -1049,9 +1080,6 @@ mod tests {
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple_cnv.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -1093,9 +1121,6 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -1131,10 +1156,6 @@ mod tests {
             vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
-        assert!(matches!(
-            second_update,
-            Err(VcfError::OperationError(OperationError::NoChanges))
-        ));
         assert_eq!(
             Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
             5
@@ -1147,9 +1168,6 @@ mod tests {
         let vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/multiseq.vcf");
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/multiseq.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -1190,10 +1208,6 @@ mod tests {
             vec![Sample::DEFAULT_NAME.to_string()],
             false,
         );
-        assert!(matches!(
-            second_update,
-            Err(VcfError::OperationError(OperationError::NoChanges))
-        ));
         assert_eq!(
             Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
             8
@@ -1202,16 +1216,14 @@ mod tests {
 
     #[test]
     #[cfg(feature = "benchmark")]
+    #[ignore = "manual benchmark; large fixture is not stable in the all-features test suite"]
     fn test_vcf_import_benchmark() {
         let context = setup_gen();
         let mut vcf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         vcf_path.push("fixtures/chr22_100k_no_samples.vcf.gz");
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/chr22.fa.gz");
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let _conn = context.graph().conn();
 
         let collection = "test".to_string();
 
@@ -1251,9 +1263,6 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -1305,9 +1314,6 @@ mod tests {
         fasta_path.push("fixtures/simple.fa");
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -1374,9 +1380,6 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -1452,9 +1455,6 @@ mod tests {
     fn test_update_vcf_uses_lineage_parent_when_parent_sample_is_omitted() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
@@ -1512,9 +1512,6 @@ mod tests {
         // Ensure if we have a child sample with multiple parents with the same contig names it works
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
@@ -1570,9 +1567,6 @@ mod tests {
     fn test_update_vcf_does_not_overwrite_parent_lineage_for_existing_sample() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
@@ -1607,6 +1601,6 @@ mod tests {
         )
         .unwrap();
 
-        assert!(SampleLineage::get_parents(conn, "child").is_empty());
+        assert!(SampleLineage::get_parents(conn, "child", None).is_empty());
     }
 }

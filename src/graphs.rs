@@ -55,7 +55,7 @@ pub enum GraphError {
 }
 
 pub fn load_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) -> BlockGroupChunk {
-    let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+    let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
 
     let start_edges = edges.iter().filter(|edge| edge.edge.is_start_edge());
 
@@ -77,9 +77,9 @@ pub fn load_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) ->
         })
         .collect();
 
-    let path = BlockGroup::get_current_path(conn, &block_group_id)
+    let path = BlockGroup::get_current_path(conn, &block_group_id, None)
         .expect("Block group chunk requires a current path");
-    let path_edges = PathEdge::edges_for_path(conn, &path.id);
+    let path_edges = PathEdge::edges_for_path(conn, &path.id, None);
 
     let start_edge = path_edges[0].clone();
     let path_start_point = Some(NodePoint {
@@ -159,7 +159,7 @@ pub fn stitch(
     {
         path_edges.extend(source_path_edges.clone());
 
-        let created_edges = Edge::query_by_ids(conn, &edge_ids);
+        let created_edges = Edge::query_by_ids(conn, &edge_ids, None);
         let stitch_edge = created_edges.iter().find(|edge| {
             edge.source_node_id == edge_start_point.id
                 && edge.source_coordinate == edge_start_point.coordinate

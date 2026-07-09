@@ -42,7 +42,7 @@ fn get_path_nodes(
     graph: &GenGraph,
 ) -> std::io::Result<Vec<gen_graph::GraphNode>> {
     let path_blocks = path
-        .blocks(conn)
+        .blocks(conn, None)
         .map_err(|err| Error::other(format!("Failed to load path blocks: {err}")))?;
 
     let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
@@ -115,6 +115,7 @@ pub struct InlineGenGraphState<'a> {
     conn: &'a GraphConnection,
     paths: Vec<Vec<gen_graph::GraphNode>>,
     block_group_id: Option<HashId>,
+    history_ref: Option<&'a str>,
     /// Annotation and path overlays currently loaded, ready for highlight + label rendering.
     overlays: Vec<GraphOverlay>,
     annotation_colors: AnnotationColorCache,
@@ -126,6 +127,7 @@ impl<'a> InlineGenGraphState<'a> {
         graph: &GenGraph,
         conn: &'a GraphConnection,
         block_group_id: Option<HashId>,
+        history_ref: Option<&'a str>,
     ) -> Self {
         let node_sizer = GenGraphNodeSizer;
         let mut graph_controller = GraphController::new(graph.clone(), node_sizer);
@@ -136,6 +138,7 @@ impl<'a> InlineGenGraphState<'a> {
             conn,
             paths: Vec::new(),
             block_group_id,
+            history_ref,
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
             annotation_groups_loaded: false,
@@ -153,15 +156,16 @@ impl<'a> InlineGenGraphState<'a> {
         let (Some(block_group_id), conn) = (self.block_group_id, self.conn) else {
             return;
         };
-        let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id) else {
+        let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id, self.history_ref) else {
             return;
         };
         // Drop the annotation overlays but keep the path overlay across viewport reloads.
         self.overlays
             .retain(|overlay| overlay.path_nodes().is_some());
-        for entry in load_annotation_group_entries(conn, &block_group) {
+        for entry in load_annotation_group_entries(conn, &block_group, self.history_ref) {
             let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
                 conn,
+                history_ref: self.history_ref,
                 current_block_group: &block_group,
                 entry: &entry,
                 node_ids,
@@ -203,7 +207,7 @@ pub fn show_inline_gen_graph_widget(
     paths: Vec<Path>,
     height: u16,
 ) -> Result<bool> {
-    show_inline_widget(conn, graph, paths, height, None)
+    show_inline_widget(conn, graph, paths, height, None, None)
 }
 
 /// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
@@ -214,9 +218,17 @@ pub fn show_inline_block_group_widget(
     block_group_id: HashId,
     paths: Vec<Path>,
     height: u16,
+    history_ref: Option<&str>,
 ) -> Result<bool> {
-    let graph = BlockGroup::get_graph(conn, &block_group_id).map_err(Error::other)?;
-    show_inline_widget(conn, &graph, paths, height, Some(block_group_id))
+    let graph = BlockGroup::get_graph(conn, &block_group_id, history_ref).map_err(Error::other)?;
+    show_inline_widget(
+        conn,
+        &graph,
+        paths,
+        height,
+        Some(block_group_id),
+        history_ref,
+    )
 }
 
 fn show_inline_widget(
@@ -225,6 +237,7 @@ fn show_inline_widget(
     paths: Vec<Path>,
     height: u16,
     block_group_id: Option<HashId>,
+    history_ref: Option<&str>,
 ) -> Result<bool> {
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
@@ -234,7 +247,7 @@ fn show_inline_widget(
 
     match terminal_result {
         Ok(mut terminal) => {
-            let mut state = InlineGenGraphState::new(graph, conn, block_group_id);
+            let mut state = InlineGenGraphState::new(graph, conn, block_group_id, history_ref);
             for path in paths {
                 state.add_path(&path, conn)?;
             }
@@ -486,7 +499,7 @@ mod tests {
         };
         graph.add_node(node);
 
-        let state = InlineGenGraphState::new(&graph, &conn, None);
+        let state = InlineGenGraphState::new(&graph, &conn, None, None);
         assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
     }
 }

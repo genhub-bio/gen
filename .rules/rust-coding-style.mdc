@@ -91,7 +91,7 @@ struct UserId(u64);  // instead of `type UserId = u64;` or `u64`
 
 When suggesting names for variables, functions, or types:
 
-- Do not prefix test-function names with `test_`, this would otherwise result in `test::test_<name>` names.
+- Prefix test-function names with `test_`, this makes test functions obvious compared to helper functions.
 - Provide a concise list of naming options with brief explanations of why each fits the context
 - Choose names of appropriate length—avoid names that are too long or too short
 - Avoid abbreviations unless they are widely recognized in the domain (e.g., `Http` or `Json` is acceptable, but `Ctx` instead of `Context` is not)

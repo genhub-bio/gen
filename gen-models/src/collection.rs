@@ -117,15 +117,21 @@ impl Collection {
         rows.map(|row| row.unwrap()).collect()
     }
 
-    pub fn get_block_groups(conn: &GraphConnection, collection_name: &str) -> Vec<BlockGroup> {
-        // Load all block groups that have the given collection_name
-        let mut stmt = conn
-            .prepare("SELECT * FROM block_groups WHERE collection_name = ?1 order by created_on;")
-            .unwrap();
-        let block_group_iter = stmt
-            .query_map([collection_name], |row| Ok(BlockGroup::process_row(row)))
-            .unwrap();
-        block_group_iter.map(|bg| bg.unwrap()).collect()
+    pub fn get_block_groups(
+        conn: &GraphConnection,
+        collection_name: &str,
+        history_ref: Option<&str>,
+    ) -> Vec<BlockGroup> {
+        let query = format!(
+            "SELECT * FROM {} WHERE collection_name = :collection_name order by created_on;",
+            BlockGroup::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
+            vec![(":collection_name", &collection_name)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        BlockGroup::query(conn, &query, &params[..])
     }
 
     pub fn delete_by_name(conn: &GraphConnection, name: &str) {

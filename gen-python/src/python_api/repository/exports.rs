@@ -1,9 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use r#gen::{
-    exports::{fasta::export_fasta, genbank::export_genbank, gfa::export_gfa},
-    track_database,
-};
+use r#gen::exports::{fasta::export_fasta, genbank::export_genbank, gfa::export_gfa};
 use gen_models::sample::Sample;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
@@ -19,17 +16,13 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<()> {
         let conn = self.context.graph().conn();
-        let op_conn = self.context.operations().conn();
-        if !self.in_transaction {
-            track_database(conn, op_conn)
-                .map_err(|e| PyRuntimeError::new_err(format!("Error tracking database: {e}")))?;
-        }
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         export_fasta(
             conn,
             &collection,
             sample.as_deref(),
             &PathBuf::from(&filename),
+            None,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
     }
@@ -43,11 +36,6 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<()> {
         let conn = self.context.graph().conn();
-        let op_conn = self.context.operations().conn();
-        if !self.in_transaction {
-            track_database(conn, op_conn)
-                .map_err(|e| PyRuntimeError::new_err(format!("Error tracking database: {e}")))?;
-        }
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         export_gfa(
@@ -56,6 +44,7 @@ impl PyRepository {
             &PathBuf::from(&filename),
             &sample,
             node_max,
+            None,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
     }
@@ -68,17 +57,12 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<()> {
         let conn = self.context.graph().conn();
-        let op_conn = self.context.operations().conn();
-        if !self.in_transaction {
-            track_database(conn, op_conn)
-                .map_err(|e| PyRuntimeError::new_err(format!("Error tracking database: {e}")))?;
-        }
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         let writer = fs::File::create(&filename).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create '{}': {e}", filename))
         })?;
-        export_genbank(conn, &collection, &sample, writer)
+        export_genbank(conn, &collection, &sample, writer, None)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
     }
 }

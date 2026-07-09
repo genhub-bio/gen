@@ -23,61 +23,28 @@ pub enum FileTypes {
     None,
 }
 
+impl AsRef<str> for FileTypes {
+    fn as_ref(&self) -> &str {
+        self.storage_tag()
+    }
+}
+
 impl ToSql for FileTypes {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        let result = match self {
-            FileTypes::GenBank => "gb".into(),
-            FileTypes::Fasta => "fasta".into(),
-            FileTypes::GFA => "gfa".into(),
-            FileTypes::VCF => "vcf".into(),
-            FileTypes::Changeset => "changeset".into(),
-            FileTypes::CSV => "csv".into(),
-            FileTypes::GAF => "gaf".into(),
-            FileTypes::Gff3 => "gff3".into(),
-            FileTypes::Bed => "bed".into(),
-            FileTypes::Tabix => "tabix".into(),
-            FileTypes::None => "none".into(),
-        };
-        Ok(result)
+        Ok(self.as_ref().into())
     }
 }
 
 impl From<FileTypes> for Value {
     fn from(value: FileTypes) -> Value {
-        let result = match value {
-            FileTypes::GenBank => "gb",
-            FileTypes::Fasta => "fasta",
-            FileTypes::GFA => "gfa",
-            FileTypes::VCF => "vcf",
-            FileTypes::Changeset => "changeset",
-            FileTypes::CSV => "csv",
-            FileTypes::GAF => "gaf",
-            FileTypes::Gff3 => "gff3",
-            FileTypes::Bed => "bed",
-            FileTypes::Tabix => "tabix",
-            FileTypes::None => "none",
-        };
-        Value::Text(result.to_string())
+        Value::Text(value.as_ref().to_string())
     }
 }
 
 impl FromSql for FileTypes {
     fn column_result(value: ValueRef) -> FromSqlResult<Self> {
-        let result = match value.as_str() {
-            Ok("gb") => FileTypes::GenBank,
-            Ok("fasta") => FileTypes::Fasta,
-            Ok("gfa") => FileTypes::GFA,
-            Ok("vcf") => FileTypes::VCF,
-            Ok("changeset") => FileTypes::Changeset,
-            Ok("csv") => FileTypes::CSV,
-            Ok("gaf") => FileTypes::GAF,
-            Ok("gff3") => FileTypes::Gff3,
-            Ok("bed") => FileTypes::Bed,
-            Ok("tabix") => FileTypes::Tabix,
-            Ok("none") => FileTypes::None,
-            _ => panic!("Invalid entry in database"),
-        };
-        Ok(result)
+        let tag = value.as_str()?;
+        Ok(FileTypes::from_storage_tag(tag))
     }
 }
 impl From<FileTypes> for gen_models_capnp::FileType {
@@ -117,6 +84,43 @@ impl From<gen_models_capnp::FileType> for FileTypes {
 }
 
 impl FileTypes {
+    pub fn from_storage_tag(tag: &str) -> Self {
+        match tag {
+            "gb" => FileTypes::GenBank,
+            "fasta" => FileTypes::Fasta,
+            "gfa" => FileTypes::GFA,
+            "gaf" => FileTypes::GAF,
+            "vcf" => FileTypes::VCF,
+            "changeset" => FileTypes::Changeset,
+            "csv" => FileTypes::CSV,
+            "gff3" => FileTypes::Gff3,
+            "bed" => FileTypes::Bed,
+            "tabix" => FileTypes::Tabix,
+            "none" => FileTypes::None,
+            _ => FileTypes::None,
+        }
+    }
+
+    fn storage_tag(self) -> &'static str {
+        match self {
+            FileTypes::GenBank => "gb",
+            FileTypes::Fasta => "fasta",
+            FileTypes::GFA => "gfa",
+            FileTypes::GAF => "gaf",
+            FileTypes::VCF => "vcf",
+            FileTypes::Changeset => "changeset",
+            FileTypes::CSV => "csv",
+            FileTypes::Gff3 => "gff3",
+            FileTypes::Bed => "bed",
+            FileTypes::Tabix => "tabix",
+            FileTypes::None => "none",
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.storage_tag()
+    }
+
     pub fn infer_from_path(path: impl AsRef<Path>) -> Self {
         let extensions = path
             .as_ref()
@@ -174,6 +178,26 @@ impl FileTypes {
 #[cfg(test)]
 mod tests {
     use super::FileTypes;
+
+    #[test]
+    fn test_file_type_as_ref_returns_canonical_storage_tag() {
+        assert_eq!(<FileTypes as AsRef<str>>::as_ref(&FileTypes::GenBank), "gb");
+        assert_eq!(
+            <FileTypes as AsRef<str>>::as_ref(&FileTypes::Tabix),
+            "tabix"
+        );
+        assert_eq!(<FileTypes as AsRef<str>>::as_ref(&FileTypes::None), "none");
+    }
+
+    #[test]
+    fn test_unknown_storage_tag_maps_to_none() {
+        let parsed = <FileTypes as rusqlite::types::FromSql>::column_result(
+            rusqlite::types::ValueRef::Text(b"unexpected"),
+        )
+        .expect("should parse unknown file type as none");
+
+        assert_eq!(parsed, FileTypes::None);
+    }
 
     #[test]
     fn infers_file_type_from_path_extension() {

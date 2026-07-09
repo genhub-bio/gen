@@ -20,7 +20,9 @@ fn decode_hex_bytes(token: &str) -> Vec<u8> {
 
     token
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let pair = std::str::from_utf8(pair).expect("hex token must be valid ascii");
             u8::from_str_radix(pair, 16).expect("hex token must be valid")
@@ -74,8 +76,14 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
         conn: &Connection,
         child_id: &Self::Id,
         max_depth: Option<usize>,
+        history_ref: Option<&str>,
     ) -> Vec<Self::Id> {
         let max_depth = max_depth.map(|depth| depth as i64);
+        let lineage_table_name = Self::table_name_with_history_ref(history_ref);
+        let parent_table_name = history_ref.map_or_else(
+            || Self::PARENT_TABLE_NAME.to_string(),
+            |_| format!("dolt_at_{}(:history_ref)", Self::PARENT_TABLE_NAME),
+        );
         let query = format!(
             "WITH RECURSIVE ancestors(id, depth, visited) AS (
                 SELECT
@@ -83,7 +91,7 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
                     1,
                     printf('|%s|', hex(lineage.{parent_column}))
                 FROM {table_name} lineage
-                WHERE lineage.{child_column} = ?1
+                WHERE lineage.{child_column} = :child_id
                 UNION ALL
                 SELECT
                     lineage.{parent_column},
@@ -95,7 +103,7 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
                     ancestors.visited,
                     printf('|%s|', hex(lineage.{parent_column}))
                 ) = 0
-                AND (?2 IS NULL OR ancestors.depth < ?2)
+                AND (:max_depth IS NULL OR ancestors.depth < :max_depth)
             ),
             ranked_ancestors(id, depth) AS (
                 SELECT id, MIN(depth)
@@ -105,17 +113,22 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
             SELECT parent.{parent_id_column}
             FROM {parent_table_name} parent
             JOIN ranked_ancestors ancestors ON parent.{parent_id_column} = ancestors.id
-            WHERE ?2 IS NULL OR ancestors.depth <= ?2
+            WHERE :max_depth IS NULL OR ancestors.depth <= :max_depth
             ORDER BY ancestors.depth, parent.{parent_id_column};",
-            table_name = Self::TABLE_NAME,
+            table_name = lineage_table_name,
             parent_column = Self::PARENT_COLUMN,
             child_column = Self::CHILD_COLUMN,
-            parent_table_name = Self::PARENT_TABLE_NAME,
+            parent_table_name = parent_table_name,
             parent_id_column = Self::PARENT_ID_COLUMN,
         );
 
         let mut stmt = conn.prepare(&query).unwrap();
-        stmt.query_map(params![child_id, max_depth], |row| row.get(0))
+        let mut query_params: Vec<(&str, &dyn ToSql)> =
+            vec![(":child_id", child_id), (":max_depth", &max_depth)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        stmt.query_map(&query_params[..], |row| row.get(0))
             .unwrap()
             .map(|value| value.unwrap())
             .collect()
@@ -448,11 +461,11 @@ mod tests {
         let conn = setup_numeric_lineage_connection();
 
         assert_eq!(
-            NumericLineage::get_ancestors(&conn, &4, None),
+            NumericLineage::get_ancestors(&conn, &4, None, None),
             vec![3, 2, 1]
         );
         assert_eq!(
-            NumericLineage::get_ancestors(&conn, &4, Some(2)),
+            NumericLineage::get_ancestors(&conn, &4, Some(2), None),
             vec![3, 2]
         );
         assert_eq!(

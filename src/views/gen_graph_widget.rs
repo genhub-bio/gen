@@ -111,7 +111,7 @@ impl<'a> GenGraphNodeRenderer<'a> {
             node_key.sequence_start,
             node_key.sequence_end,
         );
-        let sequences = Node::get_sequences_by_node_ids(self.conn, &[db_node_id]);
+        let sequences = Node::get_sequences_by_node_ids(self.conn, &[db_node_id], None);
         let sequence = match sequences.get(&db_node_id) {
             Some(seq) => seq.get_sequence(start, end)?,
             None => "?".repeat((end - start).max(0) as usize),
@@ -758,7 +758,6 @@ mod tests {
     use crate::{
         imports::fasta::import_fasta,
         test_helpers::setup_gen_on_disk,
-        track_database,
         updates::vcf::update_with_vcf,
         views::{annotation_track::AnnotationSegment, graph_overlay::OverlayContent},
     };
@@ -847,8 +846,6 @@ mod tests {
     fn test_snapshot_zygosity_pruned_edges() {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test";
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -881,7 +878,7 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1").unwrap();
+        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1", None).unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);
@@ -913,8 +910,6 @@ mod tests {
     fn test_cell_highlight_remaps_on_detail_change() {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test";
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -931,7 +926,7 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, Sample::DEFAULT_NAME).unwrap();
+        let gen_graph = Sample::get_graph(conn, collection, Sample::DEFAULT_NAME, None).unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let block = controller
@@ -1403,7 +1398,7 @@ mod tests {
 
     fn midpoint_node(id: u8, start: i64, end: i64) -> GraphNode {
         GraphNode {
-            node_id: HashId([id; 32]),
+            node_id: HashId([id; 16]),
             sequence_start: start,
             sequence_end: end,
         }

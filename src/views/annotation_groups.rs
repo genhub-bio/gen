@@ -25,12 +25,16 @@ pub enum AnnotationGroupOrigin {
 pub fn load_annotation_group_entries(
     conn: &GraphConnection,
     block_group: &BlockGroup,
+    history_ref: Option<&str>,
 ) -> Vec<AnnotationGroupEntry> {
     let mut entries = Vec::new();
-    let parent_sample_name = block_group
-        .parent_block_group_id
-        .map(|parent_id| BlockGroup::get_by_id(conn, &parent_id).unwrap().sample_name);
-    let ancestor_samples = SampleLineage::get_ancestors(conn, &block_group.sample_name, None);
+    let parent_sample_name = block_group.parent_block_group_id.map(|parent_id| {
+        BlockGroup::get_by_id(conn, &parent_id, history_ref)
+            .unwrap()
+            .sample_name
+    });
+    let ancestor_samples =
+        SampleLineage::get_ancestors(conn, &block_group.sample_name, None, history_ref);
     let sample_order = std::iter::once(block_group.sample_name.clone())
         .chain(ancestor_samples.iter().cloned())
         .enumerate()
@@ -45,6 +49,7 @@ pub fn load_annotation_group_entries(
             &block_group.sample_name,
             &block_group.name,
             &ancestor_samples,
+            history_ref,
         )
         .unwrap_or_default();
         let mut grouped = HashMap::<String, Vec<BlockGroup>>::new();
@@ -58,7 +63,7 @@ pub fn load_annotation_group_entries(
     };
 
     entries.extend(
-        AnnotationGroup::query_by_sample(conn, &block_group.sample_name)
+        AnnotationGroup::query_by_sample(conn, &block_group.sample_name, history_ref)
             .into_iter()
             .map(|group| AnnotationGroupEntry {
                 id: format!("{}::{}", block_group.sample_name, group.name),
@@ -75,7 +80,7 @@ pub fn load_annotation_group_entries(
         } else {
             AnnotationGroupOrigin::AncestorSample
         };
-        let groups = AnnotationGroup::query_by_sample(conn, &ancestor_sample);
+        let groups = AnnotationGroup::query_by_sample(conn, &ancestor_sample, history_ref);
         for ancestor_block_group in ancestor_block_groups_by_sample
             .get(&ancestor_sample)
             .into_iter()
@@ -115,9 +120,13 @@ pub fn load_annotation_group_entries(
 /// Distinct annotation-group names visible from a block group, in the order
 /// produced by [`load_annotation_group_entries`]. Shared discovery used by the
 /// Python and R auto-load paths so the logic lives in one place.
-pub fn annotation_group_names(conn: &GraphConnection, block_group: &BlockGroup) -> Vec<String> {
+pub fn annotation_group_names(
+    conn: &GraphConnection,
+    block_group: &BlockGroup,
+    history_ref: Option<&str>,
+) -> Vec<String> {
     let mut seen = HashSet::new();
-    load_annotation_group_entries(conn, block_group)
+    load_annotation_group_entries(conn, block_group, history_ref)
         .into_iter()
         .filter(|entry| seen.insert(entry.name.clone()))
         .map(|entry| entry.name)
@@ -200,8 +209,8 @@ mod tests {
         AnnotationGroupSample::create(conn, "parent-group", "parent").unwrap();
         AnnotationGroupSample::create(conn, "grand-group", "grand").unwrap();
 
-        let child = BlockGroup::get_by_id(conn, &child.id).unwrap();
-        let entries = load_annotation_group_entries(conn, &child);
+        let child = BlockGroup::get_by_id(conn, &child.id, None).unwrap();
+        let entries = load_annotation_group_entries(conn, &child, None);
 
         assert_eq!(
             entries

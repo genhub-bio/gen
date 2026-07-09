@@ -74,6 +74,28 @@ test_that("FASTA import and export work", {
   expect_equal(readLines(output_fasta)[[2]], "ATCGATCGATCGATCGATCGGGAACACACAGAGA")
 })
 
+test_that("successful R imports create clean Dolt history commits", {
+  repo <- setup_repository()
+  history_before <- repo$query(
+    "SELECT commit_hash FROM dolt_log ORDER BY date DESC"
+  )
+
+  repo$import_fasta(
+    fixture_path("simple.fa"),
+    sample = "sample-a",
+    collection = "test-collection"
+  )
+
+  history_after <- repo$query(
+    "SELECT commit_hash FROM dolt_log ORDER BY date DESC"
+  )
+  status_after <- repo$query(
+    "SELECT table_name, staged, status FROM dolt_status"
+  )
+  expect_length(history_after, length(history_before) + 1)
+  expect_length(status_after, 0)
+})
+
 test_that("GFA and GenBank import/export work", {
   repo <- setup_repository()
   gfa_out <- tempfile(fileext = ".gfa")

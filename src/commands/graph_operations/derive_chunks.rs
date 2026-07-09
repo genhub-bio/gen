@@ -4,14 +4,13 @@ use anyhow::{Error, Result};
 use gen_models::{
     db::DbContext,
     errors::OperationError,
-    operations::OperationInfo,
-    session_operations::{end_operation, start_operation},
+    operations::{OperationInfo, OperationSummary},
 };
 use itertools::Itertools;
 use thiserror::Error;
 
 use crate::{
-    commands::get_default_collection,
+    commands::{commit_operation, get_default_collection},
     graphs::operators::{derive_chunks, get_path},
 };
 
@@ -43,13 +42,8 @@ pub fn derive_chunks_operation(
     breakpoints: Option<Vec<i64>>,
     chunk_size: Option<i64>,
 ) -> Result<(), Error> {
-    let operation_conn = db_context.operations().conn();
+    let operation_conn = db_context.config().conn();
     let graph_conn = db_context.graph().conn();
-
-    let mut session = start_operation(graph_conn);
-
-    graph_conn.execute("BEGIN TRANSACTION", [])?;
-    operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let collection_name = &(match name {
         Some(collection) => collection,
@@ -66,7 +60,7 @@ pub fn derive_chunks_operation(
         &region_name.to_string(),
         backbone.as_deref(),
     )?
-    .length(graph_conn)?;
+    .length(graph_conn, None)?;
 
     let chunk_points = if let Some(breakpoints) = breakpoints {
         if breakpoints.is_empty() {
@@ -115,6 +109,8 @@ pub fn derive_chunks_operation(
 
     let chunk_range_length = chunk_ranges.len();
 
+    graph_conn.execute("BEGIN TRANSACTION", [])?;
+
     if let Err(err) = derive_chunks(
         db_context,
         collection_name,
@@ -127,7 +123,6 @@ pub fn derive_chunks_operation(
         true,
     ) {
         graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
-        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
         return Err(err.into());
     }
 
@@ -136,20 +131,21 @@ pub fn derive_chunks_operation(
         new_sample_name, chunk_range_length,
     );
 
-    let _op = end_operation(
-        db_context,
-        &mut session,
-        &OperationInfo {
+    let operation_summary = OperationSummary::new(
+        OperationInfo {
             files: vec![],
             description: "derive chunks".to_string(),
         },
-        &summary_str,
-        None,
-    )
-    .map_err(DeriveChunksOperationError::OperationError)?;
-
-    graph_conn.execute("END TRANSACTION;", [])?;
-    operation_conn.execute("END TRANSACTION;", [])?;
+        summary_str,
+    );
+    match commit_operation(db_context, &operation_summary) {
+        Ok(_) => {}
+        Err(OperationError::NoChanges) => {
+            println!("Warning: No changes made.");
+            return Ok(());
+        }
+        Err(err) => return Err(DeriveChunksOperationError::OperationError(err).into()),
+    }
 
     println!("Derive chunks succeeded.");
 
@@ -163,13 +159,11 @@ mod tests {
     use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample};
 
     use super::*;
-    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen, track_database};
+    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen};
 
     fn setup_with_fasta(fasta: &str) -> DbContext {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
         Collection::create(conn, "test").unwrap();
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fasta);
         import_fasta(
@@ -185,14 +179,14 @@ mod tests {
 
     fn chunk_sequences(context: &DbContext, sample: &str) -> Vec<String> {
         let conn = context.graph().conn();
-        let mut chunks = Sample::get_block_groups(conn, "test", sample);
+        let mut chunks = Sample::get_block_groups(conn, "test", sample, None);
         chunks.sort_by_key(|bg| bg.name.clone());
         chunks
             .iter()
             .map(|bg| {
-                BlockGroup::get_current_path(conn, &bg.id)
+                BlockGroup::get_current_path(conn, &bg.id, None)
                     .unwrap()
-                    .sequence(conn)
+                    .sequence(conn, None)
                     .unwrap()
             })
             .collect()

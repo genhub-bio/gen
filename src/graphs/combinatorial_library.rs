@@ -356,15 +356,12 @@ mod tests {
     };
 
     use super::*;
-    use crate::{test_helpers::setup_gen, track_database};
+    use crate::test_helpers::setup_gen;
 
     #[test]
     fn no_parts_in_list() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let collection = "test";
         let sample_name = "test-sample";
         let _sample = Sample::get_or_create(

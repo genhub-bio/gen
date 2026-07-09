@@ -81,7 +81,7 @@ fn get_block_group_path_nodes(
     .map_err(|e| format!("Failed to query path: {}", e))?;
 
     let path_blocks = path
-        .blocks(conn)
+        .blocks(conn, None)
         .map_err(|err| format!("Failed to load path blocks: {err}"))?;
 
     let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
@@ -164,15 +164,17 @@ pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
 
 fn load_annotation_groups_for_viewport(
     conn: &GraphConnection,
+    history_ref: Option<&str>,
     block_group: &BlockGroup,
     node_ids: &HashSet<HashId>,
     explorer_state: &mut CollectionExplorerState,
     overlays: &mut Vec<GraphOverlay>,
     messages: &mut crate::views::messages::MessageBuffer,
 ) {
-    for entry in load_annotation_group_entries(conn, block_group) {
+    for entry in load_annotation_group_entries(conn, block_group, history_ref) {
         let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
+            history_ref,
             current_block_group: block_group,
             entry: &entry,
             node_ids,
@@ -196,14 +198,19 @@ fn load_annotation_groups_for_viewport(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CLI entrypoint needs to forward explicit view selection and history state"
+)]
 pub fn view_block_group(
     conn: &GraphConnection,
-    op_conn: &gen_models::db::OperationsConnection,
+    op_conn: &gen_models::db::ConfigConnection,
     workspace: &gen_core::config::Workspace,
     name: Option<String>,
     sample_name: Option<String>,
     collection_name: &str,
     position: Option<String>, // Node ID and offset
+    history_ref: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
@@ -234,11 +241,8 @@ pub fn view_block_group(
     }
 
     if let (Some(name), Some(sample_name)) = (name, sample_name.as_ref()) {
-        let block_group = BlockGroup::get(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-            params![collection_name, sample_name, name],
-        );
+        let block_group =
+            BlockGroup::get_by_name(conn, collection_name, sample_name, &name, history_ref);
 
         if block_group.is_err() {
             panic!(
@@ -251,7 +255,7 @@ pub fn view_block_group(
 
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, &block_group.id)?;
+        block_graph = BlockGroup::get_graph(conn, &block_group.id, history_ref)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -270,13 +274,15 @@ pub fn view_block_group(
     let mut annotation_file_loaded_windows: std::collections::HashMap<HashId, (i64, i64)> =
         std::collections::HashMap::new();
     let mut current_block_group =
-        block_group_id.map(|bg_id| match BlockGroup::get_by_id(conn, &bg_id) {
-            Ok(bg) => bg,
-            Err(err) => {
-                // TODO: Handle these with messages instead of panic'ing
-                panic!("Failed to load block group {bg_id}: {err}");
-            }
-        });
+        block_group_id.map(
+            |bg_id| match BlockGroup::get_by_id(conn, &bg_id, history_ref) {
+                Ok(bg) => bg,
+                Err(err) => {
+                    // TODO: Handle these with messages instead of panic'ing
+                    panic!("Failed to load block group {bg_id}: {err}");
+                }
+            },
+        );
 
     // Create explorer and its state that persists across frames
     let mut explorer = CollectionExplorer::new(
@@ -285,6 +291,7 @@ pub fn view_block_group(
         sample_name.as_deref(),
         current_block_group.as_ref(),
         collection_name,
+        history_ref,
     );
 
     // Create the graph controller and initial graph
@@ -456,10 +463,8 @@ pub fn view_block_group(
                                 focus_zone = FocusZone::Canvas;
                                 tui_layout_change = true;
                             }
-                            KeyCode::Char('c') => {
-                                if panel_mode == PanelMode::Messages {
-                                    messages.clear();
-                                }
+                            KeyCode::Char('c') if panel_mode == PanelMode::Messages => {
+                                messages.clear();
                             }
                             _ => {}
                         },
@@ -485,6 +490,7 @@ pub fn view_block_group(
                                             block_graph.nodes().map(|node| node.node_id).collect();
                                         let request = AnnotationFileTrackRequest {
                                             conn,
+                                            history_ref,
                                             workspace,
                                             collection_name,
                                             sample_name: bg.sample_name.as_str(),
@@ -544,6 +550,7 @@ pub fn view_block_group(
                                             load_annotations_for_group(
                                                 &AnnotationGroupTrackRequest {
                                                     conn,
+                                                    history_ref,
                                                     current_block_group: current_block_group
                                                         .as_ref()
                                                         .expect("current block group should exist"),
@@ -610,6 +617,7 @@ pub fn view_block_group(
                                     block_graph.nodes().map(|node| node.node_id).collect();
                                 let request = AnnotationFileTrackRequest {
                                     conn,
+                                    history_ref,
                                     workspace,
                                     collection_name,
                                     sample_name: bg.sample_name.as_str(),
@@ -663,6 +671,7 @@ pub fn view_block_group(
                                 let spans = match entry.map(|entry| {
                                     load_annotations_for_group(&AnnotationGroupTrackRequest {
                                         conn,
+                                        history_ref,
                                         current_block_group: bg,
                                         entry,
                                         node_ids: &node_ids,
@@ -744,6 +753,7 @@ pub fn view_block_group(
                 selected_sample,
                 current_block_group.as_ref(),
                 collection_name,
+                history_ref,
             ) {
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
@@ -811,6 +821,7 @@ pub fn view_block_group(
 
                 let request = AnnotationFileTrackRequest {
                     conn,
+                    history_ref,
                     workspace,
                     collection_name,
                     sample_name: bg.sample_name.as_str(),
@@ -1175,6 +1186,7 @@ pub fn view_block_group(
                 explorer_state.active_annotation_groups.clear();
                 load_annotation_groups_for_viewport(
                     conn,
+                    history_ref,
                     block_group,
                     &node_ids,
                     &mut explorer_state,
@@ -1190,10 +1202,10 @@ pub fn view_block_group(
         // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, new_block_group_id)?;
+            block_graph = BlockGroup::get_graph(conn, new_block_group_id, history_ref)?;
             // Update the graph controller
             graph_controller = create_gen_graph_controller(block_graph.clone());
-            let block_group = match BlockGroup::get_by_id(conn, new_block_group_id) {
+            let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {
                 Ok(bg) => bg,
                 Err(err) => {
                     // TODO: Handle these with messages instead of panic'ing
@@ -1211,6 +1223,7 @@ pub fn view_block_group(
                 selected_sample,
                 current_block_group.as_ref(),
                 collection_name,
+                history_ref,
             ) {
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
@@ -1233,6 +1246,7 @@ pub fn view_block_group(
                     }
                     let request = AnnotationFileTrackRequest {
                         conn,
+                        history_ref,
                         workspace,
                         collection_name,
                         sample_name: bg.sample_name.as_str(),

@@ -54,7 +54,7 @@ impl PyAnnotation {
                 id: HashId::convert_str(name),
                 name: name.to_string(),
                 group: String::new(),
-                accession_id: HashId([0u8; 32]),
+                accession_id: HashId([0u8; 16]),
                 extra: None,
             },
             context: None,

@@ -5,12 +5,14 @@ use gen_core::region::Region;
 use gen_models::{
     db::DbContext,
     errors::OperationError,
-    operations::OperationInfo,
-    session_operations::{end_operation, start_operation},
+    operations::{OperationInfo, OperationSummary},
 };
 use thiserror::Error;
 
-use crate::{commands::get_default_collection, graphs::operators::derive_chunks};
+use crate::{
+    commands::{commit_operation, get_default_collection},
+    graphs::operators::derive_chunks,
+};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum DeriveSubgraphOperationError {
@@ -32,13 +34,8 @@ pub fn derive_subgraph_operation(
     region: String,
     backbone: Option<String>,
 ) -> Result<(), Error> {
-    let operation_conn = db_context.operations().conn();
+    let operation_conn = db_context.config().conn();
     let graph_conn = db_context.graph().conn();
-
-    let mut session = start_operation(graph_conn);
-
-    graph_conn.execute("BEGIN TRANSACTION", [])?;
-    operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let collection_name = &(match name {
         Some(collection) => collection,
@@ -58,6 +55,8 @@ pub fn derive_subgraph_operation(
 
     let (start_coordinate, end_coordinate) = parsed_region.require_coordinates()?;
 
+    graph_conn.execute("BEGIN TRANSACTION", [])?;
+
     if let Err(err) = derive_chunks(
         db_context,
         collection_name,
@@ -73,26 +72,26 @@ pub fn derive_subgraph_operation(
         true,
     ) {
         graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
-        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
         return Err(err.into());
     }
 
     let summary_str = format!(" {}: new derived block group", new_sample_name,);
 
-    let _op = end_operation(
-        db_context,
-        &mut session,
-        &OperationInfo {
+    let operation_summary = OperationSummary::new(
+        OperationInfo {
             files: vec![],
             description: "derive subgraph".to_string(),
         },
-        &summary_str,
-        None,
-    )
-    .map_err(DeriveSubgraphOperationError::OperationError)?;
-
-    graph_conn.execute("END TRANSACTION;", [])?;
-    operation_conn.execute("END TRANSACTION;", [])?;
+        summary_str,
+    );
+    match commit_operation(db_context, &operation_summary) {
+        Ok(_) => {}
+        Err(OperationError::NoChanges) => {
+            println!("Warning: No changes made.");
+            return Ok(());
+        }
+        Err(err) => return Err(DeriveSubgraphOperationError::OperationError(err).into()),
+    }
 
     println!("Derive subgraph succeeded.");
 

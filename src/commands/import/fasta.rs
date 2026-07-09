@@ -6,7 +6,7 @@ use gen_models::{
 };
 
 use crate::{
-    commands::{cli_context::CliContext, get_default_collection},
+    commands::{cli_context::CliContext, commit_operation, get_default_collection},
     fasta::FastaError,
     imports::fasta::import_fasta,
 };
@@ -39,11 +39,10 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Fasta import called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
-    conn.execute("BEGIN TRANSACTION", []).unwrap();
-    operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
+    conn.execute("BEGIN TRANSACTION", [])?;
 
     let name = &cmd
         .name
@@ -63,21 +62,24 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         )?;
     }
     match import_fasta(context, &cmd.path.clone(), name, sample_name, cmd.shallow) {
-        Ok(_) => {
-            println!("Fasta imported.");
-            conn.execute("END TRANSACTION;", []).unwrap();
-            operation_conn.execute("END TRANSACTION;", []).unwrap();
-            Ok(())
-        }
+        Ok(operation_summary) => match commit_operation(context, &operation_summary) {
+            Ok(_) => {
+                println!("Fasta imported.");
+                Ok(())
+            }
+            Err(OperationError::NoChanges) => {
+                println!("Fasta contents already exist.");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        },
         Err(FastaError::OperationError(OperationError::NoChanges)) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
             println!("Fasta contents already exist.");
             Ok(())
         }
         Err(e) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
             Err(e.into())
         }
     }

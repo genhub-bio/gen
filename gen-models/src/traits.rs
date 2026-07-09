@@ -1,13 +1,17 @@
 use std::rc::Rc;
 
 use itertools::Itertools;
-use rusqlite::{Connection, Params, Result as SQLResult, Row, limits::Limit, params, types::Value};
+use rusqlite::{
+    Connection, Params, Result as SQLResult, Row, ToSql, limits::Limit, params, types::Value,
+};
 
 use crate::errors::QueryError;
 
 /// Returns the SQLite variable parameter limit for the provided connection.
 pub fn sqlite_parameter_limit(conn: &Connection) -> usize {
-    let limit = conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER);
+    let limit = conn
+        .limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
+        .expect("SQLite parameter limit should be readable");
     usize::try_from(limit).expect("SQLite parameter limit should be positive")
 }
 
@@ -22,6 +26,7 @@ pub trait Query {
     type Model;
     const PRIMARY_KEY: &'static str = "id";
     const TABLE_NAME: &'static str;
+    const HISTORY_TABLE_NAME: Option<&'static str> = Some(Self::TABLE_NAME);
 
     fn query(conn: &Connection, query: &str, params: impl Params) -> Vec<Self::Model> {
         let mut stmt = conn.prepare(query).unwrap();
@@ -54,24 +59,45 @@ pub trait Query {
         stmt.query_row(params, |row| Ok(Self::process_row(row)))
     }
 
-    fn get_by_id<'a, T>(conn: &Connection, id: &'a T) -> Option<Self::Model>
+    fn table_name_with_history_ref(history_ref: Option<&str>) -> String {
+        if history_ref.is_some() {
+            let history_table_name =
+                Self::HISTORY_TABLE_NAME.expect("should support history ref queries");
+            format!("dolt_at_{history_table_name}(:history_ref)")
+        } else {
+            Self::TABLE_NAME.to_string()
+        }
+    }
+
+    fn get_by_id<'a, T>(
+        conn: &Connection,
+        id: &'a T,
+        history_ref: Option<&str>,
+    ) -> Option<Self::Model>
     where
         T: Clone + 'a,
         Value: From<T>,
     {
-        Self::query(
-            conn,
-            &format!(
-                "select * from {} where {} = ?1",
-                Self::TABLE_NAME,
-                Self::PRIMARY_KEY
-            ),
-            params![Value::from(id.clone())],
-        )
-        .pop()
+        let query = format!(
+            "select * from {} where {} = :id",
+            Self::table_name_with_history_ref(history_ref),
+            Self::PRIMARY_KEY,
+        );
+        let mut stmt = conn.prepare(&query).unwrap();
+        let id_value = Value::from(id.clone());
+        let mut params: Vec<(&str, &dyn ToSql)> = vec![(":id", &id_value)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        let mut rows = stmt.query(&params[..]).unwrap();
+        rows.next().unwrap().map(|row| Self::process_row(row))
     }
 
-    fn query_by_ids<'a, I: ?Sized, T>(conn: &Connection, ids: &'a I) -> Vec<Self::Model>
+    fn query_by_ids<'a, I: ?Sized, T>(
+        conn: &Connection,
+        ids: &'a I,
+        history_ref: Option<&str>,
+    ) -> Vec<Self::Model>
     where
         &'a I: IntoIterator<Item = &'a T>,
         T: Clone + 'a,
@@ -83,28 +109,32 @@ pub trait Query {
             let values: Vec<Value> = chunk
                 .map(|value: &'a T| Value::from(value.clone()))
                 .collect();
-            results.append(&mut Self::query(
-                conn,
-                // The use of rarray/rowid is to preserve the order of the input IDs. If it becomes a performance hit,
-                // we can consider seeing if the input is an ordered preserving structure or not.
-                &format!(
-                    "
+            let query = format!(
+                "
                     WITH arr AS (
                     SELECT value, rowid AS pos
-                    FROM rarray(?1)
+                    FROM rarray(:ids)
                     )
-                    SELECT {}.*
-                    FROM {}
-                    JOIN arr ON {}.{} = arr.value
+                    SELECT t.*
+                    FROM {} t
+                    JOIN arr ON t.{} = arr.value
                     ORDER BY arr.pos;
                     ",
-                    Self::TABLE_NAME,
-                    Self::TABLE_NAME,
-                    Self::TABLE_NAME,
-                    Self::PRIMARY_KEY
-                ),
-                params!(Rc::new(values)),
-            ))
+                Self::table_name_with_history_ref(history_ref),
+                Self::PRIMARY_KEY
+            );
+            let mut stmt = conn.prepare(&query).unwrap();
+            let id_values = Rc::new(values);
+            let mut params: Vec<(&str, &dyn ToSql)> = vec![(":ids", &id_values)];
+            if let Some(history_ref) = history_ref.as_ref() {
+                params.push((":history_ref", history_ref));
+            }
+            let rows = stmt
+                .query_map(&params[..], |row| Ok(Self::process_row(row)))
+                .unwrap();
+            for row in rows {
+                results.push(row.unwrap());
+            }
         }
         results
     }

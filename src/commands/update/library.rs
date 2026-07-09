@@ -1,9 +1,9 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::sample::Sample;
+use gen_models::{errors::OperationError, sample::Sample};
 
 use crate::{
-    commands::{cli_context::CliContext, get_default_collection},
+    commands::{cli_context::CliContext, commit_operation, get_default_collection},
     graphs::combinatorial_library::parse_library,
     updates::library::update_with_library,
 };
@@ -39,11 +39,10 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with library called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let operation_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", [])?;
-    operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let name = &cmd
         .name
@@ -52,7 +51,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     let parts_list = parse_library(&cmd.parts, &cmd.library)?;
 
-    if let Err(err) = update_with_library(
+    match update_with_library(
         context,
         name,
         cmd.sample.as_str(),
@@ -62,13 +61,15 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         Some(&cmd.parts),
         Some(&cmd.library),
     ) {
-        conn.execute("ROLLBACK TRANSACTION;", [])?;
-        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
-        return Err(err.into());
-    }
-
-    conn.execute("END TRANSACTION;", [])?;
-    operation_conn.execute("END TRANSACTION;", [])?;
+        Ok(operation_summary) => match commit_operation(context, &operation_summary) {
+            Ok(_) | Err(OperationError::NoChanges) => {}
+            Err(err) => return Err(err.into()),
+        },
+        Err(err) => {
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
+            return Err(err.into());
+        }
+    };
 
     println!("Updated with library file: {0}", cmd.library);
 

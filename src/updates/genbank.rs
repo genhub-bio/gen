@@ -10,11 +10,10 @@ use gen_models::{
     edge::Edge,
     errors::CollectionError,
     node::Node,
-    operations::{Operation, OperationInfo},
+    operations::{OperationInfo, OperationSummary},
     path::Path,
     region::ResolvedGenRegion,
     sequence::Sequence,
-    session_operations::end_operation,
     traits::Query,
 };
 use itertools::Itertools;
@@ -29,12 +28,11 @@ pub fn update_with_genbank<'a, R>(
     sample_name: &str,
     create_missing: bool,
     operation_info: &OperationInfo,
-) -> Result<Operation, GenBankError>
+) -> Result<OperationSummary, GenBankError>
 where
     R: Read,
 {
     let conn = context.graph().conn();
-    let mut session = gen_models::session_operations::start_operation(conn);
     let reader = reader::SeqReader::new(data);
     let collection = match Collection::create(conn, collection.into().unwrap_or_default()) {
         Ok(c) => c,
@@ -69,8 +67,8 @@ where
                     &sequence.hash,
                     &HashId::convert_str(&format!(
                         "{collection}.{contig}:{hash}",
-                        contig = &locus.name,
-                        collection = &collection.name,
+                        contig = locus.name,
+                        collection = collection.name,
                         hash = sequence.hash
                     )),
                 )?;
@@ -89,7 +87,7 @@ where
                     if !create_missing {
                         return Err(GenBankError::LookupError(format!(
                             "No block group named {contig} exists. Try importing first or pass --create-missing.",
-                            contig = &locus.name
+                            contig = locus.name
                         )));
                     }
                     BlockGroup::create(
@@ -113,7 +111,7 @@ where
                     if !create_missing {
                         return Err(GenBankError::LookupError(format!(
                             "No path named {contig} exists. Try importing first or pass --create-missing.",
-                            contig = &locus.name
+                            contig = locus.name
                         )));
                     }
                     let edge_into = Edge::create(
@@ -178,8 +176,8 @@ where
                                 &change_seq.hash,
                                 &HashId::convert_str(&format!(
                                     "{parent_hash}:{start}-{end}->{new_hash}",
-                                    parent_hash = &sequence.hash,
-                                    new_hash = &change_seq.hash,
+                                    parent_hash = sequence.hash,
+                                    new_hash = change_seq.hash,
                                 )),
                             )?;
                             BlockGroupChange {
@@ -222,11 +220,9 @@ where
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),
         }
     }
-    end_operation(
-        context,
-        &mut session,
-        operation_info,
-        &format!(
+    Ok(OperationSummary::new(
+        operation_info.clone(),
+        format!(
             "Update with GenBank {files}.",
             files = operation_info
                 .files
@@ -234,20 +230,25 @@ where
                 .map(|f| f.file_path.clone())
                 .join(",")
         ),
-        None,
-    )
-    .map_err(GenBankError::OperationError)
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
-    use gen_models::{file_types::FileTypes, operations::OperationFile, sample::Sample};
+    use gen_models::{
+        assets::{OperationKind, OperationLog},
+        file_types::FileTypes,
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        operations::{OperationFile, commit_operation_summary},
+        sample::Sample,
+        traits::Query,
+    };
     use noodles::fasta;
 
     use super::*;
-    use crate::{test_helpers::setup_gen, track_database};
+    use crate::test_helpers::setup_gen;
 
     fn get_unmodified_sequence() -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -262,10 +263,7 @@ mod tests {
     #[test]
     fn test_error_on_invalid_file() {
         let context = setup_gen();
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
+        let _conn = context.graph().conn();
         assert_eq!(
             update_with_genbank(
                 &context,
@@ -291,9 +289,6 @@ mod tests {
     fn test_records_operation() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
         let file = File::open(&path).unwrap();
@@ -305,7 +300,7 @@ mod tests {
             },
         )
         .unwrap();
-        let operation = update_with_genbank(
+        let operation_summary = update_with_genbank(
             &context,
             BufReader::new(file),
             None,
@@ -320,9 +315,14 @@ mod tests {
             },
         )
         .unwrap();
+        let history_store = DoltHistoryStore::new(conn);
+        let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
+        let mut operation_logs = OperationLog::all(conn);
+        operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
-            Operation::get_by_id(op_conn, &operation.hash).unwrap(),
-            operation
+            operation_logs[0].operation_kind,
+            OperationKind::Other("test".to_string())
         );
     }
 
@@ -334,7 +334,6 @@ mod tests {
         use crate::{
             imports::genbank::{GenBankImportOptions, import_genbank},
             test_helpers::setup_gen,
-            track_database,
         };
 
         #[test]
@@ -343,9 +342,6 @@ mod tests {
             // and update it, mimicking a workflow of going between gen <-> 3rd party tool <-> gen
             let context = setup_gen();
             let conn = context.graph().conn();
-            let op_conn = context.operations().conn();
-
-            track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
@@ -400,9 +396,6 @@ mod tests {
             // and includes new sequences and update it.
             let context = setup_gen();
             let conn = context.graph().conn();
-            let op_conn = context.operations().conn();
-
-            track_database(conn, op_conn).unwrap();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();
@@ -469,10 +462,7 @@ mod tests {
             // This tests that if a genbank file has sequences we are missing, it's an error. This
             // is an attempt to avoid updating the database with the wrong file.
             let context = setup_gen();
-            let conn = context.graph().conn();
-            let op_conn = context.operations().conn();
-
-            track_database(conn, op_conn).unwrap();
+            let _conn = context.graph().conn();
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/geneious_genbank/insertion.gb");
             let file = File::open(&path).unwrap();

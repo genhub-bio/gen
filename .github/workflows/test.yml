@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   build:
@@ -17,8 +19,10 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
     - name: Install Dependencies
-      run: sudo apt-get update && sudo apt-get install capnproto
+      run: sudo apt-get update && sudo apt-get install capnproto clang mold
     - name: Generate code coverage
       run: cargo llvm-cov --workspace --html
     - uses: actions/upload-artifact@v4

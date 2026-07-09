@@ -14,7 +14,7 @@ use r#gen::{
 use gen_models::{errors::OperationError, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
-use super::{PyRepository, run_write};
+use super::{PyRepository, run_operation_write};
 use crate::python_api::{sample::PySample, sequence_part::PySequencePart};
 
 #[pymethods]
@@ -29,24 +29,41 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_fasta(
-                ctx,
-                &collection,
-                &sample,
-                &new_sample,
-                &region_name,
-                &filename,
-                false,
-            )
-            .map_err(|e| match e {
-                FastaError::OperationError(OperationError::NoChanges) => {
+        run_operation_write(
+            self,
+            |ctx| {
+                let operation_summary = update_with_fasta(
+                    ctx,
+                    &collection,
+                    &sample,
+                    &new_sample,
+                    &region_name,
+                    &filename,
+                    false,
+                )
+                .map_err(|e| match e {
+                    FastaError::OperationError(OperationError::NoChanges) => {
+                        PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
+                    }
+                    _ => PyRuntimeError::new_err(format!(
+                        "Failed to update from '{}': {e}",
+                        filename
+                    )),
+                })?;
+                Ok((
+                    self.block_groups_in_sample(&collection, &new_sample),
+                    operation_summary,
+                ))
+            },
+            |err| match err {
+                OperationError::NoChanges => {
                     PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
                 }
-                _ => PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename)),
-            })?;
-            Ok(self.block_groups_in_sample(&collection, &new_sample))
-        })
+                _ => {
+                    PyRuntimeError::new_err(format!("Failed to update from '{}': {err}", filename))
+                }
+            },
+        )
     }
 
     #[pyo3(signature = (filename, sample, new_sample, collection=None))]
@@ -58,12 +75,25 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_gfa(ctx, &collection, &sample, &new_sample, &filename).map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
-            })?;
-            Ok(self.block_groups_in_sample(&collection, &new_sample))
-        })
+        run_operation_write(
+            self,
+            |ctx| {
+                let operation_summary =
+                    update_with_gfa(ctx, &collection, &sample, &new_sample, &filename).map_err(
+                        |e| {
+                            PyRuntimeError::new_err(format!(
+                                "Failed to update from '{}': {e}",
+                                filename
+                            ))
+                        },
+                    )?;
+                Ok((
+                    self.block_groups_in_sample(&collection, &new_sample),
+                    operation_summary,
+                ))
+            },
+            |err| PyRuntimeError::new_err(format!("Failed to update from '{}': {err}", filename)),
+        )
     }
 
     #[pyo3(signature = (filename, csv, sample, parent_sample=None, collection=None))]
@@ -76,20 +106,27 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_gaf(
-                ctx,
-                &filename,
-                &csv,
-                &collection,
-                &sample,
-                parent_sample.as_deref(),
-            )
-            .map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
-            })?;
-            Ok(self.block_groups_in_sample(&collection, &sample))
-        })
+        run_operation_write(
+            self,
+            |ctx| {
+                let operation_summary = update_with_gaf(
+                    ctx,
+                    &filename,
+                    &csv,
+                    &collection,
+                    &sample,
+                    parent_sample.as_deref(),
+                )
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
+                })?;
+                Ok((
+                    self.block_groups_in_sample(&collection, &sample),
+                    operation_summary,
+                ))
+            },
+            |err| PyRuntimeError::new_err(format!("Failed to update from '{}': {err}", filename)),
+        )
     }
 
     #[pyo3(signature = (filename, reference=None, genotype=None, sample=None, in_place=false, collection=None))]
@@ -115,27 +152,42 @@ impl PyRepository {
             }
         };
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_write(&self.context, !self.in_transaction, |ctx| {
-            let (_, output_samples) = update_with_vcf(
-                ctx,
-                &filename,
-                &collection,
-                genotype.clone().unwrap_or_default(),
-                sample.as_deref(),
-                parent_samples.clone(),
-                in_place,
-            )
-            .map_err(|e| match e {
-                VcfError::OperationError(OperationError::NoChanges) => PyRuntimeError::new_err(
+        run_operation_write(
+            self,
+            |ctx| {
+                let (operation_summary, output_samples) = update_with_vcf(
+                    ctx,
+                    &filename,
+                    &collection,
+                    genotype.clone().unwrap_or_default(),
+                    sample.as_deref(),
+                    parent_samples.clone(),
+                    in_place,
+                )
+                .map_err(|e| match e {
+                    VcfError::OperationError(OperationError::NoChanges) => PyRuntimeError::new_err(
+                        "No changes made. Provide sample and genotype if missing from VCF.",
+                    ),
+                    _ => PyRuntimeError::new_err(format!(
+                        "Failed to update from '{}': {e}",
+                        filename
+                    )),
+                })?;
+                let samples = output_samples
+                    .into_iter()
+                    .map(|sample_name| self.block_groups_in_sample(&collection, &sample_name))
+                    .collect();
+                Ok((samples, operation_summary))
+            },
+            |err| match err {
+                OperationError::NoChanges => PyRuntimeError::new_err(
                     "No changes made. Provide sample and genotype if missing from VCF.",
                 ),
-                _ => PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename)),
-            })?;
-            Ok(output_samples
-                .into_iter()
-                .map(|sample_name| self.block_groups_in_sample(&collection, &sample_name))
-                .collect())
-        })
+                _ => {
+                    PyRuntimeError::new_err(format!("Failed to update from '{}': {err}", filename))
+                }
+            },
+        )
     }
 
     #[pyo3(signature = (filename, sample, create_missing=false, collection=None))]
@@ -148,30 +200,38 @@ impl PyRepository {
     ) -> PyResult<PySample> {
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_write(&self.context, !self.in_transaction, |ctx| {
-            let file = File::open(&filename).map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to open '{}': {e}", filename))
-            })?;
-            update_with_genbank(
-                ctx,
-                &file,
-                collection.as_ref(),
-                &sample,
-                create_missing,
-                &gen_models::operations::OperationInfo {
-                    files: vec![{
-                        let mut f = gen_models::operations::OperationFile::new(filename.clone());
-                        f.file_type = gen_models::file_types::FileTypes::GenBank;
-                        f
-                    }],
-                    description: "Update from GenBank".to_string(),
-                },
-            )
-            .map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
-            })?;
-            Ok(self.block_groups_in_sample(&collection, &sample))
-        })
+        run_operation_write(
+            self,
+            |ctx| {
+                let file = File::open(&filename).map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to open '{}': {e}", filename))
+                })?;
+                let operation_summary = update_with_genbank(
+                    ctx,
+                    &file,
+                    collection.as_ref(),
+                    &sample,
+                    create_missing,
+                    &gen_models::operations::OperationInfo {
+                        files: vec![{
+                            let mut f =
+                                gen_models::operations::OperationFile::new(filename.clone());
+                            f.file_type = gen_models::file_types::FileTypes::GenBank;
+                            f
+                        }],
+                        description: "Update from GenBank".to_string(),
+                    },
+                )
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to update from '{}': {e}", filename))
+                })?;
+                Ok((
+                    self.block_groups_in_sample(&collection, &sample),
+                    operation_summary,
+                ))
+            },
+            |err| PyRuntimeError::new_err(format!("Failed to update from '{}': {err}", filename)),
+        )
     }
 
     #[pyo3(signature = (sequence, sample, new_sample, region_name, no_reference_path_update=false, collection=None))]
@@ -185,19 +245,26 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_sequence(
-                ctx,
-                &collection,
-                &sample,
-                &new_sample,
-                &region_name,
-                &sequence,
-                no_reference_path_update,
-            )
-            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
-            Ok(self.block_groups_in_sample(&collection, &new_sample))
-        })
+        run_operation_write(
+            self,
+            |ctx| {
+                let operation_summary = update_with_sequence(
+                    ctx,
+                    &collection,
+                    &sample,
+                    &new_sample,
+                    &region_name,
+                    &sequence,
+                    no_reference_path_update,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
+                Ok((
+                    self.block_groups_in_sample(&collection, &new_sample),
+                    operation_summary,
+                ))
+            },
+            |err| PyRuntimeError::new_err(format!("Update failed: {err}")),
+        )
     }
 
     #[pyo3(signature = (sample, new_sample_name, path_name, parts_list, collection=None))]
@@ -224,20 +291,27 @@ impl PyRepository {
                     .collect()
             })
             .collect();
-        run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_library(
-                ctx,
-                &collection,
-                &sample,
-                &new_sample_name,
-                &path_name,
-                rust_parts_list.clone(),
-                None,
-                None,
-            )
-            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
-            Ok(self.block_groups_in_sample(&collection, &new_sample_name))
-        })
+        run_operation_write(
+            self,
+            |ctx| {
+                let operation_summary = update_with_library(
+                    ctx,
+                    &collection,
+                    &sample,
+                    &new_sample_name,
+                    &path_name,
+                    rust_parts_list.clone(),
+                    None,
+                    None,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
+                Ok((
+                    self.block_groups_in_sample(&collection, &new_sample_name),
+                    operation_summary,
+                ))
+            },
+            |err| PyRuntimeError::new_err(format!("Update failed: {err}")),
+        )
     }
 
     #[pyo3(signature = (sample, new_sample, path_name, library, parts, collection=None))]
@@ -253,19 +327,26 @@ impl PyRepository {
         let parts_list = parse_library(&parts, &library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_write(&self.context, !self.in_transaction, |ctx| {
-            update_with_library(
-                ctx,
-                &collection,
-                &sample,
-                &new_sample,
-                &path_name,
-                parts_list.clone(),
-                Some(&parts),
-                Some(&library),
-            )
-            .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
-            Ok(self.block_groups_in_sample(&collection, &new_sample))
-        })
+        run_operation_write(
+            self,
+            |ctx| {
+                let operation_summary = update_with_library(
+                    ctx,
+                    &collection,
+                    &sample,
+                    &new_sample,
+                    &path_name,
+                    parts_list.clone(),
+                    Some(&parts),
+                    Some(&library),
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
+                Ok((
+                    self.block_groups_in_sample(&collection, &new_sample),
+                    operation_summary,
+                ))
+            },
+            |err| PyRuntimeError::new_err(format!("Update failed: {err}")),
+        )
     }
 }

@@ -134,8 +134,8 @@ pub fn resolve_path(
         Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
         Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
     };
-    let block_group = BlockGroup::get_by_id(conn, &path.block_group_id)?;
-    let path_length = path.length(conn)?;
+    let block_group = BlockGroup::get_by_id(conn, &path.block_group_id, None)?;
+    let path_length = path.length(conn, None)?;
     resolve_target(
         region,
         RegionTarget {
@@ -165,8 +165,8 @@ pub fn resolve_block_group(
         Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
         Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
     };
-    let path = BlockGroup::get_current_path(conn, &block_group.id)?;
-    let path_length = path.length(conn)?;
+    let path = BlockGroup::get_current_path(conn, &block_group.id, None)?;
+    let path_length = path.length(conn, None)?;
     resolve_target(
         region,
         RegionTarget {
@@ -223,7 +223,7 @@ pub fn resolve_annotation(
         Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
         Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
     };
-    let accession = Accession::get_by_id(conn, &annotation.accession_id)
+    let accession = Accession::get_by_id(conn, &annotation.accession_id, None)
         .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
     let target = target_from_accession(
         region,
@@ -312,7 +312,7 @@ fn target_from_accession(
     annotation: Option<Annotation>,
     require_current_sample: bool,
 ) -> Result<RegionTarget, GenRegionError> {
-    let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id)?;
+    let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id, None)?;
     if block_group.collection_name != collection_name
         || (require_current_sample && block_group.sample_name != sample_name)
     {
@@ -339,8 +339,8 @@ impl ResolvedGenRegion {
         start: i64,
         end: i64,
     ) -> Result<Self, BlockGroupError> {
-        let block_group = BlockGroup::get_by_id(conn, &block_group_id)?;
-        let path_length = path.length(conn)?;
+        let block_group = BlockGroup::get_by_id(conn, &block_group_id, None)?;
+        let path_length = path.length(conn, None)?;
         Ok(ResolvedGenRegion {
             block_group,
             path: Some(path.clone()),
@@ -364,7 +364,7 @@ impl ResolvedGenRegion {
         start: i64,
         end: i64,
     ) -> Result<Self, BlockGroupError> {
-        let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id)?;
+        let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id, None)?;
         let accession_length = accession.length(conn)?;
         Ok(ResolvedGenRegion {
             block_group,
@@ -390,7 +390,7 @@ impl ResolvedGenRegion {
         start: i64,
         end: i64,
     ) -> Result<Self, BlockGroupError> {
-        let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id)?;
+        let block_group = BlockGroup::get_by_id(conn, &accession.block_group_id, None)?;
         let accession_length = accession.length(conn)?;
         Ok(ResolvedGenRegion {
             block_group,
@@ -555,6 +555,10 @@ impl ResolvedGenRegion {
         Ok((start_positions, end_positions))
     }
 
+    #[cfg_attr(
+        feature = "profiling",
+        tracing::instrument(skip(self, conn, change, tree))
+    )]
     pub fn plan_edges(
         &self,
         conn: &GraphConnection,
@@ -721,7 +725,7 @@ mod tests {
     ) {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
-        let block_group = BlockGroup::get_by_id(&conn, &block_group_id).unwrap();
+        let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None).unwrap();
         let mut path_cache = PathCache::new(&conn);
         let accession =
             BlockGroup::add_accession(&conn, &path, "mreB", 10, 30, &mut path_cache).unwrap();
@@ -1074,7 +1078,7 @@ mod tests {
             start: i64,
             end: i64,
         ) -> Accession {
-            let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+            let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
             let mut by_source: std::collections::HashMap<
                 HashId,
                 &crate::block_group_edge::AugmentedEdge,
@@ -1459,7 +1463,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_within_node() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "within", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
@@ -1480,7 +1484,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_forward_across_nodes() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "fwd", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
@@ -1501,7 +1505,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_backwards_across_nodes() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "bwd", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
@@ -1522,7 +1526,7 @@ mod tests {
         #[test]
         fn test_reports_out_of_bounds() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "oob", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
@@ -1532,7 +1536,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_from_start() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "start", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 0, 0);
 
@@ -1553,7 +1557,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_from_end() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "end", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 14, 14);
 
@@ -1574,7 +1578,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_within_accessions() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "acc-within", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 2, 2);
 
@@ -1595,7 +1599,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_expands_accession_forward() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "acc-fwd", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 3, 3);
 
@@ -1616,7 +1620,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_expands_accession_backward() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "acc-bwd", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 1, 1);
 
@@ -1637,7 +1641,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_reports_accession_out_of_bounds() {
             let (conn, bg_id) = setup_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             let acc = create_accession(&conn, bg_id, "acc-oob", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 2, 2);
 
@@ -1647,7 +1651,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_in_branched_graph_backwards_returns_all_positions() {
             let (conn, bg_id) = setup_branched_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             // Accession on TTT: path positions 3..6, accession-relative 0..3
             let acc = create_accession(&conn, bg_id, "branched-bwd", 3, 6);
             let region = make_region(bg, acc, 3, 6, 3, 0, 0);
@@ -1672,7 +1676,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_in_branched_graph_forwardsgr_returns_all_positions() {
             let (conn, bg_id) = setup_branched_graph();
-            let bg = BlockGroup::get_by_id(&conn, &bg_id).unwrap();
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None).unwrap();
             // Accession on TTT: path positions 3..6, accession-relative 0..3
             let acc = create_accession(&conn, bg_id, "branched-fwd", 3, 6);
             let region = make_region(bg, acc, 3, 6, 3, 2, 2);
@@ -1697,7 +1701,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_in_variable_length_branch_finds_middle_nodes() {
             let fixture = setup_variable_length_branched_graph();
-            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id).unwrap();
+            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id, None).unwrap();
             let aaa_acc = create_accession_from_edges(
                 &fixture.conn,
                 fixture.block_group_id,
@@ -1744,7 +1748,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_in_variable_length_branch_returns_single_position() {
             let fixture = setup_variable_length_branched_graph();
-            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id).unwrap();
+            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id, None).unwrap();
             let acc = create_accession_from_edges(
                 &fixture.conn,
                 fixture.block_group_id,
@@ -1765,7 +1769,7 @@ mod tests {
         #[test]
         fn test_finds_graph_positions_in_variable_length_branch_finds_different_ttt_offsets() {
             let fixture = setup_variable_length_branched_graph();
-            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id).unwrap();
+            let bg = BlockGroup::get_by_id(&fixture.conn, &fixture.block_group_id, None).unwrap();
             let acc = create_accession_from_edges(
                 &fixture.conn,
                 fixture.block_group_id,

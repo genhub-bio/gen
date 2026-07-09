@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 use pprof::{ProfilerGuardBuilder, Report};
 use tracing::{Id, Subscriber, span::Attributes};
 use tracing_subscriber::{
@@ -19,12 +19,12 @@ use tracing_subscriber::{
 /// events. This will only measure code that has been instrumented with
 /// ```
 /// #[cfg_attr(
-///    all(debug_assertions, feature = "profiling"),
+///    feature = "profiling",
 ///    tracing::instrument(...)
 /// )]
 /// ```
 ///
-/// which means profiling is enabled as a feature, and it's a dev build.
+/// which means profiling is enabled as a feature.
 #[derive(Clone, Default)]
 pub struct Profiler {
     stats: Arc<Mutex<HashMap<String, Stat>>>,
@@ -154,7 +154,7 @@ where
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 /// Collects periodic samples from a `pprof` guard and prints an approximate hot-path report.
 ///
 /// `SamplingProfiler` better suited for broad performance inspection, but it reports sampled
@@ -164,7 +164,7 @@ where
 #[derive(Clone, Default)]
 pub struct SamplingProfiler;
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 impl SamplingProfiler {
     pub fn run<T>(self, f: impl FnOnce() -> T) -> T {
         let guard = ProfilerGuardBuilder::default()
@@ -244,12 +244,12 @@ impl SamplingProfiler {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn duration_for_samples(samples: u64, frequency: f64) -> Duration {
     Duration::from_secs_f64(samples as f64 / frequency)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn stack_frames(stack: &str) -> Vec<String> {
     stack
         .split(" -> ")
@@ -257,7 +257,7 @@ fn stack_frames(stack: &str) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn trim_sample_prefix(frames: &mut Vec<String>) {
     let prefix = [
         "gen::main",
@@ -276,7 +276,7 @@ fn trim_sample_prefix(frames: &mut Vec<String>) {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn stack_label_width(frames: &[String]) -> usize {
     match frames.split_last() {
         Some((leaf, parents)) => parents.len() + leaf.len(),
@@ -284,7 +284,7 @@ fn stack_label_width(frames: &[String]) -> usize {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn print_stacked_row(frames: &[String], stack_width: usize, tail: std::fmt::Arguments<'_>) {
     match frames.split_last() {
         Some((leaf, parents)) => {
@@ -298,7 +298,7 @@ fn print_stacked_row(frames: &[String], stack_width: usize, tail: std::fmt::Argu
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn sample_stack(frames: &pprof::Frames) -> Option<String> {
     let mut stack = Vec::new();
     for frame in frames.frames.iter().rev() {
@@ -319,7 +319,7 @@ fn sample_stack(frames: &pprof::Frames) -> Option<String> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn owned_frame_name(frame: &pprof::Symbol) -> Option<String> {
     let name = frame.name();
     if is_owned_code(&name) {
@@ -329,7 +329,7 @@ fn owned_frame_name(frame: &pprof::Symbol) -> Option<String> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn is_owned_code(name: &str) -> bool {
     matches!(
         name,
@@ -346,7 +346,7 @@ fn is_owned_code(name: &str) -> bool {
     )
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "profiling")]
 fn normalize_frame_name(name: &str) -> String {
     name.strip_prefix("r#").unwrap_or(name).to_string()
 }

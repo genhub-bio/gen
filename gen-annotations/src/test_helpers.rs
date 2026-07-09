@@ -154,7 +154,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
     )
     .expect("should create child block group")[0]
         .id;
-    let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id).unwrap();
+    let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id, None).unwrap();
     let alt_seq = "C";
 
     let sequence = Sequence::new()

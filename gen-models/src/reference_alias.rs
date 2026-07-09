@@ -118,9 +118,16 @@ impl ReferenceAlias {
     pub fn get_references_by_alias(
         conn: &GraphConnection,
         references: Vec<String>,
+        history_ref: Option<&str>,
     ) -> Result<HashMap<String, String>, ReferenceAliasError> {
         let mut references_by_alias = HashMap::new();
-        let reference_aliases = ReferenceAlias::all(conn);
+        let table = ReferenceAlias::table_name_with_history_ref(history_ref);
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        let reference_aliases =
+            ReferenceAlias::query(conn, &format!("SELECT * FROM {table}"), &params[..]);
         for reference_alias in reference_aliases {
             let aliases = ReferenceAlias::compute_aliases(reference_alias);
             for reference in &references {

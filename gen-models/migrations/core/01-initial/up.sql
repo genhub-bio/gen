@@ -1,7 +1,3 @@
-CREATE TABLE gen_metadata (
-  db_uuid TEXT PRIMARY KEY NOT NULL
-) STRICT;
-
 CREATE TABLE collections (
   name TEXT PRIMARY KEY NOT NULL
 ) STRICT;
@@ -113,7 +109,7 @@ CREATE TABLE block_group_edges (
   edge_id BLOB NOT NULL,
   chromosome_index INTEGER,
   phased INTEGER NOT NULL,
-  created_on INTEGER NOT NULL, 
+  created_on INTEGER NOT NULL,
   FOREIGN KEY(block_group_id) REFERENCES block_groups(id),
   FOREIGN KEY(edge_id) REFERENCES edges(id)
 ) STRICT;
@@ -164,6 +160,34 @@ CREATE TABLE reference_aliases (
   chromosome INTEGER
 );
 CREATE UNIQUE INDEX reference_alias_refseq_uidx ON reference_aliases(refseq_accession_id);
+
+CREATE TABLE gen_asset_refs (
+  id BLOB PRIMARY KEY NOT NULL,
+  uri TEXT NOT NULL,
+  file_type TEXT NOT NULL,
+  checksum BLOB,
+  size INTEGER,
+  role TEXT NOT NULL,
+  logical_path TEXT,
+  name TEXT,
+  created_on INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE gen_operation_log (
+  id BLOB PRIMARY KEY NOT NULL,
+  operation_kind TEXT NOT NULL,
+  command TEXT NOT NULL,
+  created_on INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE gen_operation_assets (
+  log_id BLOB NOT NULL,
+  asset_ref_id BLOB NOT NULL,
+  role TEXT NOT NULL,
+  PRIMARY KEY (log_id, asset_ref_id, role),
+  FOREIGN KEY(log_id) REFERENCES gen_operation_log(id),
+  FOREIGN KEY(asset_ref_id) REFERENCES gen_asset_refs(id)
+) STRICT;
 
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('E. coli K-12 MG1655', 'NC_000913.3', 'U00096.3', 'U00096.3', '');
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('E. coli O157:H7 Sakai', 'NC_002695.2', 'BA000007.3', 'BA000007.3', '');
@@ -273,14 +297,6 @@ INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_acce
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('Domestic cat', 'NC_018741.3', 'CM001396.3', 'chrX', 'X');
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('Domestic cat', 'NC_001700.1', '', 'chrM', 'MT');
 
-
-INSERT INTO gen_metadata (db_uuid) values (lower(
-    hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-' || '4' ||
-    substr(hex( randomblob(2)), 2) || '-' ||
-    substr('AB89', 1 + (abs(random()) % 4) , 1)  ||
-    substr(hex(randomblob(2)), 2) || '-' ||
-    hex(randomblob(6))
-  ));
 INSERT INTO sequences (hash, sequence_type, sequence, name, file_path, "length") values (X'84d6adbd5395281933fe41e877d3a7f02a3b1990a65be1901b2c91fc685e083b', "OTHER", "start-node-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "", "", 64), (X'1c7dfc64977b0838af0762d7333dcb64c175b15e65a70099ec38f46bf1a15ea3', "OTHER", "end-node-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "", "", 64);
-INSERT INTO nodes (id, sequence_hash) values (X'84d6adbd5395281933fe41e877d3a7f02a3b1990a65be1901b2c91fc685e083b', X'84d6adbd5395281933fe41e877d3a7f02a3b1990a65be1901b2c91fc685e083b');
-INSERT INTO nodes (id, sequence_hash) values (X'1c7dfc64977b0838af0762d7333dcb64c175b15e65a70099ec38f46bf1a15ea3', X'1c7dfc64977b0838af0762d7333dcb64c175b15e65a70099ec38f46bf1a15ea3');
+INSERT INTO nodes (id, sequence_hash) values (X'84d6adbd5395281933fe41e877d3a7f0', X'84d6adbd5395281933fe41e877d3a7f02a3b1990a65be1901b2c91fc685e083b');
+INSERT INTO nodes (id, sequence_hash) values (X'1c7dfc64977b0838af0762d7333dcb64', X'1c7dfc64977b0838af0762d7333dcb64c175b15e65a70099ec38f46bf1a15ea3');

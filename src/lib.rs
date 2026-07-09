@@ -17,11 +17,11 @@ pub use generated::gen_schema_capnp;
 pub mod gfa;
 pub mod gfa_reader;
 pub mod graphs;
+pub mod history;
 pub mod imports;
 
-pub mod operation_management;
 pub mod patch;
-#[cfg(all(debug_assertions, feature = "profiling"))]
+#[cfg(feature = "profiling")]
 pub mod profiling;
 mod progress_bar;
 #[cfg(any(test, debug_assertions))]
@@ -40,96 +40,49 @@ pub use gen_graph as graph;
 #[cfg(feature = "models")]
 pub use gen_models as models;
 use gen_models::{
-    db::{GraphConnection, OperationsConnection},
-    files::GenDatabase,
+    db::{ConfigConnection, GraphConnection},
+    history::dolt::{active_branch, checkout},
     migrations::{run_migrations, run_operation_migrations},
 };
 use noodles::vcf::variant::record::samples::series::value::genotype::Phasing;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags};
 
 pub fn get_connection(
     db_path: impl Into<PathBuf>,
 ) -> Result<GraphConnection, core::errors::ConnectionError> {
-    let db_path = db_path.into();
-    let mut conn = Connection::open(&db_path)?;
-    rusqlite::vtab::array::load_module(&conn).unwrap();
-    run_migrations(&mut conn);
+    get_connection_for_branch(db_path, None)
+}
 
+pub fn get_connection_for_branch(
+    db_path: impl Into<PathBuf>,
+    branch: Option<&str>,
+) -> Result<GraphConnection, core::errors::ConnectionError> {
+    let db_path = db_path.into();
+    let graph = get_raw_connection(db_path)?;
+    if let Some(branch) = branch
+        && active_branch(&graph)? != branch
+    {
+        checkout(&graph, branch)?;
+    }
+    let GraphConnection(mut conn) = graph;
+    run_migrations(&mut conn);
     Ok(GraphConnection(conn))
 }
 
-pub fn track_database(
-    conn: &GraphConnection,
-    op_conn: &OperationsConnection,
-) -> Result<(), core::errors::ConnectionError> {
-    // This records the database in the main gen database file. It prevents things like a user copying a database to a new file
-    // or overwriting databases without informing Gen about the changes. Not doing this would lead to situations like 2 databases
-    // with the same uuid having changes being made in parallel but not having the same content.
-    let db_uuid = models::metadata::Metadata::get_db_uuid(conn);
-    if let Some(db_path) = conn.path() {
-        if db_path.is_empty() {
-            GenDatabase::create(op_conn, &db_uuid, "memory", ":memory:").map_err(|e| {
-                core::errors::ConnectionError::DatabaseTracking(format!(
-                    "Failed to create database tracking entry: {e}"
-                ))
-            })?;
-        } else {
-            let path = PathBuf::from(db_path);
-            let mut rel_path = vec![];
-            for component in path.ancestors() {
-                let component_name = component.file_name().unwrap();
-                if component.join(".gen").exists() {
-                    break;
-                }
-                rel_path.push(component_name);
-            }
-            let relative_path = rel_path.iter().rev().collect::<PathBuf>();
-            let relative_path_str = relative_path.to_str().unwrap();
-
-            let exist_by_uuid = GenDatabase::get_by_uuid(op_conn, &db_uuid).optional()?;
-            let exist_by_path = GenDatabase::get_by_path(op_conn, relative_path_str).optional()?;
-            if let Some(path_db) = exist_by_path {
-                if let Some(uuid_db) = exist_by_uuid {
-                    if path_db == uuid_db {
-                        return Ok(());
-                    } else {
-                        return Err(core::errors::ConnectionError::DatabaseTracking(format!(
-                            "Database conflict: Database '{}' (UUID: {}) is registered at path '{}', which does not match the database found at {}",
-                            path_db.name, path_db.db_uuid, path_db.path, db_path
-                        )));
-                    }
-                } else {
-                    return Err(core::errors::ConnectionError::DatabaseTracking(format!(
-                        "Database conflict: Database '{}' (UUID: {}) is registered at path '{}', which does not match the database found at {}",
-                        path_db.name, path_db.db_uuid, path_db.path, db_path
-                    )));
-                }
-            } else if let Some(uuid_db) = exist_by_uuid {
-                return Err(core::errors::ConnectionError::DatabaseTracking(format!(
-                    "Database conflict: Database '{}' (UUID: {}) is registered at path '{}', but was accessed from {}. Was this file moved?",
-                    uuid_db.name, uuid_db.db_uuid, uuid_db.path, db_path
-                )));
-            }
-
-            let db_name = relative_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            GenDatabase::create(op_conn, &db_uuid, &db_name, relative_path_str).map_err(|e| {
-                core::errors::ConnectionError::DatabaseTracking(format!(
-                    "Failed to create database tracking entry: {e}"
-                ))
-            })?;
-        }
-    }
-    Ok(())
+/// This exists as a way to get a connection without running migrations. We need
+/// this for places like clone where migrations create an initial state incompatible
+/// with a fast-forward merge/clone.
+pub fn get_raw_connection(
+    db_path: impl Into<PathBuf>,
+) -> Result<GraphConnection, core::errors::ConnectionError> {
+    let conn = Connection::open(db_path.into())?;
+    rusqlite::vtab::array::load_module(&conn).unwrap();
+    Ok(GraphConnection(conn))
 }
 
-pub fn get_operation_connection(
+pub fn get_config_connection(
     db_path: impl Into<Option<PathBuf>>,
-) -> Result<OperationsConnection, core::errors::ConnectionError> {
+) -> Result<ConfigConnection, core::errors::ConnectionError> {
     let db_path = db_path.into();
     let path = if let Some(s) = db_path {
         s
@@ -139,7 +92,21 @@ pub fn get_operation_connection(
     let mut conn = Connection::open(&path)?;
     rusqlite::vtab::array::load_module(&conn).unwrap();
     run_operation_migrations(&mut conn);
-    Ok(OperationsConnection(conn))
+    Ok(ConfigConnection(conn))
+}
+
+/// A pure read-only connection meant for viewing history
+pub fn get_ro_connection(
+    db_path: impl AsRef<Path>,
+) -> Result<GraphConnection, core::errors::ConnectionError> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    rusqlite::vtab::array::load_module(&conn)?;
+    Ok(GraphConnection(conn))
 }
 
 pub fn run_query(conn: &Connection, query: &str) {
@@ -208,12 +175,13 @@ pub fn normalize_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use gen_models::{db::DbContext, files::GenDatabase, metadata::get_db_uuid, traits::Query};
+    use gen_models::{
+        collection::Collection,
+        history::{HistoryStore, dolt::DoltHistoryStore},
+    };
 
     use super::*;
-    use crate::test_helpers::{get_connection, get_operation_connection, setup_gen};
+    use crate::test_helpers::{get_config_connection, get_connection};
 
     #[cfg(test)]
     mod test_normalize_string {
@@ -305,127 +273,77 @@ mod tests {
     }
 
     #[test]
-    fn test_database_tracking_integration() {
-        // Assert that connecting to the database triggers database tracking
-        let context = setup_gen();
-        let db_path = context
-            .workspace()
-            .repo_root()
-            .unwrap()
-            .join("test_tracking.db");
-        let context = DbContext::new(
-            context.workspace().clone(),
-            get_connection(db_path.to_str()).unwrap(),
-            get_operation_connection(None).unwrap(),
-        );
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
+    fn test_reopening_graph_connection_on_disk_reuses_existing_schema() {
+        let temp_dir = tempfile::tempdir().expect("should create temp directory");
+        let workspace = Workspace::new(temp_dir.path());
+        workspace.ensure_gen_dir();
+        let graph_db_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph db path");
 
-        let db_uuid: String = models::metadata::get_db_uuid(conn);
-
-        let tracked_db = GenDatabase::get_by_uuid(op_conn, &db_uuid).unwrap();
-
-        assert_eq!(tracked_db.db_uuid, db_uuid);
-        assert_eq!(tracked_db.name, "test_tracking");
-        assert_eq!(tracked_db.path, "test_tracking.db");
-
-        // Connect again - should not create duplicate entry
-        let _conn2 = crate::get_connection(db_path).unwrap();
-
-        let all_entries: Vec<GenDatabase> = GenDatabase::query(
-            op_conn,
-            "SELECT * FROM gen_databases WHERE db_uuid = ?1",
-            rusqlite::params![db_uuid],
+        drop(
+            get_connection(graph_db_path.to_str().expect("should encode graph db path"))
+                .expect("should create graph database"),
         );
 
-        assert_eq!(all_entries.len(), 1);
+        let reopened = get_connection(graph_db_path.to_str().expect("should encode graph db path"));
+        assert!(
+            reopened.is_ok(),
+            "reopening an initialized graph database should succeed: {reopened:?}"
+        );
     }
 
     #[test]
-    fn test_path_conflict_detection_different_path() {
-        let context = setup_gen();
-        let db_path = context
-            .workspace()
-            .repo_root()
-            .unwrap()
-            .join("original_location.db");
-        let context = DbContext::new(
-            context.workspace().clone(),
-            crate::get_connection(&db_path).unwrap(),
-            get_operation_connection(None).unwrap(),
+    fn test_reopening_operation_connection_on_disk_reuses_existing_schema() {
+        let temp_dir = tempfile::tempdir().expect("should create temp directory");
+        let workspace = Workspace::new(temp_dir.path());
+        workspace.ensure_gen_dir();
+        let gen_db_path = workspace
+            .gen_db_path()
+            .expect("should resolve config db path");
+
+        drop(
+            get_config_connection(gen_db_path.to_str().expect("should encode config db path"))
+                .expect("should create config database"),
         );
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
-        // Force write of the WAL file into the db so we can copy
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
-
-        // Move database to different location within .gen directory
-        let moved_db_path = context
-            .workspace()
-            .repo_root()
-            .unwrap()
-            .join("moved_location.db");
-        fs::copy(&db_path, &moved_db_path).unwrap();
-
-        // Try to access from moved location - should detect path conflict
-        let conn = &crate::get_connection(&moved_db_path).unwrap();
-        let result = track_database(conn, op_conn);
-
-        assert!(result.is_err());
-        match result {
-            Err(core::errors::ConnectionError::DatabaseTracking(_)) => {
-                // Expected error type
-            }
-            _ => panic!("Expected DatabaseTracking error, got: {result:?}"),
-        }
+        let reopened =
+            get_config_connection(gen_db_path.to_str().expect("should encode config db path"));
+        assert!(
+            reopened.is_ok(),
+            "reopening an initialized config database should succeed: {reopened:?}"
+        );
     }
 
     #[test]
-    fn test_path_conflict_detection_uuid_mismatch() {
-        let context = setup_gen();
-        let db_path = context
-            .workspace()
-            .repo_root()
-            .unwrap()
-            .join("original_location.db");
-        let context = DbContext::new(
-            context.workspace().clone(),
-            crate::get_connection(db_path.clone()).unwrap(),
-            get_operation_connection(None).unwrap(),
+    fn test_ro_connection_reads_history_and_rejects_writes() {
+        let temp_dir = tempfile::tempdir().expect("should create temp directory");
+        let workspace = Workspace::new(temp_dir.path());
+        workspace.ensure_gen_dir();
+        let graph_db_path = workspace
+            .graph_db_path()
+            .expect("should resolve graph db path");
+        let graph_db_path_str = graph_db_path.to_str().expect("should encode graph db path");
+        let graph_connection =
+            get_connection(graph_db_path_str).expect("should create graph database");
+        Collection::get_or_create(&graph_connection, "test-collection")
+            .expect("should insert collection row");
+        gen_models::history::dolt::commit_all(&graph_connection, "initial collection commit")
+            .expect("should commit collection row");
+        drop(graph_connection);
+
+        let history_connection =
+            get_ro_connection(&graph_db_path).expect("should reopen read-only connection");
+        let history_store = DoltHistoryStore::new(&history_connection);
+        let history_entries = history_store.log(None).expect("should read history");
+        assert_eq!(history_entries.len(), 3);
+        assert_eq!(history_entries[0].message, "initial collection commit");
+        assert_eq!(history_entries[1].message, "Apply Gen schema migrations");
+
+        let write_result = history_connection.execute("CREATE TABLE should_fail (id INTEGER)", []);
+        assert!(
+            write_result.is_err(),
+            "history connection should reject writes"
         );
-        let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
-
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
-        let db_uuid1 = get_db_uuid(conn);
-
-        let new_db_path = context.workspace().repo_root().unwrap().join("new.db");
-        let conn = &crate::get_connection(new_db_path.clone()).unwrap();
-        track_database(conn, op_conn).unwrap();
-        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-            .unwrap();
-
-        let db_uuid2 = get_db_uuid(conn);
-
-        assert_ne!(db_uuid1, db_uuid2);
-
-        // Replace
-        fs::copy(&new_db_path, &db_path).unwrap();
-        let conn = &crate::get_connection(db_path.clone()).unwrap();
-        let result = track_database(conn, op_conn);
-
-        assert!(result.is_err());
-        match result {
-            Err(core::errors::ConnectionError::DatabaseTracking(_)) => {
-                // Expected error type
-            }
-            _ => panic!("Expected DatabaseTracking error, got: {result:?}"),
-        }
     }
 }

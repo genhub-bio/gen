@@ -76,8 +76,12 @@ impl Query for Sample {
 impl Sample {
     pub const DEFAULT_NAME: &str = "reference";
 
-    pub fn get_parent_names(conn: &GraphConnection, sample_name: &str) -> Vec<String> {
-        SampleLineage::get_parents(conn, sample_name)
+    pub fn get_parent_names(
+        conn: &GraphConnection,
+        sample_name: &str,
+        history_ref: Option<&str>,
+    ) -> Vec<String> {
+        SampleLineage::get_parents(conn, sample_name, history_ref)
     }
 
     #[cfg_attr(
@@ -138,12 +142,16 @@ impl Sample {
         Ok(())
     }
 
-    pub fn get_reference_samples(conn: &GraphConnection) -> Vec<Sample> {
-        Sample::query(
-            conn,
-            "select * from samples where is_reference = 1 order by name;",
-            params![],
-        )
+    pub fn get_reference_samples(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<Sample> {
+        let query = format!(
+            "select * from {} where is_reference = 1 order by name;",
+            Sample::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        Sample::query(conn, &query, &params[..])
     }
 
     pub fn get_sample_reference_block_groups(
@@ -158,7 +166,12 @@ impl Sample {
             return Err(SampleError::NotReference(sample_name.to_string()));
         }
 
-        Ok(Sample::get_block_groups(conn, collection_name, sample_name))
+        Ok(Sample::get_block_groups(
+            conn,
+            collection_name,
+            sample_name,
+            None,
+        ))
     }
 
     pub fn delete_by_name(conn: &GraphConnection, name: &str) {
@@ -170,11 +183,12 @@ impl Sample {
         conn: &GraphConnection,
         collection: &str,
         name: &str,
+        history_ref: Option<&str>,
     ) -> Result<GenGraph, SampleError> {
-        let block_groups = Sample::get_block_groups(conn, collection, name);
+        let block_groups = Sample::get_block_groups(conn, collection, name, history_ref);
         let mut sample_graph = GenGraph::new();
         for bg in block_groups {
-            let bg_graph = BlockGroup::get_graph(conn, &bg.id)?;
+            let bg_graph = BlockGroup::get_graph(conn, &bg.id, history_ref)?;
             // Add nodes and edges from block group graph to sample graph
             for node in bg_graph.nodes() {
                 sample_graph.add_node(node);
@@ -195,9 +209,11 @@ impl Sample {
         collection_name: &str,
         sample_name: &str,
         prune: bool,
+        history_ref: Option<&str>,
     ) -> Result<HashSet<String>, SampleError> {
         let mut sequences = HashSet::new();
-        for block_group in Sample::get_block_groups(conn, collection_name, sample_name) {
+        for block_group in Sample::get_block_groups(conn, collection_name, sample_name, history_ref)
+        {
             sequences.extend(BlockGroup::get_all_sequences(conn, &block_group.id, prune)?);
         }
         Ok(sequences)
@@ -267,16 +283,32 @@ impl Sample {
         conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
+        history_ref: Option<&str>,
     ) -> Vec<BlockGroup> {
-        BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            params![collection_name, sample_name],
-        )
+        let query = format!(
+            "select * from {} where collection_name = :collection_name AND sample_name = :sample_name;",
+            BlockGroup::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
+            (":collection_name", &collection_name),
+            (":sample_name", &sample_name),
+        ];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        BlockGroup::query(conn, &query, &params[..])
     }
 
-    pub fn get_all_names(conn: &GraphConnection) -> Vec<String> {
-        let samples = Sample::query(conn, "select * from samples;", rusqlite::params!());
+    pub fn get_all_names(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<String> {
+        let query = format!(
+            "select * from {};",
+            Sample::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        let samples = Sample::query(conn, &query, &params[..]);
         samples.iter().map(|s| s.name.clone()).collect()
     }
 
@@ -400,7 +432,7 @@ mod tests {
 
         Sample::get_or_create_child(conn, "test", "child", vec!["parent".to_string()]).unwrap();
 
-        assert!(SampleLineage::get_parents(conn, "child").is_empty());
+        assert!(SampleLineage::get_parents(conn, "child", None).is_empty());
     }
 
     #[test]
@@ -439,14 +471,14 @@ mod tests {
         )
         .unwrap();
 
-        let mut block_group_names = Sample::get_block_groups(conn, "test", &child.name)
+        let mut block_group_names = Sample::get_block_groups(conn, "test", &child.name, None)
             .into_iter()
             .map(|block_group| block_group.name)
             .collect::<Vec<_>>();
         block_group_names.sort();
         assert_eq!(block_group_names, vec!["chr1", "chr2", "chr2", "chr3"]);
         assert_eq!(
-            SampleLineage::get_parents(conn, &child.name),
+            SampleLineage::get_parents(conn, &child.name, None),
             vec![
                 "parent_a".to_string(),
                 "parent_b".to_string(),
@@ -483,7 +515,7 @@ mod tests {
         )
         .unwrap();
 
-        let reference_names = Sample::get_reference_samples(conn)
+        let reference_names = Sample::get_reference_samples(conn, None)
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();

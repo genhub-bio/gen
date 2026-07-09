@@ -55,15 +55,26 @@ pub fn propagate_gff(
     let output_file = File::create(gff_output_filename).unwrap();
     let mut writer = gff::io::Writer::new(output_file);
 
-    let source_block_groups = Sample::get_block_groups(conn, collection_name, from_sample_name);
-    let target_block_groups = Sample::get_block_groups(conn, collection_name, to_sample_name);
+    let source_block_groups =
+        Sample::get_block_groups(conn, collection_name, from_sample_name, None);
+    let target_block_groups = Sample::get_block_groups(conn, collection_name, to_sample_name, None);
     let source_paths_by_bg_name = source_block_groups
         .iter()
-        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
+        .map(|bg| {
+            Ok((
+                bg.name.clone(),
+                BlockGroup::get_current_path(conn, &bg.id, None)?,
+            ))
+        })
         .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
     let target_paths_by_bg_name = target_block_groups
         .iter()
-        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
+        .map(|bg| {
+            Ok((
+                bg.name.clone(),
+                BlockGroup::get_current_path(conn, &bg.id, None)?,
+            ))
+        })
         .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
 
     let mut path_mappings_by_bg_name = HashMap::new();
@@ -75,7 +86,7 @@ pub fn propagate_gff(
 
     let sequence_lengths_by_path_name = target_paths_by_bg_name
         .iter()
-        .map(|(name, path)| Ok((name.clone(), path.sequence(conn)?.len() as i64)))
+        .map(|(name, path)| Ok((name.clone(), path.sequence(conn, None)?.len() as i64)))
         .collect::<Result<HashMap<String, i64>, PathError>>()?;
 
     for result in reader.record_bufs() {
@@ -256,7 +267,7 @@ mod tests {
         )
         .expect("should create child block group")[0]
             .id;
-        let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id).unwrap();
+        let sample_path = BlockGroup::get_current_path(conn, &sample_bg_id, None).unwrap();
         let replacement_sequence = "AA";
 
         let replacement = Sequence::new()

@@ -12,7 +12,7 @@ frame of the changed genome. To illustrate this, here is an example of 2 rounds 
 First we import a sequence file
 
 ```bash
-gen --db simple.db import --fasta simple.fa --name simple_example
+gen import --fasta simple.fa --name simple_example
 ```
 
 This creates a collection, `simple_example` with the simple fasta file serving as the reference genome. This could just
@@ -33,7 +33,7 @@ m123	16	.	GAT	G	1611.92	.		GT	1
 ```
 
 ```bash
-gen --db simple.db update --vcf round1.vcf --name simple_example
+gen update --vcf round1.vcf --name simple_example
 ```
 This creates a new sample, `f1` with the above changes baked into its genome. This example is a haploid such as e. coli
 where the genotype is always homozygous. Graphically, the genome now appears as such:
@@ -56,7 +56,7 @@ m123	27	.	GA	G	1611.92	.		GT	1
 ```
 
 ```bash
-gen --db simple.db update --vcf round2.vcf --name simple_example --parent-samples f1
+gen update --vcf round2.vcf --name simple_example --parent-samples f1
 ```
 
 This command is very similar, with the exception that we are able to define which reference frame to use for changes. Here,
