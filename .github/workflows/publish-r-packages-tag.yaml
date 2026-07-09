@@ -42,7 +42,7 @@ jobs:
           fi
 
       - name: Checkout ref
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.PACKAGE_REF }}
           fetch-depth: 0
@@ -79,12 +79,11 @@ jobs:
           Rscript -e "install.packages(commandArgs(TRUE)[1], repos = NULL, type = 'mac.binary'); library(testthat); test_dir('gen-r/tests/testthat')" "$ASSET_NAME"
 
       - name: Upload macOS binary artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: genr-${{ matrix.asset_suffix }}
           path: ${{ env.ASSET_NAME }}
           if-no-files-found: error
-          archive: false
 
       - name: Ensure release exists
         if: ${{ env.RELEASE_NAME != '' }}
@@ -115,7 +114,7 @@ jobs:
           }
 
       - name: Checkout ref
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.PACKAGE_REF }}
           fetch-depth: 0
@@ -207,12 +206,11 @@ jobs:
           Write-Host "Prepared artifact: $asset"
 
       - name: Upload Windows binary artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: genr-windows
           path: ${{ env.ASSET_NAME }}
           if-no-files-found: error
-          archive: false
 
       - name: Ensure release exists
         if: ${{ env.RELEASE_NAME != '' }}

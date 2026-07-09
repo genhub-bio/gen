@@ -40,7 +40,7 @@ jobs:
 
       - name: Locate wheel build run
         id: wheels-run
-        uses: actions/github-script@v9
+        uses: actions/github-script@v7
         env:
           WHEEL_SHA: ${{ github.sha }}
           WHEEL_TAG: ${{ env.PUBLISH_TAG }}
@@ -70,7 +70,7 @@ jobs:
             core.setOutput("run_id", run.id.toString());
 
       - name: Download wheel artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           path: wheelhouse
@@ -84,7 +84,7 @@ jobs:
           ls -la dist
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
