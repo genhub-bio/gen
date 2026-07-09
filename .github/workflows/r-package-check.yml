@@ -4,17 +4,21 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main"]
+    branches: ["**"]
   workflow_dispatch:
 
 jobs:
   docker-install-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Build Docker install test image
+        env:
+          GITHUB_PAT: ${{ secrets.MINIMAL_RO_PAT }}
         run: |
-          docker build -f gen-r/Dockerfile -t gen-r-install-test .
+          DOCKER_BUILDKIT=1 docker build -f gen-r/Dockerfile --secret id=github_pat,env=GITHUB_PAT -t gen-r-install-test .
           docker run --rm gen-r-install-test

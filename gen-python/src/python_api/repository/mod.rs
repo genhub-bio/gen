@@ -364,7 +364,10 @@ mod python_tests {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let tmp_dir = tempdir().unwrap();
-            let path = tmp_dir.path().to_str().unwrap().to_string();
+            // Escape backslashes so a Windows path (e.g. `C:\Users\...`) survives
+            // interpolation into a double-quoted Python string literal; otherwise
+            // Python reads `\U...` as a truncated unicode escape.
+            let path = tmp_dir.path().to_str().unwrap().replace('\\', "\\\\");
             let repository = PyRepository::type_object(py);
             py_run!(
                 py,

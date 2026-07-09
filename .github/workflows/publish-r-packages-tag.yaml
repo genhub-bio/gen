@@ -25,11 +25,13 @@ jobs:
     permissions:
       contents: write
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - os: macos-15
             asset_suffix: macos-arm64
+          - os: macos-15-intel
+            asset_suffix: macos-x86_64
 
     steps:
       - name: Ensure ref provided
@@ -50,15 +52,17 @@ jobs:
           use-public-rspm: true
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: x86_64-pc-windows-gnu
 
       - name: Install system dependencies
         run: |
           brew install capnp
 
       - name: Install R package dependencies
-        run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
+        env:
+          GITHUB_PAT: ${{ secrets.MINIMAL_RO_PAT }}
+        run: |
+          Rscript -e "install.packages(c('remotes', 'testthat'), repos = 'https://cloud.r-project.org')"
+          Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget@be23d31587b3b0986febef00ba27567e46dc3338', upgrade = 'never')"
 
       - name: Build macOS binary package
         run: R CMD INSTALL --build gen-r
@@ -77,9 +81,9 @@ jobs:
       - name: Upload macOS binary artifact
         uses: actions/upload-artifact@v4
         with:
+          name: genr-${{ matrix.asset_suffix }}
           path: ${{ env.ASSET_NAME }}
           if-no-files-found: error
-          archive: false
 
       - name: Ensure release exists
         if: ${{ env.RELEASE_NAME != '' }}
@@ -121,6 +125,8 @@ jobs:
           windows-path-include-rtools: true
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: x86_64-pc-windows-gnu
 
       - name: Install system dependencies
         shell: pwsh
@@ -131,7 +137,11 @@ jobs:
 
       - name: Install R package dependencies
         shell: pwsh
-        run: Rscript -e "install.packages('testthat', repos = 'https://cloud.r-project.org')"
+        env:
+          GITHUB_PAT: ${{ github.token }}
+        run: |
+          Rscript -e "install.packages(c('remotes', 'testthat'), repos = 'https://cloud.r-project.org')"
+          Rscript -e "remotes::install_github('keller-mark/anyhtmlwidget@be23d31587b3b0986febef00ba27567e46dc3338', upgrade = 'never')"
 
       - name: Build Windows binary package
         shell: cmd
@@ -198,9 +208,9 @@ jobs:
       - name: Upload Windows binary artifact
         uses: actions/upload-artifact@v4
         with:
+          name: genr-windows
           path: ${{ env.ASSET_NAME }}
           if-no-files-found: error
-          archive: false
 
       - name: Ensure release exists
         if: ${{ env.RELEASE_NAME != '' }}

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM rust:1.90-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -33,7 +34,8 @@ COPY gen-capnp-schemas ./gen-capnp-schemas
 COPY gen-r ./gen-r
 
 RUN Rscript -e "install.packages(c('testthat', 'knitr', 'rmarkdown'), repos = 'https://cloud.r-project.org')"
-RUN Rscript -e "if (!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes', repos='https://cloud.r-project.org'); remotes::install_github('keller-mark/anyhtmlwidget', upgrade='never')"
+RUN --mount=type=secret,id=github_pat,required=false \
+    GITHUB_PAT=$(cat /run/secrets/github_pat 2>/dev/null || true) Rscript -e "if (!requireNamespace('remotes', quietly=TRUE)) install.packages('remotes', repos='https://cloud.r-project.org'); remotes::install_github('keller-mark/anyhtmlwidget@be23d31587b3b0986febef00ba27567e46dc3338', upgrade='never')"
 
 RUN R CMD INSTALL gen-r
 RUN Rscript -e "tools::buildVignettes(dir = 'gen-r', tangle = FALSE)"
