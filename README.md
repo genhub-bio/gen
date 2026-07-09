@@ -11,19 +11,16 @@ Gen brings version control to genetic sequences. With it, you can track variants
 **Gen client**: prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/genhub-bio/gen/releases): [macOS (.pkg)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), [Linux x86_64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip), [Linux arm64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
 
 **Python package**: install on macOS, Linux, or Windows using:
-
 ```sh
 pip install gen
 ```
 
 Install the `jupyter` extra to include an interactive graph widget for Jupyter and other anywidget-compatible notebooks:
-
 ```sh
 pip install gen[jupyter]
 ```
 
 **R package**: install on macOS (Apple silicon) using the `remotes` package:
-
 ```r
 install.packages("remotes")
 remotes::install_url(
@@ -48,7 +45,7 @@ gen import fasta reference.fa --reference hg38
 # Branch before making changes
 gen checkout --branch experiment/na12878
 
-# Apply variants from a VCF — Gen adds new edges to the graph without touching existing nodes
+# Apply variants from a VCF
 gen update vcf variants.vcf --reference hg38 --sample NA12878
 
 # Review the operation log
@@ -104,7 +101,7 @@ plot(sample)
 - Sequence search works across all paths in a graph, including IUPAC ambiguity codes, via `gen search` or `repo.search()` in Python and R.
 - GFF3 annotation tracks are visible in both the terminal viewer and the interactive widget.
 - For combinatorial library design, you define a parts list and a slot table; Gen builds the graph of all combinations without enumerating the sequences explicitly.
-- `gen clone`, `gen push`, and `gen pull` work against GenHub. Any public repository is clonable with a single URL.
+- `gen clone`, `gen push`, and `gen pull` work against network-mounted filesystems or genhub.bio. Any public repository is clonable with a single URL.
 - The R package includes direct import from Bioconductor `DNAStringSet` and `GRanges` objects.
 
 ## Designed for AI agents

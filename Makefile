@@ -59,8 +59,7 @@ docker-build:
 	docker build -t gen .
 	docker run -v .:/data --rm --name gen gen cp target/release/gen /data/gen
 # Rebuilds every demo repo and re-records its .tape into a .gif alongside it. Each tape's
-# directory holds its own setup script (build_demo_repo.sh or build_repo.sh) that seeds the
-# /tmp repo the tape records against.
+# directory holds its own build_demo_repo.sh that seeds the /tmp repo the tape records against.
 gif:
 	cargo build --release --bin gen
 	@command -v vhs >/dev/null 2>&1 || (echo "vhs not found; install from https://github.com/charmbracelet/vhs" && exit 1)
@@ -69,8 +68,6 @@ gif:
 		echo "==> $$tape"; \
 		if [ -x "$$dir/build_demo_repo.sh" ]; then \
 			(cd $$dir && ./build_demo_repo.sh) || exit 1; \
-		elif [ -x "$$dir/build_repo.sh" ]; then \
-			(cd $$dir && ./build_repo.sh) || exit 1; \
 		fi; \
 		(cd $$dir && vhs $$(basename $$tape)) || exit 1; \
 	done
