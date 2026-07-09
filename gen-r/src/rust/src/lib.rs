@@ -72,7 +72,7 @@ use ratatui::{
 };
 use rusqlite::{Connection, types::ValueRef};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value as JsonValue, from_str as json_from_str};
+use serde_json::from_str as json_from_str;
 
 fn nullable_string_to_option(value: Nullable<String>) -> Option<String> {
     match value {
@@ -197,26 +197,6 @@ fn gen_annotation_record_id(obj: &Robj) -> std::result::Result<Option<HashId>, E
 }
 
 /// Build a `gen_annotation` R record (id, name, group, kind, segments, length, locus).
-fn json_value_to_robj(v: &JsonValue) -> Robj {
-    match v {
-        JsonValue::Null => r!(NULL),
-        JsonValue::Bool(b) => r!(*b),
-        JsonValue::Number(n) => r!(n.as_f64().unwrap_or(f64::NAN)),
-        JsonValue::String(s) => r!(s.as_str()),
-        JsonValue::Array(arr) => {
-            let items: Vec<Robj> = arr.iter().map(json_value_to_robj).collect();
-            r!(List::from_values(items))
-        }
-        JsonValue::Object(obj) => {
-            let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
-            let vals: Vec<Robj> = obj.values().map(json_value_to_robj).collect();
-            let mut list = r!(List::from_values(vals));
-            list.set_names(keys).unwrap();
-            list
-        }
-    }
-}
-
 fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &GenGraph) -> Robj {
     let segments = annotation_segments(conn, annotation);
     let span = AnnotationSpan {
