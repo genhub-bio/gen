@@ -20,7 +20,7 @@ description = "Python bindings for the Gen graph database"
 readme = "README.md"
 
 [project.optional-dependencies]
-jupyter = ["anywidget", "traitlets"]
+jupyter = ["anywidget", "ipywidgets", "traitlets"]
 
 [project.urls]
 Repository = "https://github.com/genhub-bio/gen"
