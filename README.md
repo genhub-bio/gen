@@ -10,9 +10,7 @@ Gen brings version control to genetic sequences. With it, you can track variants
 
 **Gen client**: prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/genhub-bio/gen/releases): [macOS (.pkg)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), [Linux x86_64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip), [Linux arm64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
 
-**Python package**: this allows you to import, edit, export sequence graphs from Python. The Gen client is not
-required to use the Python package, but actions involving remote repositories (`push`/`pull`) are currently
-only available through the client. Install on macOS, Linux, or Windows using:
+**Python package**: install on macOS, Linux, or Windows using:
 
 ```sh
 pip install gen
@@ -24,7 +22,7 @@ Install the `jupyter` extra to include an interactive graph widget for Jupyter a
 pip install gen[jupyter]
 ```
 
-**R package**: run Gen operations directly from R. Install on macOS (Apple silicon) using the `remotes` package:
+**R package**: install on macOS (Apple silicon) using the `remotes` package:
 
 ```r
 install.packages("remotes")
@@ -75,7 +73,7 @@ Subsequent pushes from this repository only need `gen push`.
 
 ### Python and R bindings
 
-Python and R libraries expose the same operations. The R bindings are compatible with Bioconductor types such as DNAStringSet and GRanges. The Python API exposes samples and sequence graphs as rich objects that provide a programmatic equivalent for every action available through the CLI. The `jupyter` extra provides an interactive widget for graph visualization and exploration. The Python module was built with AI agents in mind, for example by embedding a textual representation of graph visualizations in notebook files alongside the pixel data.
+The Python package lets you import, edit, and export sequence graphs from Python. The R package covers the same workflows and interoperates with Bioconductor types such as DNAStringSet and GRanges. The `jupyter` extra adds an interactive widget for graph visualization and exploration. Remote operations (`push` and `pull`) require the client for now.
 
 Example Python code to initialize or load a repository, import a sequence as reference, applying variants from a
 VCF file, and viewing the resulting sequence graph:
@@ -108,6 +106,10 @@ plot(sample)
 - For combinatorial library design, you define a parts list and a slot table; Gen builds the graph of all combinations without enumerating the sequences explicitly.
 - `gen clone`, `gen push`, and `gen pull` work against GenHub. Any public repository is clonable with a single URL.
 - The R package includes direct import from Bioconductor `DNAStringSet` and `GRanges` objects.
+
+## Designed for AI agents
+
+Agents can interact with Gen through the command line or the Python API, which was designed with AI agents in mind. Nearly every user action has a programmatic equivalent, with methods returning samples and sequence graphs as Python objects that can be passed directly into subsequent operations. Graph visualizations in Python notebooks include embedded text representations that LLMs can interpret directly. Because every operation is recorded in the repository, agents can inspect history, compare revisions, and recover from failures.
 
 ## Screenshots
 
