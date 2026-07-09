@@ -430,8 +430,11 @@ impl GraphPage {
 
     /// Re-register every overlay highlight on the controller from the current overlay list.
     ///
-    /// Called after any mutation of `overlays`. Detail/zoom changes between mutations don't
-    /// need this: registered highlights self-heal on viewport rebuild (`map_column`).
+    /// Called after any mutation of `overlays`, and unconditionally at the top of
+    /// `render_into` on every render. The latter is required, not just defensive: which
+    /// spans get registered depends on the current detail level (tracks are hidden at
+    /// minimal detail, partial single-node spans at truncated), so a zoom/detail change
+    /// between mutations must also rerun this, not just self-heal column positions.
     fn reapply(&mut self) {
         reapply_overlays(
             &mut self.controller,
@@ -509,6 +512,11 @@ impl GraphPage {
     /// Shared by the standalone `render_frame` pymethod and `PySampleController`,
     /// which renders a header row above the graph and offsets `graph_area` accordingly.
     fn render_into(&mut self, buf: &mut Buffer, graph_area: Rect) -> PyResult<()> {
+        // Re-register overlay highlights before rendering. Which spans get registered
+        // depends on the current detail level (tracks are hidden at minimal detail, partial
+        // single-node spans at truncated), so this must rerun after zoom/detail changes too,
+        // not only after `overlays` is mutated.
+        self.reapply();
         {
             let conn = self.open_conn()?;
             let renderer = GenGraphNodeRenderer::new(&conn);
