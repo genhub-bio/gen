@@ -15,7 +15,8 @@ use r#gen::{
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, reapply_overlays,
+            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, locus_midpoint,
+            reapply_overlays,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
@@ -30,6 +31,7 @@ use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
+    locus::GraphLocus,
 };
 use gen_tui::{
     LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
@@ -121,6 +123,17 @@ fn parse_hex_color(hex: &str) -> PyResult<ratatui::style::Color> {
 
 fn is_false(b: &bool) -> bool {
     !b
+}
+
+/// Target position for `go_to_pos`: the locus midpoint when `center`, else its first
+/// slice's start (snapped left by the caller). `None` for an empty locus.
+fn locus_target_pos(locus: &GraphLocus, center: bool) -> Option<PyGraphPos> {
+    if center {
+        let (slice, offset) = locus_midpoint(locus)?;
+        return Some(PyGraphPos::new(slice.block, offset));
+    }
+    let slice = locus.slices.first()?;
+    Some(PyGraphPos::new(slice.block, slice.start))
 }
 
 /// Format by which the buffer is to be serialized.
@@ -416,8 +429,8 @@ impl GraphPage {
 
     /// Re-register every overlay highlight on the controller from the current overlay list.
     ///
-    /// Called after any mutation of `overlays`. Detail/zoom changes between mutations don't
-    /// need this: registered highlights self-heal on viewport rebuild (`map_column`).
+    /// Must run on every render, not just after `overlays` mutates: which spans register
+    /// depends on the current detail level, so a zoom/detail change alone can change the result.
     fn reapply(&mut self) {
         reapply_overlays(
             &mut self.controller,
@@ -480,12 +493,14 @@ impl GraphPage {
         self.push_span_overlays(&track_name, spans_with_styles);
     }
 
-    fn navigate_to_span(&mut self, span: &AnnotationSpan) {
+    fn navigate_to_span(&mut self, span: &AnnotationSpan, center: bool) {
         let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) else {
             return;
         };
-        let slice = &locus.slices[0];
-        self.go_to_pos(&PyGraphPos::new(slice.block, slice.start));
+        let Some(pos) = locus_target_pos(&locus, center) else {
+            return;
+        };
+        self.go_to_pos(&pos, center);
     }
 
     /// Render the graph, overlay labels, and annotation tracks into `buf` within `graph_area`.
@@ -493,6 +508,8 @@ impl GraphPage {
     /// Shared by the standalone `render_frame` pymethod and `PySampleController`,
     /// which renders a header row above the graph and offsets `graph_area` accordingly.
     fn render_into(&mut self, buf: &mut Buffer, graph_area: Rect) -> PyResult<()> {
+        // Re-register overlays: detail level affects which spans register (see `reapply`).
+        self.reapply();
         {
             let conn = self.open_conn()?;
             let renderer = GenGraphNodeRenderer::new(&conn);
@@ -635,7 +652,7 @@ impl GraphPage {
         self.controller.sync_cursor_to_closest_node();
     }
 
-    fn go_to_pos(&mut self, pos: &PyGraphPos) {
+    fn go_to_pos(&mut self, pos: &PyGraphPos, center: bool) {
         let block = pos.inner.block;
         self.controller.set_detail_level(VisualDetail::Full);
 
@@ -664,7 +681,9 @@ impl GraphPage {
         };
 
         self.controller.go_to_node(domain_idx, (frac_x, 0.5));
-        self.controller.queue_snap_left();
+        if !center {
+            self.controller.queue_snap_left();
+        }
         self.controller.hide_cursor();
     }
 
@@ -860,9 +879,9 @@ impl GraphPage {
     }
 
     /// Navigate to an `Annotation` object.
-    pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation) {
+    pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation, center: bool) {
         let span = annotation_to_span(annotation);
-        self.navigate_to_span(&span);
+        self.navigate_to_span(&span, center);
     }
 
     /// Highlight an `Annotation` on the graph without a label.
@@ -885,9 +904,11 @@ impl GraphPage {
     }
 
     /// Navigate to a `GraphLocus`.
-    pub fn go_to_locus(&mut self, locus: &PyGraphLocus) {
-        let slice = &locus.inner.slices[0];
-        self.go_to_pos(&PyGraphPos::new(slice.block, slice.start));
+    pub fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) {
+        let Some(pos) = locus_target_pos(&locus.inner, center) else {
+            return;
+        };
+        self.go_to_pos(&pos, center);
     }
 
     /// Return all gene annotations for this sequence graph.
@@ -1280,8 +1301,9 @@ impl PyGraphController {
         Ok(())
     }
 
-    fn go_to_pos(&mut self, pos: &PyGraphPos) -> PyResult<()> {
-        self.active()?.go_to_pos(pos);
+    #[pyo3(signature = (pos, center=false))]
+    fn go_to_pos(&mut self, pos: &PyGraphPos, center: bool) -> PyResult<()> {
+        self.active()?.go_to_pos(pos, center);
         Ok(())
     }
 
@@ -1362,8 +1384,13 @@ impl PyGraphController {
     }
 
     /// Navigate to an `Annotation` object.
-    pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation) -> PyResult<()> {
-        self.active()?.go_to_annotation_obj(annotation);
+    #[pyo3(signature = (annotation, center=false))]
+    pub fn go_to_annotation_obj(
+        &mut self,
+        annotation: &PyAnnotation,
+        center: bool,
+    ) -> PyResult<()> {
+        self.active()?.go_to_annotation_obj(annotation, center);
         Ok(())
     }
 
@@ -1378,8 +1405,9 @@ impl PyGraphController {
     }
 
     /// Navigate to a `GraphLocus`.
-    pub fn go_to_locus(&mut self, locus: &PyGraphLocus) -> PyResult<()> {
-        self.active()?.go_to_locus(locus);
+    #[pyo3(signature = (locus, center=false))]
+    pub fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) -> PyResult<()> {
+        self.active()?.go_to_locus(locus, center);
         Ok(())
     }
 

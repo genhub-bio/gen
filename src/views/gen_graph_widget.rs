@@ -27,7 +27,7 @@ use crate::views::{
         AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
         span_should_hide_in_truncated,
     },
-    graph_overlay::{AnnotationColorCache, GraphOverlay},
+    graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
     inline_label_placement::draw_label_near_pos,
 };
 
@@ -532,10 +532,27 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
     let node_sizer = &controller.partition_controller.node_sizer;
     let graph = controller.graph();
 
+    // DB-loaded tracks are too busy to paint at minimal detail; a span confined to a
+    // partial slice of a single node is also dropped at truncated detail, mirroring the
+    // label suppression below.
     let mut span_indices: Vec<usize> = overlays
         .iter()
         .enumerate()
-        .filter_map(|(idx, overlay)| overlay.span().map(|_| idx))
+        .filter_map(|(idx, overlay)| {
+            overlay
+                .span()
+                .filter(|_| {
+                    !matches!(
+                        (detail_level, &overlay.source),
+                        (VisualDetail::Minimal, OverlaySource::Track(_))
+                    )
+                })
+                .filter(|span| {
+                    detail_level != VisualDetail::Truncated
+                        || !span_should_hide_in_truncated(span, graph)
+                })
+                .map(|_| idx)
+        })
         .collect();
     span_indices.sort_by_key(|&idx| {
         let span = overlays[idx]
@@ -621,12 +638,19 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     controller: &GraphController<GenGraph, S>,
     overlays: &[GraphOverlay],
 ) -> bool {
+    let detail_level = controller.get_detail_level();
     let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
         .iter()
         .filter_map(|overlay| {
             overlay
                 .span()
                 .filter(|span| !span.name.is_empty())
+                .filter(|_| {
+                    !matches!(
+                        (detail_level, &overlay.source),
+                        (VisualDetail::Minimal, OverlaySource::Track(_))
+                    )
+                })
                 .map(|span| (span, overlay.style))
         })
         .collect();
@@ -643,7 +667,6 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
 
     let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
     let pos_map = viewport_pos_map(controller);
-    let detail_level = controller.get_detail_level();
     let theme = current_theme();
     let max_distance = if detail_level == VisualDetail::Minimal {
         10
@@ -693,15 +716,52 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
     any_hidden
 }
 
+/// The slice and local offset (0-based, within that slice's block) at the
+/// midpoint of a locus's total sequence length. `None` for an empty locus.
+pub fn locus_midpoint(locus: &GraphLocus) -> Option<(GraphNodeSlice, usize)> {
+    let total: usize = locus
+        .slices
+        .iter()
+        .map(|slice| slice.end - slice.start)
+        .sum();
+    if total == 0 {
+        return None;
+    }
+    let half = total / 2;
+    let mut consumed = 0;
+    for (index, slice) in locus.slices.iter().enumerate() {
+        let len = slice.end - slice.start;
+        let is_last = index == locus.slices.len() - 1;
+        if consumed + len > half || is_last {
+            return Some((*slice, slice.start + (half - consumed)));
+        }
+        consumed += len;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use gen_core::{HashId, Strand};
+    use gen_models::sample::Sample;
     use gen_tui::{
         geometry::WorldPos,
+        graph_controller::HighlightKind,
+        testing::create_test_terminal,
         viewport_state::{ViewportState, WorldBuffer},
     };
-    use ratatui::backend::TestBackend;
+    use ratatui::{backend::TestBackend, widgets::StatefulWidget as _};
 
     use super::*;
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::setup_gen_on_disk,
+        track_database,
+        updates::vcf::update_with_vcf,
+        views::{annotation_track::AnnotationSegment, graph_overlay::OverlayContent},
+    };
 
     /// Test coordinate handling for very large genomic sequences
     ///
@@ -784,18 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_zygosity_pruned_edges() {
-        use std::path::PathBuf;
-
-        use gen_models::sample::Sample;
-        use gen_tui::{graph_widget::GraphWidget, testing::create_test_terminal};
-        use ratatui::widgets::StatefulWidget as _;
-
-        use crate::{
-            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
-            updates::vcf::update_with_vcf,
-        };
-
+    fn test_snapshot_zygosity_pruned_edges() {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -861,18 +910,7 @@ mod tests {
     /// as `AAAAA...BBBBB` (13 cells), raw column 2 stays at cell 2 while raw column
     /// 31 (three from the end) lands at cell 10.
     #[test]
-    fn cell_highlight_remaps_on_detail_change() {
-        use std::path::PathBuf;
-
-        use gen_core::strand::Strand;
-        use gen_graph::GraphNodeSlice;
-        use gen_models::{locus::GraphLocus, sample::Sample};
-        use ratatui::{layout::Rect, style::Color};
-
-        use crate::{
-            imports::fasta::import_fasta, test_helpers::setup_gen_on_disk, track_database,
-        };
-
+    fn test_cell_highlight_remaps_on_detail_change() {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -935,15 +973,7 @@ mod tests {
     /// covered block, and overlay application order must be by total annotation
     /// length, not by the length of any individual per-block segment.
     #[test]
-    fn reapply_overlays_covers_each_block_and_orders_by_total_length() {
-        use gen_core::{HashId, Strand};
-        use gen_tui::graph_controller::HighlightKind;
-
-        use crate::views::{
-            annotation_track::{AnnotationSegment, AnnotationSpan},
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_covers_each_block_and_orders_by_total_length() {
         let node_a = GraphNode {
             node_id: HashId::convert_str("block-a"),
             sequence_start: 0,
@@ -1055,20 +1085,94 @@ mod tests {
         );
     }
 
+    /// At minimal detail, DB-loaded track overlays are hidden but ad-hoc annotation
+    /// overlays still paint.
+    #[test]
+    fn test_reapply_overlays_hides_track_overlays_at_minimal_detail() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("block"),
+            sequence_start: 0,
+            sequence_end: 10,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let mut controller = create_gen_graph_controller(graph);
+        controller.set_detail_level(VisualDetail::Minimal);
+
+        // Both spans cover the node's full width, so the truncated-level rule (hide only
+        // partial-node spans) never suppresses them once zoomed past minimal detail.
+        let track_span = AnnotationSpan {
+            id: HashId::convert_str("track-span"),
+            name: "track".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 0,
+                end: 10,
+                strand: Strand::Forward,
+            }],
+        };
+        let adhoc_span = AnnotationSpan {
+            id: HashId::convert_str("adhoc-span"),
+            name: "adhoc".to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 0,
+                end: 10,
+                strand: Strand::Forward,
+            }],
+        };
+
+        let mut overlays = vec![
+            GraphOverlay {
+                content: OverlayContent::Span(track_span),
+                source: OverlaySource::Track("file:1".to_string()),
+                style: PathStyle::new(Color::Cyan),
+            },
+            GraphOverlay {
+                content: OverlayContent::Span(adhoc_span),
+                source: OverlaySource::Adhoc,
+                style: PathStyle::new(Color::Yellow),
+            },
+        ];
+
+        let mut color_cache = AnnotationColorCache::new();
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+
+        let cell_highlights: Vec<GraphNode> = controller
+            .highlights
+            .iter()
+            .filter_map(|(kind, _)| match kind {
+                HighlightKind::Cells { node, .. } => Some(*node),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            cell_highlights.len(),
+            1,
+            "only the ad-hoc overlay should paint at minimal detail"
+        );
+
+        controller.set_detail_level(VisualDetail::Truncated);
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+        let cell_highlights_zoomed_in = controller
+            .highlights
+            .iter()
+            .filter(|(kind, _)| matches!(kind, HighlightKind::Cells { .. }))
+            .count();
+        assert_eq!(
+            cell_highlights_zoomed_in, 2,
+            "both overlays should paint once zoomed in past minimal detail"
+        );
+    }
+
     /// Two annotations whose ranges overlap on the same node (e.g. a GenBank `source`
     /// feature and a shorter `lacZalpha` feature nested inside it) must not be painted
     /// with the same accent color. A third, unrelated span elsewhere doesn't conflict with
     /// either, so nothing forces it away from whatever color the rotation gives it next —
     /// collision-avoidance should only kick in for annotations that actually touch.
     #[test]
-    fn reapply_overlays_avoids_color_collisions_between_overlapping_spans() {
-        use gen_core::{HashId, Strand};
-
-        use crate::views::{
-            annotation_track::AnnotationSegment,
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_avoids_color_collisions_between_overlapping_spans() {
         let shared_node = GraphNode {
             node_id: HashId::convert_str("shared-block"),
             sequence_start: 0,
@@ -1155,14 +1259,7 @@ mod tests {
     /// than deriving a color from each annotation's id, so two arbitrary unrelated
     /// annotations don't coincidentally land on the same one.
     #[test]
-    fn reapply_overlays_cycles_colors_for_new_non_conflicting_spans() {
-        use gen_core::{HashId, Strand};
-
-        use crate::views::{
-            annotation_track::AnnotationSegment,
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_cycles_colors_for_new_non_conflicting_spans() {
         let mut graph = GenGraph::new();
         let nodes: Vec<GraphNode> = (0..3)
             .map(|i| {
@@ -1213,14 +1310,7 @@ mod tests {
     /// the overlays happen to be given in a different order, so annotations don't flicker
     /// between colors as the user scrolls.
     #[test]
-    fn reapply_overlays_keeps_colors_stable_across_repeated_calls() {
-        use gen_core::{HashId, Strand};
-
-        use crate::views::{
-            annotation_track::AnnotationSegment,
-            graph_overlay::{OverlayContent, OverlaySource},
-        };
-
+    fn test_reapply_overlays_keeps_colors_stable_across_repeated_calls() {
         let node = GraphNode {
             node_id: HashId::convert_str("block"),
             sequence_start: 0,
@@ -1309,5 +1399,56 @@ mod tests {
             color_b, color_b_again,
             "span b's color should survive a reload"
         );
+    }
+
+    fn midpoint_node(id: u8, start: i64, end: i64) -> GraphNode {
+        GraphNode {
+            node_id: HashId([id; 32]),
+            sequence_start: start,
+            sequence_end: end,
+        }
+    }
+
+    fn midpoint_slice(block: GraphNode, start: usize, end: usize) -> GraphNodeSlice {
+        GraphNodeSlice {
+            block,
+            start,
+            end,
+            strand: Strand::Forward,
+        }
+    }
+
+    #[test]
+    fn test_midpoint_single_slice_is_centered_within_it() {
+        let block = midpoint_node(1, 0, 10);
+        let locus = GraphLocus {
+            slices: vec![midpoint_slice(block, 2, 8)],
+        };
+        // length 6, half = 3, so local offset = start(2) + 3 = 5
+        assert_eq!(
+            locus_midpoint(&locus),
+            Some((midpoint_slice(block, 2, 8), 5))
+        );
+    }
+
+    #[test]
+    fn test_midpoint_spans_into_second_slice() {
+        let first = midpoint_node(1, 0, 10);
+        let second = midpoint_node(2, 0, 10);
+        let locus = GraphLocus {
+            slices: vec![midpoint_slice(first, 8, 10), midpoint_slice(second, 0, 10)],
+        };
+        // total length 12, half = 6; first slice covers 2 bases (consumed=2),
+        // midpoint falls 4 bases into the second slice.
+        assert_eq!(
+            locus_midpoint(&locus),
+            Some((midpoint_slice(second, 0, 10), 4))
+        );
+    }
+
+    #[test]
+    fn test_midpoint_of_empty_locus_is_none() {
+        let locus = GraphLocus { slices: vec![] };
+        assert_eq!(locus_midpoint(&locus), None);
     }
 }

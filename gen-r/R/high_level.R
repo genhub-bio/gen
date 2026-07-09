@@ -5,14 +5,27 @@ NULL
   if (is.null(x)) y else x
 }
 
-.gen_serialize_mcols <- function(xss) {
-  mc <- tryCatch(S4Vectors::mcols(xss), error = function(e) NULL)
-  if (is.null(mc) || ncol(mc) == 0L) return(NULL)
-  df <- as.data.frame(mc)
-  vapply(seq_len(nrow(df)), function(i) {
-    jsonlite::toJSON(as.list(df[i, , drop = FALSE]), auto_unbox = TRUE)
-  }, character(1))
+# Serialize a GraphLocus's slices as "<node_id>,<seq_start>,<seq_end>,..." for the
+# "hl"/"gotoc" op protocols, which send the whole multi-block span to Rust.
+.slices_to_block_parts <- function(slices) {
+  paste(
+    sapply(slices, function(s) {
+      sprintf("%s,%d,%d", s$node$node_id, as.integer(s$node$sequence_start), as.integer(s$node$sequence_end))
+    }),
+    collapse = ","
+  )
 }
+
+# Unused: per-part mcols metadata is no longer imported, so this serializer
+# has no caller. Kept commented as a reference for a future metadata path.
+# .gen_serialize_mcols <- function(xss) {
+#   mc <- tryCatch(S4Vectors::mcols(xss), error = function(e) NULL)
+#   if (is.null(mc) || ncol(mc) == 0L) return(NULL)
+#   df <- as.data.frame(mc)
+#   vapply(seq_len(nrow(df)), function(i) {
+#     jsonlite::toJSON(as.list(df[i, , drop = FALSE]), auto_unbox = TRUE)
+#   }, character(1))
+# }
 
 # Extract the genome string from a sequence container.
 # Supported: BSgenome, DNAStringSet (with metadata$genome set), FaFile, TwoBitFile.
@@ -141,7 +154,7 @@ print.gen_locus <- function(x, ...) {
 #'     \item{\code{handle_click(col, row)}}{Send a mouse click; returns \code{TRUE} if a node was hit.}
 #'     \item{\code{set_detail(detail)}}{Change node detail level (\code{"normal"}, \code{"compressed"}, or \code{"full"}). Returns self invisibly.}
 #'     \item{\code{render_frame(cols, rows)}}{Render to JSON string (used internally by the widget).}
-#'     \item{\code{goto_match(match_locus)}}{Center the viewport on a search result locus. Sets detail to \code{"full"}. Returns self invisibly.}
+#'     \item{\code{go_to_match(match_locus, center = FALSE)}}{Move the viewport to a search result locus, snapping it left by default or centering it when \code{center = TRUE}. Sets detail to \code{"full"}. Returns self invisibly.}
 #'     \item{\code{highlight_match(match_locus, color = "yellow")}}{Highlight a search result locus on the graph. \code{color} may be a named terminal color (e.g. \code{"yellow"}, \code{"red"}, \code{"cyan"}) or a CSS hex string (e.g. \code{"#4393c3"}). Returns self invisibly.}
 #'     \item{\code{clear_highlights()}}{Remove all highlights. Returns self invisibly.}
 #'     \item{\code{add_track_file(path, name = NULL, sample = NULL)}}{Add a GFF3 or BED file and render annotations as inline graph highlights with floating labels. \code{sample} is the sample whose path defines the coordinate space (default \code{"reference"}).}
@@ -243,16 +256,19 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
     invisible(ctrl)
   }
 
-  ctrl$goto_match <- function(match_locus) {
+  ctrl$go_to_match <- function(match_locus, center = FALSE) {
     ctrl$detail <- "full"
-    pos <- match_locus$start
+    # center = TRUE aims the camera at the span's midpoint (precomputed in Rust) rather
+    # than its start, so a long match sits balanced in the viewport instead of hugging the edge.
+    pos <- if (isTRUE(center)) match_locus$midpoint else match_locus$start
     node <- pos$node
     offset <- pos$offset
     node_len <- node$sequence_end - node$sequence_start
     frac_x <- if (node_len > 1L) offset / (node_len - 1L) else 0.5
     frac_x <- max(0.0, min(1.0, frac_x))
-    ctrl$ops <- c(ctrl$ops, sprintf("goto,%s,%d,%d,%.6f",
-      node$node_id,
+    op <- if (isTRUE(center)) "gotoc" else "goto"
+    ctrl$ops <- c(ctrl$ops, sprintf("%s,%s,%d,%d,%.6f",
+      op, node$node_id,
       as.integer(node$sequence_start),
       as.integer(node$sequence_end),
       frac_x))
@@ -261,23 +277,14 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
 
   ctrl$highlight_match <- function(match_locus, color = "yellow") {
     slices <- match_locus$slices
-    n <- length(slices)
-    start_offset <- match_locus$start$offset
-    end_offset <- match_locus$end$offset
     strand_code <- switch(match_locus$strand, "+" = "f", "-" = "r", "u")
-    block_parts <- paste(
-      sapply(slices, function(s) {
-        sprintf("%s,%d,%d", s$node$node_id, as.integer(s$node$sequence_start), as.integer(s$node$sequence_end))
-      }),
-      collapse = ","
-    )
     ctrl$ops <- c(ctrl$ops, sprintf("hl,%s,%d,%d,%s,%d,%s",
       color,
-      as.integer(start_offset),
-      as.integer(end_offset),
+      as.integer(match_locus$start$offset),
+      as.integer(match_locus$end$offset),
       strand_code,
-      as.integer(n),
-      block_parts))
+      length(slices),
+      .slices_to_block_parts(slices)))
     invisible(ctrl)
   }
 
@@ -290,8 +297,8 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
     ctrl$repo$list_annotations(ctrl$sequence_graph_id)
   }
 
-  ctrl$go_to <- function(x) {
-    ctrl$goto_match(if (!is.null(x$locus)) x$locus else x)
+  ctrl$go_to <- function(x, center = FALSE) {
+    ctrl$go_to_match(if (!is.null(x$locus)) x$locus else x, center = center)
   }
 
   class(ctrl) <- "gen_plot"
