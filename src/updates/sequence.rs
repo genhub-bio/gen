@@ -199,8 +199,11 @@ mod tests {
 
     use super::*;
     use crate::{
+        graphs::combinatorial_library::parse_library,
         imports::fasta::import_fasta,
         test_helpers::{get_sample_bg, setup_block_group, setup_gen},
+        track_database,
+        updates::library::update_with_library,
     };
 
     fn insertion_block(
@@ -805,6 +808,97 @@ mod tests {
         assert_eq!(
             latest_path.sequence(conn, None).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    // Reproduces https://github.com/genhub-bio/gen/issues/211: deleting a
+    // sub-region of a part that a combinatorial library wired in from
+    // multiple entry points (p1/p2/p3 -> cds1) should create a bypass edge
+    // for each entry point, not just one. Mirrors the bash reproduction:
+    // import -> add-annotation -> update library -> update sequence "".
+    #[test]
+    fn test_deletion_inside_combinatorial_library_part_creates_bypass_for_every_entry_point() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+        track_database(conn, op_conn).unwrap();
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            "wt",
+            false,
+        )
+        .unwrap();
+        add_annotation(&context, &collection, "SITE", None, "wt", "m123:7-20").unwrap();
+
+        let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let parts_path = binding.to_str().unwrap();
+        let binding =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
+        let library_path = binding.to_str().unwrap();
+        let parts_list = parse_library(parts_path, library_path).unwrap();
+
+        update_with_library(
+            &context,
+            &collection,
+            "wt",
+            "design",
+            "SITE",
+            parts_list,
+            Some(parts_path),
+            Some(library_path),
+        )
+        .unwrap();
+
+        // Delete the first base of cds1's start codon, same as
+        // `gen update sequence "" --region-name cds1:0-1` in the issue.
+        let _ = update_with_sequence(
+            &context,
+            &collection,
+            "design",
+            "deleted",
+            "cds1:0-1",
+            "",
+            false,
+        );
+
+        let block_groups = BlockGroup::query(
+            conn,
+            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
+            params![collection, "deleted"],
+        );
+        assert_eq!(block_groups.len(), 1);
+
+        // Every combo that routes through cds1 (via p1, p2, or p3) should
+        // gain a bypass-edge variant with the first base of cds1 removed,
+        // alongside the untouched combos and the original unedited route.
+        let expected_sequences = HashSet::from_iter(
+            [
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA",
+                "ATCGATCAAAAATGATAAGGAACACACAGAGA",
+                "ATCGATCAAAAATGTTAAGGAACACACAGAGA",
+                "ATCGATCAAAAATGCTAAGGAACACACAGAGA",
+                "ATCGATCTAATATGATAAGGAACACACAGAGA",
+                "ATCGATCTAATATGTTAAGGAACACACAGAGA",
+                "ATCGATCTAATATGCTAAGGAACACACAGAGA",
+                "ATCGATCCAACATGATAAGGAACACACAGAGA",
+                "ATCGATCCAACATGTTAAGGAACACACAGAGA",
+                "ATCGATCCAACATGCTAAGGAACACACAGAGA",
+                // bypass variants: cds1's leading "A" removed, one per entry point
+                "ATCGATCAAAAATGATAGGAACACACAGAGA",
+                "ATCGATCTAATATGATAGGAACACACAGAGA",
+                "ATCGATCCAACATGATAGGAACACACAGAGA",
+            ]
+            .map(String::from),
+        );
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            expected_sequences,
         );
     }
 }
