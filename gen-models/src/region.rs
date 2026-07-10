@@ -11,7 +11,7 @@ use crate::{
     accession::{Accession, AccessionError},
     annotations::{Annotation, AnnotationError},
     block_group::{BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource},
-    block_group_edge::AugmentedEdgeData,
+    block_group_edge::{AugmentedEdgeData, BlockGroupEdge},
     db::GraphConnection,
     edge::EdgeData,
     errors::PathError,
@@ -626,6 +626,24 @@ impl ResolvedGenRegion {
             PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
         };
         let mut new_edges = vec![];
+        let boundary_positions = start_positions
+            .iter()
+            .filter(|position| position.coordinate() == position.graph_node.sequence_start)
+            .collect::<Vec<_>>();
+        let block_group_edges = if boundary_positions.is_empty() {
+            Vec::new()
+        } else {
+            BlockGroupEdge::edges_for_block_group(conn, &change.region.block_group.id)
+        };
+        let incoming_edges = boundary_positions
+            .into_iter()
+            .flat_map(|position| {
+                block_group_edges.iter().filter(move |augmented_edge| {
+                    augmented_edge.edge.target_node_id == position.graph_node.node_id
+                        && augmented_edge.edge.target_coordinate == position.coordinate()
+                })
+            })
+            .collect::<Vec<_>>();
 
         for position in start_positions.iter().chain(end_positions.iter()) {
             if !is_terminal(position.graph_node.node_id) {
@@ -662,6 +680,22 @@ impl ResolvedGenRegion {
                     });
                 }
             }
+            for incoming_edge in &incoming_edges {
+                for end_position in &end_positions {
+                    new_edges.push(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: incoming_edge.edge.source_node_id,
+                            source_coordinate: incoming_edge.edge.source_coordinate,
+                            source_strand: incoming_edge.edge.source_strand,
+                            target_node_id: end_position.graph_node.node_id,
+                            target_coordinate: end_position.coordinate(),
+                            target_strand: Strand::Forward,
+                        },
+                        chromosome_index: change.chromosome_index,
+                        phased: change.phased,
+                    });
+                }
+            }
         } else {
             for start_position in &start_positions {
                 new_edges.push(AugmentedEdgeData {
@@ -669,6 +703,20 @@ impl ResolvedGenRegion {
                         source_node_id: start_position.graph_node.node_id,
                         source_coordinate: start_position.coordinate(),
                         source_strand: Strand::Forward,
+                        target_node_id: change.block.node_id,
+                        target_coordinate: change.block.sequence_start,
+                        target_strand: Strand::Forward,
+                    },
+                    chromosome_index: change.chromosome_index,
+                    phased: change.phased,
+                });
+            }
+            for incoming_edge in &incoming_edges {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: incoming_edge.edge.source_node_id,
+                        source_coordinate: incoming_edge.edge.source_coordinate,
+                        source_strand: incoming_edge.edge.source_strand,
                         target_node_id: change.block.node_id,
                         target_coordinate: change.block.sequence_start,
                         target_strand: Strand::Forward,
