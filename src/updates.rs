@@ -1,4 +1,4 @@
-use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock};
+use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange},
     db::GraphConnection,
@@ -8,6 +8,9 @@ use gen_models::{
         GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind, resolve_accession,
         resolve_annotation, resolve_path,
     },
+    sample::Sample,
+    sequence::Sequence,
+    traits::Query,
 };
 
 pub mod fasta;
@@ -93,4 +96,134 @@ pub(crate) fn insert_update_change(
         preserve_edge: data.preserve_edge,
     };
     BlockGroup::insert_change(conn, &change)
+}
+
+pub(crate) struct SequenceUpdate<'a> {
+    pub collection_name: &'a str,
+    pub parent_sample_name: &'a str,
+    pub new_sample_name: &'a str,
+    pub region: &'a ResolvedGenRegion,
+    pub disable_reference_path_update: bool,
+}
+
+pub(crate) fn apply_sequence_updates<E>(
+    conn: &GraphConnection,
+    update: &SequenceUpdate<'_>,
+    sequences: impl IntoIterator<Item = String>,
+) -> Result<usize, E>
+where
+    E: From<gen_models::errors::BlockGroupError>
+        + From<gen_models::errors::NodeError>
+        + From<gen_models::errors::PathError>
+        + From<gen_models::errors::QueryError>
+        + From<gen_models::errors::SampleError>
+        + From<gen_models::errors::SequenceError>
+        + From<GenRegionError>,
+{
+    Sample::get_or_create_child(
+        conn,
+        update.collection_name,
+        update.new_sample_name,
+        vec![update.parent_sample_name.to_string()],
+    )?;
+    let block_groups = Sample::get_block_groups(
+        conn,
+        update.collection_name,
+        update.parent_sample_name,
+        None,
+    );
+    let mut target_block_groups = Vec::new();
+    for block_group in block_groups {
+        let new_block_groups = BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            update.collection_name,
+            update.new_sample_name,
+            &block_group.name,
+            vec![update.parent_sample_name.to_string()],
+        )?;
+        if block_group.name == update.region.block_group.name {
+            target_block_groups = new_block_groups;
+        }
+    }
+    if target_block_groups.is_empty() {
+        return Err(E::from(GenRegionError::NotFound(
+            update.region.block_group.name.clone(),
+        )));
+    }
+
+    let sequences = sequences.into_iter().collect::<Vec<_>>();
+    let change_count = target_block_groups.len() * sequences.len();
+    let update_reference_path = !update.disable_reference_path_update && sequences.len() == 1;
+    for target_block_group in target_block_groups {
+        let path = if update.region.kind == ResolvedRegionKind::Path {
+            Some(BlockGroup::get_current_path(
+                conn,
+                &target_block_group.id,
+                None,
+            )?)
+        } else {
+            None
+        };
+        for sequence in &sequences {
+            let (node_id, sequence_end) = if sequence.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let saved_sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(sequence)
+                    .save(conn)?;
+                let node_id = gen_models::node::Node::create(
+                    conn,
+                    &saved_sequence.hash,
+                    &HashId::convert_str(&format!(
+                        "{block_group_id}:0-{sequence_end}->{sequence_hash}",
+                        block_group_id = target_block_group.id,
+                        sequence_end = saved_sequence.length,
+                        sequence_hash = saved_sequence.hash,
+                    )),
+                )?;
+                (node_id, saved_sequence.length)
+            };
+            let block = PathBlock {
+                node_id,
+                block_sequence: sequence.clone(),
+                sequence_start: 0,
+                sequence_end,
+                path_start: update.region.start,
+                path_end: update.region.end,
+                strand: Strand::Forward,
+            };
+            let target_region =
+                target_update_region(conn, update.region, target_block_group.id, path.as_ref())?;
+            insert_update_change(conn, target_region, InsertChangeData::new(block))?;
+
+            if update_reference_path && let Some(path) = &path {
+                if sequence.is_empty() {
+                    let _ =
+                        path.new_path_with_deletion(conn, update.region.start, update.region.end);
+                } else {
+                    let edge_to_new_node = gen_models::edge::Edge::query(
+                        conn,
+                        "select * from edges where target_node_id = ?1",
+                        rusqlite::params![node_id],
+                    )[0]
+                    .clone();
+                    let edge_from_new_node = gen_models::edge::Edge::query(
+                        conn,
+                        "select * from edges where source_node_id = ?1",
+                        rusqlite::params![node_id],
+                    )[0]
+                    .clone();
+                    path.new_path_with(
+                        conn,
+                        update.region.start,
+                        update.region.end,
+                        &edge_to_new_node,
+                        &edge_from_new_node,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(change_count)
 }

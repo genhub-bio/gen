@@ -1,26 +1,14 @@
-use std::str;
-
-use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::BlockGroup,
     db::DbContext,
-    edge::Edge,
     file_types::FileTypes,
-    node::Node,
     operations::{OperationFile, OperationInfo, OperationSummary},
-    region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
-    sample::Sample,
-    sequence::Sequence,
-    traits::*,
+    region::{GenRegionError, Region},
 };
 use noodles::fasta;
-use rusqlite::{self, types::Value as SQLValue};
 
 use crate::{
     fasta::FastaError,
-    updates::{
-        InsertChangeData, insert_update_change, resolve_update_region, target_update_region,
-    },
+    updates::{SequenceUpdate, apply_sequence_updates, resolve_update_region},
 };
 #[allow(clippy::too_many_arguments)]
 pub fn update_with_fasta(
@@ -36,175 +24,32 @@ pub fn update_with_fasta(
     let parsed_region = Region::parse(region_name).map_err(GenRegionError::from)?;
     let resolved_region =
         resolve_update_region(&parsed_region, conn, collection_name, parent_sample_name)?;
-    let (start_coordinate, end_coordinate) =
-        if parsed_region.start.is_some() || parsed_region.end.is_some() {
-            (resolved_region.start, resolved_region.end)
-        } else {
-            return Err(FastaError::MissingCoordinates(region_name.to_string()));
-        };
+    if parsed_region.start.is_none() && parsed_region.end.is_none() {
+        return Err(FastaError::MissingCoordinates(region_name.to_string()));
+    }
 
     let mut fasta_reader = fasta::io::reader::Builder.build_from_path(fasta_file_path)?;
-
-    let _new_sample = Sample::get_or_create_child(
-        conn,
-        collection_name,
-        new_sample_name,
-        vec![parent_sample_name.to_string()],
-    )?;
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name, None);
-
-    let mut target_block_groups = vec![];
-    for block_group in block_groups {
-        let new_block_groups = BlockGroup::get_or_create_sample_block_groups(
-            conn,
-            collection_name,
-            new_sample_name,
-            &block_group.name,
-            vec![parent_sample_name.to_string()],
-        )?;
-
-        if block_group.name == resolved_region.block_group.name {
-            target_block_groups = new_block_groups;
-        }
-    }
-
-    if target_block_groups.is_empty() {
-        return Err(GenRegionError::NotFound(region_name.to_string()).into());
-    }
-
-    struct TargetBlockGroupState {
-        block_group_id: HashId,
-        path: Option<gen_models::path::Path>,
-        first_node: Option<HashId>,
-    }
-
-    let mut target_states = target_block_groups
-        .iter()
-        .map(|target_block_group| -> Result<_, FastaError> {
-            let path = if resolved_region.kind == ResolvedRegionKind::Path {
-                Some(BlockGroup::get_current_path(
-                    conn,
-                    &target_block_group.id,
-                    None,
-                )?)
-            } else {
-                None
-            };
-            Ok(TargetBlockGroupState {
-                block_group_id: target_block_group.id,
-                path,
-                first_node: None,
+    let sequences = fasta_reader
+        .records()
+        .map(|result| {
+            result.map(|record| {
+                str::from_utf8(record.sequence().as_ref())
+                    .unwrap()
+                    .to_string()
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-
-    let mut change_count = 0;
-
-    for (index, result) in fasta_reader.records().enumerate() {
-        let record = result?;
-        let sequence = str::from_utf8(record.sequence().as_ref()).unwrap();
-
-        for state in &mut target_states {
-            if sequence.is_empty() {
-                let node_id = HashId::convert_str("");
-                let path_block = PathBlock {
-                    node_id,
-                    block_sequence: sequence.to_string(),
-                    sequence_start: 0,
-                    sequence_end: 0,
-                    path_start: start_coordinate,
-                    path_end: end_coordinate,
-                    strand: Strand::Forward,
-                };
-
-                insert_fasta_change(
-                    conn,
-                    &resolved_region,
-                    state.block_group_id,
-                    state.path.as_ref(),
-                    path_block,
-                )?;
-                if index == 0 {
-                    state.first_node = Some(node_id);
-                } else if state.first_node.is_some() {
-                    state.first_node = None;
-                }
-            } else {
-                let seq = Sequence::new()
-                    .sequence_type("DNA")
-                    .sequence(sequence)
-                    .save(conn)?;
-                let node_id = Node::create(
-                    conn,
-                    &seq.hash,
-                    &HashId::convert_str(&format!(
-                        "{block_group_id}:{ref_start}-{ref_end}->{sequence_hash}",
-                        block_group_id = state.block_group_id,
-                        ref_start = 0,
-                        ref_end = seq.length,
-                        sequence_hash = seq.hash
-                    )),
-                )?;
-
-                let path_block = PathBlock {
-                    node_id,
-                    block_sequence: sequence.to_string(),
-                    sequence_start: 0,
-                    sequence_end: seq.length,
-                    path_start: start_coordinate,
-                    path_end: end_coordinate,
-                    strand: Strand::Forward,
-                };
-
-                insert_fasta_change(
-                    conn,
-                    &resolved_region,
-                    state.block_group_id,
-                    state.path.as_ref(),
-                    path_block,
-                )?;
-                if index == 0 {
-                    state.first_node = Some(node_id);
-                } else if state.first_node.is_some() {
-                    state.first_node = None;
-                }
-            }
-            change_count += 1;
-        }
-    }
-
-    for state in target_states {
-        if !disable_reference_path_update
-            && resolved_region.kind == ResolvedRegionKind::Path
-            && let Some(node_id) = state.first_node
-            && let Some(path) = state.path
-        {
-            if node_id == HashId::convert_str("") {
-                let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
-            } else {
-                let edge_to_new_node = Edge::query(
-                    conn,
-                    "select * from edges where target_node_id = ?1",
-                    rusqlite::params![node_id],
-                )[0]
-                .clone();
-                let edge_from_new_node = Edge::query(
-                    conn,
-                    "select * from edges where source_node_id = ?1",
-                    rusqlite::params!(SQLValue::from(node_id)),
-                )[0]
-                .clone();
-                path.new_path_with(
-                    conn,
-                    start_coordinate,
-                    end_coordinate,
-                    &edge_to_new_node,
-                    &edge_from_new_node,
-                )?;
-            }
-        }
-    }
-
+    let change_count = apply_sequence_updates::<FastaError>(
+        conn,
+        &SequenceUpdate {
+            collection_name,
+            parent_sample_name,
+            new_sample_name,
+            region: &resolved_region,
+            disable_reference_path_update,
+        },
+        sequences,
+    )?;
     let summary_str = format!("{change_count} sequences inserted");
     let operation_summary = OperationSummary::new(
         OperationInfo {
@@ -221,19 +66,6 @@ pub fn update_with_fasta(
     Ok(operation_summary)
 }
 
-fn insert_fasta_change(
-    conn: &gen_models::db::GraphConnection,
-    region: &ResolvedGenRegion,
-    target_block_group_id: HashId,
-    path: Option<&gen_models::path::Path>,
-    block: PathBlock,
-) -> Result<(), FastaError> {
-    let source = target_update_region(conn, region, target_block_group_id, path)?;
-    let data = InsertChangeData::new(block);
-    insert_update_change(conn, source, data)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
@@ -242,10 +74,14 @@ mod tests {
     use gen_models::{
         annotations::add_annotation,
         assets::{OperationKind, OperationLog},
+        block_group::BlockGroup,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
+        sample::Sample,
+        traits::Query as _,
     };
+    use rusqlite::types::Value as SQLValue;
     use tempfile::NamedTempFile;
 
     use super::*;
