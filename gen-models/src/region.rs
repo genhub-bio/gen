@@ -630,17 +630,31 @@ impl ResolvedGenRegion {
             .iter()
             .filter(|position| position.coordinate() == position.graph_node.sequence_start)
             .collect::<Vec<_>>();
-        let block_group_edges = if boundary_positions.is_empty() {
-            Vec::new()
-        } else {
-            BlockGroupEdge::edges_for_block_group(conn, &change.region.block_group.id)
-        };
+        let end_boundary_positions = end_positions
+            .iter()
+            .filter(|position| position.coordinate() == position.graph_node.sequence_end)
+            .collect::<Vec<_>>();
+        let block_group_edges =
+            if boundary_positions.is_empty() && end_boundary_positions.is_empty() {
+                Vec::new()
+            } else {
+                BlockGroupEdge::edges_for_block_group(conn, &change.region.block_group.id)
+            };
         let incoming_edges = boundary_positions
             .into_iter()
             .flat_map(|position| {
                 block_group_edges.iter().filter(move |augmented_edge| {
                     augmented_edge.edge.target_node_id == position.graph_node.node_id
                         && augmented_edge.edge.target_coordinate == position.coordinate()
+                })
+            })
+            .collect::<Vec<_>>();
+        let outgoing_edges = end_boundary_positions
+            .into_iter()
+            .flat_map(|position| {
+                block_group_edges.iter().filter(move |augmented_edge| {
+                    augmented_edge.edge.source_node_id == position.graph_node.node_id
+                        && augmented_edge.edge.source_coordinate == position.coordinate()
                 })
             })
             .collect::<Vec<_>>();
@@ -696,6 +710,22 @@ impl ResolvedGenRegion {
                     });
                 }
             }
+            for start_position in &start_positions {
+                for outgoing_edge in &outgoing_edges {
+                    new_edges.push(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: start_position.graph_node.node_id,
+                            source_coordinate: start_position.coordinate(),
+                            source_strand: Strand::Forward,
+                            target_node_id: outgoing_edge.edge.target_node_id,
+                            target_coordinate: outgoing_edge.edge.target_coordinate,
+                            target_strand: outgoing_edge.edge.target_strand,
+                        },
+                        chromosome_index: change.chromosome_index,
+                        phased: change.phased,
+                    });
+                }
+            }
         } else {
             for start_position in &start_positions {
                 new_edges.push(AugmentedEdgeData {
@@ -739,6 +769,20 @@ impl ResolvedGenRegion {
                     phased: change.phased,
                 });
             }
+            for outgoing_edge in &outgoing_edges {
+                new_edges.push(AugmentedEdgeData {
+                    edge_data: EdgeData {
+                        source_node_id: change.block.node_id,
+                        source_coordinate: change.block.sequence_end,
+                        source_strand: Strand::Forward,
+                        target_node_id: outgoing_edge.edge.target_node_id,
+                        target_coordinate: outgoing_edge.edge.target_coordinate,
+                        target_strand: outgoing_edge.edge.target_strand,
+                    },
+                    chromosome_index: change.chromosome_index,
+                    phased: change.phased,
+                });
+            }
         }
 
         Ok(new_edges)
@@ -757,10 +801,15 @@ impl IntervalTreeSource for ResolvedGenRegion {
 
 #[cfg(test)]
 mod tests {
+    use gen_core::{NO_CHROMOSOME_INDEX, PathBlock, Strand};
+    use gen_graph::{GraphNode, GraphNodePosition};
+
     use super::*;
     use crate::{
         annotations::Annotation,
         block_group::{BlockGroup, PathCache},
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        edge::Edge,
         test_helpers::{get_connection, setup_block_group},
     };
 
@@ -780,6 +829,95 @@ mod tests {
         let annotation =
             Annotation::get_or_create(&conn, "gene-mreB", "genes", &accession.id, None).unwrap();
         (conn, block_group, path, accession, annotation)
+    }
+
+    #[test]
+    fn test_node_end_update_preserves_all_outgoing_edges() {
+        let (conn, block_group, _path, _accession, _annotation) = setup_targets();
+        let t_node_id = HashId::convert_str("test-t-node");
+        let c_node_id = HashId::convert_str("test-c-node");
+        let g_node_id = HashId::convert_str("test-g-node");
+        let extra_outgoing_edge = Edge::create(
+            &conn,
+            t_node_id,
+            10,
+            Strand::Forward,
+            g_node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: extra_outgoing_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let start_position = GraphNodePosition {
+            graph_node: GraphNode {
+                node_id: t_node_id,
+                sequence_start: 0,
+                sequence_end: 10,
+            },
+            offset: 8,
+        };
+        let end_position = GraphNodePosition {
+            graph_node: start_position.graph_node,
+            offset: 10,
+        };
+        let region = ResolvedGenRegion {
+            block_group,
+            path: None,
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::Annotation,
+            anchor_start: 0,
+            anchor_end: 0,
+            feature_length: 0,
+            start: 8,
+            end: 10,
+            start_anchors: Some(vec![start_position]),
+            end_anchors: Some(vec![end_position]),
+            remove_ambiguous_positions: false,
+        };
+
+        for (sequence_end, expected_source_node_id, expected_source_coordinate) in [
+            (0, t_node_id, 8),
+            (4, HashId::convert_str("replacement"), 4),
+        ] {
+            let change = BlockGroupChange {
+                region: region.clone(),
+                path_accession: None,
+                block: PathBlock {
+                    node_id: expected_source_node_id,
+                    block_sequence: "N".repeat(sequence_end as usize),
+                    sequence_start: 0,
+                    sequence_end,
+                    path_start: 8,
+                    path_end: 10,
+                    strand: Strand::Forward,
+                },
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            let edges = region.plan_edges(&conn, &change, None).unwrap();
+            for target_node_id in [c_node_id, g_node_id] {
+                assert!(
+                    edges.iter().any(|edge| {
+                        edge.edge_data.source_node_id == expected_source_node_id
+                            && edge.edge_data.source_coordinate == expected_source_coordinate
+                            && edge.edge_data.target_node_id == target_node_id
+                            && edge.edge_data.target_coordinate == 0
+                    }),
+                    "node-end update should preserve outgoing edge to {target_node_id}",
+                );
+            }
+        }
     }
 
     mod region_resolver {
