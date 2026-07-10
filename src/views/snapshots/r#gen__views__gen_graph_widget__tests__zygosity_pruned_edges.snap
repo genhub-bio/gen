@@ -1,6 +1,6 @@
 ---
-source: src/views/testing/zygosity_snapshot_test.rs
-expression: snapshot
+source: src/views/gen_graph_widget.rs
+expression: terminal.backend().to_string()
 ---
 "                                                                                                                        "
 "                                                                                                                        "
@@ -15,9 +15,9 @@ expression: snapshot
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
-"          ╭─T─╮     ╭─A─╮      ╭╌G╌╮      ╭─A─╮       ╭─TTT─╮       ╭─A─╮                                               "
-"     ╟─AT─╯   ╰─GAT─┤   ├─GATC─╮   ╭─ATCG─┤   ├─TCGGG─╯     ╰─AACAC─┤   ├─CAGAGA─╢                                      "
-"          ╰╌C╌╯     ╰─C─╯      ╰───╯      ╰───╯       ╰╌╌╌╌╌╯       ╰─G─╯                                               "
+"          ╭╴T╶╮     ╭╴A╶╮      ╭╌G╌╮      ╭╴A╶╮       ╭╴TTT╶╮       ╭╴A╶╮                                               "
+"     ╟╴AT╶╯   ╰╴GAT╶┤   ├╴GATC╶╮   ╭╴ATCG╶┤   ├╴TCGGG╶╯     ╰╴AACAC╶┤   ├╴CAGAGA╶╢                                      "
+"          ╰╌C╌╯     ╰╴C╶╯      ╰───╯      ╰───╯       ╰╌╌╌╌╌╯       ╰╴G╶╯                                               "
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "

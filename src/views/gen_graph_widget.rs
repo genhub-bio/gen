@@ -146,11 +146,13 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
         if is_start_node(node_id.node_id) {
             let edge_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
             buffer.set_string_styled(area.left_center(), label::START, edge_style);
+            soften_adjacent_edges(buffer, area);
             return;
         }
         if is_end_node(node_id.node_id) {
             let edge_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
             buffer.set_string_styled(area.left_center(), label::END, edge_style);
+            soften_adjacent_edges(buffer, area);
             return;
         }
 
@@ -176,6 +178,51 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
                     .unwrap_or_else(|_| "Unknown Sequence".to_string());
                 buffer.set_string_styled(area.left_center(), &sequence, text_style);
             }
+        }
+
+        soften_adjacent_edges(buffer, area);
+    }
+}
+
+/// Replace a horizontal box-drawing edge glyph immediately to the left/right of a node's
+/// text area with its "stub" variant, so lines don't visually run into the text
+/// (`─NNN` -> `╴NNN`, `NNN─` -> `NNN╶`; bold `━`/`╸`/`╺` likewise). Only applies when the
+/// node's own adjacent character (the one inside the border) is alphanumeric, so
+/// box-drawing labels like `╟`/`╢` keep their unbroken connecting line.
+fn soften_adjacent_edges(buffer: &mut WorldBuffer, area: WorldRect) {
+    let y = area.left_center().y;
+
+    let left_inside_pos = WorldPos::new(area.left(), y);
+    let left_outside_pos = WorldPos::new(area.left() - 1, y);
+    let left_inside_char = buffer.get_char(left_inside_pos);
+    if left_inside_char.is_some_and(|ch| ch.is_alphanumeric())
+        && let Some((left_outside_char, left_outside_style)) =
+            buffer.get_char_styled(left_outside_pos)
+    {
+        let replacement = match left_outside_char {
+            '─' => Some('╴'),
+            '━' => Some('╸'),
+            _ => None,
+        };
+        if let Some(new_char) = replacement {
+            buffer.set_char_styled(left_outside_pos, new_char, left_outside_style);
+        }
+    }
+
+    let right_inside_pos = WorldPos::new(area.right(), y);
+    let right_outside_pos = WorldPos::new(area.right() + 1, y);
+    let right_inside_char = buffer.get_char(right_inside_pos);
+    if right_inside_char.is_some_and(|ch| ch.is_alphanumeric())
+        && let Some((right_outside_char, right_outside_style)) =
+            buffer.get_char_styled(right_outside_pos)
+    {
+        let replacement = match right_outside_char {
+            '─' => Some('╶'),
+            '━' => Some('╺'),
+            _ => None,
+        };
+        if let Some(new_char) = replacement {
+            buffer.set_char_styled(right_outside_pos, new_char, right_outside_style);
         }
     }
 }
