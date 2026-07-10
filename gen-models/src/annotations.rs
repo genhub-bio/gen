@@ -896,21 +896,34 @@ impl AnnotationFile {
             input.file_type,
             input.checksum_override,
         )?;
-        let index_file_addition = input
-            .index_file_path
-            .as_deref()
-            .map(|path| FileAddition::get_or_create(workspace, conn, path, FileTypes::Tabix, None))
-            .transpose()?;
+        let index_file_addition = if let Some(index_file_path) = input.index_file_path.as_ref() {
+            Some(FileAddition::get_or_create(
+                workspace,
+                conn,
+                index_file_path,
+                FileTypes::Tabix,
+                None,
+            )?)
+        } else {
+            None
+        };
+
         let file_path =
             OperationFile::storage_file_path(workspace, &input.file_path, &file_addition.checksum)?;
-        let index_file_path = input
-            .index_file_path
-            .as_deref()
-            .zip(index_file_addition.as_ref())
-            .map(|(path, index_file_addition)| {
-                OperationFile::storage_file_path(workspace, path, &index_file_addition.checksum)
-            })
-            .transpose()?;
+        let index_file_path = if let Some(index_file_addition) = index_file_addition.as_ref() {
+            if let Some(index_file_path) = input.index_file_path.as_deref() {
+                Some(OperationFile::storage_file_path(
+                    workspace,
+                    index_file_path,
+                    &index_file_addition.checksum,
+                )?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         AnnotationFile::link_to_operation(
             conn,
             operation_hash,
