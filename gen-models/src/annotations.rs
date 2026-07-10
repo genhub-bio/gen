@@ -730,33 +730,37 @@ pub fn add_annotation_file(
     let file_addition =
         FileAddition::get_or_create(workspace, operation_conn, path, file_type, None)?;
     let index_file_path = annotation_index_file_path(workspace, path, index);
-    let index_file_addition = index_file_path
-        .as_deref()
-        .map(|index_path| {
-            FileAddition::get_or_create(
-                workspace,
-                operation_conn,
-                index_path,
-                FileTypes::Tabix,
-                None,
-            )
-        })
-        .transpose()?;
+    let index_file_addition = if let Some(index_file_path) = index_file_path {
+        Some(FileAddition::get_or_create(
+            workspace,
+            operation_conn,
+            &index_file_path,
+            FileTypes::Tabix,
+            None,
+        )?)
+    } else {
+        None
+    };
+
     let stored_file_path =
         OperationFile::storage_file_path(workspace, path, &file_addition.checksum)?;
-    let stored_index_file_path = index_file_path
-        .as_deref()
-        .zip(index_file_addition.as_ref())
-        .map(|(path, index_file_addition)| {
-            OperationFile::storage_file_path(workspace, path, &index_file_addition.checksum)
-        })
-        .transpose()?;
+    let stored_index_file_path = if let Some(index_file_addition) = index_file_addition.as_ref() {
+        Some(OperationFile::storage_file_path(
+            workspace,
+            path,
+            &index_file_addition.checksum,
+        )?)
+    } else {
+        None
+    };
+
     let name_value = name.unwrap_or_default();
     let index_file_addition_id = index_file_addition
         .as_ref()
         .map(|index_file| index_file.id.to_string())
         .unwrap_or_default();
     let stored_index_file_path_value = stored_index_file_path.as_deref().unwrap_or_default();
+
     let operation_hash = HashId(calculate_hash(&format!(
         "{file_addition_id}:{name_value}:{index_file_addition_id}:{stored_file_path}:{stored_index_file_path_value}",
         file_addition_id = file_addition.id
