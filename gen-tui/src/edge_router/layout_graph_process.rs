@@ -237,8 +237,21 @@ pub fn prune_pin_stubs(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirecte
 /// pass-through `Routing` nodes and the terminating junction leading from it - splicing
 /// the junction's two other neighbors together with the bundle carried along the way.
 /// See `prune_pin_stubs`.
+///
+/// A pin with two or more neighbors is not a dead-end stub but a load-bearing corner of
+/// the bypass path: it happens when a locally-scoped loop's pin lands directly on its host
+/// partition's stitch column (see `PartitionTable::new_with_backward_edges`), wiring the
+/// target and the bypass to the pin without an intervening routing mesh to relay them
+/// through. Removing it would sever the loop, so it is re-roled to an ordinary `Routing`
+/// corner (pins already render as routing nodes) and left in place.
 fn prune_pin(graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected>, pin_index: NodeIndex) {
     let neighbors: Vec<NodeIndex> = graph.neighbors(pin_index).collect();
+
+    if neighbors.len() >= 2 {
+        graph[pin_index].role = NodeRole::Routing;
+        return;
+    }
+
     let mut to_remove = vec![pin_index];
     #[allow(clippy::type_complexity)]
     let mut splice: Option<(NodeIndex, NodeIndex, Vec<(NodeIndex, NodeIndex)>)> = None;

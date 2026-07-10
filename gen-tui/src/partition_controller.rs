@@ -105,12 +105,28 @@ where
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
+        // Auto-detect the backward edges (a feedback arc set) so cyclic graphs render as
+        // loops instead of tripping the DAG-only ranking. Acyclic graphs take the toposort
+        // fast path and yield no backward edges, so this is a no-op for them. `pin_source`/
+        // `pin_sink` steer which edges are chosen as backward.
+        let pin_source = partition_config
+            .pin_source
+            .map(|idx| <G as NodeIndexable>::from_index(&graph, idx.index()));
+        let pin_sink = partition_config
+            .pin_sink
+            .map(|idx| <G as NodeIndexable>::from_index(&graph, idx.index()));
+        let backward_edges: Vec<(G::NodeId, G::NodeId)> =
+            crate::cycle_removal::remove_cycles(&graph, pin_source, pin_sink)
+                .backward_edges
+                .into_iter()
+                .collect();
+
         Self::new_with_config_and_backward_edges(
             graph,
             node_sizer,
             partition_config,
             controller_config,
-            &[],
+            &backward_edges,
         )
     }
 
@@ -791,6 +807,7 @@ mod tests {
         let partition_config = PartitionConfig {
             layer_count: 1, // Small layer count
             node_count: 3,  // Small node count to force multiple partitions
+            ..Default::default()
         };
         let config = ControllerConfig {
             max_loaded_partitions: usize::MAX,

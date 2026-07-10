@@ -247,6 +247,7 @@ impl PartitionLayout {
         mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
         vertex_spacing: f64,
         partition_idx: usize,
+        backward_bundles: &std::collections::HashSet<(NodeIndex, NodeIndex)>,
     ) -> Self {
         log::trace!(
             "for_section: input layout_graph has {} nodes, {} edges",
@@ -263,11 +264,11 @@ impl PartitionLayout {
         // channel positions) and centers nodes within their slack in one pass.
         compact_layout(&mut layout_graph, vertex_spacing);
 
-        // Pin occupies the column alignment falls back to on the side of a boundary
-        // partition that has no stitch (see `align_partition_to_origin`), so pruning must
-        // wait until after alignment has consumed that column. Only the spatial index
-        // (and everything downstream of it) should ever see the pruned graph.
-        let (dx, dy) = align_partition_to_origin(&mut layout_graph);
+        // Alignment ignores pins entirely (see `align_partition_to_origin`/`mean_y_for_x`),
+        // so it must run against the pin's routing chain still intact: pruning splices that
+        // chain into ordinary Routing edges, and only the spatial index (and everything
+        // downstream of it) should ever see the pruned graph.
+        let (dx, dy) = align_partition_to_origin(&mut layout_graph, backward_bundles);
 
         if let Ok(path) = std::env::var("GEN_TUI_DOT_DUMP") {
             let _ = crate::dot_export::export_layout_graph_to_dot(
@@ -591,6 +592,10 @@ pub struct LayoutEngine<'a> {
     vertex_graph: StableDiGraph<Vertex, Edge, u32>,
     vertex_layers: Option<Vec<Vec<NodeIndex<u32>>>>,
     config: Config,
+    /// Domain `(source, target)` pairs of the backward edges rewritten onto pin nodes, so
+    /// section alignment can tell a loop's bypass fly-over apart from ordinary content and
+    /// exclude it from the rise computation. Empty for any acyclic graph.
+    backward_bundles: std::collections::HashSet<(NodeIndex, NodeIndex)>,
 }
 
 impl<'a> LayoutEngine<'a> {
@@ -615,7 +620,15 @@ impl<'a> LayoutEngine<'a> {
                         let d: i32 = i32::try_from(domain_idx.index()).unwrap_or(i32::MAX);
                         i32::MAX.saturating_sub(d)
                     }
-                    PartitionNode::Stitch(_) | PartitionNode::Pin => 0,
+                    // Bias pins to one end of their layer so a backward edge's two pins land
+                    // on the same vertical side in their (independent) partitions, drawing
+                    // the loop as a clean one-sided rectangle instead of an S that crosses
+                    // the baseline mid-span. `sort_bias` only breaks ties between equal-
+                    // crossing orderings (see `p2_reduce_crossings::prefer_order`), and a pin
+                    // sits in a sparse layer where that ordering is degenerate, so this is a
+                    // reliable nudge without overriding crossing minimization.
+                    PartitionNode::Pin => i32::MIN,
+                    PartitionNode::Stitch(_) => 0,
                 };
                 vertex.set_sort_bias(sort_bias);
                 let new_vertex_idx = vertex_graph.add_node(vertex);
@@ -660,7 +673,17 @@ impl<'a> LayoutEngine<'a> {
             vertex_graph,
             vertex_layers: None,
             config: Config::default(),
+            backward_bundles: std::collections::HashSet::new(),
         }
+    }
+
+    /// Record the backward-edge bundles so section alignment can exclude their bypass
+    /// fly-overs from the rise. See `LayoutEngine::backward_bundles`.
+    pub fn set_backward_bundles(
+        &mut self,
+        backward_bundles: std::collections::HashSet<(NodeIndex, NodeIndex)>,
+    ) {
+        self.backward_bundles = backward_bundles;
     }
 
     pub fn set_sugiyama_config(&mut self, config: Config) {
@@ -784,6 +807,7 @@ impl<'a> LayoutEngine<'a> {
             layout_graph,
             self.config.vertex_spacing,
             self.partition_idx,
+            &self.backward_bundles,
         );
 
         Ok(layout)
@@ -938,18 +962,52 @@ fn count_connected_components<N, E>(graph: &StableDiGraph<N, E, u32>) -> usize {
 fn mean_y_for_x(
     layout_graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     x: i64,
+    excluded: &std::collections::HashSet<NodeIndex>,
 ) -> Option<i64> {
     let ys: Vec<i64> = layout_graph
-        .node_weights()
-        .filter(|node| {
-            node.pos.x == x && !matches!(node.role, NodeRole::Stitch(_) | NodeRole::Pin)
+        .node_indices()
+        .filter(|&node_idx| {
+            let node = &layout_graph[node_idx];
+            node.pos.x == x
+                && !matches!(node.role, NodeRole::Stitch(_) | NodeRole::Pin)
+                && !excluded.contains(&node_idx)
         })
-        .map(|node| node.pos.y)
+        .map(|node_idx| layout_graph[node_idx].pos.y)
         .collect();
     if ys.is_empty() {
         return None;
     }
     Some((ys.iter().sum::<i64>() as f64 / ys.len() as f64).floor() as i64)
+}
+
+/// Collect the `Routing` nodes that carry a backward edge's bypass fly-over: a `Routing`
+/// node is one iff an incident edge's bundle is a backward edge (its `(source, target)`
+/// pair is in `backward_bundles`). Keyed on the edge bundle rather than reachability from a
+/// `Pin` so it also catches the intermediate partitions a full-width loop merely passes
+/// through - they relay the bypass stitch-to-stitch and host no pin of their own, yet their
+/// relay must be excluded from the rise just the same for adjacent partitions to stay
+/// aligned. A forward spanning edge relayed the same way carries a non-backward bundle and
+/// is left in. Empty for any acyclic graph, so non-cyclic graphs are unaffected.
+fn bypass_routing_nodes(
+    layout_graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    backward_bundles: &std::collections::HashSet<(NodeIndex, NodeIndex)>,
+) -> std::collections::HashSet<NodeIndex> {
+    if backward_bundles.is_empty() {
+        return std::collections::HashSet::new();
+    }
+
+    layout_graph
+        .node_indices()
+        .filter(|&node_idx| {
+            matches!(layout_graph[node_idx].role, NodeRole::Routing)
+                && layout_graph.edges(node_idx).any(|edge| {
+                    edge.weight()
+                        .bundle
+                        .iter()
+                        .any(|pair| backward_bundles.contains(pair))
+                })
+        })
+        .collect()
 }
 
 /// Take the contents of a layout graph and translate the node coordinates
@@ -960,21 +1018,45 @@ fn mean_y_for_x(
 ///   from the origin to the mean of the rightmost nodes
 fn align_partition_to_origin(
     layout_graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    backward_bundles: &std::collections::HashSet<(NodeIndex, NodeIndex)>,
 ) -> (i64, i64) {
-    // Stitch nodes are handles for bridges to plug into, not a coordinate-meaningful
-    // interface row (see `mean_y_for_x`), so the reference for both the partition's own
-    // origin and its rise into the next partition is the first/last column that actually
-    // has real (Data or Routing - i.e. non-Stitch) content.
+    // Horizontal extent (the run handed to the next partition) counts everything that
+    // physically occupies space - Data and Routing, including a backward edge's bypass
+    // fly-over, which can jut out horizontally past the data. Stitch nodes are excluded
+    // (they are bridge handles, not content) and Pin is excluded because it floats to the
+    // leftmost/rightmost rank of its host partition rather than sitting where content ends.
     let (min_x, max_x) = layout_graph
         .node_weights()
-        .filter(|node| !matches!(node.role, NodeRole::Stitch(_)))
+        .filter(|node| !matches!(node.role, NodeRole::Stitch(_) | NodeRole::Pin))
         .map(|node| node.pos.x)
         .minmax()
         .into_option()
         .unwrap_or((0, 0));
 
-    let mean_y_left = mean_y_for_x(layout_graph, min_x).unwrap_or(0);
-    let mean_y_right = mean_y_for_x(layout_graph, max_x).unwrap_or(0);
+    // The vertical origin and the rise into the next partition are measured on the data
+    // chain, so a backward edge's fly-over never tilts where this partition hands off.
+    // The fly-over's routing nodes are excluded (along with Stitch/Pin): a local loop
+    // originates or terminates at a pin inside one partition, so its bypass touches that
+    // partition's boundary column on one side only, and counting it would introduce a
+    // spurious rise that lifts every downstream partition. A full-width loop spans its
+    // intermediate partitions symmetrically and is unaffected either way; a non-cyclic
+    // graph has no bypass nodes, so this reduces to the plain data/routing extent.
+    let bypass = bypass_routing_nodes(layout_graph, backward_bundles);
+    let (anchor_min_x, anchor_max_x) = layout_graph
+        .node_indices()
+        .filter(|&node_idx| {
+            !matches!(
+                layout_graph[node_idx].role,
+                NodeRole::Stitch(_) | NodeRole::Pin
+            ) && !bypass.contains(&node_idx)
+        })
+        .map(|node_idx| layout_graph[node_idx].pos.x)
+        .minmax()
+        .into_option()
+        .unwrap_or((min_x, max_x));
+
+    let mean_y_left = mean_y_for_x(layout_graph, anchor_min_x, &bypass).unwrap_or(0);
+    let mean_y_right = mean_y_for_x(layout_graph, anchor_max_x, &bypass).unwrap_or(0);
 
     // Apply normalization offsets
     for node in layout_graph.node_weights_mut() {
@@ -1020,7 +1102,7 @@ mod tests {
         ));
 
         // Apply alignment for inter-partition space
-        align_partition_to_origin(&mut graph);
+        align_partition_to_origin(&mut graph, &std::collections::HashSet::new());
 
         // After alignment, the leftmost nodes (at x=10) should be at x=0
         // n1 and n2 originally have center x=10, n3 has center x=30

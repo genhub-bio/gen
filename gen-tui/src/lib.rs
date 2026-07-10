@@ -4,6 +4,7 @@
 pub mod animation;
 pub mod compaction;
 pub mod cursor;
+pub mod cycle_removal;
 pub mod distribute_nodes;
 pub mod dot_export;
 pub mod edge_router; // Rust port of edge routing

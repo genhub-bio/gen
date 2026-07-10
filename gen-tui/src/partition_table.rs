@@ -33,6 +33,13 @@ pub struct PartitionConfig {
     /// Number of nodes after which a partition is forcibly closed.
     /// The layer is still finished so the final count could be higher than this.
     pub node_count: usize,
+    /// Optional node forced to the start of the layout when cycles are auto-detected,
+    /// which determines where each cycle is broken (see `cycle_removal::remove_cycles`).
+    /// For a circular genome this is the origin. Ignored on the explicit-backward-edge path.
+    pub pin_source: Option<NodeIndex<u32>>,
+    /// Optional node forced to the end of the layout when cycles are auto-detected.
+    /// Ignored on the explicit-backward-edge path.
+    pub pin_sink: Option<NodeIndex<u32>>,
 }
 
 impl Default for PartitionConfig {
@@ -40,6 +47,8 @@ impl Default for PartitionConfig {
         Self {
             layer_count: 100,
             node_count: usize::MAX,
+            pin_source: None,
+            pin_sink: None,
         }
     }
 }
@@ -229,7 +238,10 @@ where
     /// Create a new PartitionTable from a generic graph, rewriting each backward edge
     /// `(source, target)` in `backward_edges` onto a pair of synthetic pin nodes
     /// (`left_pin -> target`, `left_pin -> right_pin`, `source -> right_pin`) so the
-    /// resulting graph is acyclic. See `gen-tui` cyclic-graph-rendering design notes.
+    /// resulting graph is acyclic. Each loop's pins are hosted in the partitions its own
+    /// endpoints occupy, so multiple independent cycles each render as a compact local
+    /// bypass over the partitions they cross rather than all spanning the full width. See
+    /// `gen-tui` cyclic-graph-rendering design notes.
     pub fn new_with_backward_edges(
         graph: &G,
         min_width: usize,
@@ -526,13 +538,19 @@ where
             }
         }
 
-        // Rewire each backward edge onto a pair of pin nodes: `left_pin` in the first
-        // partition and `right_pin` in the last partition, connected by three forward
+        // Rewire each backward edge onto a pair of pin nodes connected by three forward
         // edges (`left_pin -> target`, `left_pin -> right_pin`, `source -> right_pin`).
         // `left_pin` has only outgoing edges and `right_pin` only incoming edges within
-        // their partitions, so each lands at the leftmost/rightmost rank automatically
-        // once laid out - no explicit rank-forcing is needed.
-        let last_partition_idx = num_partitions - 1;
+        // their partitions, so each lands at the leftmost/rightmost rank of its own host
+        // partition automatically once laid out - no explicit rank-forcing is needed.
+        //
+        // The pins are hosted in the partitions the cycle's own endpoints live in, not at
+        // the graph's outer extremes, so the bypass spans only the partitions the loop
+        // actually crosses. `left_pin` goes in the leftmost of the two endpoint partitions
+        // and `right_pin` in the rightmost; when both endpoints share a partition the
+        // bypass and both legs stay entirely internal to that one section (no bridge
+        // infrastructure is touched). The full-width circular-genome case falls out as the
+        // degenerate case where `target` sits in partition 0 and `source` in the last one.
         let mut backward_domain_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = Vec::new();
         for &(source, target) in backward_edges {
             let (source_partition_idx, source_node_index) = node_map
@@ -549,14 +567,23 @@ where
             let bundle = (source_domain_idx, target_domain_idx);
             backward_domain_edges.push(bundle);
 
-            let left_pin_idx = all_partitions[0].graph.add_node(PartitionNode::Pin);
-            let right_pin_idx = all_partitions[last_partition_idx]
+            // A backward edge closes a cycle, so `target` is upstream of `source` and its
+            // partition index is <= `source`'s. Take min/max anyway so a caller that hands
+            // in a non-backward edge still produces a valid left-to-right pin span rather
+            // than tripping `connect_across_partitions`' ordering assertion.
+            let left_partition_idx = target_partition_idx.min(source_partition_idx);
+            let right_partition_idx = target_partition_idx.max(source_partition_idx);
+
+            let left_pin_idx = all_partitions[left_partition_idx]
+                .graph
+                .add_node(PartitionNode::Pin);
+            let right_pin_idx = all_partitions[right_partition_idx]
                 .graph
                 .add_node(PartitionNode::Pin);
 
             connect_across_partitions(
                 &mut all_partitions,
-                0,
+                left_partition_idx,
                 left_pin_idx,
                 target_partition_idx,
                 target_node_index,
@@ -566,15 +593,15 @@ where
                 &mut all_partitions,
                 source_partition_idx,
                 source_node_index,
-                last_partition_idx,
+                right_partition_idx,
                 right_pin_idx,
                 bundle,
             );
             connect_across_partitions(
                 &mut all_partitions,
-                0,
+                left_partition_idx,
                 left_pin_idx,
-                last_partition_idx,
+                right_partition_idx,
                 right_pin_idx,
                 bundle,
             );
@@ -809,6 +836,7 @@ where
             PartitionNodeSizer::new(original_sizer, original_graph, partition_graph);
         let mut layout_engine = LayoutEngine::new(partition_graph, partition_index);
         layout_engine.set_vertex_spacing(vertex_spacing);
+        layout_engine.set_backward_bundles(self.backward_edges.iter().copied().collect());
 
         let base_layout = layout_engine.compute_layout(&sizer_adapter, VisualDetail::Minimal)?;
 
@@ -1723,6 +1751,132 @@ mod tests {
                 .count(),
             2,
             "right_pin should have exactly 2 edges: from source, and from its partition's left stitch"
+        );
+    }
+
+    /// Collect the partition indices that hold at least one `Pin` node.
+    #[cfg(test)]
+    fn pin_partitions<G>(table: &PartitionTable<G>) -> Vec<PartitionIndex>
+    where
+        G: GraphBase,
+    {
+        table
+            .partitions
+            .iter()
+            .enumerate()
+            .filter(|(_, partition)| {
+                partition
+                    .graph
+                    .node_indices()
+                    .any(|idx| matches!(partition.graph.node_weight(idx), Some(PartitionNode::Pin)))
+            })
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    #[test]
+    fn test_local_backward_edge_scopes_pins_to_endpoint_partitions() {
+        // Long chain 0 -> 1 -> ... -> 7 with a backward edge 5 -> 2 that only loops over
+        // the middle of the graph. min_width=1 spreads the nodes across many partitions,
+        // so a full-width bypass (pins at partition 0 / last) would be clearly wrong.
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)];
+        let graph = make_test_graph(edges);
+
+        let table = PartitionTable::new_with_backward_edges(
+            &graph,
+            1,
+            usize::MAX,
+            &[(TestNode(5), TestNode(2))],
+        );
+
+        assert!(
+            table.partitions.len() > 3,
+            "min_width=1 should force many partitions"
+        );
+
+        let (target_partition_idx, _) = table.node_map[&TestNode(2)];
+        let (source_partition_idx, _) = table.node_map[&TestNode(5)];
+        assert!(
+            target_partition_idx < source_partition_idx,
+            "target should be laid out left of source"
+        );
+
+        // The pins must live exactly in the endpoints' own partitions, not the extremes.
+        let mut pins = pin_partitions(&table);
+        pins.sort_unstable();
+        assert_eq!(
+            pins,
+            vec![target_partition_idx, source_partition_idx],
+            "left/right pins should be hosted in the target/source partitions"
+        );
+
+        let last_partition_idx = table.partitions.len() - 1;
+        assert!(
+            !pins.contains(&0) && !pins.contains(&last_partition_idx),
+            "a local loop must not place pins at the graph's outer extremes"
+        );
+
+        // The bypass should only relay across the partitions strictly between the two
+        // endpoints - partitions outside [target, source] must carry no relay for it.
+        let (source_domain_idx, _) = {
+            let idx = <_ as NodeIndexable>::to_index(&graph, TestNode(5));
+            (NodeIndex::<u32>::new(idx), ())
+        };
+        let (target_domain_idx, _) = {
+            let idx = <_ as NodeIndexable>::to_index(&graph, TestNode(2));
+            (NodeIndex::<u32>::new(idx), ())
+        };
+        let bundle = (source_domain_idx, target_domain_idx);
+        for (idx, partition) in table.partitions.iter().enumerate() {
+            let relays = partition
+                .graph
+                .edge_indices()
+                .filter(|&edge| partition.graph.edge_weight(edge) == Some(&Some(bundle)))
+                .count();
+            if idx < target_partition_idx || idx > source_partition_idx {
+                assert_eq!(
+                    relays, 0,
+                    "partition {} is outside the loop span and must carry no bypass relay",
+                    idx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_multiple_independent_backward_edges_scoped_locally() {
+        // Two disjoint local cycles on one long chain: 1 -> 0 near the left and 6 -> 5
+        // near the right. Neither should span the full graph, and each pin pair should be
+        // confined to its own region so they don't compete for the whole canvas.
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)];
+        let graph = make_test_graph(edges);
+
+        let table = PartitionTable::new_with_backward_edges(
+            &graph,
+            1,
+            usize::MAX,
+            &[(TestNode(1), TestNode(0)), (TestNode(6), TestNode(5))],
+        );
+
+        let (first_target, _) = table.node_map[&TestNode(0)];
+        let (first_source, _) = table.node_map[&TestNode(1)];
+        let (second_target, _) = table.node_map[&TestNode(5)];
+        let (second_source, _) = table.node_map[&TestNode(6)];
+
+        let mut pins = pin_partitions(&table);
+        pins.sort_unstable();
+        let mut expected = vec![first_target, first_source, second_target, second_source];
+        expected.sort_unstable();
+        assert_eq!(
+            pins, expected,
+            "each cycle's pins should be hosted in its own endpoint partitions"
+        );
+
+        // The two loops must occupy disjoint partition spans - the left loop ends before
+        // the right loop begins, so neither bypass reaches the other's region.
+        assert!(
+            first_source < second_target,
+            "the two local loops should not overlap in partition range"
         );
     }
 

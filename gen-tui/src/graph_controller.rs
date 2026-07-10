@@ -138,7 +138,23 @@ where
     where
         <G as petgraph::visit::GraphBase>::NodeId: std::fmt::Debug,
     {
-        Self::new_with_config_and_backward_edges(graph, node_sizer, config, &[])
+        // Auto-detect backward edges (see `PartitionController::new_with_config`): cyclic
+        // graphs render as loops, acyclic graphs are unaffected via the toposort fast path.
+        let pin_source = config
+            .partition
+            .pin_source
+            .map(|idx| <G as NodeIndexable>::from_index(&graph, idx.index()));
+        let pin_sink = config
+            .partition
+            .pin_sink
+            .map(|idx| <G as NodeIndexable>::from_index(&graph, idx.index()));
+        let backward_edges: Vec<(G::NodeId, G::NodeId)> =
+            crate::cycle_removal::remove_cycles(&graph, pin_source, pin_sink)
+                .backward_edges
+                .into_iter()
+                .collect();
+
+        Self::new_with_config_and_backward_edges(graph, node_sizer, config, &backward_edges)
     }
 
     /// Create a new GraphController, rewriting each backward edge `(source, target)` in

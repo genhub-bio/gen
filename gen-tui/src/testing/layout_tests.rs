@@ -2423,3 +2423,206 @@ fn backward_edge_branched_cycle() {
 
     insta::assert_snapshot!("backward_edge_branched_cycle", snapshot);
 }
+
+#[test]
+fn backward_edge_local_loop_multi_partition() {
+    let _ = env_logger::try_init();
+    // Long chain 0→1→…→7 split across partitions (layer_count=2), with a backward edge
+    // 5→2 that only loops over the middle. The bypass should span just the 2→5 region,
+    // not the whole graph - contrast with backward_edge_six_node_cycle_multi_partition,
+    // whose full-width loop reaches partition 0 and the last partition.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..8).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..7 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        200,
+        20,
+        2,
+        usize::MAX,
+        &[(nodes[5], nodes[2])],
+    );
+
+    insta::assert_snapshot!("backward_edge_local_loop_multi_partition", snapshot);
+}
+
+#[test]
+fn backward_edge_two_independent_local_loops() {
+    let _ = env_logger::try_init();
+    // Two disjoint local cycles on one chain split across partitions: 2→0 on the left and
+    // 7→5 on the right. Each should render as its own compact bypass over its own region,
+    // rather than both stacking as full-width lines competing across the whole canvas.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..8).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..7 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        200,
+        20,
+        2,
+        usize::MAX,
+        &[(nodes[2], nodes[0]), (nodes[7], nodes[5])],
+    );
+
+    insta::assert_snapshot!("backward_edge_two_independent_local_loops", snapshot);
+}
+
+// Cycle auto-detection tests (ported from the view-cycles branch). Unlike the
+// `backward_edge_*` tests above, these hand a raw cyclic graph to the auto-detecting
+// `make_snapshot`/`make_snapshot_pinned` path (`GraphController::new_with_config`) and let
+// `cycle_removal::remove_cycles` identify the backward edges, so they exercise detection,
+// self-loops, and `pin_source` end to end rather than the explicit-edge entry point.
+
+/// Build a graph from an explicit node count and edge list.
+#[cfg(test)]
+fn graph_from_edges(node_count: usize, edges: &[(usize, usize)]) -> MockDomainGraph {
+    let mut graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
+    for &(source, target) in edges {
+        graph.add_edge(nodes[source], nodes[target], ());
+    }
+    graph
+}
+
+/// Build a single directed cycle `0 -> 1 -> ... -> node_count-1 -> 0`.
+#[cfg(test)]
+fn cycle_graph(node_count: usize) -> MockDomainGraph {
+    let mut graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
+    for i in 0..node_count {
+        graph.add_edge(nodes[i], nodes[(i + 1) % node_count], ());
+    }
+    graph
+}
+
+/// Add an edge between two nodes identified by their positional index.
+#[cfg(test)]
+fn add_edge_by_index(graph: &mut MockDomainGraph, source: usize, target: usize) {
+    let nodes: Vec<_> = graph.node_indices().collect();
+    graph.add_edge(nodes[source], nodes[target], ());
+}
+
+/// Like `make_snapshot`, but forces `pin_source` to the given node index so cycle detection
+/// breaks each cycle relative to that node (see `PartitionConfig::pin_source`).
+#[cfg(test)]
+fn make_snapshot_pinned(
+    domain_graph: MockDomainGraph,
+    viewport_width: u16,
+    viewport_height: u16,
+    layer_count: usize,
+    node_count: usize,
+    pin_source: usize,
+) -> String {
+    use crate::graph_controller::GraphConfig;
+
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut renderer = TestRenderers::debug();
+
+    let mut terminal = create_test_terminal(viewport_width, viewport_height);
+
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = layer_count;
+    config.partition.node_count = node_count;
+    config.partition.pin_source = Some(petgraph::graph::NodeIndex::new(pin_source));
+    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+
+    controller.viewport_state.viewport_bounds =
+        ratatui::layout::Rect::new(0, 0, viewport_width, viewport_height);
+    controller.set_detail_level(VisualDetail::Full);
+
+    let result = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+        let _ = controller.ensure_camera_coverage();
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph for snapshot generation");
+        let viewport_graph = controller.get_viewport_graph();
+        let detail_level = controller.get_detail_level();
+        let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
+        plot_viewport_graph(
+            viewport_graph,
+            &mut buffer,
+            &mut renderer,
+            controller.graph(),
+            detail_level,
+            &crate::theme::current_theme(),
+        );
+    });
+
+    match result {
+        Ok(_) => format!("{}", terminal.backend()),
+        Err(e) => format!("Rendering failed: {}", e),
+    }
+}
+
+#[test]
+fn cycle_simple_autodetected() {
+    let _ = env_logger::try_init();
+    // A bare 3-cycle with no explicit backward edge: detection finds the loop-closing edge.
+    let snapshot = make_snapshot(
+        graph_from_edges(3, &[(0, 1), (1, 2), (2, 0)]),
+        80,
+        20,
+        1000,
+        1000,
+    );
+    insta::assert_snapshot!("cycle_simple_autodetected", snapshot);
+}
+
+#[test]
+fn cycle_self_loop_autodetected() {
+    let _ = env_logger::try_init();
+    // A single node with a self-loop (0 -> 0): the pins share the node's partition and the
+    // loop stays entirely local. Self-loops were a non-goal of the pin work but fall out of
+    // the same-partition path once detection reports them.
+    let snapshot = make_snapshot(graph_from_edges(1, &[(0, 0)]), 60, 20, 1000, 1000);
+    insta::assert_snapshot!("cycle_self_loop_autodetected", snapshot);
+}
+
+#[test]
+fn cycle_with_chord_autodetected() {
+    let _ = env_logger::try_init();
+    // An 8-cycle plus a chord (6 -> 3): two backward edges, each scoped to its own span.
+    let mut domain_graph = cycle_graph(8);
+    add_edge_by_index(&mut domain_graph, 6, 3);
+    let snapshot = make_snapshot(domain_graph, 100, 25, 1000, 1000);
+    insta::assert_snapshot!("cycle_with_chord_autodetected", snapshot);
+}
+
+#[test]
+fn cycle_with_two_chords_autodetected() {
+    let _ = env_logger::try_init();
+    // An 8-cycle plus two chords (6 -> 3, 4 -> 1): three independent backward edges.
+    let mut domain_graph = cycle_graph(8);
+    add_edge_by_index(&mut domain_graph, 6, 3);
+    add_edge_by_index(&mut domain_graph, 4, 1);
+    let snapshot = make_snapshot(domain_graph, 120, 25, 1000, 1000);
+    insta::assert_snapshot!("cycle_with_two_chords_autodetected", snapshot);
+}
+
+#[test]
+fn cycle_pinned_source() {
+    let _ = env_logger::try_init();
+    // A 12-cycle with node 6 pinned as the source: detection breaks the cycle relative to
+    // node 6 rather than at petgraph's default entry point.
+    let snapshot = make_snapshot_pinned(cycle_graph(12), 100, 20, 1000, 1000, 6);
+    insta::assert_snapshot!("cycle_pinned_source", snapshot);
+}
+
+#[test]
+fn cycle_pinned_source_partitioned() {
+    let _ = env_logger::try_init();
+    // Same as `cycle_pinned_source`, but split across partitions to exercise the pin relay.
+    let snapshot = make_snapshot_pinned(cycle_graph(12), 160, 20, 2, 8, 6);
+    insta::assert_snapshot!("cycle_pinned_source_partitioned", snapshot);
+}
