@@ -148,11 +148,16 @@ where
             .partition
             .pin_sink
             .map(|idx| <G as NodeIndexable>::from_index(&graph, idx.index()));
-        let backward_edges: Vec<(G::NodeId, G::NodeId)> =
+        // Sort for a stable pin-injection order: `remove_cycles` returns a HashSet whose
+        // iteration order is randomized per process, which would otherwise make a graph with
+        // two or more backward edges lay out non-deterministically (see
+        // `PartitionController::new_with_config`).
+        let mut backward_edges: Vec<(G::NodeId, G::NodeId)> =
             crate::cycle_removal::remove_cycles(&graph, pin_source, pin_sink)
                 .backward_edges
                 .into_iter()
                 .collect();
+        backward_edges.sort_unstable();
 
         Self::new_with_config_and_backward_edges(graph, node_sizer, config, &backward_edges)
     }

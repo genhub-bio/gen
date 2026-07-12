@@ -447,7 +447,8 @@ fn test_layer_coordinate_alignment_and_ordering() {
     // Use partitioning settings that will force partition creation
     let mut config = GraphConfig::default();
     config.partition.layer_count = 2; // Force layer-based partitioning
-    config.partition.node_count = 3; // Force node-based partitioning as well
+    config.partition.node_count = 3;
+    config.controller.max_loaded_partitions = 5; // Force node-based partitioning as well
 
     let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
@@ -856,6 +857,7 @@ fn test_skip_layer_terminal_stitch_edge_bundles() {
     let mut config = GraphConfig::default();
     config.partition.layer_count = 2;
     config.partition.node_count = 3;
+    config.controller.max_loaded_partitions = 5;
 
     let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
 
@@ -1312,6 +1314,33 @@ fn test_layout_determinism_with_partitioning() {
 
     // Also verify against the stored snapshot to ensure the output is correct
     insta::assert_snapshot!("determinism_check_complex_dag_node_partitioning", first);
+}
+
+/// Cyclic graphs with two or more backward edges must lay out deterministically. Cycle
+/// auto-detection returns the backward edges as a HashSet, whose iteration order is
+/// randomized per process; unless the controller sorts them before injecting pins, the
+/// pin order (and thus the layout) varies from run to run. Building the same cyclic graph
+/// many times and comparing catches a regression of that sort within a single process.
+#[test]
+fn test_cyclic_layout_determinism_multiple_backward_edges() {
+    let _ = env_logger::try_init();
+
+    let mut snapshots = Vec::new();
+    for _ in 0..10 {
+        let mut graph = cycle_graph(8);
+        add_edge_by_index(&mut graph, 6, 3);
+        add_edge_by_index(&mut graph, 4, 1);
+        snapshots.push(make_snapshot(graph, 120, 25, 1000, 1000));
+    }
+
+    let first = &snapshots[0];
+    for (i, snapshot) in snapshots.iter().enumerate().skip(1) {
+        assert_eq!(
+            first, snapshot,
+            "Cyclic layout iteration {i} differs from iteration 0 - backward-edge pin \
+             injection order is not deterministic (likely HashSet iteration order)."
+        );
+    }
 }
 
 /// Proves crossing-reduction tie handling is deterministic by constructing the same symmetric
@@ -2625,4 +2654,136 @@ fn cycle_pinned_source_partitioned() {
     // Same as `cycle_pinned_source`, but split across partitions to exercise the pin relay.
     let snapshot = make_snapshot_pinned(cycle_graph(12), 160, 20, 2, 8, 6);
     insta::assert_snapshot!("cycle_pinned_source_partitioned", snapshot);
+}
+
+/// Render a cyclic graph through a viewport narrower than the graph, so only the partitions
+/// covering the camera load. Returns the rendered frame plus the loaded/total partition
+/// counts so a test can assert the load stayed partial.
+#[cfg(test)]
+fn render_partial_view(
+    domain_graph: MockDomainGraph,
+    viewport_width: u16,
+    viewport_height: u16,
+    layer_count: usize,
+    node_count: usize,
+) -> (String, usize, usize) {
+    use crate::graph_controller::GraphConfig;
+
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut renderer = TestRenderers::debug();
+    let mut terminal = create_test_terminal(viewport_width, viewport_height);
+
+    let mut config = GraphConfig::default();
+    config.partition.layer_count = layer_count;
+    config.partition.node_count = node_count;
+    let mut controller = GraphController::new_with_config(domain_graph, node_sizer, config);
+    controller.set_detail_level(VisualDetail::Full);
+
+    let result = terminal.draw(|f| {
+        let area = f.area();
+        controller.viewport_state.viewport_bounds = area;
+        let _ = controller.ensure_camera_coverage();
+        controller
+            .rebuild_viewport_graph()
+            .expect("Failed to rebuild viewport graph for snapshot generation");
+        let viewport_graph = controller.get_viewport_graph();
+        let detail_level = controller.get_detail_level();
+        let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
+        plot_viewport_graph(
+            viewport_graph,
+            &mut buffer,
+            &mut renderer,
+            controller.graph(),
+            detail_level,
+            &crate::theme::current_theme(),
+        );
+    });
+
+    let total = controller
+        .partition_controller
+        .partition_table
+        .partitions
+        .len();
+    let loaded = controller.loaded_partition_count();
+    let frame = match result {
+        Ok(_) => format!("{}", terminal.backend()),
+        Err(e) => format!("Rendering failed: {}", e),
+    };
+    (frame, loaded, total)
+}
+
+#[test]
+fn cycle_partial_partition_loading() {
+    let _ = env_logger::try_init();
+    // A 24-node cycle split into many small partitions (node_count=3 -> 15 partitions),
+    // viewed through a viewport far narrower than the graph. Only the leftmost partitions
+    // covering the camera load; the full-cycle backward edge's right pin lives in the
+    // last (unloaded) partition, yet its bypass must still render across the loaded region
+    // and run off the right edge toward the off-screen pin - without crashing on the
+    // partitions that were never loaded.
+    let (snapshot, loaded, total) = render_partial_view(cycle_graph(24), 40, 20, 2, 3);
+
+    assert!(
+        loaded < total,
+        "expected a partial load, but {loaded} of {total} partitions loaded"
+    );
+    assert!(
+        snapshot.contains('◀'),
+        "the loop's bypass should still render across the loaded partitions"
+    );
+
+    insta::assert_snapshot!("cycle_partial_partition_loading", snapshot);
+}
+
+#[test]
+fn cycle_with_nested_chords() {
+    let _ = env_logger::try_init();
+    // An 8-cycle with two chords whose spans nest: 7 -> 1 encloses 6 -> 3. Three backward
+    // edges total; the inner chord's bypass should sit inside the outer chord's.
+    let mut domain_graph = cycle_graph(8);
+    add_edge_by_index(&mut domain_graph, 7, 1);
+    add_edge_by_index(&mut domain_graph, 6, 3);
+    let snapshot = make_snapshot(domain_graph, 120, 25, 1000, 1000);
+    insta::assert_snapshot!("cycle_with_nested_chords", snapshot);
+}
+
+#[test]
+fn cycle_with_overlapping_chords() {
+    let _ = env_logger::try_init();
+    // Two chords whose spans partially overlap without nesting: 5 -> 1 (spans 1..5) and
+    // 7 -> 3 (spans 3..7) share the 3..5 range. Since every loop is biased to the same
+    // vertical side, this exercises how two co-located bypasses share channels.
+    let mut domain_graph = cycle_graph(8);
+    add_edge_by_index(&mut domain_graph, 5, 1);
+    add_edge_by_index(&mut domain_graph, 7, 3);
+    let snapshot = make_snapshot(domain_graph, 120, 25, 1000, 1000);
+    insta::assert_snapshot!("cycle_with_overlapping_chords", snapshot);
+}
+
+#[test]
+fn cycle_with_chords_shared_target() {
+    let _ = env_logger::try_init();
+    // Two chords pointing at the same node: 5 -> 2 and 7 -> 2. Both loopbacks land on the
+    // same target, exercising two backward edges that share a left endpoint.
+    let mut domain_graph = cycle_graph(8);
+    add_edge_by_index(&mut domain_graph, 5, 2);
+    add_edge_by_index(&mut domain_graph, 7, 2);
+    let snapshot = make_snapshot(domain_graph, 120, 25, 1000, 1000);
+    insta::assert_snapshot!("cycle_with_chords_shared_target", snapshot);
+}
+
+#[test]
+fn cycle_with_chord_multi_partition() {
+    let _ = env_logger::try_init();
+    // A local backward chord whose span crosses partition boundaries (layer_count=2), so its
+    // bypass relays through intermediate stitch chains rather than staying inside a single
+    // section. Pinning node 0 fixes the ordering (0..9) so the chord 8 -> 3 is unambiguously
+    // backward and local (spanning ranks 3..8), alongside the full-width main loop 9 -> 0.
+    let mut domain_graph = cycle_graph(10);
+    add_edge_by_index(&mut domain_graph, 8, 3);
+    let snapshot = make_snapshot_pinned(domain_graph, 200, 25, 2, usize::MAX, 0);
+    insta::assert_snapshot!("cycle_with_chord_multi_partition", snapshot);
 }
