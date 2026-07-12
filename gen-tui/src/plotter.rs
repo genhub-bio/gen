@@ -16,7 +16,7 @@ use ratatui::{
 };
 
 use crate::{
-    geometry::{BigRect, Point, WorldPos, WorldRect},
+    geometry::{BigRect, PartitionIndex, Point, WorldPos, WorldRect},
     graph_controller::{GraphController, WorldBuffer},
     graph_widget::{GraphWidget, NODE_GLYPH},
     layout::{JunctionSymbol, NodeRole, VisualDetail},
@@ -515,8 +515,20 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
     }
 
     // Mark the horizontal bypass of any rewired backward edge with direction arrows.
-    for &(source, target) in &viewport_graph.backward_edges {
-        draw_arrows(buffer, viewport_graph, source, target, ARROW_GAPS);
+    for (&(source, target), &(source_partition_idx, target_partition_idx)) in viewport_graph
+        .backward_edges
+        .iter()
+        .zip(&viewport_graph.backward_edge_partitions)
+    {
+        draw_arrows(
+            buffer,
+            viewport_graph,
+            source,
+            target,
+            source_partition_idx,
+            target_partition_idx,
+            ARROW_GAPS,
+        );
     }
 }
 
@@ -627,63 +639,258 @@ fn draw_edge_with_style(
     }
 }
 
-/// Place direction markers on the horizontal bypass segment(s) of a backward edge
-/// rewired onto pin nodes by `PartitionTable::new_with_backward_edges`.
+/// Place direction markers on a rewired backward edge's bypass segments.
 ///
-/// Only one backward edge is ever rewired at a time, and the rewiring always produces
-/// an unambiguous shape: a vertical leg on the source side, a single long horizontal
-/// bypass spanning the full graph width (always traveling right-to-left, by construction
-/// of `left_pin`/`right_pin`), and a vertical leg on the target side. So direction never
-/// needs to be computed - it's always `◀` - and only horizontal segments are marked;
-/// vertical legs are left untouched.
+/// A backward edge's pins are hosted in `source`'s and `target`'s own partitions (see
+/// `PartitionTable::new_with_backward_edges`), so the rendered path has up to three legs:
+/// a short excursion inside `source`'s partition (from `source` up to the rank of
+/// `right_pin`, provably the rightmost node in that partition), a short excursion inside
+/// `target`'s partition (from `left_pin`, provably the leftmost node there, down to
+/// `target`), and the main span between the two pins. Because `right_pin` is the rightmost
+/// point of the *entire* bypass and `left_pin` the leftmost, the main span only ever
+/// travels right-to-left - so, assuming a leg never doubles back on itself repeatedly (true
+/// of the rectilinear router in practice), a segment's net horizontal direction is fixed by
+/// which partition rendered it. Comparing a segment's own host partition (`LayoutNode::pos.
+/// partition_idx`, always known once a node is loaded) to `source_partition_idx`/
+/// `target_partition_idx` (known regardless of whether those partitions are loaded, since
+/// partition assignment happens eagerly for the whole graph) classifies every segment
+/// correctly without ever needing to locate `source`/`target` themselves - the case this
+/// exists for is a long bypass whose middle is visible while both endpoints, and the
+/// partitions they live in, are scrolled out of view and never loaded.
 fn draw_arrows(
+    buffer: &mut WorldBuffer,
+    viewport_graph: &CroppedGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    source_partition_idx: PartitionIndex,
+    target_partition_idx: PartitionIndex,
+    gaps: i64,
+) {
+    // A fully local loop hosts both pins in the same partition, so partition comparison
+    // can't tell the two excursions apart from each other. That partition loads atomically,
+    // so `source`/`target` are always both present when any of this bundle is visible -
+    // walk the bundle's own subgraph instead.
+    if source_partition_idx == target_partition_idx {
+        draw_arrows_by_walk(buffer, viewport_graph, source, target, gaps);
+        return;
+    }
+
+    let source_pos = viewport_graph.node_positions.get(&source).copied();
+    let target_pos = viewport_graph.node_positions.get(&target).copied();
+
+    // `viewport_graph` is backed by a hash-keyed graph, so `.edges()` iterates in an order
+    // randomized per process. Collect every segment first and sort by position before
+    // classifying or drawing anything, so a position two adjacent segments both touch (a
+    // partition-boundary corner) is always resolved the same way regardless of that order.
+    let mut raw_segments: Vec<(WorldPos, WorldPos)> = viewport_graph
+        .edges()
+        .filter(|(_, _, bundle)| bundle.contains(&(source, target)))
+        .map(|(seg_a, seg_b, _)| order_pair(seg_a, seg_b))
+        .collect();
+    raw_segments.sort_unstable_by_key(|&(lo, hi)| (lo.x, lo.y, hi.x, hi.y));
+
+    // The bypass may be split across several collinear segments (one per partition/bridge
+    // it crosses) that render as one continuous line; compute a single margin from their
+    // combined span, so the marker grid stays aligned across segment boundaries instead of
+    // each segment centering itself.
+    let mut h_segments: Vec<(WorldPos, WorldPos, char)> = Vec::new();
+    let mut v_segments: Vec<(WorldPos, WorldPos, WorldPos)> = Vec::new();
+    let mut h_span: Option<(i64, i64)> = None;
+
+    for (lo, hi) in raw_segments {
+        // Both endpoints of a rendered segment always come from the same partition's own
+        // layout graph (see `CroppedGraph::new`), so either endpoint's host partition
+        // identifies the whole segment.
+        let partition_idx = viewport_graph
+            .get_node(&lo)
+            .map(|node| node.pos.partition_idx);
+
+        if lo.y == hi.y {
+            let glyph = if partition_idx == Some(source_partition_idx)
+                || partition_idx == Some(target_partition_idx)
+            {
+                '▶' // leaving `source` toward `right_pin`, or arriving at `target` from `left_pin`
+            } else {
+                '◀' // main span: right_pin (rightmost) toward left_pin (leftmost)
+            };
+            h_segments.push((lo, hi, glyph));
+            h_span = Some(match h_span {
+                Some((min_x, max_x)) => (min_x.min(lo.x), max_x.max(hi.x)),
+                None => (lo.x, hi.x),
+            });
+        } else if lo.x == hi.x {
+            // Only mark a vertical leg when its own anchor (the data node it connects to)
+            // is actually loaded and visible - without it there's no principled way to know
+            // which side of the leg the node sits on, so the leg is left untouched.
+            let anchor = if partition_idx == Some(source_partition_idx) {
+                source_pos
+            } else if partition_idx == Some(target_partition_idx) {
+                target_pos
+            } else {
+                None
+            };
+            if let Some(anchor) = anchor {
+                v_segments.push((lo, hi, anchor));
+            }
+        }
+    }
+
+    let mut claimed: std::collections::HashSet<WorldPos> = std::collections::HashSet::new();
+    if let Some((min_x, max_x)) = h_span {
+        draw_horizontal_markers(buffer, &h_segments, min_x, max_x, gaps, &mut claimed);
+    }
+    for (lo, hi, anchor) in v_segments {
+        draw_vertical_arrow(buffer, lo, hi, anchor, &mut claimed);
+    }
+}
+
+/// Order two world positions into a canonical `(lo, hi)` pair (lexicographic by x, then y),
+/// independent of which order an undirected graph happened to yield them in.
+fn order_pair(a: WorldPos, b: WorldPos) -> (WorldPos, WorldPos) {
+    if (a.x, a.y) <= (b.x, b.y) {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Direction markers for a backward edge whose pins share `source`'s and `target`'s own
+/// partition (see `draw_arrows`). Walks the bundle's own subgraph - a simple path, since
+/// only one backward edge is ever rewired onto a given pair of pins - from `source` to
+/// `target`, marking each hop with the direction actually traveled.
+fn draw_arrows_by_walk(
     buffer: &mut WorldBuffer,
     viewport_graph: &CroppedGraph,
     source: NodeIndex,
     target: NodeIndex,
     gaps: i64,
 ) {
-    // The bypass may be split across several collinear segments (one per partition/
-    // bridge it crosses) that render as one continuous line. Collect them first and
-    // compute a single margin from their combined span, so the marker grid stays
-    // aligned across segment boundaries instead of each segment centering itself.
-    let mut segments: Vec<(WorldPos, WorldPos)> = Vec::new();
-    let mut span: Option<(i64, i64)> = None;
-    for (seg_a, seg_b, bundle) in viewport_graph.edges() {
-        if seg_a.y != seg_b.y || !bundle.contains(&(source, target)) {
-            continue;
-        }
-
-        let (lo, hi) = if seg_a.x <= seg_b.x {
-            (seg_a, seg_b)
-        } else {
-            (seg_b, seg_a)
-        };
-        segments.push((lo, hi));
-        span = Some(match span {
-            Some((min_x, max_x)) => (min_x.min(lo.x), max_x.max(hi.x)),
-            None => (lo.x, hi.x),
-        });
-    }
-
-    let Some((min_x, max_x)) = span else {
+    let Some(&start) = viewport_graph.node_positions.get(&source) else {
         return;
     };
+    let target_pos = viewport_graph.node_positions.get(&target).copied();
 
+    // The walk visits each node of this bundle's own (simple-path) subgraph exactly once,
+    // so its result doesn't depend on `viewport_graph`'s hash-based iteration order - unlike
+    // the general case in `draw_arrows`, no upfront sort is needed here.
+    let mut h_segments: Vec<(WorldPos, WorldPos, char)> = Vec::new();
+    let mut v_segments: Vec<(WorldPos, WorldPos, WorldPos)> = Vec::new();
+    let mut h_span: Option<(i64, i64)> = None;
+    let mut visited = std::collections::HashSet::from([start]);
+    let mut current = start;
+
+    loop {
+        let next = viewport_graph.neighbors(current).find(|&neighbor| {
+            !visited.contains(&neighbor)
+                && viewport_graph
+                    .graph
+                    .edge_weight(current, neighbor)
+                    .is_some_and(|bundle| bundle.contains(&(source, target)))
+        });
+        let Some(next) = next else {
+            break;
+        };
+
+        if current.y == next.y {
+            let (lo, hi) = if current.x <= next.x {
+                (current, next)
+            } else {
+                (next, current)
+            };
+            let glyph = if next.x > current.x { '▶' } else { '◀' };
+            h_segments.push((lo, hi, glyph));
+            h_span = Some(match h_span {
+                Some((min_x, max_x)) => (min_x.min(lo.x), max_x.max(hi.x)),
+                None => (lo.x, hi.x),
+            });
+        } else if current.x == next.x {
+            // Orient toward whichever endpoint this leg is nearer to in x - the leg closer
+            // to `source` points into `source`, the one closer to `target` points into it.
+            let anchor = match target_pos {
+                Some(target_pos)
+                    if (current.x - target_pos.x).abs() < (current.x - start.x).abs() =>
+                {
+                    target_pos
+                }
+                _ => start,
+            };
+            let (lo, hi) = order_pair(current, next);
+            v_segments.push((lo, hi, anchor));
+        }
+
+        visited.insert(next);
+        current = next;
+    }
+
+    let mut claimed: std::collections::HashSet<WorldPos> = std::collections::HashSet::new();
+    if let Some((min_x, max_x)) = h_span {
+        draw_horizontal_markers(buffer, &h_segments, min_x, max_x, gaps, &mut claimed);
+    }
+    for (lo, hi, anchor) in v_segments {
+        draw_vertical_arrow(buffer, lo, hi, anchor, &mut claimed);
+    }
+}
+
+/// Stamp direction glyphs onto a set of horizontal segments at an evenly-spaced grid.
+/// `min_x`/`max_x` are the combined span across every segment (not just this one), so the
+/// grid stays aligned across segment boundaries instead of each segment centering itself.
+/// `claimed` tracks positions already marked (by this or an earlier segment) so a position
+/// two segments both touch is only ever set once, regardless of processing order.
+fn draw_horizontal_markers(
+    buffer: &mut WorldBuffer,
+    segments: &[(WorldPos, WorldPos, char)],
+    min_x: i64,
+    max_x: i64,
+    gaps: i64,
+    claimed: &mut std::collections::HashSet<WorldPos>,
+) {
     // Center the markers across the full span: split the leftover space (total
     // length mod gaps) evenly between both ends, so the first/last arrow sits the
     // same distance from its endpoint as every other arrow sits from its neighbor.
     let margin = (max_x - min_x).rem_euclid(gaps) / 2;
 
-    for (lo, hi) in segments {
+    for &(lo, hi, glyph) in segments {
         for x in lo.x..=hi.x {
             let pos = WorldPos::new(x, lo.y);
             if (x - min_x - margin).rem_euclid(gaps) == 0
+                && claimed.insert(pos)
                 && matches!(buffer.get_char(pos), Some('─') | Some('━') | Some('┄'))
                 && let Some((_, style)) = buffer.get_char_styled(pos)
             {
-                buffer.set_char_styled(pos, '◀', style);
+                buffer.set_char_styled(pos, glyph, style);
             }
+        }
+    }
+}
+
+/// Mark the midpoint of a vertical leg with a glyph pointing toward `anchor` - `▼` if the
+/// leg sits above it (larger world y, since increasing y is "north"/up - see
+/// `edge_router::layout_graph_process::assign_ports`), `▲` if below. `claimed` tracks
+/// positions already marked, shared with `draw_horizontal_markers` so a position that both a
+/// horizontal and a vertical leg pass through is only ever set once.
+fn draw_vertical_arrow(
+    buffer: &mut WorldBuffer,
+    seg_a: WorldPos,
+    seg_b: WorldPos,
+    anchor: WorldPos,
+    claimed: &mut std::collections::HashSet<WorldPos>,
+) {
+    let (lo, hi) = if seg_a.y <= seg_b.y {
+        (seg_a, seg_b)
+    } else {
+        (seg_b, seg_a)
+    };
+    let glyph = if lo.y >= anchor.y { '▼' } else { '▲' };
+    let mid_y = (lo.y + hi.y) / 2;
+
+    for y in lo.y..=hi.y {
+        let pos = WorldPos::new(lo.x, y);
+        if y == mid_y
+            && claimed.insert(pos)
+            && matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┊'))
+            && let Some((_, style)) = buffer.get_char_styled(pos)
+        {
+            buffer.set_char_styled(pos, glyph, style);
         }
     }
 }

@@ -79,6 +79,14 @@ where
     /// the rendered bypass edge with direction arrows after `prune_pin_stubs` has removed
     /// the pin nodes themselves.
     pub backward_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)>,
+    /// `(source_partition_idx, target_partition_idx)` for each entry in `backward_edges`,
+    /// aligned by index. Partition assignment happens eagerly for the whole graph during
+    /// construction, so these are known even for a partition that never gets loaded for
+    /// rendering. This lets the plotter classify a bypass segment's leg (source-side,
+    /// target-side, or main span) by comparing the segment's own host partition to these
+    /// indices, without needing `source`/`target` themselves to be loaded - see
+    /// `plotter::draw_arrows`.
+    pub backward_edge_partitions: Vec<(PartitionIndex, PartitionIndex)>,
     metrics: Vec<UnifiedLayout>,
     anchor_partition_idx: PartitionIndex,
 }
@@ -552,6 +560,7 @@ where
         // infrastructure is touched). The full-width circular-genome case falls out as the
         // degenerate case where `target` sits in partition 0 and `source` in the last one.
         let mut backward_domain_edges: Vec<(NodeIndex<u32>, NodeIndex<u32>)> = Vec::new();
+        let mut backward_edge_partitions: Vec<(PartitionIndex, PartitionIndex)> = Vec::new();
         for &(source, target) in backward_edges {
             let (source_partition_idx, source_node_index) = node_map
                 .get(&source)
@@ -566,6 +575,7 @@ where
             let target_domain_idx = NodeIndex::new(<G as NodeIndexable>::to_index(graph, target));
             let bundle = (source_domain_idx, target_domain_idx);
             backward_domain_edges.push(bundle);
+            backward_edge_partitions.push((source_partition_idx, target_partition_idx));
 
             // A backward edge closes a cycle, so `target` is upstream of `source` and its
             // partition index is <= `source`'s. Take min/max anyway so a caller that hands
@@ -612,6 +622,7 @@ where
             node_map,
             inter_partition_edges,
             backward_edges: backward_domain_edges,
+            backward_edge_partitions,
             metrics: vec![
                 UnifiedLayout::new(num_partitions), // Minimal
                 UnifiedLayout::new(num_partitions), // Full

@@ -50,6 +50,9 @@ pub struct CroppedGraph {
     /// Domain edges rewired onto pin nodes (see `PartitionTable::backward_edges`), copied
     /// through so the plotter can mark the rendered bypass edge with direction arrows.
     pub backward_edges: Vec<(NodeIndex, NodeIndex)>,
+    /// `(source_partition_idx, target_partition_idx)` for each entry in `backward_edges`,
+    /// aligned by index (see `PartitionTable::backward_edge_partitions`).
+    pub backward_edge_partitions: Vec<(PartitionIndex, PartitionIndex)>,
 }
 
 impl CroppedGraph {
@@ -69,6 +72,7 @@ impl CroppedGraph {
             edge_lowlights: Vec::new(),
             node_lowlights: Vec::new(),
             backward_edges: Vec::new(),
+            backward_edge_partitions: Vec::new(),
         }
     }
 
@@ -214,6 +218,7 @@ impl CroppedGraph {
         // Divide the graph up in logical layers by grouping Data nodes by x-coordinate
         this.build_layers_from_coordinates();
         this.backward_edges = partition_table.backward_edges.clone();
+        this.backward_edge_partitions = partition_table.backward_edge_partitions.clone();
 
         this
     }
