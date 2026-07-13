@@ -31,11 +31,14 @@ except ImportError:
     GraphWidget = None
     freeze_all_widgets = None
 
+from .skills import install_skill
+
 __all__ = [
     "Annotation",
     "GraphWidget",
     "freeze_all_widgets",
     "HashId",
+    "install_skill",
     "Locus",
     "Node",
     "NodeSlice",
