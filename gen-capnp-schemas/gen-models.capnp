@@ -235,10 +235,11 @@ struct ManifestAnnotationFileAddition {
     none @3 :Void;
     some @4 :FileAddition;
   }
-  filePath @5 :Text;
+  filename @5 :Text;
+  filePath @6 :Text;
   indexFilePath :union {
-    none @6 :Void;
-    some @7 :Text;
+    none @7 :Void;
+    some @8 :Text;
   }
 }
 
