@@ -235,6 +235,12 @@ struct ManifestAnnotationFileAddition {
     none @3 :Void;
     some @4 :FileAddition;
   }
+  filename @5 :Text;
+  filePath @6 :Text;
+  indexFilePath :union {
+    none @7 :Void;
+    some @8 :Text;
+  }
 }
 
 struct Manifest {
