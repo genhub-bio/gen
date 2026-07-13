@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_chunks_two_inserts() {
+    fn test_derive_chunks_two_inserts() {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -810,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_chunks_two_inserts_then_stitch() {
+    fn test_derive_chunks_two_inserts_then_stitch() {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn make_stitch_rejects_duplicate_region_input() {
+    fn test_make_stitch_rejects_duplicate_region_input() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
@@ -1014,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn make_stitch_rolls_back_cyclic_output() {
+    fn test_make_stitch_rolls_back_cyclic_output() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let op_conn = context.operations().conn();
