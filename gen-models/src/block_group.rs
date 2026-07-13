@@ -32,7 +32,6 @@ use crate::{
         SequenceError,
     },
     gen_models_capnp::block_group,
-    node::Node,
     path::{Path, PathData},
     path_edge::PathEdge,
     region::{ResolvedGenRegion, ResolvedRegionKind},
@@ -1123,8 +1122,6 @@ impl BlockGroup {
     #[allow(clippy::too_many_arguments)]
     pub fn derive_subgraph(
         conn: &GraphConnection,
-        collection_name: &str,
-        child_sample_name: &str,
         source_block_group_id: &HashId,
         start_block: &NodeIntervalBlock,
         end_block: &NodeIntervalBlock,
@@ -1132,7 +1129,7 @@ impl BlockGroup {
         end_node_coordinate: i64,
         target_block_group_id: &HashId,
         create_terminal_edges: bool,
-    ) -> Result<HashMap<HashId, HashId>, BlockGroupError> {
+    ) -> Result<(), BlockGroupError> {
         let current_graph = BlockGroup::get_graph(conn, source_block_group_id)?;
         let start_node = current_graph
             .nodes()
@@ -1159,96 +1156,6 @@ impl BlockGroup {
             .collect::<Vec<_>>();
         let source_edges = Edge::query_by_ids(conn, &subgraph_edge_ids);
 
-        // Instead of reusing the existing edges, we create copies of the nodes and edges.  This
-        // makes it easier to recombine subgraphs later.
-        // TODO: Annotation support. We do not reuse node ids because nodes control the graph
-        // topology. If we duplicated nodes via these operations, it would leave to unintentional
-        // cycles. A node cannot exist in 2 places. This will be non-intuitive for annotation
-        // propagation and needs to be handled.
-        let mut old_node_ids = HashSet::new();
-        for source_edge in &source_edges {
-            old_node_ids.insert(source_edge.source_node_id);
-            old_node_ids.insert(source_edge.target_node_id);
-        }
-
-        old_node_ids.insert(start_block.node_id);
-        old_node_ids.insert(end_block.node_id);
-
-        let old_nodes = Node::query_by_ids(conn, &old_node_ids);
-        let old_nodes_by_id = old_nodes
-            .iter()
-            .map(|node| (node.id, node))
-            .collect::<HashMap<_, _>>();
-
-        let mut new_node_ids_by_old = HashMap::new();
-        let old_start_node = old_nodes_by_id.get(&start_block.node_id).unwrap();
-        let new_start_node_hash = HashId(calculate_hash(&format!(
-            "{}.{}.{}.bg-{}",
-            collection_name, child_sample_name, old_start_node.id, target_block_group_id
-        )));
-        new_node_ids_by_old.insert(
-            old_start_node.id,
-            Node::create(conn, &old_start_node.sequence_hash, &new_start_node_hash)?,
-        );
-        let old_end_node = old_nodes_by_id.get(&end_block.node_id).unwrap();
-        let new_end_node_hash = HashId(calculate_hash(&format!(
-            "{}.{}.{}.bg-{}",
-            collection_name, child_sample_name, old_end_node.id, target_block_group_id
-        )));
-        new_node_ids_by_old.insert(
-            old_end_node.id,
-            Node::create(conn, &old_end_node.sequence_hash, &new_end_node_hash)?,
-        );
-
-        let mut new_edges = vec![];
-        for source_edge in &source_edges {
-            let new_source_node_id = if let Some(node_id) =
-                new_node_ids_by_old.get(&source_edge.source_node_id)
-            {
-                *node_id
-            } else {
-                let old_source_node = old_nodes_by_id.get(&source_edge.source_node_id).unwrap();
-                let new_source_node_hash = HashId(calculate_hash(&format!(
-                    "{}.{}.{}.bg-{}",
-                    collection_name, child_sample_name, old_source_node.id, target_block_group_id
-                )));
-                let new_node_id =
-                    Node::create(conn, &old_source_node.sequence_hash, &new_source_node_hash)?;
-                new_node_ids_by_old.insert(old_source_node.id, new_node_id);
-                new_node_id
-            };
-            let new_target_node_id = if let Some(node_id) =
-                new_node_ids_by_old.get(&source_edge.target_node_id)
-            {
-                *node_id
-            } else {
-                let old_target_node = old_nodes_by_id.get(&source_edge.target_node_id).unwrap();
-                let new_target_node_hash = HashId(calculate_hash(&format!(
-                    "{}.{}.{}.bg-{}",
-                    collection_name, child_sample_name, old_target_node.id, target_block_group_id
-                )));
-                let new_node_id =
-                    Node::create(conn, &old_target_node.sequence_hash, &new_target_node_hash)?;
-                new_node_ids_by_old.insert(old_target_node.id, new_node_id);
-                new_node_id
-            };
-            new_edges.push(EdgeData {
-                source_node_id: new_source_node_id,
-                source_coordinate: source_edge.source_coordinate,
-                source_strand: source_edge.source_strand,
-                target_node_id: new_target_node_id,
-                target_coordinate: source_edge.target_coordinate,
-                target_strand: source_edge.target_strand,
-            });
-        }
-
-        let new_edge_ids = Edge::bulk_create(conn, &new_edges);
-        let new_edge_ids_by_old = source_edges
-            .iter()
-            .zip(new_edge_ids.iter())
-            .map(|(source_edge, new_edge_id)| (&source_edge.id, new_edge_id))
-            .collect::<HashMap<_, _>>();
-
         let source_block_group_edges = BlockGroupEdge::specific_edges_for_block_group(
             conn,
             source_block_group_id,
@@ -1273,10 +1180,9 @@ impl BlockGroup {
                 let block_group_edge = source_block_group_edges_by_edge_id
                     .get(&edge.edge.id)
                     .unwrap();
-                let new_edge_id = new_edge_ids_by_old.get(&edge.edge.id).unwrap();
                 BlockGroupEdgeData {
                     block_group_id: *target_block_group_id,
-                    edge_id: **new_edge_id,
+                    edge_id: edge.edge.id,
                     chromosome_index: block_group_edge.chromosome_index,
                     phased: block_group_edge.phased,
                 }
@@ -1286,13 +1192,12 @@ impl BlockGroup {
         let mut all_edges = subgraph_edge_inputs.clone();
 
         if create_terminal_edges {
-            let new_start_node_id = new_node_ids_by_old.get(&start_block.node_id).unwrap();
             let new_start_edge = Edge::create(
                 conn,
                 PATH_START_NODE_ID,
                 0,
                 Strand::Forward,
-                *new_start_node_id,
+                start_block.node_id,
                 start_node_coordinate,
                 start_block.strand,
             )?;
@@ -1302,10 +1207,9 @@ impl BlockGroup {
                 chromosome_index: 0,
                 phased: 0,
             };
-            let new_end_node_id = new_node_ids_by_old.get(&end_block.node_id).unwrap();
             let new_end_edge = Edge::create(
                 conn,
-                *new_end_node_id,
+                end_block.node_id,
                 end_node_coordinate,
                 end_block.strand,
                 PATH_END_NODE_ID,
@@ -1325,7 +1229,7 @@ impl BlockGroup {
 
         BlockGroupEdge::bulk_create(conn, &all_edges);
 
-        Ok(new_node_ids_by_old)
+        Ok(())
     }
 }
 
@@ -4056,10 +3960,9 @@ mod tests {
             let end_node_coordinate = 25 - end_block.start + end_block.sequence_start;
 
             let block_group2 = create_bg(conn, "test", "test", "chr1.1");
+            let node_count_before = Node::query(conn, "SELECT * FROM nodes", params![]).len();
             BlockGroup::derive_subgraph(
                 conn,
-                "test",
-                "test",
                 &block_group1_id,
                 &start_block,
                 &end_block,
@@ -4069,6 +3972,8 @@ mod tests {
                 true,
             )
             .unwrap();
+            let node_count_after = Node::query(conn, "SELECT * FROM nodes", params![]).len();
+            assert_eq!(node_count_after, node_count_before);
             let all_sequences2 =
                 BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
             assert_eq!(
@@ -4281,8 +4186,6 @@ mod tests {
             let block_group2 = create_bg(conn, "test", "test", "chr1.1");
             BlockGroup::derive_subgraph(
                 conn,
-                "test",
-                "test",
                 &block_group1_id,
                 &start_block,
                 &end_block,
@@ -4564,8 +4467,6 @@ mod tests {
             let block_group2 = create_bg(conn, "test", "test", "chr1.1");
             BlockGroup::derive_subgraph(
                 conn,
-                "test",
-                "test",
                 &block_group1_id,
                 &start_block,
                 &end_block,

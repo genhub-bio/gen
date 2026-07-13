@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::Edge,
     errors::{BlockGroupError, OperationError, PathError},
@@ -14,6 +14,7 @@ use gen_models::{
     sample::Sample,
     traits::Query,
 };
+use petgraph::algo::is_cyclic_directed;
 use thiserror::Error;
 
 use crate::graphs::{BlockGroupChunk, GraphError, NodePoint, load_block_group_chunk, stitch};
@@ -34,6 +35,12 @@ pub enum GraphOperationError {
     PathError(#[from] PathError),
     #[error("Block group creation error: {0}")]
     BlockGroupError(#[from] BlockGroupError),
+    #[error("Invalid stitch input: {0}")]
+    InvalidStitchInput(String),
+    #[error("Stitched block group contains a cycle: {0}")]
+    StitchedGraphCycle(String),
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
 }
 
 pub fn get_path(
@@ -160,10 +167,8 @@ pub fn derive_chunks(
         let end_block = blocks[blocks.len() - 1];
         let end_node_coordinate = end_coordinate - end_block.start + end_block.sequence_start;
 
-        let new_node_ids_by_old = BlockGroup::derive_subgraph(
+        BlockGroup::derive_subgraph(
             conn,
-            collection_name,
-            new_sample_name,
             &parent_block_group_id,
             &start_block,
             &end_block,
@@ -194,16 +199,10 @@ pub fn derive_chunks(
             })
             .collect::<HashMap<_, _>>();
 
-        // The block group method to derive a subgraph creates copies of the nodes from the parent
-        // block group, to make it easier to then stitch them together later.  So we need to use the
-        // map returned by derive_subgraph to find the edges in the child graph that correspond to
-        // path edges in the parent graph, and create a new path from the child edges.
         let mut new_path_edge_ids = vec![];
 
-        let new_start_target_node_id = new_node_ids_by_old.get(&start_block.node_id).unwrap();
-
         let start_node_point = NodePoint {
-            id: *new_start_target_node_id,
+            id: start_block.node_id,
             coordinate: start_node_coordinate,
             strand: Strand::Forward,
         };
@@ -213,7 +212,7 @@ pub fn derive_chunks(
                 .iter()
                 .find(|e| {
                     is_start_node(e.edge.source_node_id)
-                        && e.edge.target_node_id == *new_start_target_node_id
+                        && e.edge.target_node_id == start_block.node_id
                         && e.edge.target_coordinate == start_node_coordinate
                 })
                 .unwrap();
@@ -221,30 +220,26 @@ pub fn derive_chunks(
         }
 
         for edge in &current_path_edges {
-            let new_source_node_id = new_node_ids_by_old.get(&edge.source_node_id);
-            let new_target_node_id = new_node_ids_by_old.get(&edge.target_node_id);
+            if is_start_node(edge.source_node_id) || is_end_node(edge.target_node_id) {
+                continue;
+            }
 
-            if let Some(new_source_node_id) = new_source_node_id
-                && let Some(new_target_node_id) = new_target_node_id
-            {
-                let key = &(
-                    *new_source_node_id,
-                    edge.source_coordinate,
-                    edge.source_strand,
-                    *new_target_node_id,
-                    edge.target_coordinate,
-                    edge.target_strand,
-                );
-                let child_edge_id = child_edge_ids_by_key.get(key);
-                if let Some(child_edge_id) = child_edge_id {
-                    new_path_edge_ids.push(*child_edge_id);
-                }
+            let key = &(
+                edge.source_node_id,
+                edge.source_coordinate,
+                edge.source_strand,
+                edge.target_node_id,
+                edge.target_coordinate,
+                edge.target_strand,
+            );
+            let child_edge_id = child_edge_ids_by_key.get(key);
+            if let Some(child_edge_id) = child_edge_id {
+                new_path_edge_ids.push(*child_edge_id);
             }
         }
 
-        let new_end_source_node_id = new_node_ids_by_old.get(&end_block.node_id).unwrap();
         let end_node_point = NodePoint {
-            id: *new_end_source_node_id,
+            id: end_block.node_id,
             coordinate: end_node_coordinate,
             strand: Strand::Forward,
         };
@@ -254,7 +249,7 @@ pub fn derive_chunks(
                 .iter()
                 .find(|e| {
                     is_end_node(e.edge.target_node_id)
-                        && e.edge.source_node_id == *new_end_source_node_id
+                        && e.edge.source_node_id == end_block.node_id
                         && e.edge.source_coordinate == end_node_coordinate
                 })
                 .unwrap();
@@ -308,6 +303,48 @@ pub fn make_stitch(
 ) -> Result<(), GraphOperationError> {
     let conn = context.graph().conn();
 
+    let stitch_inputs = stitch_inputs(conn, collection_name, parent_sample_name, region_names)?;
+    validate_stitch_inputs(&stitch_inputs)?;
+    let block_group_chunks = stitch_inputs
+        .iter()
+        .map(|input| input.chunk.clone())
+        .collect::<Vec<_>>();
+
+    conn.execute_batch("SAVEPOINT make_stitch")?;
+    let result = create_stitched_block_group(
+        context,
+        collection_name,
+        new_sample_name,
+        new_region_name,
+        &stitch_inputs,
+        &block_group_chunks,
+    );
+    match result {
+        Ok(()) => {
+            conn.execute_batch("RELEASE make_stitch")?;
+            Ok(())
+        }
+        Err(err) => {
+            conn.execute_batch("ROLLBACK TO make_stitch")?;
+            conn.execute_batch("RELEASE make_stitch")?;
+            Err(err)
+        }
+    }
+}
+
+struct StitchInput<'a> {
+    region_name: &'a str,
+    block_group_id: HashId,
+    chunk: BlockGroupChunk,
+    nonterminal_edges: Vec<AugmentedEdge>,
+}
+
+fn stitch_inputs<'a>(
+    conn: &GraphConnection,
+    collection_name: &str,
+    parent_sample_name: &str,
+    region_names: &'a Vec<&'a str>,
+) -> Result<Vec<StitchInput<'a>>, GraphOperationError> {
     let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name);
 
     let mut block_groups_by_name = HashMap::new();
@@ -317,6 +354,72 @@ pub fn make_stitch(
             block_groups_by_name.insert(block_group_name, block_group.clone());
         }
     }
+
+    let mut stitch_inputs = vec![];
+    for region_name in region_names {
+        if let Some(block_group) = block_groups_by_name.get(region_name) {
+            let chunk = load_block_group_chunk(conn, block_group.id);
+            let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+            let nonterminal_edges = edges
+                .into_iter()
+                .filter(|edge| !edge.edge.is_start_edge() && !edge.edge.is_end_edge())
+                .collect();
+            stitch_inputs.push(StitchInput {
+                region_name,
+                block_group_id: block_group.id,
+                chunk,
+                nonterminal_edges,
+            });
+        } else {
+            return Err(GraphOperationError::RegionNotFound(format!(
+                "No region found with name: {region_name}"
+            )));
+        }
+    }
+
+    Ok(stitch_inputs)
+}
+
+/// Given a list of block groups to stitch together, confirms there are no
+/// duplicate block groups (which would generate a cycle in the graph) or edges
+/// that are shared between block groups
+fn validate_stitch_inputs(stitch_inputs: &[StitchInput<'_>]) -> Result<(), GraphOperationError> {
+    let mut seen_block_group_ids = HashMap::<HashId, &str>::new();
+    let mut seen_edge_ids = HashMap::<HashId, &str>::new();
+    for input in stitch_inputs {
+        if let Some(previous_region_name) =
+            seen_block_group_ids.insert(input.block_group_id, input.region_name)
+        {
+            return Err(GraphOperationError::InvalidStitchInput(format!(
+                "Regions {previous_region_name} and {} refer to the same block group",
+                input.region_name
+            )));
+        }
+
+        for edge in &input.nonterminal_edges {
+            if let Some(previous_region_name) =
+                seen_edge_ids.insert(edge.edge.id, input.region_name)
+            {
+                return Err(GraphOperationError::InvalidStitchInput(format!(
+                    "Regions {previous_region_name} and {} share edge {}",
+                    input.region_name, edge.edge.id
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn create_stitched_block_group(
+    context: &DbContext,
+    collection_name: &str,
+    new_sample_name: &str,
+    new_region_name: &str,
+    stitch_inputs: &[StitchInput<'_>],
+    block_group_chunks: &[BlockGroupChunk],
+) -> Result<(), GraphOperationError> {
+    let conn = context.graph().conn();
 
     let _new_sample = Sample::get_or_create(
         conn,
@@ -336,42 +439,44 @@ pub fn make_stitch(
         },
     )?;
 
-    let mut block_group_chunks = vec![];
-
-    for region_name in region_names {
-        if let Some(block_group) = block_groups_by_name.get(region_name) {
-            let chunk = load_block_group_chunk(conn, block_group.id);
-            block_group_chunks.push(chunk.clone());
-
-            let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
-
-            let nonterminal_edges: Vec<_> = edges
-                .iter()
-                .filter(|edge| !edge.edge.is_start_edge() && !edge.edge.is_end_edge())
-                .collect();
-            let bg_edges = nonterminal_edges
-                .iter()
-                .map(|edge| BlockGroupEdgeData {
-                    block_group_id: child_block_group.id,
-                    edge_id: edge.edge.id,
-                    chromosome_index: edge.chromosome_index,
-                    phased: edge.phased,
-                })
-                .collect::<Vec<_>>();
-            BlockGroupEdge::bulk_create(conn, &bg_edges);
-        } else {
-            return Err(GraphOperationError::RegionNotFound(format!(
-                "No region found with name: {region_name}"
-            )));
-        }
+    for input in stitch_inputs {
+        let bg_edges = input
+            .nonterminal_edges
+            .iter()
+            .map(|edge| BlockGroupEdgeData {
+                block_group_id: child_block_group.id,
+                edge_id: edge.edge.id,
+                chromosome_index: edge.chromosome_index,
+                phased: edge.phased,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(conn, &bg_edges);
     }
 
     make_stitch_from_block_groups(
         context,
-        &block_group_chunks,
+        block_group_chunks,
         child_block_group.id,
         new_region_name,
-    )
+    )?;
+
+    validate_stitched_block_group_is_acyclic(conn, &child_block_group.id)?;
+
+    Ok(())
+}
+
+fn validate_stitched_block_group_is_acyclic(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+) -> Result<(), GraphOperationError> {
+    let graph = BlockGroup::get_graph(conn, block_group_id)?;
+    if is_cyclic_directed(&graph) {
+        return Err(GraphOperationError::StitchedGraphCycle(format!(
+            "block group {block_group_id} is cyclic"
+        )));
+    }
+
+    Ok(())
 }
 
 pub fn make_stitch_from_block_groups(
@@ -442,10 +547,10 @@ pub fn make_stitch_from_block_groups(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_core::Strand;
+    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::{
-        block_group_edge::BlockGroupEdgeData, collection::Collection, edge::Edge, node::Node,
-        sequence::Sequence,
+        block_group::NewBlockGroup, block_group_edge::BlockGroupEdgeData, collection::Collection,
+        edge::Edge, node::Node, path::Path, sample::Sample, sequence::Sequence,
     };
 
     use super::*;
@@ -591,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_chunks_two_inserts() {
+    fn test_derive_chunks_two_inserts() {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -705,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_chunks_two_inserts_then_stitch() {
+    fn test_derive_chunks_two_inserts_then_stitch() {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -880,5 +985,156 @@ mod tests {
         let path5 = BlockGroup::get_current_path(conn, &block_group5.id).unwrap();
         // path3 + path2 concatenated
         assert_eq!(path5.sequence(conn).unwrap(), "ATCGATCAAGGAACACATCAATCG");
+    }
+
+    #[test]
+    fn test_make_stitch_rejects_duplicate_region_input() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        setup_block_group(conn);
+
+        let result = make_stitch(
+            &context,
+            "test",
+            "test",
+            "stitched",
+            &vec!["chr1", "chr1"],
+            "chr1.stitched",
+        );
+
+        assert!(matches!(
+            result,
+            Err(GraphOperationError::InvalidStitchInput(_))
+        ));
+        let block_groups = Sample::get_block_groups(conn, "test", "stitched");
+        assert!(block_groups.is_empty());
+    }
+
+    #[test]
+    fn test_make_stitch_rolls_back_cyclic_output() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        track_database(conn, op_conn).unwrap();
+        Collection::create(conn, "test").unwrap();
+        Sample::get_or_create(
+            conn,
+            gen_models::sample::NewSample {
+                name: "parent",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let a_seq = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAAAAAAAAA")
+            .save(conn)
+            .unwrap();
+        let a_node_id = Node::create(
+            conn,
+            &a_seq.hash,
+            &HashId::convert_str(&format!("cycle-a.{}", a_seq.hash)),
+        )
+        .unwrap();
+        let t_seq = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("TTTTTTTTTT")
+            .save(conn)
+            .unwrap();
+        let t_node_id = Node::create(
+            conn,
+            &t_seq.hash,
+            &HashId::convert_str(&format!("cycle-t.{}", t_seq.hash)),
+        )
+        .unwrap();
+
+        create_two_node_block_group(conn, "forward", a_node_id, t_node_id);
+        create_two_node_block_group(conn, "reverse", t_node_id, a_node_id);
+
+        let result = make_stitch(
+            &context,
+            "test",
+            "parent",
+            "stitched",
+            &vec!["forward", "reverse"],
+            "cycle",
+        );
+
+        assert!(matches!(
+            result,
+            Err(GraphOperationError::StitchedGraphCycle(_))
+        ));
+        let block_groups = Sample::get_block_groups(conn, "test", "stitched");
+        assert!(block_groups.is_empty());
+    }
+
+    fn create_two_node_block_group(
+        conn: &GraphConnection,
+        name: &str,
+        source_node_id: HashId,
+        target_node_id: HashId,
+    ) {
+        let block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: "test",
+                sample_name: "parent",
+                name,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let start_edge = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            source_node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let internal_edge = Edge::create(
+            conn,
+            source_node_id,
+            10,
+            Strand::Forward,
+            target_node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let end_edge = Edge::create(
+            conn,
+            target_node_id,
+            10,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let block_group_edges = [start_edge.id, internal_edge.id, end_edge.id]
+            .iter()
+            .map(|edge_id| BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: *edge_id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(conn, &block_group_edges);
+        Path::create(
+            conn,
+            name,
+            &block_group.id,
+            &[start_edge.id, internal_edge.id, end_edge.id],
+        )
+        .unwrap();
     }
 }
