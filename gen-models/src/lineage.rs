@@ -55,7 +55,7 @@ macro_rules! impl_numeric_lineage_id {
     };
 }
 
-impl_numeric_lineage_id!(i32, i64, u32, u64, usize);
+impl_numeric_lineage_id!(i32, i64, u32);
 
 pub trait SqlLineage: Query<Model = Self> + Sized {
     type Id: LineageId;

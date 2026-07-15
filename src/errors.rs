@@ -9,10 +9,11 @@ use gen_models::{
 };
 use thiserror::Error;
 
+#[cfg(not(target_os = "emscripten"))]
+pub use crate::patch::CreatePatchError;
 pub use crate::{
     diffs::gfa::GfaDiffError,
     exports::{fasta::FastaExportError, genbank::GenbankExportError, gfa::GfaExportError},
-    patch::CreatePatchError,
     updates::gaf::GafUpdateError,
 };
 

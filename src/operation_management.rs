@@ -1,50 +1,51 @@
-use std::{
-    collections::HashMap,
-    fs,
-    io::copy,
-    path::{Path as FilePath, PathBuf},
-    str,
-};
+#[cfg(not(target_os = "emscripten"))]
+use std::{collections::HashMap, io::copy, path::Path as FilePath};
+use std::{fs, path::PathBuf, str};
 
-use gen_core::{
-    HashId,
-    config::Workspace,
-    errors::{ConfigError, ConnectionError},
-    traits::Capnp,
-};
+use gen_core::{HashId, errors::ConnectionError};
+#[cfg(not(target_os = "emscripten"))]
+use gen_core::{config::Workspace, errors::ConfigError, traits::Capnp};
+#[cfg(not(target_os = "emscripten"))]
 use gen_models::{
     annotations::{AnnotationFile, AnnotationFileError},
     assets::LocalAssetUri,
-    changesets::{apply_changeset, revert_changeset},
-    db::{DbContext, OperationsConnection},
-    errors::{BranchError, ChangesetError, FileAdditionError, OperationError, RemoteError},
-    file_types::FileTypes,
+    errors::{BranchError, FileAdditionError, RemoteError},
     manifest::{
         ManifestAnnotationFileAddition, ManifestComparer, ManifestDiff, ManifestDiffError,
         ManifestError, ManifestGenerator, ManifestOperation, ManifestOperationFileAddition,
     },
     metadata::get_db_uuid,
+    operations::{Defaults, FileAddition, Remote, calculate_file_checksum},
+};
+use gen_models::{
+    changesets::{apply_changeset, revert_changeset},
+    db::{DbContext, OperationsConnection},
+    errors::{ChangesetError, OperationError},
+    file_types::FileTypes,
     operations::{
-        Branch, Defaults, FileAddition, HashParseError, Operation, OperationFile, OperationInfo,
-        OperationState, Remote, calculate_file_checksum, parse_hash,
+        Branch, HashParseError, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
     },
     session_operations::{end_operation, start_operation},
     traits::*,
 };
+#[cfg(not(target_os = "emscripten"))]
 use log::info;
 use petgraph::Direction;
+#[cfg(not(target_os = "emscripten"))]
 use reqwest::{
     StatusCode,
     blocking::{Client, multipart},
 };
 use rusqlite::{self, Error as SQLError};
+#[cfg(not(target_os = "emscripten"))]
 use serde::Deserialize;
 use thiserror::Error;
+#[cfg(not(target_os = "emscripten"))]
 use url_parse::core::Parser;
 
-use crate::{
-    commands::remote::utils::load_tokens, get_connection, get_operation_connection, track_database,
-};
+use crate::get_connection;
+#[cfg(not(target_os = "emscripten"))]
+use crate::{commands::remote::utils::load_tokens, get_operation_connection, track_database};
 
 /* General information
 
@@ -112,6 +113,7 @@ pub enum ResetError {
     OperationError(#[from] OperationError),
 }
 
+#[cfg(not(target_os = "emscripten"))]
 #[derive(Debug, Error)]
 pub enum RemoteOperationError {
     #[error("Failed to transfer {0} from {1} to {2}")]
@@ -506,6 +508,7 @@ pub fn parse_patch_operations(
 
 // The url-parse crate doesn't know about file-based urls, so we need to provide it with a
 // custom set of port mappings
+#[cfg(not(target_os = "emscripten"))]
 fn port_mappings() -> HashMap<&'static str, (u32, &'static str)> {
     HashMap::from([
         ("file", (0, "file")),
@@ -515,6 +518,7 @@ fn port_mappings() -> HashMap<&'static str, (u32, &'static str)> {
     ])
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn connect_file_remote(
     remote_url: &str,
 ) -> Result<(Workspace, OperationsConnection), RemoteOperationError> {
@@ -545,6 +549,7 @@ fn connect_file_remote(
 
     Ok((Workspace::new(remote_path), remote_op_conn))
 }
+#[cfg(not(target_os = "emscripten"))]
 fn apply_operations_to_remote(
     local_context: &DbContext,
     remote_op_conn: &OperationsConnection,
@@ -747,6 +752,7 @@ fn apply_operations_to_remote(
     Ok(())
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn push_to_file_remote(
     local_context: &DbContext,
     remote_url: &str,
@@ -823,6 +829,7 @@ fn push_to_file_remote(
     all(debug_assertions, feature = "profiling"),
     tracing::instrument(skip(context, remote))
 )]
+#[cfg(not(target_os = "emscripten"))]
 pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOperationError> {
     let operation_conn = context.operations().conn();
     let remote_name = &remote
@@ -963,6 +970,7 @@ pub fn push(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
     all(debug_assertions, feature = "profiling"),
     tracing::instrument(skip(context, remote))
 )]
+#[cfg(not(target_os = "emscripten"))]
 pub fn pull(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOperationError> {
     let operation_conn = context.operations().conn();
     let remote_name = &remote
@@ -1001,6 +1009,7 @@ pub fn pull(context: &DbContext, remote: Option<&str>) -> Result<(), RemoteOpera
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn pull_from_file_remote(
     context: &DbContext,
     remote_url: &str,
@@ -1054,6 +1063,7 @@ fn pull_from_file_remote(
     Ok(())
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn pull_from_remote_server(
     context: &DbContext,
     remote_name: &str,
@@ -1110,6 +1120,7 @@ fn pull_from_remote_server(
     all(debug_assertions, feature = "profiling"),
     tracing::instrument(skip(context, manifest_operation, repo_root))
 )]
+#[cfg(not(target_os = "emscripten"))]
 fn ingest_manifest_operation(
     context: &DbContext,
     manifest_operation: &ManifestOperation,
@@ -1221,6 +1232,7 @@ fn ingest_manifest_operation(
     Ok(())
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn copy_operation_from_remote_fs(
     manifest_operation: &ManifestOperation,
     local_workspace: &Workspace,
@@ -1336,6 +1348,7 @@ fn copy_operation_from_remote_fs(
 /// file_addition.file_path field will always be the asset_dir path, while the
 /// top level file_path field can be like fastas/hg19.fa. So if we are not in
 /// the asset_dir, we copy it out
+#[cfg(not(target_os = "emscripten"))]
 fn materialize_operation_file(
     workspace: &Workspace,
     file_addition: &ManifestOperationFileAddition,
@@ -1349,6 +1362,7 @@ fn materialize_operation_file(
     )
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn materialize_annotation_file(
     workspace: &Workspace,
     annotation_file: &ManifestAnnotationFileAddition,
@@ -1362,6 +1376,7 @@ fn materialize_annotation_file(
     )
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn materialize_annotation_index_file(
     workspace: &Workspace,
     annotation_file: &ManifestAnnotationFileAddition,
@@ -1379,6 +1394,7 @@ fn materialize_annotation_index_file(
     )
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn materialize_asset_file(
     workspace: &Workspace,
     file_addition: &FileAddition,
@@ -1416,6 +1432,7 @@ fn materialize_asset_file(
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(not(target_os = "emscripten"))]
 struct RemoteOperationAssetResponse {
     changeset: String,
     dependencies: String,
@@ -1424,11 +1441,13 @@ struct RemoteOperationAssetResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(not(target_os = "emscripten"))]
 struct RemoteFileAsset {
     asset_path: String,
     url: String,
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn download_remote_operation_assets(
     client: &Client,
     auth_token: &str,
@@ -1521,6 +1540,7 @@ fn download_remote_operation_assets(
     Ok(())
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn download_remote_file_addition_asset(
     client: &Client,
     auth_token: &str,
@@ -1565,6 +1585,7 @@ fn download_remote_file_addition_asset(
 
 // TODO: Add a parameter to force overwrite the local with the remote, in case
 // the user gets stuck and wants to get the remote copy
+#[cfg(not(target_os = "emscripten"))]
 fn verify_downloaded_asset(
     file_addition: &FileAddition,
     destination: &FilePath,
@@ -1581,6 +1602,7 @@ fn verify_downloaded_asset(
     Ok(())
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn remote_asset_response_file<'a>(
     files: &'a [RemoteFileAsset],
     stored_asset_path: &str,
@@ -1594,6 +1616,7 @@ fn remote_asset_response_file<'a>(
     })
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn download_binary(
     client: &Client,
     url: &str,
@@ -1629,6 +1652,7 @@ fn download_binary(
     Ok(())
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn send_manifest_to_remote(
     remote_name: &str,
     remote_url: &str,
@@ -1676,6 +1700,7 @@ fn send_manifest_to_remote(
     Ok(response.json()?)
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn is_authorization_status(status: StatusCode) -> bool {
     matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
 }

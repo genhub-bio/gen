@@ -155,8 +155,10 @@ impl PartialEq<HashId> for [u8; 32] {
     }
 }
 
-use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+#[cfg(feature = "sqlite")]
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef};
 
+#[cfg(feature = "sqlite")]
 impl FromSql for HashId {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         match value {
@@ -177,14 +179,14 @@ impl FromSql for HashId {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl ToSql for HashId {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(self.0.as_ref())) // &[u8]
     }
 }
 
-use rusqlite::types::Value;
-
+#[cfg(feature = "sqlite")]
 impl From<HashId> for Value {
     fn from(h: HashId) -> Self {
         Value::Blob(h.0.to_vec())

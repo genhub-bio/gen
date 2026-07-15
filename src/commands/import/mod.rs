@@ -3,6 +3,7 @@ use clap::{Args, Subcommand};
 
 use crate::commands::cli_context::CliContext;
 
+#[cfg(not(target_os = "emscripten"))]
 mod fasta;
 mod genbank;
 mod gfa;
@@ -18,6 +19,7 @@ pub struct Command {
 #[derive(Clone, Debug, Subcommand)]
 pub enum Commands {
     /// Import fasta
+    #[cfg(not(target_os = "emscripten"))]
     Fasta(fasta::Command),
     /// Import genbank
     Genbank(genbank::Command),
@@ -33,6 +35,7 @@ pub enum Commands {
 )]
 pub fn execute(ctx: &CliContext, command: Command) -> anyhow::Result<()> {
     match command.command {
+        #[cfg(not(target_os = "emscripten"))]
         Commands::Fasta(cmd) => crate::commands::import::fasta::execute(ctx, cmd),
         Commands::Genbank(cmd) => crate::commands::import::genbank::execute(ctx, cmd),
         Commands::Gfa(cmd) => crate::commands::import::gfa::execute(ctx, cmd),

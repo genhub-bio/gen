@@ -18,6 +18,7 @@ pub enum ConfigError {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ConnectionError {
+    #[cfg(feature = "sqlite")]
     #[error("Failed to open database connection: {0}")]
     OpenFailed(#[from] rusqlite::Error),
     #[error("Database tracking error: {0}")]
@@ -30,6 +31,7 @@ pub enum ConnectionError {
 pub enum StrandError {
     #[error("Invalid Strand: {0}")]
     InvalidStrand(String),
+    #[cfg(feature = "sqlite")]
     #[error("Rusqlite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
 }

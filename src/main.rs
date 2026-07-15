@@ -18,41 +18,47 @@ use r#gen::{
     annotations::gff::propagate_gff,
     commands::{
         Cli, Commands, cli_context::CliContext,
-        graph_operations::make_stitch::make_stitch_operation, remote::handle_remote_command,
+        graph_operations::make_stitch::make_stitch_operation,
     },
     diffs::gfa::gfa_sample_diff,
     get_connection, get_operation_connection,
     graphs::graph_search::{GenGraphMatcher, SeedIndex},
     operation_management,
-    operation_management::{parse_patch_operations, pull, push},
-    patch,
+    operation_management::parse_patch_operations,
     theme::init_theme,
     track_database,
     updates::gaf::transform_csv_to_fasta,
+    views::tui_runtime::install_global_panic_hook,
+};
+#[cfg(not(target_os = "emscripten"))]
+use r#gen::{
+    commands::remote::handle_remote_command,
+    operation_management::{pull, push},
+    patch,
     views::{
         block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
         diff::view_diff, operations::view_operations, patch::view_patches,
-        tui_runtime::install_global_panic_hook,
     },
 };
 use gen_annotations::translate;
 use gen_core::{config::Workspace, range::Range, region::Region};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
-    annotations::{add_annotation, add_annotation_file},
+    annotations::add_annotation,
     block_group::BlockGroup,
     collection::Collection,
     db::{DbContext, OperationsConnection},
     errors::RemoteError,
     metadata,
     operations::{
-        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState,
-        add_files_operation, parse_hash,
+        Branch, Defaults, Operation, OperationFile, OperationInfo, OperationState, parse_hash,
     },
     reference_alias::ReferenceAlias,
     sample::Sample,
     traits::Query,
 };
+#[cfg(not(target_os = "emscripten"))]
+use gen_models::{annotations::add_annotation_file, operations::add_files_operation};
 use rusqlite::{Connection, params, types::Value};
 use sha2::digest::typenum::Gr;
 
@@ -86,8 +92,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Clone { url }) = &cli.command {
         return r#gen::commands::clone::execute(url, &workspace);
+    }
+    #[cfg(target_os = "emscripten")]
+    if let Some(Commands::Clone { .. }) = &cli.command {
+        return Err("clone is not supported in this build (no network access)".into());
     }
     #[cfg(all(debug_assertions, feature = "profiling"))]
     if let Some(Commands::Profile(cmd)) = &cli.command {
@@ -180,7 +191,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Update(cmd)) => Ok(r#gen::commands::update::execute(&cli_context, cmd)?),
         Some(Commands::Export(cmd)) => Ok(r#gen::commands::export::execute(&cli_context, cmd)?),
         Some(Commands::Derive(cmd)) => Ok(r#gen::commands::derive::execute(&cli_context, cmd)?),
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::View {
             graph,
             sample,
@@ -250,6 +263,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::View { .. }) => {
+            Err("interactive view is not supported in this build".into())
+        }
         Some(Commands::ViewDiff { from, to }) => {
             let to_ref = to.clone().unwrap_or_else(|| {
                 OperationState::get_operation(operation_conn)
@@ -271,7 +288,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             if diffs.is_empty() {
                 println!("No differences found between {from} and {to_ref}.");
             } else {
+                #[cfg(not(target_os = "emscripten"))]
                 view_diff(graph_conn, &diffs)?;
+                #[cfg(target_os = "emscripten")]
+                println!(
+                    "{} difference(s) found between {from} and {to_ref}.",
+                    diffs.len()
+                );
             }
             Ok(())
         }
@@ -335,7 +358,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         .id,
                 );
                 if interactive {
+                    #[cfg(not(target_os = "emscripten"))]
                     return Ok(view_operations(&db_context, &operations)?);
+                    #[cfg(target_os = "emscripten")]
+                    return Err("interactive view is not supported in this build".into());
                 } else {
                     let mut indicator = "";
                     println!(
@@ -516,6 +542,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => Err(format!("Operation reset failed: {}", e).into()),
             }
         }
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::PatchCreate {
             name,
             operation,
@@ -536,6 +563,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             patch::create_patch(&db_context, &operations, &mut f)?;
             Ok(())
         }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::PatchCreate { .. }) => {
+            Err("patch-create is not supported in this build (no local file access)".into())
+        }
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::PatchApply { patch }) => {
             let mut f = File::open(patch)?;
             match patch::apply_patch_archive(&db_context, &mut f) {
@@ -546,6 +578,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => Err(format!("Patch application failed: {}", e).into()),
             }
         }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::PatchApply { .. }) => {
+            Err("patch-apply is not supported in this build (no local file access)".into())
+        }
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::PatchView { prefix, patch }) => {
             let patch_path = Path::new(&patch);
             let mut f = File::open(patch_path)?;
@@ -571,6 +608,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(())
+        }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::PatchView { .. }) => {
+            Err("patch-view is not supported in this build (no local file access)".into())
         }
         None => Ok(()),
         Some(Commands::Defaults {
@@ -623,6 +664,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             println!("Annotation {name} added in operation {}", operation.hash);
             Ok(())
         }
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::AddAnnotationFile {
             path,
             format,
@@ -641,10 +683,19 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             println!("Annotation file added in operation {}", operation.hash);
             Ok(())
         }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::AddAnnotationFile { .. }) => {
+            Err("add-annotation-file is not supported in this build (no local file access)".into())
+        }
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::AddFile { files, message }) => {
             let operation = add_files_operation(&db_context, &files, message.as_deref())?;
             println!("Files added in operation {}", operation.hash);
             Ok(())
+        }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::AddFile { .. }) => {
+            Err("add-file is not supported in this build (no local file access)".into())
         }
         Some(Commands::BuildIndex {
             collection,
@@ -854,14 +905,24 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => Err(format!("Error making a stitch: {e}").into()),
             }
         }
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::Push { remote }) => {
             push(&db_context, remote.as_deref())?;
             println!("Push succeeded.");
             Ok(())
         }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::Push { .. }) => {
+            Err("push is not supported in this build (no network access)".into())
+        }
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::Pull { remote }) => {
             pull(&db_context, remote.as_deref())?;
             Ok(())
+        }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::Pull { .. }) => {
+            Err("pull is not supported in this build (no network access)".into())
         }
         Some(Commands::AddReferenceAliases {
             reference_name,

@@ -1,34 +1,43 @@
 use std::{
     collections::{HashMap, HashSet},
-    error::Error,
     fs::File,
-    io::{BufRead, BufReader, Cursor},
+    io::{BufRead, BufReader},
+};
+#[cfg(not(target_os = "emscripten"))]
+use std::{
+    error::Error,
+    io::Cursor,
     path::{Path as FsPath, PathBuf},
 };
 
-use gen_annotations::{
-    projection as annotation_projection,
-    translate::{bed::translate_bed, gff::translate_gff},
-};
-use gen_core::{HashId, Strand, Workspace, is_terminal};
+use gen_annotations::projection as annotation_projection;
+#[cfg(not(target_os = "emscripten"))]
+use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
+#[cfg(not(target_os = "emscripten"))]
+use gen_core::Workspace;
+use gen_core::{HashId, Strand, is_terminal};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
-    file_types::FileTypes,
-    operations::FileAddition,
-    reference_alias::ReferenceAlias,
     traits::Query,
 };
-use noodles::{bed, core::Region, gff, tabix};
+#[cfg(not(target_os = "emscripten"))]
+use gen_models::{
+    file_types::FileTypes, operations::FileAddition, reference_alias::ReferenceAlias,
+};
+use noodles::{bed, gff};
+#[cfg(not(target_os = "emscripten"))]
+use noodles::{core::Region, tabix};
 use petgraph::Direction;
 
+#[cfg(not(target_os = "emscripten"))]
+use crate::views::{annotation_files::AnnotationFileEntry, annotation_track::AnnotationTrack};
 use crate::views::{
-    annotation_files::AnnotationFileEntry,
     annotation_groups::AnnotationGroupEntry,
-    annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
+    annotation_track::{AnnotationSegment, AnnotationSpan},
 };
 
 pub struct AnnotationGroupTrackRequest<'a> {
@@ -370,6 +379,7 @@ pub fn parse_translated_bed<R: BufRead>(
     build_annotation_spans(track_label, segments_by_name)
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn resolve_annotation_file_path(
     workspace: &Workspace,
     file_addition: &FileAddition,
@@ -390,6 +400,7 @@ fn resolve_annotation_file_path(
     None
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn tabix_index_path(file_path: &FsPath) -> PathBuf {
     let mut index_path = file_path.to_path_buf();
     index_path.set_extension(format!(
@@ -405,6 +416,7 @@ fn tabix_index_path(file_path: &FsPath) -> PathBuf {
     PathBuf::from(format!("{}.tbi", file_path.display()))
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn resolve_annotation_index_file_path(
     workspace: &Workspace,
     entry: &AnnotationFileEntry,
@@ -421,6 +433,7 @@ fn resolve_annotation_index_file_path(
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn load_tabix_region_bytes(
     file_path: &FsPath,
     index_path: Option<&FsPath>,
@@ -448,12 +461,14 @@ fn load_tabix_region_bytes(
     Ok(bytes)
 }
 
+#[cfg(not(target_os = "emscripten"))]
 pub struct AnnotationFileTrackLoadResult {
     pub track: AnnotationTrack,
     pub index_available: bool,
     pub loaded_window: Option<(i64, i64)>,
 }
 
+#[cfg(not(target_os = "emscripten"))]
 pub struct AnnotationFileTrackRequest<'a> {
     pub conn: &'a GraphConnection,
     pub workspace: &'a Workspace,
@@ -476,6 +491,7 @@ pub struct AnnotationFileTrackRequest<'a> {
     pub entry: &'a AnnotationFileEntry,
 }
 
+#[cfg(not(target_os = "emscripten"))]
 pub fn load_annotation_file_track(
     request: &AnnotationFileTrackRequest<'_>,
 ) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {

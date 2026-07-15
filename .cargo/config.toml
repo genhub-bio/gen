@@ -1,0 +1,10 @@
+# wasm32-unknown-emscripten builds enable rusqlite's `session` feature, which
+# forces libsqlite3-sys's `buildtime_bindgen` (session = ["preupdate_hook", "buildtime_bindgen"]
+# in libsqlite3-sys). On wasm32 targets, Clang assigns `hidden` LLVM visibility to
+# functions by default (see rust-lang/rust-bindgen#1941), and bindgen's
+# `Function::parse` skips any cursor whose visibility isn't `CXVisibility_Default`,
+# so every SQLite function declaration is silently dropped from the generated
+# bindings. Forcing default visibility for the bindgen parse restores them.
+# Native builds do not invoke buildtime_bindgen, so this is a no-op there.
+[env]
+BINDGEN_EXTRA_CLANG_ARGS = "-fvisibility=default"

@@ -8,15 +8,16 @@ homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
 [features]
-default = []
+default = ["sqlite", "gff"]
+sqlite = ["dep:rusqlite"]
+gff = ["dep:noodles"]
 python-bindings = ["pyo3", "pyo3-macros"]
 
 [dependencies]
 gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.2.1" }
 itertools = "0.14.0"
 capnp = { version = "0.24" }
-noodles = { version = "0.101.0", features = ["gff"] }
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+noodles = { version = "0.101.0", features = ["gff"], optional = true }
 serde = {  version = "1.0.219", features = ["derive"] }
 thiserror = "1.0"
 sha2 = "0.10.9"
@@ -25,6 +26,16 @@ rand = "0.10.1"
 uuid = { version = "1.18.1", features = ["v7"] }
 pyo3 = { version = "0.25.1", optional = true }
 pyo3-macros = { version = "0.25.1", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+uuid = { version = "1.18.1", features = ["rng-getrandom"] }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+rusqlite = { version = "0.39.0", features = ["bundled"], optional = true }
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+rusqlite = { version = "0.39.0", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.20.0"

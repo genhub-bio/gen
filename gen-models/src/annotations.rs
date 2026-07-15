@@ -4,6 +4,7 @@ use std::{
     rc::Rc,
 };
 
+#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
 use anyhow::anyhow;
 use gen_core::{
     HashId, NodeIntervalBlock, calculate_hash,
@@ -18,16 +19,22 @@ use thiserror::Error;
 
 use crate::{
     accession::{Accession, AccessionError, AccessionSpan, NewAccession},
-    changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
     db::{DbContext, GraphConnection, OperationsConnection},
-    errors::{FileAdditionError, OperationError},
+    errors::FileAdditionError,
     file_types::FileTypes,
-    files::GenDatabase,
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
-    metadata,
-    operations::{FileAddition, Operation, OperationFile, OperationInfo, OperationSummary},
-    session_operations::{DependencyModels, end_operation, start_operation},
+    operations::{FileAddition, Operation, OperationInfo},
+    session_operations::{end_operation, start_operation},
     traits::Query,
+};
+#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+use crate::{
+    changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
+    errors::OperationError,
+    files::GenDatabase,
+    metadata,
+    operations::{OperationFile, OperationSummary},
+    session_operations::DependencyModels,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -703,6 +710,7 @@ pub fn add_annotation(
     Ok(operation)
 }
 
+#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
 pub fn add_annotation_file(
     context: &DbContext,
     path: &str,
@@ -883,6 +891,7 @@ impl AnnotationFile {
         Ok(())
     }
 
+    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
     pub fn add_to_operation(
         workspace: &Workspace,
         conn: &OperationsConnection,

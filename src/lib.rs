@@ -20,6 +20,7 @@ pub mod graphs;
 pub mod imports;
 
 pub mod operation_management;
+#[cfg(not(target_os = "emscripten"))]
 pub mod patch;
 #[cfg(all(debug_assertions, feature = "profiling"))]
 pub mod profiling;

@@ -147,7 +147,9 @@ impl PathEdge {
                 params.push(Box::new(hash));
                 params.push(Box::new(path_id));
                 params.push(Box::new(edge_id));
-                params.push(Box::new(index_in));
+                params.push(Box::new(
+                    i64::try_from(index_in).expect("index_in should fit in i64"),
+                ));
             }
 
             let sql = format!(

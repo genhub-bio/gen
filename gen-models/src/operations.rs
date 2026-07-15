@@ -7,8 +7,11 @@ use std::{
     string::ToString,
 };
 
-use gen_core::{HashId, Workspace, calculate_hash, traits::Capnp};
+#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+use gen_core::calculate_hash;
+use gen_core::{HashId, Workspace, traits::Capnp};
 use gen_graph::{OperationGraph, all_simple_paths};
+#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
 use itertools::Itertools;
 use petgraph::{Direction, graphmap::UnGraphMap};
 use rusqlite::{Result as SQLResult, Row, params, types::Value};
@@ -16,20 +19,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
 use crate::{
     assets::{AssetUri, LocalAssetUri},
-    changesets::{
-        ChangesetModels, DatabaseChangeset, get_changeset_dependencies_from_path,
-        get_changeset_from_path, write_changeset,
-    },
-    db::{DbContext, OperationsConnection},
-    errors::{
-        AddFilesOperationError, FileAdditionError, FileStoreError, OperationError, RemoteError,
-    },
-    file_types::FileTypes,
+    changesets::{ChangesetModels, write_changeset},
+    db::DbContext,
+    errors::{AddFilesOperationError, FileStoreError, OperationError},
     files::GenDatabase,
-    gen_models_capnp::operation,
     metadata,
+};
+use crate::{
+    changesets::{
+        DatabaseChangeset, get_changeset_dependencies_from_path, get_changeset_from_path,
+    },
+    db::OperationsConnection,
+    errors::{FileAdditionError, RemoteError},
+    file_types::FileTypes,
+    gen_models_capnp::operation,
     session_operations::DependencyModels,
     traits::*,
 };
@@ -171,6 +177,7 @@ impl Operation {
             file_path
         ))
     )]
+    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
     pub fn add_file(
         workspace: &Workspace,
         conn: &OperationsConnection,
@@ -421,6 +428,7 @@ impl OperationFileInfo {
         }
     }
 
+    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
     pub fn hashed_filename(&self) -> String {
         <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
     }
@@ -453,6 +461,7 @@ impl OperationFile {
         self
     }
 
+    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
     pub fn storage_file_path(
         workspace: &Workspace,
         path_or_uri: &str,
@@ -521,6 +530,7 @@ pub struct OperationInfo {
     pub description: String,
 }
 
+#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
 pub fn add_files_operation(
     context: &DbContext,
     files: &[String],
@@ -666,10 +676,11 @@ impl Query for FileAddition {
 impl FileAddition {
     pub fn file_path(&self) -> &str {
         self.asset_uri
-            .strip_prefix(LocalAssetUri::SCHEME)
+            .strip_prefix("file://")
             .unwrap_or(&self.asset_uri)
     }
 
+    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(workspace, conn, file_path, file_type, checksum_override))
@@ -752,6 +763,7 @@ impl FileAddition {
             })
     }
 
+    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(self, workspace))
@@ -761,6 +773,7 @@ impl FileAddition {
         asset_uri.store_file(self, workspace)
     }
 
+    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
     pub fn hashed_filename(self) -> String {
         <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
     }

@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use gen_models::db::OperationsConnection;
 
 pub mod cli_context;
+#[cfg(not(target_os = "emscripten"))]
 pub mod clone;
 pub mod derive;
 pub mod export;
@@ -9,6 +10,7 @@ pub mod graph_operations;
 pub mod import;
 #[cfg(all(debug_assertions, feature = "profiling"))]
 pub mod profile;
+#[cfg(not(target_os = "emscripten"))]
 pub mod remote;
 pub mod update;
 
@@ -198,6 +200,7 @@ pub enum Commands {
         collection: Option<String>,
     },
     /// Manage remote repositories
+    #[cfg(not(target_os = "emscripten"))]
     #[command(subcommand)]
     Remote(remote::RemoteCommand),
 

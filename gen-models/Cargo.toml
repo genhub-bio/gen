@@ -9,8 +9,14 @@ license = "Apache-2.0"
 include = ["src", "migrations"]
 
 [features]
+default = ["remote-storage"]
 benchmark = []
 profiling = ["dep:tracing"]
+remote-storage = ["dep:opendal", "dep:tokio"]
+
+# `remote-storage` is meaningless on wasm32-unknown-emscripten (no sockets,
+# no threads), so opendal/tokio and their transitive networking stack
+# (mio, socket2, hyper, ...) are only ever depended on for native builds.
 
 [dev-dependencies]
 rand = "0.10.1"
@@ -27,18 +33,23 @@ chrono = "0.4.40"
 fallible-streaming-iterator = "0.1.9"
 intervaltree = "0.2.7"
 itertools = "0.14.0"
-noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "fasta", "gff", "gtf", "tabix", "vcf"] }
-opendal = { version = "0.56", features = ["blocking", "services-fs", "services-http", "services-s3", "services-gcs", "services-azblob"] }
+noodles = { version = "0.101.0", features = ["bed", "bgzf", "core", "fasta", "gff", "gtf", "vcf"] }
 petgraph = "0.6.5"
-rusqlite = { version = "0.32.1", features = ["bundled", "array", "limits", "session"] }
-rusqlite_migration = { version = "1.3.1" , features = ["from-directory"]}
+rusqlite_migration = { version = "2.5.0" , features = ["from-directory"]}
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 sha2 = "0.10.8"
 thiserror = "2.0.12"
-tokio = { version = "1.52.1", features = ["rt-multi-thread"] }
 url = "2.5.0"
 indexmap = "2.11.3"
 anyhow = "1.0.100"
 tracing = { version = "0.1.41", optional = true }
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+rusqlite = { version = "0.39.0", features = ["bundled", "array", "limits", "session"] }
+opendal = { version = "0.56", features = ["blocking", "services-fs", "services-http", "services-s3", "services-gcs", "services-azblob"], optional = true }
+tokio = { version = "1.52.1", features = ["rt-multi-thread"], optional = true }
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+rusqlite = { version = "0.39.0", features = ["bundled", "array", "limits", "session", "buildtime_bindgen"] }
