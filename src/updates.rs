@@ -2,6 +2,7 @@ use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
 use gen_graph::{GraphNode, GraphNodePosition};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange},
+    block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     errors::BlockGroupError,
     path::Path,
@@ -14,6 +15,8 @@ use gen_models::{
     traits::Query,
 };
 
+use crate::graphs::NodePoint;
+
 pub mod fasta;
 pub mod gaf;
 pub mod genbank;
@@ -21,6 +24,44 @@ pub mod gfa;
 pub mod library;
 pub mod sequence;
 pub mod vcf;
+
+pub(crate) fn adjacent_boundary_points(
+    conn: &GraphConnection,
+    block_group_id: HashId,
+    start_points: &[NodePoint],
+    end_points: &[NodePoint],
+) -> (Vec<NodePoint>, Vec<NodePoint>) {
+    let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+    let mut incoming_points = Vec::new();
+    let mut outgoing_points = Vec::new();
+    for edge in edges {
+        if start_points.iter().any(|point| {
+            edge.edge.target_node_id == point.id && edge.edge.target_coordinate == point.coordinate
+        }) {
+            let point = NodePoint {
+                id: edge.edge.source_node_id,
+                coordinate: edge.edge.source_coordinate,
+                strand: edge.edge.source_strand,
+            };
+            if !incoming_points.contains(&point) {
+                incoming_points.push(point);
+            }
+        }
+        if end_points.iter().any(|point| {
+            edge.edge.source_node_id == point.id && edge.edge.source_coordinate == point.coordinate
+        }) {
+            let point = NodePoint {
+                id: edge.edge.target_node_id,
+                coordinate: edge.edge.target_coordinate,
+                strand: edge.edge.target_strand,
+            };
+            if !outgoing_points.contains(&point) {
+                outgoing_points.push(point);
+            }
+        }
+    }
+    (incoming_points, outgoing_points)
+}
 
 pub(crate) fn resolve_update_region(
     region: &Region,

@@ -26,7 +26,7 @@ use crate::{
         operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
         stitch,
     },
-    updates::resolve_update_region,
+    updates::{adjacent_boundary_points, resolve_update_region},
 };
 
 /// Creates a top-level accession anchored at a single resolved graph
@@ -417,7 +417,7 @@ fn path_boundary_points(
         .value;
     let start_node_coordinate = start_coordinate - start_block.start + start_block.sequence_start;
     let end_node_coordinate = end_coordinate - end_block.start + end_block.sequence_start;
-    adjacent_boundary_points(
+    Ok(adjacent_boundary_points(
         conn,
         block_group_id,
         &[NodePoint {
@@ -430,45 +430,7 @@ fn path_boundary_points(
             coordinate: end_node_coordinate,
             strand: end_block.strand,
         }],
-    )
-}
-
-fn adjacent_boundary_points(
-    conn: &gen_models::db::GraphConnection,
-    block_group_id: gen_core::HashId,
-    start_points: &[NodePoint],
-    end_points: &[NodePoint],
-) -> Result<(Vec<NodePoint>, Vec<NodePoint>), UpdateWithLibraryError> {
-    let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
-    let incoming_points = edges
-        .iter()
-        .filter(|edge| {
-            start_points.iter().any(|point| {
-                edge.edge.target_node_id == point.id
-                    && edge.edge.target_coordinate == point.coordinate
-            })
-        })
-        .map(|edge| NodePoint {
-            id: edge.edge.source_node_id,
-            coordinate: edge.edge.source_coordinate,
-            strand: edge.edge.source_strand,
-        })
-        .collect();
-    let outgoing_points = edges
-        .iter()
-        .filter(|edge| {
-            end_points.iter().any(|point| {
-                edge.edge.source_node_id == point.id
-                    && edge.edge.source_coordinate == point.coordinate
-            })
-        })
-        .map(|edge| NodePoint {
-            id: edge.edge.target_node_id,
-            coordinate: edge.edge.target_coordinate,
-            strand: edge.edge.target_strand,
-        })
-        .collect();
-    Ok((incoming_points, outgoing_points))
+    ))
 }
 
 fn extend_unique_points(points: &mut Vec<NodePoint>, additional_points: Vec<NodePoint>) {
@@ -517,7 +479,7 @@ fn update_graph_native_library(
         target_block_group.id,
         &start_node_points,
         &end_node_points,
-    )?;
+    );
     let mut start_chunk = BlockGroupChunk {
         entry_node_points: start_node_points.clone(),
         exit_node_points: start_node_points,

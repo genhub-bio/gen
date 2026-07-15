@@ -26,7 +26,7 @@ use regex::Regex;
 use rusqlite::{params, types::Value};
 use thiserror::Error;
 
-use crate::read_lines;
+use crate::{graphs::NodePoint, read_lines, updates::adjacent_boundary_points};
 
 #[derive(Debug, serde::Deserialize)]
 struct CSVRow {
@@ -37,6 +37,58 @@ struct CSVRow {
 }
 
 const GEN_PREFIX: &str = "_gen_";
+
+fn plan_gaf_change_edges(
+    conn: &gen_models::db::GraphConnection,
+    block_group_id: HashId,
+    sequence_node_id: HashId,
+    sequence_length: i64,
+    left_anchor: Option<&NodePoint>,
+    right_anchor: Option<&NodePoint>,
+) -> Vec<EdgeData> {
+    let source = left_anchor.cloned().unwrap_or(NodePoint {
+        id: PATH_START_NODE_ID,
+        coordinate: 0,
+        strand: Strand::Forward,
+    });
+    let target = right_anchor.cloned().unwrap_or(NodePoint {
+        id: PATH_END_NODE_ID,
+        coordinate: 0,
+        strand: Strand::Forward,
+    });
+
+    let mut sources = vec![source];
+    let mut targets = vec![target];
+    let (incoming_points, outgoing_points) = adjacent_boundary_points(
+        conn,
+        block_group_id,
+        left_anchor.map(core::slice::from_ref).unwrap_or_default(),
+        right_anchor.map(core::slice::from_ref).unwrap_or_default(),
+    );
+    sources.extend(incoming_points);
+    targets.extend(outgoing_points);
+
+    let mut planned_edges = sources
+        .into_iter()
+        .map(|source| EdgeData {
+            source_node_id: source.id,
+            source_coordinate: source.coordinate,
+            source_strand: source.strand,
+            target_node_id: sequence_node_id,
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        })
+        .collect::<Vec<_>>();
+    planned_edges.extend(targets.into_iter().map(|target| EdgeData {
+        source_node_id: sequence_node_id,
+        source_coordinate: sequence_length,
+        source_strand: Strand::Forward,
+        target_node_id: target.id,
+        target_coordinate: target.coordinate,
+        target_strand: target.strand,
+    }));
+    planned_edges
+}
 
 #[derive(Debug, Error)]
 pub enum GafUpdateError {
@@ -307,84 +359,69 @@ where
                 )),
             )?;
 
-            let mut new_edges = vec![];
             let mut bg_nodes = vec![];
-
-            if change.left.is_empty() && change.right.is_empty() {
+            let (left_anchor, right_anchor) = if change.left.is_empty() && change.right.is_empty() {
                 panic!("Invalid change specification");
             } else if change.left.is_empty() {
                 // we are inserting at the far left side, so our right node mapping is actually
                 // where we want to be
                 let (node, strand, pos) = path_changes["right"];
                 bg_nodes.push(Value::from(node));
-                new_edges.push(EdgeData {
-                    source_node_id: PATH_START_NODE_ID,
-                    source_coordinate: 0,
-                    source_strand: Strand::Forward,
-                    target_node_id: seq_node,
-                    target_coordinate: 0,
-                    target_strand: Strand::Forward,
-                });
-                new_edges.push(EdgeData {
-                    source_node_id: seq_node,
-                    source_coordinate: sequence.length,
-                    source_strand: Strand::Forward,
-                    target_node_id: node,
-                    target_coordinate: pos,
-                    target_strand: strand,
-                });
+                (
+                    None,
+                    Some(NodePoint {
+                        id: node,
+                        coordinate: pos,
+                        strand,
+                    }),
+                )
             } else if change.right.is_empty() {
                 // we are inserting at the far right side
                 let (node, strand, pos) = path_changes["left"];
                 bg_nodes.push(Value::from(node));
-                new_edges.push(EdgeData {
-                    source_node_id: node,
-                    source_coordinate: pos,
-                    source_strand: strand,
-                    target_node_id: seq_node,
-                    target_coordinate: 0,
-                    target_strand: Strand::Forward,
-                });
-                new_edges.push(EdgeData {
-                    source_node_id: seq_node,
-                    source_coordinate: sequence.length,
-                    source_strand: Strand::Forward,
-                    target_node_id: PATH_END_NODE_ID,
-                    target_coordinate: 0,
-                    target_strand: Strand::Forward,
-                });
+                (
+                    Some(NodePoint {
+                        id: node,
+                        coordinate: pos,
+                        strand,
+                    }),
+                    None,
+                )
             } else {
                 // normal insert
-                let (node, strand, pos) = path_changes["left"];
-                bg_nodes.push(Value::from(node));
-                new_edges.push(EdgeData {
-                    source_node_id: node,
-                    source_coordinate: pos,
-                    source_strand: strand,
-                    target_node_id: seq_node,
-                    target_coordinate: 0,
-                    target_strand: Strand::Forward,
-                });
+                let (left_node, left_strand, left_pos) = path_changes["left"];
+                bg_nodes.push(Value::from(left_node));
+                let (right_node, right_strand, right_pos) = path_changes["right"];
+                bg_nodes.push(Value::from(right_node));
+                (
+                    Some(NodePoint {
+                        id: left_node,
+                        coordinate: left_pos,
+                        strand: left_strand,
+                    }),
+                    Some(NodePoint {
+                        id: right_node,
+                        coordinate: right_pos,
+                        strand: right_strand,
+                    }),
+                )
+            };
 
-                let (node, strand, pos) = path_changes["right"];
-                bg_nodes.push(Value::from(node));
-                new_edges.push(EdgeData {
-                    source_node_id: seq_node,
-                    source_coordinate: sequence.length,
-                    source_strand: Strand::Forward,
-                    target_node_id: node,
-                    target_coordinate: pos,
-                    target_strand: strand,
-                });
-            }
-
-            let edge_ids = Edge::bulk_create(conn, &new_edges);
             let bgs = BlockGroup::query(
                 conn,
                 "select distinct bg.* from block_groups bg left join block_group_edges bge on (bg.id = bge.block_group_id) left join edges e on (e.id = bge.edge_id and (e.source_node_id in rarray(?3) or e.target_node_id in rarray(?3))) where collection_name = ?1 and sample_name = ?2",
                 params!(collection_name.to_string(), sample_name, Rc::new(bg_nodes)),
             );
             for bg in bgs.iter() {
+                let new_edges = plan_gaf_change_edges(
+                    conn,
+                    bg.id,
+                    seq_node,
+                    sequence.length,
+                    left_anchor.as_ref(),
+                    right_anchor.as_ref(),
+                );
+                let edge_ids = Edge::bulk_create(conn, &new_edges);
                 let new_block_group_edges = edge_ids
                     .iter()
                     .map(|edge_id| BlockGroupEdgeData {
@@ -420,7 +457,140 @@ mod tests {
     use petgraph::Direction;
 
     use super::*;
-    use crate::{imports::gfa::import_gfa, test_helpers::setup_gen};
+    use crate::{
+        imports::gfa::import_gfa,
+        test_helpers::{get_connection, setup_block_group, setup_gen},
+    };
+
+    fn gaf_test_node_ids(
+        conn: &gen_models::db::GraphConnection,
+        block_group_id: HashId,
+    ) -> (HashId, HashId, HashId, HashId) {
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let a_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == PATH_START_NODE_ID)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let t_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == a_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let c_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == t_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let g_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == c_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        (a_node_id, t_node_id, c_node_id, g_node_id)
+    }
+
+    #[test]
+    fn test_gaf_change_preserves_incoming_edges_at_start_boundary() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, _) = setup_block_group(&conn);
+        let (a_node_id, t_node_id, _, g_node_id) = gaf_test_node_ids(&conn, block_group_id);
+        let sequence_node_id = HashId::convert_str("insert-node");
+        let branch_edge = Edge::create(
+            &conn,
+            g_node_id,
+            10,
+            Strand::Forward,
+            t_node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: branch_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let edges = plan_gaf_change_edges(
+            &conn,
+            block_group_id,
+            sequence_node_id,
+            2,
+            Some(&NodePoint {
+                id: t_node_id,
+                coordinate: 0,
+                strand: Strand::Forward,
+            }),
+            None,
+        );
+
+        for source_node_id in [a_node_id, g_node_id] {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.source_node_id == source_node_id && edge.target_node_id == sequence_node_id
+                }),
+                "GAF update should retain incoming route from {source_node_id}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_gaf_change_preserves_outgoing_edges_at_end_boundary() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, _) = setup_block_group(&conn);
+        let (_, t_node_id, c_node_id, g_node_id) = gaf_test_node_ids(&conn, block_group_id);
+        let sequence_node_id = HashId::convert_str("insert-node");
+        let branch_edge = Edge::create(
+            &conn,
+            t_node_id,
+            10,
+            Strand::Forward,
+            g_node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: branch_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let edges = plan_gaf_change_edges(
+            &conn,
+            block_group_id,
+            sequence_node_id,
+            2,
+            None,
+            Some(&NodePoint {
+                id: t_node_id,
+                coordinate: 10,
+                strand: Strand::Forward,
+            }),
+        );
+
+        for target_node_id in [c_node_id, g_node_id] {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.source_node_id == sequence_node_id && edge.target_node_id == target_node_id
+                }),
+                "GAF update should retain outgoing route to {target_node_id}",
+            );
+        }
+    }
 
     mod test_transform {
         use super::*;
