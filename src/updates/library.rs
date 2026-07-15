@@ -10,6 +10,7 @@ use gen_models::{
     errors::{BlockGroupError, OperationError, PathError, SampleError},
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo, OperationSummary},
+    path::Path,
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
 };
@@ -301,6 +302,13 @@ fn update_path_library(
         Some(target_block_group.id),
         false,
     )?;
+    let (incoming_boundary_points, outgoing_boundary_points) = path_boundary_points(
+        conn,
+        target_block_group.id,
+        &parent_path,
+        start_coordinate,
+        end_coordinate,
+    )?;
 
     let (library_block_group_chunk, part_nodes) = create_library(
         conn,
@@ -331,13 +339,17 @@ fn update_path_library(
     if start_coordinate > 0 {
         let start_chunk = derived_block_group_chunks[0].clone();
         reference_block_group_chunks.push(start_chunk.clone());
-        let pathless_start_chunk = BlockGroupChunk {
+        let mut pathless_start_chunk = BlockGroupChunk {
             entry_node_points: start_chunk.entry_node_points.clone(),
             exit_node_points: start_chunk.exit_node_points.clone(),
             path_edges: vec![],
             path_start_point: None,
             path_end_point: None,
         };
+        extend_unique_points(
+            &mut pathless_start_chunk.exit_node_points,
+            incoming_boundary_points.clone(),
+        );
         block_group_chunks.push(pathless_start_chunk);
 
         chunk_index += 1;
@@ -351,13 +363,17 @@ fn update_path_library(
     if end_coordinate < parent_path_length {
         let end_chunk = derived_block_group_chunks[chunk_index].clone();
         reference_block_group_chunks.push(end_chunk.clone());
-        let pathless_end_chunk = BlockGroupChunk {
+        let mut pathless_end_chunk = BlockGroupChunk {
             entry_node_points: end_chunk.entry_node_points.clone(),
             exit_node_points: end_chunk.exit_node_points.clone(),
             path_edges: vec![],
             path_start_point: None,
             path_end_point: None,
         };
+        extend_unique_points(
+            &mut pathless_end_chunk.entry_node_points,
+            outgoing_boundary_points.clone(),
+        );
         block_group_chunks.push(pathless_end_chunk);
     }
 
@@ -379,6 +395,88 @@ fn update_path_library(
     )?;
 
     Ok(())
+}
+
+fn path_boundary_points(
+    conn: &gen_models::db::GraphConnection,
+    block_group_id: gen_core::HashId,
+    path: &Path,
+    start_coordinate: i64,
+    end_coordinate: i64,
+) -> Result<(Vec<NodePoint>, Vec<NodePoint>), UpdateWithLibraryError> {
+    let interval_tree = path.intervaltree(conn)?;
+    let start_block = interval_tree
+        .query_point(start_coordinate)
+        .next()
+        .ok_or_else(|| UpdateWithLibraryError::BlockGroupLookupFailed(path.name.clone()))?
+        .value;
+    let end_block = interval_tree
+        .query_point(end_coordinate - 1)
+        .next()
+        .ok_or_else(|| UpdateWithLibraryError::BlockGroupLookupFailed(path.name.clone()))?
+        .value;
+    let start_node_coordinate = start_coordinate - start_block.start + start_block.sequence_start;
+    let end_node_coordinate = end_coordinate - end_block.start + end_block.sequence_start;
+    adjacent_boundary_points(
+        conn,
+        block_group_id,
+        &[NodePoint {
+            id: start_block.node_id,
+            coordinate: start_node_coordinate,
+            strand: start_block.strand,
+        }],
+        &[NodePoint {
+            id: end_block.node_id,
+            coordinate: end_node_coordinate,
+            strand: end_block.strand,
+        }],
+    )
+}
+
+fn adjacent_boundary_points(
+    conn: &gen_models::db::GraphConnection,
+    block_group_id: gen_core::HashId,
+    start_points: &[NodePoint],
+    end_points: &[NodePoint],
+) -> Result<(Vec<NodePoint>, Vec<NodePoint>), UpdateWithLibraryError> {
+    let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+    let incoming_points = edges
+        .iter()
+        .filter(|edge| {
+            start_points.iter().any(|point| {
+                edge.edge.target_node_id == point.id
+                    && edge.edge.target_coordinate == point.coordinate
+            })
+        })
+        .map(|edge| NodePoint {
+            id: edge.edge.source_node_id,
+            coordinate: edge.edge.source_coordinate,
+            strand: edge.edge.source_strand,
+        })
+        .collect();
+    let outgoing_points = edges
+        .iter()
+        .filter(|edge| {
+            end_points.iter().any(|point| {
+                edge.edge.source_node_id == point.id
+                    && edge.edge.source_coordinate == point.coordinate
+            })
+        })
+        .map(|edge| NodePoint {
+            id: edge.edge.target_node_id,
+            coordinate: edge.edge.target_coordinate,
+            strand: edge.edge.target_strand,
+        })
+        .collect();
+    Ok((incoming_points, outgoing_points))
+}
+
+fn extend_unique_points(points: &mut Vec<NodePoint>, additional_points: Vec<NodePoint>) {
+    for point in additional_points {
+        if !points.contains(&point) {
+            points.push(point);
+        }
+    }
 }
 
 fn update_graph_native_library(
@@ -412,20 +510,30 @@ fn update_graph_native_library(
         &part_nodes,
     )?;
 
-    let start_chunk = BlockGroupChunk {
-        entry_node_points: graph_node_positions_to_points(start_positions),
-        exit_node_points: graph_node_positions_to_points(start_positions),
+    let start_node_points = graph_node_positions_to_points(start_positions);
+    let end_node_points = graph_node_positions_to_points(end_positions);
+    let (incoming_boundary_points, outgoing_boundary_points) = adjacent_boundary_points(
+        conn,
+        target_block_group.id,
+        &start_node_points,
+        &end_node_points,
+    )?;
+    let mut start_chunk = BlockGroupChunk {
+        entry_node_points: start_node_points.clone(),
+        exit_node_points: start_node_points,
         path_edges: vec![],
         path_start_point: None,
         path_end_point: None,
     };
-    let end_chunk = BlockGroupChunk {
-        entry_node_points: graph_node_positions_to_points(end_positions),
-        exit_node_points: graph_node_positions_to_points(end_positions),
+    extend_unique_points(&mut start_chunk.exit_node_points, incoming_boundary_points);
+    let mut end_chunk = BlockGroupChunk {
+        entry_node_points: end_node_points.clone(),
+        exit_node_points: end_node_points,
         path_edges: vec![],
         path_start_point: None,
         path_end_point: None,
     };
+    extend_unique_points(&mut end_chunk.entry_node_points, outgoing_boundary_points);
 
     let stitched_start = stitch(conn, &start_chunk, &library_chunk, target_block_group.id)?;
     let _stitched_end = stitch(conn, &stitched_start, &end_chunk, target_block_group.id)?;
@@ -499,11 +607,16 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use anyhow::Result;
+    use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::{
         annotations::{Annotation, add_annotation},
         block_group::BlockGroup,
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        edge::Edge,
+        node::Node,
         path::Path,
         sample_lineage::SampleLineage,
+        sequence::Sequence,
     };
 
     use super::*;
@@ -511,6 +624,259 @@ mod tests {
         graphs::combinatorial_library::parse_library, imports::fasta::import_fasta,
         test_helpers::setup_gen,
     };
+
+    fn test_parts(sequences: &[&str]) -> Vec<Vec<SequencePart>> {
+        vec![
+            sequences
+                .iter()
+                .enumerate()
+                .map(|(index, sequence)| SequencePart {
+                    name: format!("part-{index}"),
+                    sequence: sequence.to_string(),
+                    sequence_length: sequence.len() as i64,
+                })
+                .collect(),
+        ]
+    }
+
+    fn setup_path_library_boundary_test(
+        incoming: bool,
+        annotation_range: Option<&str>,
+    ) -> (DbContext, HashId, Vec<HashId>) {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            "test",
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        let block_group = crate::test_helpers::get_sample_bg(conn, "test", Sample::DEFAULT_NAME);
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+        let original_node_id = path
+            .intervaltree(conn)
+            .unwrap()
+            .query_point(10)
+            .next()
+            .unwrap()
+            .value
+            .node_id;
+        if let Some(annotation_range) = annotation_range {
+            add_annotation(
+                &context,
+                "test",
+                "boundary",
+                None,
+                Sample::DEFAULT_NAME,
+                annotation_range,
+            )
+            .unwrap();
+        }
+        let mut branch_node_ids = Vec::new();
+        let mut edge_ids = Vec::new();
+        for index in 0..3 {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("NN")
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(
+                conn,
+                &sequence.hash,
+                &HashId::convert_str(&format!("boundary-branch-{incoming}-{index}")),
+            )
+            .unwrap();
+            branch_node_ids.push(node_id);
+            let edges = if incoming {
+                [
+                    Edge::create(
+                        conn,
+                        PATH_START_NODE_ID,
+                        0,
+                        Strand::Forward,
+                        node_id,
+                        0,
+                        Strand::Forward,
+                    )
+                    .unwrap(),
+                    Edge::create(
+                        conn,
+                        node_id,
+                        2,
+                        Strand::Forward,
+                        original_node_id,
+                        20,
+                        Strand::Forward,
+                    )
+                    .unwrap(),
+                ]
+            } else {
+                [
+                    Edge::create(
+                        conn,
+                        original_node_id,
+                        7,
+                        Strand::Forward,
+                        node_id,
+                        0,
+                        Strand::Forward,
+                    )
+                    .unwrap(),
+                    Edge::create(
+                        conn,
+                        node_id,
+                        2,
+                        Strand::Forward,
+                        PATH_END_NODE_ID,
+                        0,
+                        Strand::Forward,
+                    )
+                    .unwrap(),
+                ]
+            };
+            edge_ids.extend(edges.map(|edge| edge.id));
+        }
+        BlockGroupEdge::bulk_create(
+            conn,
+            &edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        (context, original_node_id, branch_node_ids)
+    }
+
+    #[test]
+    fn test_path_library_preserves_incoming_edges_at_start_boundary() {
+        let (context, original_node_id, branch_node_ids) =
+            setup_path_library_boundary_test(true, None);
+        update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "updated",
+            "m123:20-25",
+            test_parts(&["GG"]),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        for branch_node_id in branch_node_ids {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.edge.source_node_id == branch_node_id
+                        && edge.edge.target_node_id != original_node_id
+                        && edge.edge.target_coordinate == 0
+                }),
+                "library update should retain incoming route from {branch_node_id}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_path_library_preserves_outgoing_edges_at_end_boundary() {
+        let (context, original_node_id, branch_node_ids) =
+            setup_path_library_boundary_test(false, None);
+        update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "updated",
+            "m123:2-7",
+            test_parts(&["GG"]),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        for branch_node_id in branch_node_ids {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.edge.source_node_id != original_node_id
+                        && edge.edge.source_node_id != PATH_START_NODE_ID
+                        && edge.edge.target_node_id == branch_node_id
+                }),
+                "library update should retain outgoing route to {branch_node_id}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_graph_library_preserves_incoming_edges_at_start_boundary() {
+        let (context, original_node_id, branch_node_ids) =
+            setup_path_library_boundary_test(true, Some("m123:20-25"));
+        update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "updated",
+            "boundary",
+            test_parts(&["GG"]),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        for branch_node_id in branch_node_ids {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.edge.source_node_id == branch_node_id
+                        && edge.edge.target_node_id != original_node_id
+                        && edge.edge.target_coordinate == 0
+                }),
+                "graph library update should retain incoming route from {branch_node_id}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_graph_library_preserves_outgoing_edges_at_end_boundary() {
+        let (context, original_node_id, branch_node_ids) =
+            setup_path_library_boundary_test(false, Some("m123:2-7"));
+        update_with_library(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "updated",
+            "boundary",
+            test_parts(&["GG"]),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        for branch_node_id in branch_node_ids {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.edge.source_node_id != original_node_id
+                        && edge.edge.source_node_id != PATH_START_NODE_ID
+                        && edge.edge.target_node_id == branch_node_id
+                }),
+                "graph library update should retain outgoing route to {branch_node_id}",
+            );
+        }
+    }
 
     #[test]
     fn makes_a_pool() -> Result<()> {
