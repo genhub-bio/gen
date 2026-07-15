@@ -21,7 +21,67 @@ use crate::{
     errors::SequenceUpdateError,
     gfa::bool_to_strand,
     gfa_reader::{Gfa, Segment},
+    graphs::NodePoint,
+    updates::adjacent_boundary_points,
 };
+
+fn plan_gfa_boundary_edges(
+    conn: &GraphConnection,
+    block_group_id: HashId,
+    source: &NodePoint,
+    target: &NodePoint,
+) -> Vec<EdgeData> {
+    let (incoming_points, outgoing_points) = adjacent_boundary_points(
+        conn,
+        block_group_id,
+        core::slice::from_ref(source),
+        core::slice::from_ref(target),
+    );
+    let mut edges = vec![gfa_edge(source, target)];
+    edges.extend(incoming_points.into_iter().map(|incoming| EdgeData {
+        source_node_id: incoming.id,
+        source_coordinate: incoming.coordinate,
+        source_strand: incoming.strand,
+        ..gfa_edge(source, target)
+    }));
+    edges.extend(outgoing_points.into_iter().map(|outgoing| EdgeData {
+        target_node_id: outgoing.id,
+        target_coordinate: outgoing.coordinate,
+        target_strand: outgoing.strand,
+        ..gfa_edge(source, target)
+    }));
+    edges
+}
+
+fn gfa_edge(source: &NodePoint, target: &NodePoint) -> EdgeData {
+    EdgeData {
+        source_node_id: source.id,
+        source_coordinate: source.coordinate,
+        source_strand: source.strand,
+        target_node_id: target.id,
+        target_coordinate: target.coordinate,
+        target_strand: target.strand,
+    }
+}
+
+fn add_gfa_boundary_edges(
+    path_edges: &mut Vec<AugmentedEdgeData>,
+    boundary_edges: &mut Vec<AugmentedEdgeData>,
+    planned_edges: Vec<EdgeData>,
+) {
+    for (index, edge_data) in planned_edges.into_iter().enumerate() {
+        let edge = AugmentedEdgeData {
+            edge_data,
+            chromosome_index: 1,
+            phased: 0,
+        };
+        if index == 0 {
+            path_edges.push(edge);
+        } else {
+            boundary_edges.push(edge);
+        }
+    }
+}
 
 #[cfg_attr(
     all(debug_assertions, feature = "profiling"),
@@ -240,6 +300,7 @@ fn create_new_path_from_existing(
     gfa: &Gfa<String, (), ()>,
     segments_by_id: &HashMap<String, &Segment<String, ()>>,
 ) -> Result<(), SequenceUpdateError> {
+    let block_group_id = existing_path.block_group_id;
     let interval_tree = existing_path.intervaltree(conn)?;
     let mut existing_path_ranges_by_segment_id = HashMap::new();
     let mut existing_path_position = 0;
@@ -266,7 +327,9 @@ fn create_new_path_from_existing(
     let mut previous_node_id = PATH_START_NODE_ID;
     let mut previous_node_coordinate = -1;
     let mut previous_node_strand = Strand::Forward;
+    let mut previous_node_is_new = false;
     let mut new_path_edges = vec![];
+    let mut boundary_edges = vec![];
     let mut healing_edges = vec![];
     for (i, segment_id) in unmatched_path_segment_ids.iter().enumerate() {
         if let Some((path_start, path_end)) = existing_path_ranges_by_segment_id.get(segment_id) {
@@ -296,18 +359,29 @@ fn create_new_path_from_existing(
             // NOTE: We're assuming that if the previous segment was on the same node ID as the
             // block with the start coordinate, they are contiguous, so no new edge is needed
             if previous_node_id != block_with_start.node_id {
-                new_path_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: previous_node_id,
-                        source_coordinate: previous_node_coordinate,
-                        source_strand: previous_node_strand,
-                        target_node_id: block_with_start.node_id,
-                        target_coordinate,
-                        target_strand: block_with_start.strand,
-                    },
-                    chromosome_index: 1,
-                    phased: 0,
-                });
+                let source = NodePoint {
+                    id: previous_node_id,
+                    coordinate: previous_node_coordinate,
+                    strand: previous_node_strand,
+                };
+                let target = NodePoint {
+                    id: block_with_start.node_id,
+                    coordinate: target_coordinate,
+                    strand: block_with_start.strand,
+                };
+                if previous_node_is_new {
+                    add_gfa_boundary_edges(
+                        &mut new_path_edges,
+                        &mut boundary_edges,
+                        plan_gfa_boundary_edges(conn, block_group_id, &source, &target),
+                    );
+                } else {
+                    add_gfa_boundary_edges(
+                        &mut new_path_edges,
+                        &mut boundary_edges,
+                        vec![gfa_edge(&source, &target)],
+                    );
+                }
 
                 // Create the boundary edges that will be interrupted by the new path
                 if !is_terminal(block_with_start.node_id) && *path_start > 0 {
@@ -345,6 +419,7 @@ fn create_new_path_from_existing(
             previous_node_coordinate =
                 block_with_end.sequence_start + existing_path_position - block_with_end.start;
             previous_node_strand = block_with_end.strand;
+            previous_node_is_new = false;
         } else {
             // Current segment is new.  Create a sequence and node for it, then add an edge to the
             // new node
@@ -371,18 +446,24 @@ fn create_new_path_from_existing(
                         index: i,
                     }
                 })?);
-            new_path_edges.push(AugmentedEdgeData {
-                edge_data: EdgeData {
-                    source_node_id: previous_node_id,
-                    source_coordinate: previous_node_coordinate,
-                    source_strand: previous_node_strand,
-                    target_node_id: node_id,
-                    target_coordinate: 0,
-                    target_strand: next_node_strand,
-                },
-                chromosome_index: 1,
-                phased: 0,
-            });
+            add_gfa_boundary_edges(
+                &mut new_path_edges,
+                &mut boundary_edges,
+                plan_gfa_boundary_edges(
+                    conn,
+                    block_group_id,
+                    &NodePoint {
+                        id: previous_node_id,
+                        coordinate: previous_node_coordinate,
+                        strand: previous_node_strand,
+                    },
+                    &NodePoint {
+                        id: node_id,
+                        coordinate: 0,
+                        strand: next_node_strand,
+                    },
+                ),
+            );
             healing_edges.push(AugmentedEdgeData {
                 edge_data: EdgeData {
                     source_node_id: previous_node_id,
@@ -398,6 +479,7 @@ fn create_new_path_from_existing(
             previous_node_id = node_id;
             previous_node_coordinate = segment_sequence.len() as i64;
             previous_node_strand = next_node_strand;
+            previous_node_is_new = true;
         }
     }
 
@@ -426,18 +508,24 @@ fn create_new_path_from_existing(
             phased: 0,
         });
     } else {
-        new_path_edges.push(AugmentedEdgeData {
-            edge_data: EdgeData {
-                source_node_id: previous_node_id,
-                source_coordinate: previous_node_coordinate,
-                source_strand: previous_node_strand,
-                target_node_id: PATH_END_NODE_ID,
-                target_coordinate: 0,
-                target_strand: Strand::Forward,
-            },
-            chromosome_index: 1,
-            phased: 0,
-        });
+        add_gfa_boundary_edges(
+            &mut new_path_edges,
+            &mut boundary_edges,
+            plan_gfa_boundary_edges(
+                conn,
+                block_group_id,
+                &NodePoint {
+                    id: previous_node_id,
+                    coordinate: previous_node_coordinate,
+                    strand: previous_node_strand,
+                },
+                &NodePoint {
+                    id: PATH_END_NODE_ID,
+                    coordinate: 0,
+                    strand: Strand::Forward,
+                },
+            ),
+        );
         healing_edges.push(AugmentedEdgeData {
             edge_data: EdgeData {
                 source_node_id: previous_node_id,
@@ -452,7 +540,6 @@ fn create_new_path_from_existing(
         });
     }
 
-    let block_group_id = existing_path.block_group_id;
     let new_edge_ids = Edge::bulk_create(
         conn,
         &new_path_edges
@@ -467,8 +554,15 @@ fn create_new_path_from_existing(
             .map(|edge| edge.edge_data)
             .collect::<Vec<EdgeData>>(),
     );
-    let all_edges = [new_path_edges, healing_edges].concat();
-    let all_edge_ids = [new_edge_ids.clone(), healing_edge_ids].concat();
+    let boundary_edge_ids = Edge::bulk_create(
+        conn,
+        &boundary_edges
+            .iter()
+            .map(|edge| edge.edge_data)
+            .collect::<Vec<EdgeData>>(),
+    );
+    let all_edges = [new_path_edges, healing_edges, boundary_edges].concat();
+    let all_edge_ids = [new_edge_ids.clone(), healing_edge_ids, boundary_edge_ids].concat();
     let block_group_edges = all_edge_ids
         .iter()
         .enumerate()
@@ -494,7 +588,142 @@ mod tests {
     use rusqlite::types::Value as SQLValue;
 
     use super::*;
-    use crate::{imports::fasta::import_fasta, test_helpers::setup_gen};
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{get_connection, setup_block_group, setup_gen},
+    };
+
+    fn gfa_test_node_ids(
+        conn: &GraphConnection,
+        block_group_id: HashId,
+    ) -> (HashId, HashId, HashId, HashId) {
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let a_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == PATH_START_NODE_ID)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let t_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == a_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let c_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == t_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let g_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == c_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        (a_node_id, t_node_id, c_node_id, g_node_id)
+    }
+
+    #[test]
+    fn test_gfa_change_preserves_incoming_edges_at_start_boundary() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, _) = setup_block_group(&conn);
+        let (a_node_id, t_node_id, _, g_node_id) = gfa_test_node_ids(&conn, block_group_id);
+        let branch_edge = Edge::create(
+            &conn,
+            g_node_id,
+            10,
+            Strand::Forward,
+            t_node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: branch_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+        let new_node_id = HashId::convert_str("gfa-new-node");
+        let edges = plan_gfa_boundary_edges(
+            &conn,
+            block_group_id,
+            &NodePoint {
+                id: t_node_id,
+                coordinate: 0,
+                strand: Strand::Forward,
+            },
+            &NodePoint {
+                id: new_node_id,
+                coordinate: 0,
+                strand: Strand::Forward,
+            },
+        );
+
+        for source_node_id in [a_node_id, g_node_id] {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.source_node_id == source_node_id && edge.target_node_id == new_node_id
+                }),
+                "GFA update should retain incoming route from {source_node_id}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_gfa_change_preserves_outgoing_edges_at_end_boundary() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, _) = setup_block_group(&conn);
+        let (_, t_node_id, c_node_id, g_node_id) = gfa_test_node_ids(&conn, block_group_id);
+        let branch_edge = Edge::create(
+            &conn,
+            t_node_id,
+            10,
+            Strand::Forward,
+            g_node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: branch_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+        let new_node_id = HashId::convert_str("gfa-new-node");
+        let edges = plan_gfa_boundary_edges(
+            &conn,
+            block_group_id,
+            &NodePoint {
+                id: new_node_id,
+                coordinate: 2,
+                strand: Strand::Forward,
+            },
+            &NodePoint {
+                id: t_node_id,
+                coordinate: 10,
+                strand: Strand::Forward,
+            },
+        );
+
+        for target_node_id in [c_node_id, g_node_id] {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.source_node_id == new_node_id && edge.target_node_id == target_node_id
+                }),
+                "GFA update should retain outgoing route to {target_node_id}",
+            );
+        }
+    }
 
     #[test]
     fn test_basic_update() {
