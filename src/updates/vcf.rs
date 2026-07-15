@@ -39,6 +39,7 @@ use thiserror::Error;
 use crate::{
     parse_genotype,
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
+    updates::prepare_path_update_region,
 };
 
 const VCF_CHANGE_APPLY_CHUNK_SIZE: usize = 5_000;
@@ -238,7 +239,7 @@ fn prepare_vcf_entry(
             sequence_hash = sequence.hash
         )),
     )?;
-    let change = prepare_change(
+    let mut change = prepare_change(
         path_region,
         ids,
         ref_start,
@@ -250,6 +251,7 @@ fn prepare_vcf_entry(
         node_id,
         has_ref,
     )?;
+    prepare_path_update_region(conn, &mut change.region)?;
     Ok(VcfEntry {
         sample_name: sample_name.to_string(),
         change,

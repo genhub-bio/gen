@@ -566,7 +566,9 @@ impl ResolvedGenRegion {
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         match self.kind {
-            ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
+            ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup
+                if self.start_anchors.is_none() || self.end_anchors.is_none() =>
+            {
                 let local_tree;
                 let tree = match tree {
                     Some(tree) => tree,
@@ -577,7 +579,10 @@ impl ResolvedGenRegion {
                 };
                 return BlockGroup::set_up_new_edges(change, tree);
             }
-            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {}
+            ResolvedRegionKind::Path
+            | ResolvedRegionKind::BlockGroup
+            | ResolvedRegionKind::Annotation
+            | ResolvedRegionKind::Accession => {}
         };
 
         let graph_positions_from_tree = |coordinate| {
@@ -874,7 +879,7 @@ mod tests {
             path: None,
             accession: None,
             annotation: None,
-            kind: ResolvedRegionKind::Annotation,
+            kind: ResolvedRegionKind::Path,
             anchor_start: 0,
             anchor_end: 0,
             feature_length: 0,

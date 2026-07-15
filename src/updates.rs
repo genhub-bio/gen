@@ -1,4 +1,5 @@
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
+use gen_graph::{GraphNode, GraphNodePosition};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange},
     db::GraphConnection,
@@ -106,6 +107,62 @@ pub(crate) struct SequenceUpdate<'a> {
     pub disable_reference_path_update: bool,
 }
 
+pub(crate) fn prepare_path_update_region(
+    conn: &GraphConnection,
+    region: &mut ResolvedGenRegion,
+) -> Result<(), BlockGroupError> {
+    if region.kind != ResolvedRegionKind::Path
+        || region.start <= 0
+        || region.end >= region.feature_length
+    {
+        return Ok(());
+    }
+    let path = region
+        .path
+        .as_ref()
+        .expect("should have a path for a path region");
+    let interval_tree = path.intervaltree(conn)?;
+    let start_block = interval_tree
+        .query_point(region.start)
+        .next()
+        .ok_or_else(|| BlockGroupError::ChangeOutOfBounds("missing path start block".to_string()))?
+        .value;
+    let end_coordinate = if region.end == region.start {
+        region.end
+    } else {
+        region.end - 1
+    };
+    let end_block = interval_tree
+        .query_point(end_coordinate)
+        .next()
+        .ok_or_else(|| BlockGroupError::ChangeOutOfBounds("missing path end block".to_string()))?
+        .value;
+    let starts_at_node_boundary =
+        region.start - start_block.start + start_block.sequence_start == start_block.sequence_start;
+    let ends_at_node_boundary =
+        region.end - end_block.start + end_block.sequence_start == end_block.sequence_end;
+    if !starts_at_node_boundary && !ends_at_node_boundary {
+        return Ok(());
+    }
+    region.start_anchors = Some(vec![GraphNodePosition {
+        graph_node: GraphNode {
+            node_id: start_block.node_id,
+            sequence_start: start_block.sequence_start,
+            sequence_end: start_block.sequence_end,
+        },
+        offset: region.start - start_block.start,
+    }]);
+    region.end_anchors = Some(vec![GraphNodePosition {
+        graph_node: GraphNode {
+            node_id: end_block.node_id,
+            sequence_start: end_block.sequence_start,
+            sequence_end: end_block.sequence_end,
+        },
+        offset: region.end - end_block.start,
+    }]);
+    Ok(())
+}
+
 pub(crate) fn apply_sequence_updates<E>(
     conn: &GraphConnection,
     update: &SequenceUpdate<'_>,
@@ -193,8 +250,9 @@ where
                 path_end: update.region.end,
                 strand: Strand::Forward,
             };
-            let target_region =
+            let mut target_region =
                 target_update_region(conn, update.region, target_block_group.id, path.as_ref())?;
+            prepare_path_update_region(conn, &mut target_region)?;
             insert_update_change(conn, target_region, InsertChangeData::new(block))?;
 
             if update_reference_path && let Some(path) = &path {

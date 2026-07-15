@@ -19,7 +19,10 @@ use gen_models::{
 use itertools::Itertools;
 use rusqlite::{params, types::Value};
 
-use crate::genbank::{EditType, GenBankError, process_sequence};
+use crate::{
+    genbank::{EditType, GenBankError, process_sequence},
+    updates::prepare_path_update_region,
+};
 
 pub fn update_with_genbank<'a, R>(
     context: &DbContext,
@@ -159,8 +162,9 @@ where
                 for edit in locus.changes_to_wt() {
                     let start = edit.start;
                     let end = edit.end;
-                    let region =
+                    let mut region =
                         ResolvedGenRegion::from_path(conn, block_group.id, &path, start, end)?;
+                    prepare_path_update_region(conn, &mut region)?;
                     let change = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()
