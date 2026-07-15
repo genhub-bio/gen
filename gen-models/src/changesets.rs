@@ -1288,6 +1288,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        errors::OperationError,
         file_types::FileTypes,
         operations::{OperationFile, OperationInfo},
         sample::{NewSample, Sample},
@@ -1688,6 +1689,92 @@ mod tests {
         let dependencies = operation.get_changeset_dependencies(context.workspace());
         assert_eq!(dependencies.samples.len(), 1);
         assert_eq!(dependencies.samples[0].name, "parent");
+    }
+
+    // Deletes a sample created in a prior operation.
+    #[test]
+    #[should_panic(expected = "ApiMisuse")]
+    fn test_deleting_a_sample_created_in_a_prior_operation_cannot_be_tracked() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        let mut first_session = start_operation(conn);
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "doomed",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+        let _ = end_operation(
+            &context,
+            &mut first_session,
+            &OperationInfo {
+                files: vec![],
+                description: "create op".to_string(),
+            },
+            "create op",
+            None,
+        )
+        .unwrap();
+
+        let mut second_session = start_operation(conn);
+        conn.execute("DELETE FROM samples WHERE name = 'doomed'", [])
+            .unwrap();
+
+        // Panics inside process_changesetiter on a new_value() unwrap for the DELETE row.
+        let _ = end_operation(
+            &context,
+            &mut second_session,
+            &OperationInfo {
+                files: vec![],
+                description: "delete op".to_string(),
+            },
+            "delete op",
+            None,
+        );
+    }
+
+    // If the insert and the delete both happen inside the same session, the sqlite session
+    // module nets them out to no change at all for that row, resultin in a no-change error.
+    #[test]
+    fn test_creating_and_deleting_a_sample_in_the_same_session_cancels_out() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let op_conn = context.operations().conn();
+
+        let db_uuid = crate::metadata::get_db_uuid(conn);
+        crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+
+        let mut session = start_operation(conn);
+        let _ = Sample::create(
+            conn,
+            NewSample {
+                name: "doomed",
+                is_reference: false,
+            },
+        )
+        .unwrap();
+        conn.execute("DELETE FROM samples WHERE name = 'doomed'", [])
+            .unwrap();
+
+        let result = end_operation(
+            &context,
+            &mut session,
+            &OperationInfo {
+                files: vec![],
+                description: "create and delete op".to_string(),
+            },
+            "create and delete op",
+            None,
+        );
+
+        assert!(matches!(result, Err(OperationError::NoChanges)));
     }
 
     #[test]
