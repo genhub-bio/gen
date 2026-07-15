@@ -28,7 +28,7 @@ pub enum SequenceUpdateError {
     NodeError(#[from] NodeError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
-    #[error("Block group creation error: {0}")]
+    #[error("Sequence graph creation error: {0}")]
     BlockGroupError(#[from] BlockGroupError),
     #[error("Sample creation error: {0}")]
     SampleError(#[from] SampleError),
@@ -48,7 +48,9 @@ pub enum SequenceUpdateError {
     MissingCoordinates(String),
     #[error("Unsupported region type for sequence update: {0}")]
     UnsupportedRegionType(String),
-    #[error("Resolved path '{path_name}' was not found in target block group '{block_group_name}'")]
+    #[error(
+        "Resolved path '{path_name}' was not found in target sequence graph '{block_group_name}'"
+    )]
     MissingResolvedPath {
         path_name: String,
         block_group_name: String,

@@ -77,7 +77,7 @@ pub fn derive_subgraph_operation(
         return Err(err.into());
     }
 
-    let summary_str = format!(" {}: new derived block group", new_sample_name,);
+    let summary_str = format!(" {}: new derived sequence graph", new_sample_name,);
 
     let _op = end_operation(
         db_context,
