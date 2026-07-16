@@ -1,4 +1,4 @@
-.PHONY: python jupyter r r-test release-check-js clean build clippy-fix docker-build gif
+.PHONY: python jupyter r r-test release-check-js clean build clippy-fix docker-build gif wasm-jupyter
 python:
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
@@ -71,3 +71,25 @@ gif:
 		fi; \
 		(cd $$dir && vhs $$(basename $$tape)) || exit 1; \
 	done
+# Builds gen for wasm32-unknown-emscripten and serves it in a cockle/JupyterLite terminal at
+# http://localhost:4501, using the self-contained wasm-demo/ page (built on the published
+# @jupyterlite/cockle npm package, no sibling checkout of the cockle repo needed). Requires a
+# `gen-emscripten` conda env (pinned emcc/binaryen) and micromamba (ships with miniforge, used by
+# cockle's own wasm-package fetch step). Override CONDA_SH/MICROMAMBA_DIR to match your machine.
+CONDA_SH ?= /opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh
+MICROMAMBA_DIR ?= /opt/homebrew/Caskroom/miniforge/base
+wasm-jupyter:
+	@test -f $(CONDA_SH) || (echo "conda.sh not found at $(CONDA_SH); set CONDA_SH=/path/to/conda.sh" && exit 1)
+	@test -x $(MICROMAMBA_DIR)/micromamba || (echo "micromamba not found in $(MICROMAMBA_DIR); set MICROMAMBA_DIR=/path/to/dir/containing/micromamba" && exit 1)
+	bash -lc '\
+		source $(CONDA_SH) && \
+		conda activate gen-emscripten && \
+		export LIBCLANG_PATH="$$CONDA_PREFIX/lib" && \
+		CC=emcc CXX=em++ AR=emar RUSTFLAGS="-C panic=unwind -C opt-level=1 -C link-arg=-sSTACK_SIZE=8388608 -C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_NAME=Module -C link-arg=-sEXPORTED_RUNTIME_METHODS=FS,TTY,ENV -C link-arg=-lproxyfs.js" \
+		cargo build --release --bin gen --target wasm32-unknown-emscripten \
+	'
+	cd wasm-demo && npm install
+	mkdir -p wasm-demo/gen-wasm
+	cp target/wasm32-unknown-emscripten/release/gen.js target/wasm32-unknown-emscripten/release/gen.wasm wasm-demo/gen-wasm/
+	cd wasm-demo && PATH="$(MICROMAMBA_DIR):$$PATH" npm run build
+	cd wasm-demo && npm run serve

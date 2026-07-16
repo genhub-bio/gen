@@ -50,6 +50,11 @@ gen-python/python/gen/static/jupyter_widget.js.map
 # Cap'n proto generated files
 **/generated/*capnp.rs
 
+# wasm demo build output
+wasm-demo/dist/
+wasm-demo/gen-wasm/
+wasm-demo/cockle_wasm_env/
+
 # precommit stuff
 .cache
 
