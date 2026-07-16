@@ -582,10 +582,11 @@ fn create_new_path_from_existing(
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use std::path::PathBuf;
+    use std::{io::Write as _, path::PathBuf};
 
     use gen_models::traits::Query;
     use rusqlite::types::Value as SQLValue;
+    use tempfile::NamedTempFile;
 
     use super::*;
     use crate::{
@@ -623,6 +624,122 @@ mod tests {
             .edge
             .target_node_id;
         (a_node_id, t_node_id, c_node_id, g_node_id)
+    }
+
+    fn run_gfa_boundary_update(incoming: bool) -> (DbContext, HashId, HashId, HashId) {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let mut fasta_file = NamedTempFile::new().unwrap();
+        writeln!(fasta_file, ">chr1\nAAAAAAAAAATTTTTTTTTTCCCCCCCCCC").unwrap();
+        import_fasta(
+            &context,
+            &fasta_file.path().to_str().unwrap().to_string(),
+            "test",
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        let block_group = crate::test_helpers::get_sample_bg(conn, "test", Sample::DEFAULT_NAME);
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+        let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id);
+        let original_node_id = path_edges
+            .iter()
+            .find(|edge| edge.source_node_id == PATH_START_NODE_ID)
+            .unwrap()
+            .target_node_id;
+        let branch_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("GG")
+            .save(conn)
+            .unwrap();
+        let branch_node_id = Node::create(
+            conn,
+            &branch_sequence.hash,
+            &HashId::convert_str(&format!("gfa-branch-{incoming}")),
+        )
+        .unwrap();
+        let branch_edge = if incoming {
+            Edge::create(
+                conn,
+                branch_node_id,
+                branch_sequence.length,
+                Strand::Forward,
+                original_node_id,
+                10,
+                Strand::Forward,
+            )
+        } else {
+            Edge::create(
+                conn,
+                original_node_id,
+                20,
+                Strand::Forward,
+                branch_node_id,
+                0,
+                Strand::Forward,
+            )
+        }
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: branch_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let mut gfa_file = NamedTempFile::new().unwrap();
+        write!(
+            gfa_file,
+            "S\ta\tAAAAAAAAAA\t*\n\
+             S\tt\tTTTTTTTTTT\t*\n\
+             S\tc\tCCCCCCCCCC\t*\n\
+             S\tnew\tNN\t*\n\
+             P\tmatched\ta+,t+,c+\t*\n\
+             P\tchanged\ta+,new+,c+\t*\n"
+        )
+        .unwrap();
+        update_with_gfa(
+            &context,
+            "test",
+            Sample::DEFAULT_NAME,
+            "updated",
+            gfa_file.path().to_str().unwrap(),
+        )
+        .unwrap();
+
+        let updated_block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
+        let new_node_id = Node::query(
+            conn,
+            "select n.* from nodes n left join sequences s on n.sequence_hash = s.hash where s.sequence = ?1",
+            rusqlite::params!["NN"],
+        )[0]
+        .id;
+        (context, updated_block_group.id, new_node_id, branch_node_id)
+    }
+
+    #[test]
+    fn test_gfa_update_preserves_incoming_edges_at_actual_divergence() {
+        let (context, block_group_id, new_node_id, branch_node_id) = run_gfa_boundary_update(true);
+        let conn = context.graph().conn();
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+
+        assert!(edges.iter().any(|edge| {
+            edge.edge.source_node_id == branch_node_id && edge.edge.target_node_id == new_node_id
+        }));
+    }
+
+    #[test]
+    fn test_gfa_update_preserves_outgoing_edges_at_actual_rejoin() {
+        let (context, block_group_id, new_node_id, branch_node_id) = run_gfa_boundary_update(false);
+        let conn = context.graph().conn();
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+
+        assert!(edges.iter().any(|edge| {
+            edge.edge.source_node_id == new_node_id && edge.edge.target_node_id == branch_node_id
+        }));
     }
 
     #[test]

@@ -63,6 +63,8 @@ mod tests {
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
         block_group::{BlockGroup, BlockGroupChange, PathCache},
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        edge::Edge,
         history::{HistoryStore, dolt::DoltHistoryStore},
         node::Node,
         operations::commit_operation_summary,
@@ -80,7 +82,6 @@ mod tests {
         graphs::combinatorial_library::parse_library,
         imports::fasta::import_fasta,
         test_helpers::{get_sample_bg, setup_block_group, setup_gen},
-        track_database,
         updates::library::update_with_library,
     };
 
@@ -105,6 +106,91 @@ mod tests {
             path_end: 0,
             strand: Strand::Forward,
         }
+    }
+
+    #[test]
+    fn test_reference_path_uses_canonical_edges_at_branched_boundaries() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (block_group_id, _) = setup_block_group(conn);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let a_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.is_start_edge())
+            .unwrap()
+            .edge
+            .target_node_id;
+        let t_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == a_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let c_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == t_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let g_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == c_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let branch_edges = [
+            Edge::create(
+                conn,
+                g_node_id,
+                10,
+                Strand::Forward,
+                t_node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap(),
+            Edge::create(
+                conn,
+                t_node_id,
+                10,
+                Strand::Forward,
+                a_node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap(),
+        ];
+        BlockGroupEdge::bulk_create(
+            conn,
+            &branch_edges
+                .iter()
+                .map(|edge| BlockGroupEdgeData {
+                    block_group_id,
+                    edge_id: edge.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        update_with_sequence(
+            &context,
+            "test",
+            "test",
+            "updated",
+            "chr1:10-20",
+            "NN",
+            false,
+        )
+        .unwrap();
+
+        let updated_block_group = get_sample_bg(conn, "test", "updated");
+        let updated_path =
+            BlockGroup::get_current_path(conn, &updated_block_group.id, None).unwrap();
+        assert_eq!(
+            updated_path.sequence(conn, None).unwrap(),
+            "AAAAAAAAAANNCCCCCCCCCCGGGGGGGGGG"
+        );
     }
 
     #[test]
@@ -698,8 +784,6 @@ mod tests {
     fn test_deletion_inside_combinatorial_library_part_creates_bypass_for_every_entry_point() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let collection = "test".to_string();

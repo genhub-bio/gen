@@ -208,6 +208,125 @@ pub(crate) fn prepare_path_update_region(
     Ok(())
 }
 
+fn reference_path_update_edges(
+    conn: &GraphConnection,
+    node_id: HashId,
+    region: &ResolvedGenRegion,
+    path: &Path,
+) -> Result<(gen_models::edge::Edge, gen_models::edge::Edge), gen_models::errors::QueryError> {
+    let incoming_edges = gen_models::edge::Edge::query(
+        conn,
+        "select * from edges where target_node_id = ?1",
+        rusqlite::params![node_id],
+    );
+    let outgoing_edges = gen_models::edge::Edge::query(
+        conn,
+        "select * from edges where source_node_id = ?1",
+        rusqlite::params![node_id],
+    );
+    let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id);
+    let incoming_edge = match &region.start_anchors {
+        Some(anchors) => path_edges
+            .iter()
+            .find(|path_edge| {
+                anchors.iter().any(|anchor| {
+                    path_edge.target_node_id == anchor.graph_node.node_id
+                        && path_edge.target_coordinate == anchor.coordinate()
+                })
+            })
+            .and_then(|path_edge| {
+                incoming_edges.iter().find(|edge| {
+                    edge.source_node_id == path_edge.source_node_id
+                        && edge.source_coordinate == path_edge.source_coordinate
+                        && edge.source_strand == path_edge.source_strand
+                })
+            }),
+        None if incoming_edges.len() == 1 => incoming_edges.first(),
+        None => None,
+    }
+    .ok_or_else(|| {
+        gen_models::errors::QueryError::ResultsNotFound(format!(
+            "reference-path edge entering update node {node_id}"
+        ))
+    })?;
+    let outgoing_edge = match &region.end_anchors {
+        Some(anchors) => path_edges
+            .iter()
+            .find(|path_edge| {
+                anchors.iter().any(|anchor| {
+                    path_edge.source_node_id == anchor.graph_node.node_id
+                        && path_edge.source_coordinate == anchor.coordinate()
+                })
+            })
+            .and_then(|path_edge| {
+                outgoing_edges.iter().find(|edge| {
+                    edge.target_node_id == path_edge.target_node_id
+                        && edge.target_coordinate == path_edge.target_coordinate
+                        && edge.target_strand == path_edge.target_strand
+                })
+            }),
+        None if outgoing_edges.len() == 1 => outgoing_edges.first(),
+        None => None,
+    }
+    .ok_or_else(|| {
+        gen_models::errors::QueryError::ResultsNotFound(format!(
+            "reference-path edge leaving update node {node_id}"
+        ))
+    })?;
+    Ok((incoming_edge.clone(), outgoing_edge.clone()))
+}
+
+fn update_reference_path(
+    conn: &GraphConnection,
+    path: &Path,
+    region: &ResolvedGenRegion,
+    edge_to_new_node: &gen_models::edge::Edge,
+    edge_from_new_node: &gen_models::edge::Edge,
+) -> Result<(), gen_models::errors::PathError> {
+    let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id);
+    let boundary_indices = region
+        .start_anchors
+        .as_ref()
+        .zip(region.end_anchors.as_ref())
+        .and_then(|(start_anchors, end_anchors)| {
+            let start_index = path_edges.iter().position(|edge| {
+                start_anchors.iter().any(|anchor| {
+                    edge.target_node_id == anchor.graph_node.node_id
+                        && edge.target_coordinate == anchor.coordinate()
+                })
+            })?;
+            let end_index = path_edges.iter().position(|edge| {
+                end_anchors.iter().any(|anchor| {
+                    edge.source_node_id == anchor.graph_node.node_id
+                        && edge.source_coordinate == anchor.coordinate()
+                })
+            })?;
+            Some((start_index, end_index))
+        });
+    if let Some((start_index, end_index)) = boundary_indices {
+        let edge_ids = path_edges[..start_index]
+            .iter()
+            .map(|edge| edge.id)
+            .chain([edge_to_new_node.id, edge_from_new_node.id])
+            .chain(path_edges[end_index + 1..].iter().map(|edge| edge.id))
+            .collect::<Vec<_>>();
+        let name = format!(
+            "{}-start-{}-end-{}-node-{}",
+            path.name, region.start, region.end, edge_to_new_node.target_node_id
+        );
+        Path::create(conn, &name, &path.block_group_id, &edge_ids)?;
+    } else {
+        path.new_path_with(
+            conn,
+            region.start,
+            region.end,
+            edge_to_new_node,
+            edge_from_new_node,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_sequence_updates<E>(
     conn: &GraphConnection,
     update: &SequenceUpdate<'_>,
@@ -255,7 +374,8 @@ where
 
     let sequences = sequences.into_iter().collect::<Vec<_>>();
     let change_count = target_block_groups.len() * sequences.len();
-    let update_reference_path = !update.disable_reference_path_update && sequences.len() == 1;
+    let should_update_reference_path =
+        !update.disable_reference_path_update && sequences.len() == 1;
     for target_block_group in target_block_groups {
         let path = if update.region.kind == ResolvedRegionKind::Path {
             Some(BlockGroup::get_current_path(
@@ -298,29 +418,20 @@ where
             let mut target_region =
                 target_update_region(conn, update.region, target_block_group.id, path.as_ref())?;
             prepare_path_update_region(conn, &mut target_region)?;
+            let reference_region = target_region.clone();
             insert_update_change(conn, target_region, InsertChangeData::new(block))?;
 
-            if update_reference_path && let Some(path) = &path {
+            if should_update_reference_path && let Some(path) = &path {
                 if sequence.is_empty() {
                     let _ =
                         path.new_path_with_deletion(conn, update.region.start, update.region.end);
                 } else {
-                    let edge_to_new_node = gen_models::edge::Edge::query(
+                    let (edge_to_new_node, edge_from_new_node) =
+                        reference_path_update_edges(conn, node_id, &reference_region, path)?;
+                    update_reference_path(
                         conn,
-                        "select * from edges where target_node_id = ?1",
-                        rusqlite::params![node_id],
-                    )[0]
-                    .clone();
-                    let edge_from_new_node = gen_models::edge::Edge::query(
-                        conn,
-                        "select * from edges where source_node_id = ?1",
-                        rusqlite::params![node_id],
-                    )[0]
-                    .clone();
-                    path.new_path_with(
-                        conn,
-                        update.region.start,
-                        update.region.end,
+                        path,
+                        &reference_region,
                         &edge_to_new_node,
                         &edge_from_new_node,
                     )?;
