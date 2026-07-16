@@ -1,0 +1,12 @@
+{
+  "packages": {
+    "gen": {
+      "local_directory": "gen-wasm",
+      "modules": {
+        "gen": {
+          "commands": "gen"
+        }
+      }
+    }
+  }
+}

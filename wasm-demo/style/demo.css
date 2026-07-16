@@ -1,0 +1,13 @@
+@import '~@xterm/xterm/css/xterm.css';
+
+body {
+  background-color: lightgrey;
+  margin: 0;
+}
+
+#targetdiv {
+  --target-background: #000000;
+  padding: 0.3em;
+  box-sizing: content-box;
+  background-color: var(--target-background);
+}
