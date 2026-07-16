@@ -36,7 +36,9 @@ pub(crate) fn adjacent_boundary_points(
     let mut outgoing_points = Vec::new();
     for edge in edges {
         if start_points.iter().any(|point| {
-            edge.edge.target_node_id == point.id && edge.edge.target_coordinate == point.coordinate
+            edge.edge.target_node_id == point.id
+                && edge.edge.target_coordinate == point.coordinate
+                && edge.edge.target_strand == point.strand
         }) {
             let point = NodePoint {
                 id: edge.edge.source_node_id,
@@ -48,7 +50,9 @@ pub(crate) fn adjacent_boundary_points(
             }
         }
         if end_points.iter().any(|point| {
-            edge.edge.source_node_id == point.id && edge.edge.source_coordinate == point.coordinate
+            edge.edge.source_node_id == point.id
+                && edge.edge.source_coordinate == point.coordinate
+                && edge.edge.source_strand == point.strand
         }) {
             let point = NodePoint {
                 id: edge.edge.target_node_id,
@@ -325,4 +329,132 @@ where
         }
     }
     Ok(change_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use gen_core::{HashId, Strand};
+    use gen_models::{
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        db::GraphConnection,
+        edge::Edge,
+    };
+
+    use crate::{
+        graphs::NodePoint,
+        test_helpers::{get_connection, setup_block_group},
+        updates::adjacent_boundary_points,
+    };
+
+    fn update_test_node_ids(
+        conn: &GraphConnection,
+        block_group_id: HashId,
+    ) -> (HashId, HashId, HashId, HashId) {
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let a_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.is_start_edge())
+            .unwrap()
+            .edge
+            .target_node_id;
+        let t_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == a_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let c_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == t_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        let g_node_id = edges
+            .iter()
+            .find(|edge| edge.edge.source_node_id == c_node_id)
+            .unwrap()
+            .edge
+            .target_node_id;
+        (a_node_id, t_node_id, c_node_id, g_node_id)
+    }
+
+    #[test]
+    fn test_adjacent_boundary_points_filters_incoming_edges_by_strand() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, _) = setup_block_group(&conn);
+        let (a_node_id, t_node_id, _, g_node_id) = update_test_node_ids(&conn, block_group_id);
+        let opposite_strand_edge = Edge::create(
+            &conn,
+            g_node_id,
+            10,
+            Strand::Reverse,
+            t_node_id,
+            0,
+            Strand::Reverse,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: opposite_strand_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let (incoming_points, _) = adjacent_boundary_points(
+            &conn,
+            block_group_id,
+            &[NodePoint {
+                id: t_node_id,
+                coordinate: 0,
+                strand: Strand::Forward,
+            }],
+            &[],
+        );
+
+        assert!(incoming_points.iter().any(|point| point.id == a_node_id));
+        assert!(!incoming_points.iter().any(|point| point.id == g_node_id));
+    }
+
+    #[test]
+    fn test_adjacent_boundary_points_filters_outgoing_edges_by_strand() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, _) = setup_block_group(&conn);
+        let (_, t_node_id, c_node_id, g_node_id) = update_test_node_ids(&conn, block_group_id);
+        let opposite_strand_edge = Edge::create(
+            &conn,
+            t_node_id,
+            10,
+            Strand::Reverse,
+            g_node_id,
+            0,
+            Strand::Reverse,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: opposite_strand_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let (_, outgoing_points) = adjacent_boundary_points(
+            &conn,
+            block_group_id,
+            &[],
+            &[NodePoint {
+                id: t_node_id,
+                coordinate: 10,
+                strand: Strand::Forward,
+            }],
+        );
+
+        assert!(outgoing_points.iter().any(|point| point.id == c_node_id));
+        assert!(!outgoing_points.iter().any(|point| point.id == g_node_id));
+    }
 }
