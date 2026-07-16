@@ -145,18 +145,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compression"
-version = "0.4.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e79b3f8a79cccc2898f31920fc69f304859b3bd567490f75ebf51ae1c792a9ac"
-dependencies = [
- "compression-codecs",
- "compression-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -389,15 +377,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49ecfb22d906f800d4fe833b6282cf4dc1c298f5057ca0b5445e5c209735ca47"
 dependencies = [
  "bzip2-sys",
-]
-
-[[package]]
-name = "bzip2"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
-dependencies = [
- "libbz2-rs-sys",
 ]
 
 [[package]]
@@ -750,23 +729,6 @@ dependencies = [
  "ryu",
  "static_assertions",
 ]
-
-[[package]]
-name = "compression-codecs"
-version = "0.4.38"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
-dependencies = [
- "compression-core",
- "flate2",
- "memchr",
-]
-
-[[package]]
-name = "compression-core"
-version = "0.4.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "console"
@@ -2747,12 +2709,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "803ec87c9cfb29b9d2633f20cba1f488db3fd53f2158b1024cbefb47ba05d413"
 
 [[package]]
-name = "libbz2-rs-sys"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3a6a8c165077efc8f3a971534c50ea6a1a18b329ef4a66e897a7e3a1494565f"
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3035,55 +2991,14 @@ version = "0.101.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aab24c2e22c6a42936a7970c5aa9a79fe54a113627e845dc786dd1e845fc9b72"
 dependencies = [
- "noodles-bam",
- "noodles-bcf",
  "noodles-bed",
  "noodles-bgzf",
  "noodles-core",
- "noodles-cram",
- "noodles-csi",
  "noodles-fasta",
- "noodles-fastq",
  "noodles-gff",
  "noodles-gtf",
- "noodles-sam",
  "noodles-tabix",
  "noodles-vcf",
-]
-
-[[package]]
-name = "noodles-bam"
-version = "0.83.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7480c171f2d2e108f64e504b073dceccd886bf4a5af06d18e65497a4a48e6dd2"
-dependencies = [
- "bstr",
- "futures",
- "indexmap",
- "memchr",
- "noodles-bgzf",
- "noodles-core",
- "noodles-csi",
- "noodles-sam",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
-name = "noodles-bcf"
-version = "0.78.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "167e7421ebf8c6dfc9e55982f0ee9708f5b6c04ed1489e7ea86b407c087b9a30"
-dependencies = [
- "futures",
- "indexmap",
- "memchr",
- "noodles-bgzf",
- "noodles-core",
- "noodles-csi",
- "noodles-vcf",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
@@ -3110,10 +3025,6 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "flate2",
- "futures",
- "pin-project-lite",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -3123,29 +3034,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ebfc6396fb51059c98a35bb81b96422ac41ea1bc60b6c8e9c6b2550212e9493"
 dependencies = [
  "bstr",
-]
-
-[[package]]
-name = "noodles-cram"
-version = "0.86.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a97398fd9d03cf1b773408c0227dc1214877d990ca8babd6dd19fbbea1c061d6"
-dependencies = [
- "async-compression",
- "bitflags 2.13.0",
- "bstr",
- "bzip2 0.6.1",
- "flate2",
- "futures",
- "indexmap",
- "md-5",
- "noodles-bam",
- "noodles-core",
- "noodles-fasta",
- "noodles-sam",
- "pin-project-lite",
- "tokio",
- "xz2",
 ]
 
 [[package]]
@@ -3159,7 +3047,6 @@ dependencies = [
  "indexmap",
  "noodles-bgzf",
  "noodles-core",
- "tokio",
 ]
 
 [[package]]
@@ -3173,19 +3060,6 @@ dependencies = [
  "memchr",
  "noodles-bgzf",
  "noodles-core",
- "tokio",
-]
-
-[[package]]
-name = "noodles-fastq"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db9a66608bdbe2a2e1ece0b963a9c3bcbf922ca5600c3b6ba6cb96cf6f8d6458"
-dependencies = [
- "bstr",
- "futures",
- "memchr",
- "tokio",
 ]
 
 [[package]]
@@ -3195,14 +3069,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44e0132682fb8a247443e7c14b391da1f638aa002b313e6287d6aa93bae6ffcc"
 dependencies = [
  "bstr",
- "futures",
  "indexmap",
  "lexical-core",
  "noodles-bgzf",
  "noodles-core",
  "noodles-csi",
  "percent-encoding",
- "tokio",
 ]
 
 [[package]]
@@ -3221,25 +3093,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "noodles-sam"
-version = "0.79.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c64ab4f1c784a44cef043f2c630b0e08fffc7757d5ccb2a0a698369041b987"
-dependencies = [
- "bitflags 2.13.0",
- "bstr",
- "futures",
- "indexmap",
- "lexical-core",
- "memchr",
- "noodles-bgzf",
- "noodles-core",
- "noodles-csi",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "noodles-tabix"
 version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3250,7 +3103,6 @@ dependencies = [
  "noodles-bgzf",
  "noodles-core",
  "noodles-csi",
- "tokio",
 ]
 
 [[package]]
@@ -3259,7 +3111,6 @@ version = "0.81.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4c3edc79cf9c235cc803137a108fa20e6f9c4a3b6fa39e879c78504cc7d19d7"
 dependencies = [
- "futures",
  "indexmap",
  "memchr",
  "noodles-bgzf",
@@ -3267,8 +3118,6 @@ dependencies = [
  "noodles-csi",
  "noodles-tabix",
  "percent-encoding",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
@@ -6918,7 +6767,7 @@ checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
 dependencies = [
  "aes",
  "arbitrary",
- "bzip2 0.5.2",
+ "bzip2",
  "constant_time_eq",
  "crc32fast",
  "crossbeam-utils",
