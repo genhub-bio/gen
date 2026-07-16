@@ -7,11 +7,11 @@ use std::{
     string::ToString,
 };
 
-#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+#[cfg(feature = "remote-storage")]
 use gen_core::calculate_hash;
 use gen_core::{HashId, Workspace, traits::Capnp};
 use gen_graph::{OperationGraph, all_simple_paths};
-#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+#[cfg(feature = "remote-storage")]
 use itertools::Itertools;
 use petgraph::{Direction, graphmap::UnGraphMap};
 use rusqlite::{Result as SQLResult, Row, params, types::Value};
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+#[cfg(feature = "remote-storage")]
 use crate::{
     assets::{AssetUri, LocalAssetUri},
     changesets::{ChangesetModels, write_changeset},
@@ -177,7 +177,7 @@ impl Operation {
             file_path
         ))
     )]
-    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+    #[cfg(feature = "remote-storage")]
     pub fn add_file(
         workspace: &Workspace,
         conn: &OperationsConnection,
@@ -428,7 +428,7 @@ impl OperationFileInfo {
         }
     }
 
-    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+    #[cfg(feature = "remote-storage")]
     pub fn hashed_filename(&self) -> String {
         <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
     }
@@ -461,7 +461,7 @@ impl OperationFile {
         self
     }
 
-    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+    #[cfg(feature = "remote-storage")]
     pub fn storage_file_path(
         workspace: &Workspace,
         path_or_uri: &str,
@@ -530,7 +530,7 @@ pub struct OperationInfo {
     pub description: String,
 }
 
-#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+#[cfg(feature = "remote-storage")]
 pub fn add_files_operation(
     context: &DbContext,
     files: &[String],
@@ -680,7 +680,7 @@ impl FileAddition {
             .unwrap_or(&self.asset_uri)
     }
 
-    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+    #[cfg(feature = "remote-storage")]
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(workspace, conn, file_path, file_type, checksum_override))
@@ -763,7 +763,7 @@ impl FileAddition {
             })
     }
 
-    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+    #[cfg(feature = "remote-storage")]
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(self, workspace))
@@ -773,7 +773,7 @@ impl FileAddition {
         asset_uri.store_file(self, workspace)
     }
 
-    #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+    #[cfg(feature = "remote-storage")]
     pub fn hashed_filename(self) -> String {
         <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
     }

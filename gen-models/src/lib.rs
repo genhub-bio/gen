@@ -1,6 +1,6 @@
 pub mod accession;
 pub mod annotations;
-#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+#[cfg(feature = "remote-storage")]
 pub mod assets;
 pub mod block_group;
 pub mod block_group_edge;

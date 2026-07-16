@@ -22,7 +22,7 @@ use crate::{
     sample::Sample,
     sequence::Sequence,
 };
-#[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+#[cfg(feature = "remote-storage")]
 use crate::{file_types::FileTypes, operations::FileAddition};
 
 pub fn start_operation(conn: &GraphConnection) -> session::Session<'_> {
@@ -70,7 +70,7 @@ pub fn end_operation(
 
     match Operation::create(operation_conn, &operation_info.description, &hash) {
         Ok(operation) => {
-            #[cfg(all(feature = "remote-storage", not(target_os = "emscripten")))]
+            #[cfg(feature = "remote-storage")]
             for op_file in operation_info.files.iter() {
                 let fa = match FileAddition::get_or_create(
                     context.workspace(),
