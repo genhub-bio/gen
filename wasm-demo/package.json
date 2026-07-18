@@ -5,11 +5,9 @@
     "license": "Apache-2.0",
     "private": true,
     "scripts": {
-        "postinstall": "patch-package",
         "build": "rspack build",
-        "postbuild": "npm run postbuild:copy-assets && npm run postbuild:prepare-wasm",
-        "postbuild:copy-assets": "copyfiles -u 1 assets/* dist/ && copyfiles -u 1 gen-wasm/* dist/gen-wasm/",
-        "postbuild:prepare-wasm": "node node_modules/@jupyterlite/cockle/lib/tools/prepare_wasm.js --copy dist/",
+        "postbuild": "npm run postbuild:copy-assets",
+        "postbuild:copy-assets": "copyfiles -u 1 assets/* dist/ && cp cockle-config.json dist/ && mkdir -p dist/gen dist/cockle_fs dist/coreutils dist/grep dist/less dist/sed && cp gen-wasm/* dist/gen/ && cp cockle_fs-wasm/* dist/cockle_fs/ && cp coreutils-wasm/* dist/coreutils/ && cp grep-wasm/* dist/grep/ && cp less-wasm/* dist/less/ && cp sed-wasm/* dist/sed/",
         "serve": "static-handler --coi --port 4501 dist/"
     },
     "devDependencies": {
@@ -20,7 +18,6 @@
         "@xterm/xterm": "^6.0.0",
         "copyfiles": "^2.4.1",
         "css-loader": "^7.1.4",
-        "patch-package": "^8.0.1",
         "static-handler": "^0.5.3",
         "style-loader": "^4.0.0",
         "ts-loader": "^9.6.2",
