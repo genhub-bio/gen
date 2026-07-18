@@ -11,7 +11,6 @@ use r#gen::{
     commands::{
         Cli, Commands, cli_context::CliContext, commit_operation,
         graph_operations::make_stitch::make_stitch_operation, parse_diff_revisions,
-        remote::handle_remote_command,
     },
     diffs::gfa::gfa_sample_diff,
     get_config_connection, get_connection_for_branch, get_raw_connection,
@@ -20,10 +19,14 @@ use r#gen::{
     patch,
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
+    views::tui_runtime::install_global_panic_hook,
+};
+#[cfg(not(target_os = "emscripten"))]
+use r#gen::{
+    commands::remote::handle_remote_command,
     views::{
         block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
         diff::view_diff, operations::view_operations, patch::view_patch,
-        tui_runtime::install_global_panic_hook,
     },
 };
 use gen_annotations::translate;
@@ -77,8 +80,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Clone { url }) = &cli.command {
         return r#gen::commands::clone::execute(url, &workspace);
+    }
+    #[cfg(target_os = "emscripten")]
+    if let Some(Commands::Clone { .. }) = &cli.command {
+        return Err("clone is not supported in this build (no network access)".into());
     }
     #[cfg(feature = "profiling")]
     if let Some(Commands::Profile(cmd)) = &cli.command {
@@ -133,9 +141,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             hash.as_deref(),
         );
     }
+    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Remote(cmd)) = &cli.command {
         return handle_remote_command(&operation_conn, cmd);
     }
+    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Push {
         remote,
         branch,
@@ -149,12 +159,21 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             *force,
         );
     }
+    #[cfg(target_os = "emscripten")]
+    if let Some(Commands::Push { .. }) = &cli.command {
+        return Err("push is not supported in this build (no network access)".into());
+    }
+    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Pull { remote, branch }) = &cli.command {
         return r#gen::commands::remote::operations::execute_pull(
             &workspace,
             remote.as_deref(),
             branch.as_deref(),
         );
+    }
+    #[cfg(target_os = "emscripten")]
+    if let Some(Commands::Pull { .. }) = &cli.command {
+        return Err("pull is not supported in this build (no network access)".into());
     }
     if let Some(Commands::Defaults {
         collection,
@@ -233,7 +252,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(r#gen::commands::export::execute(&export_cli_context, cmd)?)
         }
         Some(Commands::Derive(cmd)) => Ok(r#gen::commands::derive::execute(&cli_context, cmd)?),
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::View {
             graph,
             history_ref,
@@ -313,6 +334,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::View { .. }) => {
+            Err("interactive view is not supported in this build".into())
+        }
         Some(Commands::ViewDiff { source, target }) => {
             let (source_ref, target_ref, range) =
                 parse_diff_revisions(&source, target.as_deref()).map_err(|error| anyhow!(error))?;
@@ -325,7 +350,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             if diff.operations.is_empty() {
                 println!("No differences found between {source_ref} and {target_ref}.");
             } else {
+                #[cfg(not(target_os = "emscripten"))]
                 view_diff(graph_conn, &diff)?;
+                #[cfg(target_os = "emscripten")]
+                println!(
+                    "{} operation(s) differ between {source_ref} and {target_ref}.",
+                    diff.operations.len()
+                );
             }
             Ok(())
         }
@@ -381,7 +412,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if interactive {
+                #[cfg(not(target_os = "emscripten"))]
                 return view_operations(&db_context, &history_entries).map_err(Into::into);
+                #[cfg(target_os = "emscripten")]
+                return Err("interactive view is not supported in this build".into());
             }
 
             println!(
@@ -559,11 +593,17 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => Err(format!("Patch application failed: {}", e).into()),
             }
         }
+        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::PatchView { patch }) => {
             let mut file = File::open(patch)?;
             view_patch(&db_context, &mut file)?;
             Ok(())
         }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::PatchView { .. }) => Err(
+            "patch-view is not supported in this build (interactive diff viewer unavailable)"
+                .into(),
+        ),
         None => Ok(()),
         Some(Commands::Defaults { .. }) => Ok(()),
         Some(Commands::Transform { format_csv_for_gaf }) => Ok(()),
