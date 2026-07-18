@@ -113,3 +113,7 @@ strip = "symbols"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[patch.crates-io]
+# Includes fixes to make the emscripten build work.
+rusqdoltlite = { git = "https://github.com/chris7/rusqdoltlite", rev = "389ee0e1fefc298c09e92810eb4176f648a31c85" }
