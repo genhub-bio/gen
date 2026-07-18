@@ -1,5 +1,20 @@
 {
   "packages": {
+    "cockle_fs": {
+      "local_directory": "cockle_fs-wasm"
+    },
+    "coreutils": {
+      "local_directory": "coreutils-wasm"
+    },
+    "grep": {
+      "local_directory": "grep-wasm"
+    },
+    "less": {
+      "local_directory": "less-wasm"
+    },
+    "sed": {
+      "local_directory": "sed-wasm"
+    },
     "gen": {
       "local_directory": "gen-wasm",
       "modules": {
