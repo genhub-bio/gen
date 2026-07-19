@@ -5,6 +5,11 @@ body {
   margin: 0;
 }
 
+#upload-bar {
+  padding: 0.5em;
+  font-family: sans-serif;
+}
+
 #targetdiv {
   --target-background: #000000;
   padding: 0.3em;
