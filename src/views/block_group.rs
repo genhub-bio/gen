@@ -32,7 +32,7 @@ use crate::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
             GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
-            draw_annotation_labels, reapply_overlays,
+            draw_annotation_labels, extract_viewport_node_ids, reapply_overlays,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlaySource, file_track_key, group_track_key,
@@ -115,21 +115,6 @@ fn toggle_path_highlight(
         set_path_overlay(overlays, style, path_nodes);
         Ok(true)
     }
-}
-
-/// Node IDs present in the current viewport (excluding terminal start/end nodes).
-pub(crate) fn extract_viewport_node_ids(
-    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
-) -> HashSet<HashId> {
-    use gen_core::{is_end_node, is_start_node};
-    use petgraph::visit::NodeIndexable;
-    let graph = controller.graph();
-    controller
-        .get_viewport_graph()
-        .data_nodes()
-        .map(|(_, idx, _)| <&GenGraph as NodeIndexable>::from_index(&graph, idx.index()).node_id)
-        .filter(|&id| !is_start_node(id) && !is_end_node(id))
-        .collect()
 }
 
 /// Compute the coordinate window (min sequence start, max sequence end) of visible blocks

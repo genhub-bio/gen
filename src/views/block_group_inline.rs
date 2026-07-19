@@ -25,9 +25,9 @@ use ratatui::{
 use crate::views::{
     annotation_groups::load_annotation_group_entries,
     annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
-    block_group::extract_viewport_node_ids,
     gen_graph_widget::{
-        GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
+        GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels,
+        extract_viewport_node_ids, reapply_overlays,
     },
     graph_overlay::{
         AnnotationColorCache, GraphOverlay, group_track_key, has_path_overlay,
@@ -271,10 +271,25 @@ fn show_inline_widget(
     block_group_id: Option<HashId>,
     history_ref: Option<&str>,
 ) -> Result<bool> {
+    #[cfg(not(target_os = "emscripten"))]
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(height),
         })
+    });
+    // `ratatui::init_with_options` requires ratatui's `crossterm` cargo feature, which pulls in
+    // `mio` via `ratatui-crossterm`'s default-featured `crossterm` dependency (no emscripten
+    // backend). Build the terminal manually on our own `EmscriptenBackend` instead.
+    #[cfg(target_os = "emscripten")]
+    let terminal_result = panic::catch_unwind(|| {
+        crossterm::terminal::enable_raw_mode().expect("failed to enable raw mode");
+        ratatui::Terminal::with_options(
+            crate::views::emscripten_backend::EmscriptenBackend::new(std::io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Inline(height),
+            },
+        )
+        .expect("failed to initialize terminal")
     });
 
     match terminal_result {

@@ -62,6 +62,46 @@ fn read_available() -> Vec<u8> {
     }
 }
 
+/// Queries the terminal for the cursor's current position via the DSR (`ESC [ 6 n`) escape
+/// sequence, blocking until the terminal's `ESC [ row ; col R` reply arrives. Mirrors
+/// `crossterm::cursor::position`, which is unavailable here since it's implemented on top of the
+/// `mio`-gated `event` module's internal poll/read.
+///
+/// Only ever called once, before `poll_next`'s event loop starts, so there is no risk of
+/// consuming bytes that belong to a real keystroke.
+#[cfg(target_os = "emscripten")]
+pub fn read_cursor_position() -> std::io::Result<(u16, u16)> {
+    std::io::stdout().write_all(b"\x1b[6n")?;
+    std::io::stdout().flush()?;
+
+    let mut buffer = Vec::new();
+    loop {
+        if let Some(pos) = parse_cursor_position_report(&buffer) {
+            return Ok(pos);
+        }
+        if !stdin_ready(Duration::from_secs(2)) {
+            return Err(std::io::Error::other(
+                "timed out waiting for cursor position report",
+            ));
+        }
+        buffer.extend(read_available());
+    }
+}
+
+/// Parses a `ESC [ row ; col R` cursor position report, returning `(col - 1, row - 1)` to match
+/// crossterm's 0-indexed `(x, y)` convention.
+#[cfg(target_os = "emscripten")]
+fn parse_cursor_position_report(bytes: &[u8]) -> Option<(u16, u16)> {
+    let start = bytes.windows(2).position(|pair| pair == b"\x1b[")?;
+    let rest = &bytes[start + 2..];
+    let terminator = rest.iter().position(|&b| b == b'R')?;
+    let body = std::str::from_utf8(&rest[..terminator]).ok()?;
+    let mut parts = body.split(';');
+    let row = parts.next()?.parse::<u16>().ok()?;
+    let col = parts.next()?.parse::<u16>().ok()?;
+    Some((col.saturating_sub(1), row.saturating_sub(1)))
+}
+
 /// Parses a burst of raw terminal input bytes into zero or more events.
 fn parse_bytes(bytes: &[u8]) -> Vec<Event> {
     let mut events = Vec::new();

@@ -19,14 +19,16 @@ use r#gen::{
     patch,
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
-    views::tui_runtime::install_global_panic_hook,
+    views::{
+        block_group_inline::show_inline_block_group_widget, tui_runtime::install_global_panic_hook,
+    },
 };
 #[cfg(not(target_os = "emscripten"))]
 use r#gen::{
     commands::remote::handle_remote_command,
     views::{
-        block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
-        diff::view_diff, operations::view_operations, patch::view_patch,
+        block_group::view_block_group, diff::view_diff, operations::view_operations,
+        patch::view_patch,
     },
 };
 use gen_annotations::translate;
@@ -254,7 +256,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Derive(cmd)) => Ok(r#gen::commands::derive::execute(&cli_context, cmd)?),
         #[cfg(not(target_os = "emscripten"))]
         Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
-        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::View {
             graph,
             history_ref,
@@ -293,6 +294,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                             clamp_inline_view_height(height),
                             history_ref.as_deref(),
                         ) {
+                            #[cfg(not(target_os = "emscripten"))]
                             Ok(true) => {
                                 // User requested upgrade to full TUI
                                 view_block_group(
@@ -305,6 +307,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                     position,
                                     history_ref.as_deref(),
                                 )?;
+                            }
+                            #[cfg(target_os = "emscripten")]
+                            Ok(true) => {
+                                eprintln!(
+                                    "Full-screen view is not supported in this build; staying in the inline view."
+                                );
                             }
                             Ok(false) => {}
                             Err(e) => {
@@ -320,23 +328,27 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             } else {
-                // Use the full-screen viewer if --full is specified or no graph is provided
-                view_block_group(
-                    graph_conn,
-                    operation_conn,
-                    &workspace,
-                    graph,
-                    sample,
-                    collection_name,
-                    position,
-                    history_ref.as_deref(),
-                )?;
+                #[cfg(not(target_os = "emscripten"))]
+                {
+                    // Use the full-screen viewer if --full is specified or no graph is provided
+                    view_block_group(
+                        graph_conn,
+                        operation_conn,
+                        &workspace,
+                        graph,
+                        sample,
+                        collection_name,
+                        position,
+                        history_ref.as_deref(),
+                    )?;
+                }
+                #[cfg(target_os = "emscripten")]
+                return Err(
+                    "full-screen view is not supported in this build; omit --full and pass --graph/--sample"
+                        .into(),
+                );
             }
             Ok(())
-        }
-        #[cfg(target_os = "emscripten")]
-        Some(Commands::View { .. }) => {
-            Err("interactive view is not supported in this build".into())
         }
         Some(Commands::ViewDiff { source, target }) => {
             let (source_ref, target_ref, range) =
