@@ -1,4 +1,4 @@
-.PHONY: python jupyter r r-test release-check-js clean build clippy-fix docker-build gif wasm-jupyter
+.PHONY: python jupyter r r-test release-check-js clean build clippy-fix docker-build gif wasm wasm-test
 python:
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
@@ -71,15 +71,15 @@ gif:
 		fi; \
 		(cd $$dir && vhs $$(basename $$tape)) || exit 1; \
 	done
-# Builds gen for wasm32-unknown-emscripten and serves it in a cockle/JupyterLite terminal at
-# http://localhost:4501, using the self-contained wasm-demo/ page (built on the published
-# @jupyterlite/cockle npm package, no sibling checkout of the cockle repo needed). Requires an
-# emsdk install (emcc/em++/emar; https://emscripten.org/docs/getting_started/downloads.html,
-# `./emsdk install 4.0.9 && ./emsdk activate 4.0.9`). Override EMSDK_DIR to match your machine.
-# cockle's coreutils/grep/less/sed/cockle_fs wasm packages are vendored under wasm-demo/*-wasm/
-# rather than fetched via micromamba at build time -- see wasm-demo/VENDORED_PACKAGES.md.
+# Builds gen for wasm32-unknown-emscripten and bundles it into the self-contained wasm-demo/ page
+# (built on the published @jupyterlite/cockle npm package, no sibling checkout of the cockle repo
+# needed). Requires an emsdk install (emcc/em++/emar;
+# https://emscripten.org/docs/getting_started/downloads.html, `./emsdk install 4.0.9 && ./emsdk
+# activate 4.0.9`). Override EMSDK_DIR to match your machine. cockle's coreutils/grep/less/sed/
+# cockle_fs wasm packages are vendored under wasm-demo/*-wasm/ rather than fetched via micromamba
+# at build time -- see wasm-demo/VENDORED_PACKAGES.md.
 EMSDK_DIR ?= $(HOME)/emsdk
-wasm-jupyter:
+wasm:
 	@test -f $(EMSDK_DIR)/emsdk_env.sh || (echo "emsdk not found at $(EMSDK_DIR); set EMSDK_DIR=/path/to/emsdk" && exit 1)
 	@for pkg in cockle_fs coreutils grep less sed; do \
 		test -d wasm-demo/$$pkg-wasm || (echo "wasm-demo/$$pkg-wasm/ missing; see wasm-demo/VENDORED_PACKAGES.md for how to fetch/re-vendor it" && exit 1); \
@@ -93,4 +93,6 @@ wasm-jupyter:
 	mkdir -p wasm-demo/gen-wasm
 	cp target/wasm32-unknown-emscripten/release/gen.js target/wasm32-unknown-emscripten/release/gen.wasm wasm-demo/gen-wasm/
 	cd wasm-demo && npm run build
+# Serves the page built by `make wasm` in a cockle/JupyterLite terminal at http://localhost:4501.
+wasm-test: wasm
 	cd wasm-demo && npm run serve
