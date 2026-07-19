@@ -81,6 +81,10 @@ zip = "2.4.2"
 tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["registry"], optional = true }
 pprof = { version = "0.15.0", optional = true }
+# Used by src/views/emscripten_input.rs for a `select(2)`-based bounded-wait stdin poll on
+# emscripten (where crossterm's `events` feature is unavailable, see below); the parsing logic
+# in that module is plain and unit-tested natively too, hence a plain (non-target-gated) dep.
+libc = "0.2"
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 gen-tui = { path = "gen-tui", version = "0.2.1" }

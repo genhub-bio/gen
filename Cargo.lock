@@ -1685,6 +1685,7 @@ dependencies = [
  "interavl",
  "intervaltree",
  "itertools",
+ "libc",
  "log",
  "more-asserts",
  "noodles",

@@ -5,12 +5,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_core::HashId;
 use gen_graph::GenGraph;
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_controller::GraphController,
+    key_event::{Event, KeyCode, KeyEvent, KeyEventKind},
     layout::VisualDetail,
     plotter::{LineStyle, PathStyle},
     theme::current_theme,
@@ -58,7 +58,7 @@ fn get_path_nodes(
 #[derive(Debug)]
 pub enum AppEvent {
     Tick,
-    KeyPress(crossterm::event::KeyEvent),
+    KeyPress(KeyEvent),
     Resize(u16, u16),
 }
 
@@ -80,6 +80,7 @@ impl TickEventSource {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 impl EventSource for TickEventSource {
     fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent> {
         let remaining = self
@@ -89,8 +90,39 @@ impl EventSource for TickEventSource {
 
         let wait = remaining.min(timeout);
 
-        if event::poll(wait).unwrap_or(false) {
-            match event::read().unwrap() {
+        if crossterm::event::poll(wait).unwrap_or(false) {
+            match crossterm::event::read().unwrap() {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    return Some(AppEvent::KeyPress(k));
+                }
+                Event::Resize(w, h) => {
+                    return Some(AppEvent::Resize(w, h));
+                }
+                _ => {}
+            }
+        }
+
+        if self.last_tick.elapsed() >= self.tick_rate {
+            self.last_tick = Instant::now();
+            return Some(AppEvent::Tick);
+        }
+
+        None
+    }
+}
+
+#[cfg(target_os = "emscripten")]
+impl EventSource for TickEventSource {
+    fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent> {
+        let remaining = self
+            .tick_rate
+            .checked_sub(self.last_tick.elapsed())
+            .unwrap_or(Duration::ZERO);
+
+        let wait = remaining.min(timeout);
+
+        if let Some(event) = crate::views::emscripten_input::poll_next(wait) {
+            match event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     return Some(AppEvent::KeyPress(k));
                 }
