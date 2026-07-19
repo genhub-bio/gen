@@ -20,16 +20,14 @@ use r#gen::{
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group_inline::show_inline_block_group_widget, tui_runtime::install_global_panic_hook,
+        block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
+        tui_runtime::install_global_panic_hook,
     },
 };
 #[cfg(not(target_os = "emscripten"))]
 use r#gen::{
     commands::remote::handle_remote_command,
-    views::{
-        block_group::view_block_group, diff::view_diff, operations::view_operations,
-        patch::view_patch,
-    },
+    views::{diff::view_diff, operations::view_operations, patch::view_patch},
 };
 use gen_annotations::translate;
 use gen_core::{BranchName, CommitRef, config::Workspace, range::Range, region::Region};
@@ -294,7 +292,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                             clamp_inline_view_height(height),
                             history_ref.as_deref(),
                         ) {
-                            #[cfg(not(target_os = "emscripten"))]
                             Ok(true) => {
                                 // User requested upgrade to full TUI
                                 view_block_group(
@@ -307,12 +304,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                     position,
                                     history_ref.as_deref(),
                                 )?;
-                            }
-                            #[cfg(target_os = "emscripten")]
-                            Ok(true) => {
-                                eprintln!(
-                                    "Full-screen view is not supported in this build; staying in the inline view."
-                                );
                             }
                             Ok(false) => {}
                             Err(e) => {
@@ -328,25 +319,17 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             } else {
-                #[cfg(not(target_os = "emscripten"))]
-                {
-                    // Use the full-screen viewer if --full is specified or no graph is provided
-                    view_block_group(
-                        graph_conn,
-                        operation_conn,
-                        &workspace,
-                        graph,
-                        sample,
-                        collection_name,
-                        position,
-                        history_ref.as_deref(),
-                    )?;
-                }
-                #[cfg(target_os = "emscripten")]
-                return Err(
-                    "full-screen view is not supported in this build; omit --full and pass --graph/--sample"
-                        .into(),
-                );
+                // Use the full-screen viewer if --full is specified or no graph is provided
+                view_block_group(
+                    graph_conn,
+                    operation_conn,
+                    &workspace,
+                    graph,
+                    sample,
+                    collection_name,
+                    position,
+                    history_ref.as_deref(),
+                )?;
             }
             Ok(())
         }

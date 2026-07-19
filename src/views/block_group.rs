@@ -4,12 +4,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{
-    LineStyle, graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle,
+    LineStyle,
+    graph_controller::GraphController,
+    key_event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
+    layout::VisualDetail,
+    plotter::PathStyle,
     theme::current_theme,
 };
 use log::{info, warn};
@@ -40,7 +43,7 @@ use crate::{
             remove_track_overlays, replace_track_overlays, set_path_overlay,
         },
         panels::{render_status_bar, render_with_optional_clear},
-        tui_runtime::TuiSession,
+        tui_runtime::{TuiSession, poll_immediate_event, wait_for_event},
     },
 };
 
@@ -296,7 +299,10 @@ pub fn view_block_group(
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
+    #[cfg(not(target_os = "emscripten"))]
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    #[cfg(target_os = "emscripten")]
+    crate::views::emscripten_input::enable_mouse_capture()?;
     let terminal = session.terminal_mut();
 
     // Basic event loop
@@ -321,9 +327,9 @@ pub fn view_block_group(
     let mut should_quit = false;
     loop {
         // Drain ALL pending input events before doing any work
-        while crossterm::event::poll(Duration::from_millis(0))? {
-            match event::read()? {
-                event::Event::Key(key) if key.kind == KeyEventKind::Press => {
+        while let Some(input_event) = poll_immediate_event() {
+            match input_event {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     // Any keyboard navigation shows the cursor.
                     if !graph_controller.is_cursor_visible()
                         && matches!(
@@ -575,7 +581,7 @@ pub fn view_block_group(
                         }
                     }
                 }
-                event::Event::Mouse(mouse)
+                Event::Mouse(mouse)
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                         && last_sidebar_area.contains(Position {
                             x: mouse.column,
@@ -687,7 +693,7 @@ pub fn view_block_group(
                         }
                     }
                 }
-                event::Event::Mouse(mouse) if focus_zone == FocusZone::Canvas => match mouse.kind {
+                Event::Mouse(mouse) if focus_zone == FocusZone::Canvas => match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         mouse_last_pos = Some((mouse.column, mouse.row));
                         mouse_is_dragging = false;
@@ -1273,7 +1279,7 @@ pub fn view_block_group(
         } else {
             Duration::from_secs(3600)
         };
-        let _ = crossterm::event::poll(wait);
+        wait_for_event(wait);
 
         // Update tick
         if last_tick.elapsed() >= tick_rate {

@@ -254,6 +254,17 @@ pub fn poll_next(timeout: Duration) -> Option<Event> {
     first
 }
 
+/// Returns true if an event is ready without consuming any stdin bytes: either an already-parsed
+/// event is sitting in the pending queue from a previous burst, or fresh bytes are available.
+/// Mirrors `crossterm::event::poll`'s non-destructive readiness check.
+#[cfg(target_os = "emscripten")]
+pub fn wait_ready(timeout: Duration) -> bool {
+    if PENDING_EVENTS.with(|events| !events.borrow().is_empty()) {
+        return true;
+    }
+    stdin_ready(timeout)
+}
+
 /// Enables SGR mouse tracking (modes 1000/1002/1006), matching what
 /// `crossterm::event::EnableMouseCapture` would send — unavailable here since it's part of the
 /// `mio`-gated `event` module. xterm.js implements these modes/encoding natively (confirmed by

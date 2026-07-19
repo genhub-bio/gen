@@ -8,6 +8,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use gen_tui::key_event::Event;
 #[cfg(not(target_os = "emscripten"))]
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -113,4 +114,104 @@ impl Drop for TuiSession {
     fn drop(&mut self) {
         let _ = self.restore();
     }
+}
+
+#[cfg(target_os = "emscripten")]
+pub type EmscriptenTerminal =
+    ratatui::Terminal<crate::views::emscripten_backend::EmscriptenBackend<std::io::Stdout>>;
+
+/// RAII guard for full-screen TUI sessions on `target_os = "emscripten"`. Mirrors the native
+/// `TuiSession` above, but builds the terminal on `EmscriptenBackend` instead of
+/// `ratatui-crossterm`'s `CrosstermBackend` (see `emscripten_backend.rs` for why that crate is
+/// unusable on this target) and drives mouse capture through `emscripten_input`'s hand-written
+/// SGR escape sequences instead of `crossterm::event::{Enable,Disable}MouseCapture`.
+#[cfg(target_os = "emscripten")]
+pub struct TuiSession {
+    terminal: EmscriptenTerminal,
+    restored: bool,
+}
+
+#[cfg(target_os = "emscripten")]
+impl TuiSession {
+    pub fn enter() -> std::io::Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        if let Err(err) =
+            crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)
+        {
+            let _ = crossterm::terminal::disable_raw_mode();
+            return Err(err);
+        }
+
+        match ratatui::Terminal::new(crate::views::emscripten_backend::EmscriptenBackend::new(
+            std::io::stdout(),
+        )) {
+            Ok(terminal) => Ok(Self {
+                terminal,
+                restored: false,
+            }),
+            Err(err) => {
+                let _ = Self::restore_terminal_state();
+                Err(err)
+            }
+        }
+    }
+
+    pub fn terminal_mut(&mut self) -> &mut EmscriptenTerminal {
+        &mut self.terminal
+    }
+
+    fn restore_terminal_state() -> std::io::Result<()> {
+        let _ = crate::views::emscripten_input::disable_mouse_capture();
+        crossterm::terminal::disable_raw_mode()?;
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show
+        )
+    }
+
+    pub fn restore(&mut self) -> std::io::Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+
+        self.restored = true;
+        self.terminal.show_cursor().ok();
+        Self::restore_terminal_state()
+    }
+}
+
+#[cfg(target_os = "emscripten")]
+impl Drop for TuiSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+/// Waits up to `timeout` for an input event to become ready, without consuming it. Used to
+/// sleep between animation ticks; the next loop iteration drains whatever arrived via
+/// [`poll_immediate_event`].
+#[cfg(not(target_os = "emscripten"))]
+pub fn wait_for_event(timeout: std::time::Duration) {
+    let _ = crossterm::event::poll(timeout);
+}
+
+#[cfg(target_os = "emscripten")]
+pub fn wait_for_event(timeout: std::time::Duration) {
+    let _ = crate::views::emscripten_input::wait_ready(timeout);
+}
+
+/// Returns the next already-buffered input event, if any, without blocking.
+#[cfg(not(target_os = "emscripten"))]
+pub fn poll_immediate_event() -> Option<Event> {
+    if crossterm::event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+        crossterm::event::read().ok()
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "emscripten")]
+pub fn poll_immediate_event() -> Option<Event> {
+    crate::views::emscripten_input::poll_next(std::time::Duration::from_millis(0))
 }
