@@ -28,7 +28,7 @@ const STDIN_FD: RawFd = 0;
 
 /// Returns true if stdin has bytes available to read within `timeout`.
 #[cfg(target_os = "emscripten")]
-fn stdin_ready(timeout: Duration) -> bool {
+pub(crate) fn stdin_ready(timeout: Duration) -> bool {
     let mut readfds: libc::fd_set = unsafe { std::mem::zeroed() };
     unsafe {
         libc::FD_ZERO(&mut readfds);
@@ -54,7 +54,7 @@ fn stdin_ready(timeout: Duration) -> bool {
 /// readiness, so this should not block for long: a full escape sequence arrives as one buffered
 /// burst (confirmed empirically), so one read gets the whole sequence, not a partial one.
 #[cfg(target_os = "emscripten")]
-fn read_available() -> Vec<u8> {
+pub(crate) fn read_available() -> Vec<u8> {
     let mut buf = [0u8; 64];
     match std::io::stdin().read(&mut buf) {
         Ok(n) => buf[..n].to_vec(),

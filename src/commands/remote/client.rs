@@ -176,14 +176,8 @@ pub enum RemoteClientError {
 }
 
 pub fn normalized_origin(remote_url: &str) -> Result<String, RemoteClientError> {
-    let parsed = Url::parse(remote_url)
-        .map_err(|_| RemoteClientError::InvalidRepositoryUrl(remote_url.to_string()))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(RemoteClientError::InvalidRepositoryUrl(
-            remote_url.to_string(),
-        ));
-    }
-    Ok(parsed.origin().ascii_serialization())
+    crate::commands::remote::utils::normalized_origin(remote_url)
+        .map_err(|error| RemoteClientError::InvalidRepositoryUrl(error.0))
 }
 
 fn response_error(response: reqwest::blocking::Response) -> RemoteClientError {

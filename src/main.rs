@@ -6,11 +6,14 @@ use clap::{Parser, Subcommand};
 use crossterm::terminal;
 #[cfg(feature = "profiling")]
 use r#gen::profiling::{Profiler, SamplingProfiler};
+#[cfg(not(target_os = "emscripten"))]
+use r#gen::views::{diff::view_diff, operations::view_operations, patch::view_patch};
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{
         Cli, Commands, cli_context::CliContext, commit_operation,
         graph_operations::make_stitch::make_stitch_operation, parse_diff_revisions,
+        remote::handle_remote_command,
     },
     diffs::gfa::gfa_sample_diff,
     get_config_connection, get_connection_for_branch, get_raw_connection,
@@ -23,11 +26,6 @@ use r#gen::{
         block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
         tui_runtime::install_global_panic_hook,
     },
-};
-#[cfg(not(target_os = "emscripten"))]
-use r#gen::{
-    commands::remote::handle_remote_command,
-    views::{diff::view_diff, operations::view_operations, patch::view_patch},
 };
 use gen_annotations::translate;
 use gen_core::{BranchName, CommitRef, config::Workspace, range::Range, region::Region};
@@ -141,7 +139,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             hash.as_deref(),
         );
     }
-    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Remote(cmd)) = &cli.command {
         return handle_remote_command(&operation_conn, cmd);
     }
@@ -252,7 +249,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(r#gen::commands::export::execute(&export_cli_context, cmd)?)
         }
         Some(Commands::Derive(cmd)) => Ok(r#gen::commands::derive::execute(&cli_context, cmd)?),
-        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
         Some(Commands::View {
             graph,

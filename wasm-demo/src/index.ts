@@ -8,6 +8,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import localforage from 'localforage';
 import { GenShell } from './gen_shell';
+import { BrowserLoginBridge, splitOnBeginMessage } from './login_bridge';
 import { ServiceWorkerManager } from './service_worker_manager';
 import '../style/demo.css';
 
@@ -100,19 +101,81 @@ async function runDemo(): Promise<void> {
   });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-  term.loadAddon(new WebLinksAddon());
+
+  // The `gen remote login` browser flow prints its login URL as ordinary terminal text (see
+  // `outputCallback` below), so it already goes through xterm's web-links auto-detection. Route
+  // clicks on that specific URL through `loginBridge.openLoginWindow()` (preserving the popup's
+  // `window.opener`, required for the callback page's `postMessage` back); every other link keeps
+  // exactly `WebLinksAddon`'s own default behavior (open a blank tab, clear its `opener`, then
+  // navigate it -- see `@xterm/addon-web-links`'s default handler, reproduced here since the
+  // addon only lets a custom handler *replace* the default, not wrap it).
+  term.loadAddon(
+    new WebLinksAddon((event, uri) => {
+      if (loginBridge.isPendingLoginUrl(uri)) {
+        loginBridge.openLoginWindow();
+        return;
+      }
+      const blankTab = window.open();
+      if (blankTab) {
+        try {
+          blankTab.opener = null;
+        } catch {
+          // Some browsers disallow reassigning `opener`; the tab still opened blank, which is
+          // the security property we actually need here.
+        }
+        blankTab.location.href = uri;
+      } else {
+        console.warn('Opening link blocked as opener could not be cleared');
+      }
+    })
+  );
 
   await fontReady;
   term.open(targetDiv);
   initWebglAddon(term);
+
+  // Buffers output across chunks so a `gen-login` sentinel message split across two
+  // `outputCallback` calls is never partially displayed as raw control text.
+  let outputBuffer = '';
+  function writeTerminalOutput(text: string): void {
+    outputBuffer += text;
+    for (;;) {
+      const split = splitOnBeginMessage(outputBuffer);
+      if (!split) {
+        term.write(outputBuffer);
+        outputBuffer = '';
+        return;
+      }
+      term.write(split.before);
+      if (split.begin) {
+        loginBridge.begin(split.begin);
+      }
+      outputBuffer = split.after;
+    }
+  }
+
+  const loginBridge = new BrowserLoginBridge(
+    data => shell.input(data),
+    loginUrl => {
+      term.write(
+        '\r\nThe login popup was blocked.\r\n' +
+          `Open this link to sign in: ${loginUrl}\r\n` +
+          'Waiting for authentication...\r\n'
+      );
+    }
+  );
 
   const shellOptions: IShell.IOptions = {
     browsingContextId: serviceWorkerManager.browsingContextId,
     baseUrl,
     wasmBaseUrl: baseUrl,
     mountpoint: DRIVE_MOUNTPOINT,
-    outputCallback: (text: string) => term.write(text),
+    outputCallback: writeTerminalOutput,
     shellManager,
+    environment: {
+      GEN_TERMINAL_ORIGIN: window.location.origin,
+      GEN_LOGIN_CALLBACK_URL: new URL('gen-login-callback.html', baseUrl).href,
+    },
   };
   const shell = new GenShell(shellOptions);
 
