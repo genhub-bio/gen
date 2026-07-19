@@ -14,6 +14,22 @@ const BROADCAST_CHANNEL_ID = '/sw-api.v1';
 const SW_PING_ENDPOINT = '/api/service-worker-heartbeat';
 const HEARTBEAT_MS = 20000;
 
+// Bump whenever service-worker.ts or the broadcast message shape it relays changes: forces
+// browsers with an already-installed (and already-controlling, via clients.claim()) worker from a
+// previous build to unregister and pick up the new one, rather than keep answering broadcast
+// messages with stale/mismatched logic until the tab is manually reloaded twice or hard-refreshed.
+const SW_PROTOCOL_VERSION = '1';
+
+async function unregisterStaleServiceWorkers(scriptUrl: string): Promise<void> {
+  const versionKey = `${scriptUrl}-version`;
+  const installedVersion = localStorage.getItem(versionKey);
+  if (installedVersion !== SW_PROTOCOL_VERSION) {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(registrations.map(registration => registration.unregister()));
+    localStorage.setItem(versionKey, SW_PROTOCOL_VERSION);
+  }
+}
+
 export interface IStdinHandler {
   (message: any): Promise<any>;
 }
@@ -54,6 +70,8 @@ export class ServiceWorkerManager {
       this._ready.reject(void 0);
       return;
     }
+
+    await unregisterStaleServiceWorkers(this._workerUrl);
 
     if (serviceWorker.controller) {
       registration = (await serviceWorker.getRegistration(serviceWorker.controller.scriptURL)) ?? null;
