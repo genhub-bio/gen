@@ -86,6 +86,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(Commands::Clone { .. }) = &cli.command {
         return Err("clone is not supported in this build (no network access)".into());
     }
+    #[cfg(target_os = "emscripten")]
+    if let Some(Commands::EmscriptenHttpTest(cmd)) = &cli.command {
+        return r#gen::commands::emscripten_http_test::execute(cmd);
+    }
     #[cfg(feature = "profiling")]
     if let Some(Commands::Profile(cmd)) = &cli.command {
         return r#gen::commands::profile::execute(cmd.clone());
@@ -235,6 +239,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Clone { .. }) => {
             unreachable!("clone commands are handled before opening the workspace databases")
+        }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::EmscriptenHttpTest(..)) => {
+            unreachable!(
+                "emscripten http test commands are handled before opening the workspace databases"
+            )
         }
         #[cfg(feature = "profiling")]
         Some(Commands::Profile(cmd)) => r#gen::commands::profile::execute(cmd.clone()),

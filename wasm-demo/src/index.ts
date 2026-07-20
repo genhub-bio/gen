@@ -134,6 +134,11 @@ async function runDemo(): Promise<void> {
   term.open(targetDiv);
   initWebglAddon(term);
 
+  // Exposes the terminal instance for browser-level test automation (e.g. Playwright) to read
+  // back rendered output via `term.buffer.active`; the WebGL renderer draws to a canvas, so the
+  // rendered text is otherwise unavailable through the DOM.
+  (window as unknown as { __genTerminal: Terminal }).__genTerminal = term;
+
   // Buffers output across chunks so a `gen-login` sentinel message split across two
   // `outputCallback` calls is never partially displayed as raw control text.
   let outputBuffer = '';

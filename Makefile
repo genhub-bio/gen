@@ -77,7 +77,9 @@ gif:
 # https://emscripten.org/docs/getting_started/downloads.html, `./emsdk install 4.0.9 && ./emsdk
 # activate 4.0.9`). Override EMSDK_DIR to match your machine. cockle's coreutils/grep/less/sed/
 # cockle_fs wasm packages are vendored under wasm-demo/*-wasm/ rather than fetched via micromamba
-# at build time -- see wasm-demo/VENDORED_PACKAGES.md.
+# at build time -- see wasm-demo/VENDORED_PACKAGES.md. -sFETCH=1 links Emscripten's Fetch API
+# runtime (libfetch), which `gen remote`'s browser HTTP transport calls directly; referencing
+# emscripten_fetch() alone does not pull it in automatically.
 EMSDK_DIR ?= $(HOME)/emsdk
 wasm:
 	@test -f $(EMSDK_DIR)/emsdk_env.sh || (echo "emsdk not found at $(EMSDK_DIR); set EMSDK_DIR=/path/to/emsdk" && exit 1)
@@ -86,7 +88,7 @@ wasm:
 	done
 	bash -lc '\
 		source $(EMSDK_DIR)/emsdk_env.sh && \
-		CC=emcc CXX=em++ AR=emar RUSTFLAGS="-C panic=unwind -C opt-level=1 -C link-arg=-sSTACK_SIZE=8388608 -C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_NAME=Module -C link-arg=-sEXPORTED_RUNTIME_METHODS=FS,TTY,ENV -C link-arg=-lproxyfs.js" \
+		CC=emcc CXX=em++ AR=emar RUSTFLAGS="-C panic=unwind -C opt-level=1 -C link-arg=-sSTACK_SIZE=8388608 -C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_NAME=Module -C link-arg=-sEXPORTED_RUNTIME_METHODS=FS,TTY,ENV -C link-arg=-lproxyfs.js -C link-arg=-sFETCH=1" \
 		cargo build --release --bin gen --target wasm32-unknown-emscripten \
 	'
 	cd wasm-demo && npm install

@@ -10,9 +10,8 @@ use crate::commands::remote::server::AuthTokens;
 // Unconditional (not `#[cfg(target_os = "emscripten")]`) so its pure URL/message-framing logic
 // gets exercised by the normal native test run too; only its actual stdin/stdout I/O is gated.
 pub mod browser;
-#[cfg(not(target_os = "emscripten"))]
 pub mod client;
-#[cfg(not(target_os = "emscripten"))]
+pub mod http;
 pub mod operations;
 pub mod server;
 pub mod utils;
