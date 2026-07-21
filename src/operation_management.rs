@@ -777,19 +777,25 @@ fn push_to_file_remote(
         None
     };
 
-    let diff = if let Some(remote_manifest) = remote_manifest {
-        ManifestComparer::diff_manifests(&local_manifest, &remote_manifest)?
+    let diff = if let Some(remote_manifest) = &remote_manifest {
+        ManifestComparer::diff_manifests(&local_manifest, remote_manifest)?
     } else {
         // Empty remote - all local operations are missing
         ManifestDiff {
             missing_in_manifest2: local_manifest.operations.clone(),
             missing_in_manifest1: vec![],
+            default_collection_name: remote_manifest.as_ref().map_or_else(
+                || "default".to_string(),
+                |manifest| manifest.default_collection_name.clone(),
+            ),
         }
     };
 
     if !diff.missing_in_manifest1.is_empty() {
         return Err(RemoteOperationError::RemoteBranchAhead);
     }
+
+    Defaults::set_default_collection(remote_op_conn, &local_manifest.default_collection_name)?;
 
     if !diff.missing_in_manifest2.is_empty() {
         apply_operations_to_remote(
@@ -1023,17 +1029,22 @@ fn pull_from_file_remote(
             ))
         })?;
 
-    let diff = if let Some(remote_hash) = remote_branch.current_operation_hash {
-        let remote_manifest = ManifestGenerator::new(remote_op_conn)
-            .generate_manifest(&current_branch.name, Some(&remote_hash))?;
+    let remote_manifest = ManifestGenerator::new(remote_op_conn).generate_manifest(
+        &current_branch.name,
+        remote_branch.current_operation_hash.as_ref(),
+    )?;
+    let diff = if remote_branch.current_operation_hash.is_some() {
         ManifestComparer::diff_manifests(&local_manifest, &remote_manifest)?
     } else {
         // There's nothing in the remote, so just make it empty since we have nothing to pull.
         ManifestDiff {
             missing_in_manifest2: vec![],
             missing_in_manifest1: vec![],
+            default_collection_name: remote_manifest.default_collection_name.clone(),
         }
     };
+
+    Defaults::set_default_collection(operation_conn, &remote_manifest.default_collection_name)?;
 
     if diff.missing_in_manifest1.is_empty() {
         return Ok(());
@@ -1068,6 +1079,8 @@ fn pull_from_remote_server(
         current_branch.current_operation_hash.as_ref(),
     )?;
     let diff = send_manifest_to_remote(remote_name, remote_url, &manifest)?;
+
+    Defaults::set_default_collection(operation_conn, &diff.default_collection_name)?;
 
     if diff.missing_in_manifest1.is_empty() {
         return Ok(());
@@ -2773,6 +2786,7 @@ mod tests {
                 "remote operation",
                 HashId::random_str(),
             );
+            Defaults::set_default_collection(remote_op_conn, "remote collection").unwrap();
 
             let remote_url = format!(
                 "file://{}",
@@ -2794,6 +2808,10 @@ mod tests {
             let local_ops = Operation::all(op_conn);
             let remote_ops = Operation::all(remote_op_conn);
             assert_eq!(local_ops, remote_ops);
+            assert_eq!(
+                Defaults::get(op_conn).and_then(|defaults| defaults.collection_name),
+                Some("remote collection".to_string())
+            );
         }
 
         #[test]
@@ -2932,6 +2950,7 @@ mod tests {
                 description: "second operation".to_string(),
             };
             let op2 = end_operation(&context, &mut session, &op_info, "test2", None).unwrap();
+            Defaults::set_default_collection(op_conn, "local collection").unwrap();
 
             let remote_context = setup_gen_on_disk();
             let remote_url = format!(
@@ -2952,6 +2971,11 @@ mod tests {
                 .join(op2.hash.to_string());
             assert!(remote_op1_dir.exists());
             assert!(remote_op2_dir.exists());
+            assert_eq!(
+                Defaults::get(remote_context.operations().conn())
+                    .and_then(|defaults| defaults.collection_name),
+                Some("local collection".to_string())
+            );
         }
 
         #[test]

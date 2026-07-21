@@ -9,7 +9,7 @@ use crate::{
         manifest, manifest_annotation_file_addition, manifest_diff, manifest_operation,
         manifest_operation_file_addition,
     },
-    operations::{FileAddition, Operation, OperationFile, OperationSummary},
+    operations::{Defaults, FileAddition, Operation, OperationFile, OperationSummary},
     traits::Query,
 };
 
@@ -252,6 +252,7 @@ pub struct Manifest {
     pub branch_name: String,
     pub end_hash: Option<HashId>,
     pub operations: Vec<ManifestOperation>,
+    pub default_collection_name: String,
 }
 
 impl<'a> Capnp<'a> for Manifest {
@@ -274,6 +275,8 @@ impl<'a> Capnp<'a> for Manifest {
             let mut operation_builder = operations_builder.reborrow().get(i as u32);
             operation.write_capnp(&mut operation_builder);
         }
+
+        builder.set_default_collection_name(&self.default_collection_name);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -295,11 +298,18 @@ impl<'a> Capnp<'a> for Manifest {
             }
         };
 
+        let default_collection_name = reader
+            .get_default_collection_name()
+            .unwrap()
+            .to_string()
+            .unwrap();
+
         Manifest {
             manifest_version,
             branch_name,
             end_hash,
             operations,
+            default_collection_name,
         }
     }
 }
@@ -308,6 +318,7 @@ impl<'a> Capnp<'a> for Manifest {
 pub struct ManifestDiff {
     pub missing_in_manifest2: Vec<ManifestOperation>,
     pub missing_in_manifest1: Vec<ManifestOperation>,
+    pub default_collection_name: String,
 }
 
 impl<'a> Capnp<'a> for ManifestDiff {
@@ -330,6 +341,8 @@ impl<'a> Capnp<'a> for ManifestDiff {
             let mut operation_builder = missing_in_manifest1_builder.reborrow().get(i as u32);
             operation.write_capnp(&mut operation_builder);
         }
+
+        builder.set_default_collection_name(&self.default_collection_name);
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -345,9 +358,16 @@ impl<'a> Capnp<'a> for ManifestDiff {
             missing_in_manifest1.push(ManifestOperation::read_capnp(operation_reader));
         }
 
+        let default_collection_name = reader
+            .get_default_collection_name()
+            .unwrap()
+            .to_string()
+            .unwrap();
+
         ManifestDiff {
             missing_in_manifest2,
             missing_in_manifest1,
+            default_collection_name,
         }
     }
 }
@@ -415,6 +435,9 @@ impl<'a> ManifestGenerator<'a> {
             branch_name: branch_name.to_string(),
             end_hash: end_hash.copied(),
             operations: manifest_operations,
+            default_collection_name: Defaults::get(self.conn)
+                .and_then(|defaults| defaults.collection_name)
+                .unwrap_or_else(|| "default".to_string()),
         })
     }
 }
@@ -473,6 +496,7 @@ impl ManifestComparer {
         Ok(ManifestDiff {
             missing_in_manifest2,
             missing_in_manifest1,
+            default_collection_name: manifest2.default_collection_name.clone(),
         })
     }
 }
@@ -584,6 +608,7 @@ mod tests {
             manifest_version: "1.0".to_string(),
             branch_name: "main".to_string(),
             end_hash: Some(operation.hash),
+            default_collection_name: "test collection".to_string(),
             operations: vec![ManifestOperation {
                 operation,
                 file_additions: vec![],
@@ -631,6 +656,7 @@ mod tests {
         let manifest_diff = ManifestDiff {
             missing_in_manifest2: vec![manifest_operation.clone()],
             missing_in_manifest1: vec![manifest_operation],
+            default_collection_name: "test collection".to_string(),
         };
 
         let mut message = TypedBuilder::<manifest_diff::Owned>::new_default();
@@ -649,6 +675,7 @@ mod tests {
 
         let db_uuid = crate::metadata::get_db_uuid(conn);
         crate::files::GenDatabase::create(op_conn, &db_uuid, "test_db", "test_db_path").unwrap();
+        Defaults::set_default_collection(op_conn, "test collection").unwrap();
 
         let mut session = start_operation(conn);
         crate::sequence::Sequence::new()
@@ -680,6 +707,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(manifest.branch_name, "main");
+        assert_eq!(manifest.default_collection_name, "test collection");
         assert_eq!(manifest.operations.len(), 2);
         assert_eq!(manifest.operations[0].operation.hash, op1.hash);
         assert_eq!(manifest.operations[1].operation.hash, op2.hash);
@@ -842,6 +870,7 @@ mod tests {
             manifest_version: "1.0".to_string(),
             branch_name: "main".to_string(),
             end_hash: Some(op2.hash),
+            default_collection_name: "local".to_string(),
             operations: vec![
                 ManifestOperation {
                     operation: op1.clone(),
@@ -862,6 +891,7 @@ mod tests {
             manifest_version: "1.0".to_string(),
             branch_name: "main".to_string(),
             end_hash: Some(op3.hash),
+            default_collection_name: "remote".to_string(),
             operations: vec![
                 ManifestOperation {
                     operation: op2.clone(),
@@ -885,6 +915,7 @@ mod tests {
 
         assert_eq!(diff.missing_in_manifest1.len(), 1);
         assert_eq!(diff.missing_in_manifest1[0].operation.hash, op3.hash);
+        assert_eq!(diff.default_collection_name, "remote");
     }
 
     #[test]

@@ -16,6 +16,7 @@ looking things up afterward:
 import gen
 
 repo = gen.Repository("path/to/.gen")
+repo.defaults("my_collection")                # default for omitted collection= arguments
 
 sample = repo.import_fasta("path/to.fa")     # -> Sample
 sg = sample[0]                               # -> SequenceGraph
