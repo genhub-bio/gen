@@ -1270,6 +1270,18 @@ impl Query for Defaults {
 }
 
 impl Defaults {
+    /// Set the default collection by name.
+    pub fn set_default_collection(
+        conn: &OperationsConnection,
+        collection_name: &str,
+    ) -> SQLResult<()> {
+        conn.execute(
+            "UPDATE defaults SET collection_name = ?1 WHERE id = 1",
+            params![collection_name],
+        )?;
+        Ok(())
+    }
+
     /// Set the default remote by name
     pub fn set_default_remote(
         conn: &OperationsConnection,

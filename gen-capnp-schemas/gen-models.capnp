@@ -251,11 +251,13 @@ struct Manifest {
     some @3 :List(UInt8);
   }
   operations @4 :List(ManifestOperation);
+  defaultCollectionName @5 :Text;
 }
 
 struct ManifestDiff {
   missingInManifest2 @0 :List(ManifestOperation);
   missingInManifest1 @1 :List(ManifestOperation);
+  defaultCollectionName @2 :Text;
 }
 
 struct AnnotationInterval {

@@ -192,6 +192,13 @@ impl PyRepository {
         path_to_py_path(py, &path)
     }
 
+    /// Set the collection used when a method's `collection` argument is omitted.
+    fn defaults(&self, collection: &str) -> PyResult<()> {
+        Defaults::set_default_collection(self.context.operations().conn(), collection)
+            .map_err(sqlite_err_to_pyerr)?;
+        Ok(())
+    }
+
     // Transaction context manager
 
     /// Returns self so that Python's `with` statement calls `__enter__`/`__exit__`
@@ -380,6 +387,30 @@ mod python_tests {
                     "#
                 )
             );
+        });
+    }
+
+    #[test]
+    fn test_defaults_changes_default_collection() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_repo = make_repo(py);
+            let dir = tempdir().unwrap();
+            let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
+
+            py_repo.borrow(py).defaults("configured").unwrap();
+            let sample = py_repo
+                .borrow(py)
+                .import_fasta(
+                    fasta.to_str().unwrap().to_string(),
+                    Some("test".to_string()),
+                    false,
+                    None,
+                )
+                .unwrap();
+
+            assert_eq!(sample.collection_name, "configured");
+            assert_eq!(py_repo.borrow(py).get_default_collection(), "configured");
         });
     }
 
