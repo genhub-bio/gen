@@ -120,5 +120,6 @@ codegen-units = 1
 panic = "abort"
 
 [patch.crates-io]
-# Includes fixes to make the emscripten build work.
-rusqdoltlite = { git = "https://github.com/chris7/rusqdoltlite", rev = "389ee0e1fefc298c09e92810eb4176f648a31c85" }
+# Includes fixes to make the emscripten build work, plus the emscripten Fetch
+# HTTP transport for the DoltLite remote client (patches/0002 on the fork).
+rusqdoltlite = { git = "https://github.com/bobvh/rusqdoltlite", rev = "3fccc48f429ad6bb0e002508ebbba6402ec899fd" }

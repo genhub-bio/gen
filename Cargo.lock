@@ -6844,5 +6844,5 @@ dependencies = [
 
 [[patch.unused]]
 name = "rusqdoltlite"
-version = "0.40.12"
-source = "git+https://github.com/chris7/rusqdoltlite?rev=389ee0e1fefc298c09e92810eb4176f648a31c85#389ee0e1fefc298c09e92810eb4176f648a31c85"
+version = "0.40.13"
+source = "git+https://github.com/bobvh/rusqdoltlite?rev=3fccc48f429ad6bb0e002508ebbba6402ec899fd#3fccc48f429ad6bb0e002508ebbba6402ec899fd"
