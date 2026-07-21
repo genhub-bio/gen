@@ -10,7 +10,6 @@ use gen_models::{
 
 pub mod checkout;
 pub mod cli_context;
-#[cfg(not(target_os = "emscripten"))]
 pub mod clone;
 pub mod derive;
 #[cfg(target_os = "emscripten")]

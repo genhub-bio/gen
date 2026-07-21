@@ -78,13 +78,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Clone { url }) = &cli.command {
         return r#gen::commands::clone::execute(url, &workspace);
-    }
-    #[cfg(target_os = "emscripten")]
-    if let Some(Commands::Clone { .. }) = &cli.command {
-        return Err("clone is not supported in this build (no network access)".into());
     }
     #[cfg(target_os = "emscripten")]
     if let Some(Commands::EmscriptenHttpTest(cmd)) = &cli.command {
@@ -146,7 +141,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(Commands::Remote(cmd)) = &cli.command {
         return handle_remote_command(&operation_conn, cmd);
     }
-    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Push {
         remote,
         branch,
@@ -160,21 +154,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             *force,
         );
     }
-    #[cfg(target_os = "emscripten")]
-    if let Some(Commands::Push { .. }) = &cli.command {
-        return Err("push is not supported in this build (no network access)".into());
-    }
-    #[cfg(not(target_os = "emscripten"))]
     if let Some(Commands::Pull { remote, branch }) = &cli.command {
         return r#gen::commands::remote::operations::execute_pull(
             &workspace,
             remote.as_deref(),
             branch.as_deref(),
         );
-    }
-    #[cfg(target_os = "emscripten")]
-    if let Some(Commands::Pull { .. }) = &cli.command {
-        return Err("pull is not supported in this build (no network access)".into());
     }
     if let Some(Commands::Defaults {
         collection,
