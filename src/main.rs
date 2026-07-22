@@ -6,8 +6,6 @@ use clap::{Parser, Subcommand};
 use crossterm::terminal;
 #[cfg(feature = "profiling")]
 use r#gen::profiling::{Profiler, SamplingProfiler};
-#[cfg(not(target_os = "emscripten"))]
-use r#gen::views::{diff::view_diff, operations::view_operations, patch::view_patch};
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{
@@ -24,6 +22,7 @@ use r#gen::{
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
+        diff::view_diff, operations::view_operations, patch::view_patch,
         tui_runtime::install_global_panic_hook,
     },
 };
@@ -336,13 +335,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             if diff.operations.is_empty() {
                 println!("No differences found between {source_ref} and {target_ref}.");
             } else {
-                #[cfg(not(target_os = "emscripten"))]
                 view_diff(graph_conn, &diff)?;
-                #[cfg(target_os = "emscripten")]
-                println!(
-                    "{} operation(s) differ between {source_ref} and {target_ref}.",
-                    diff.operations.len()
-                );
             }
             Ok(())
         }
@@ -398,10 +391,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if interactive {
-                #[cfg(not(target_os = "emscripten"))]
                 return view_operations(&db_context, &history_entries).map_err(Into::into);
-                #[cfg(target_os = "emscripten")]
-                return Err("interactive view is not supported in this build".into());
             }
 
             println!(
@@ -579,17 +569,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => Err(format!("Patch application failed: {}", e).into()),
             }
         }
-        #[cfg(not(target_os = "emscripten"))]
         Some(Commands::PatchView { patch }) => {
             let mut file = File::open(patch)?;
             view_patch(&db_context, &mut file)?;
             Ok(())
         }
-        #[cfg(target_os = "emscripten")]
-        Some(Commands::PatchView { .. }) => Err(
-            "patch-view is not supported in this build (interactive diff viewer unavailable)"
-                .into(),
-        ),
         None => Ok(()),
         Some(Commands::Defaults { .. }) => Ok(()),
         Some(Commands::Transform { format_csv_for_gaf }) => Ok(()),

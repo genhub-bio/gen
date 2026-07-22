@@ -11,6 +11,7 @@ use crossterm::{
 use gen_tui::key_event::Event;
 #[cfg(not(target_os = "emscripten"))]
 use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{TerminalOptions, Viewport, layout::Rect};
 
 #[cfg(not(target_os = "emscripten"))]
 pub type CrosstermTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
@@ -91,6 +92,13 @@ impl TuiSession {
         &mut self.terminal
     }
 
+    pub fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(
+            self.terminal.backend_mut(),
+            crossterm::event::EnableMouseCapture
+        )
+    }
+
     pub fn restore(&mut self) -> io::Result<()> {
         if self.restored {
             return Ok(());
@@ -160,6 +168,10 @@ impl TuiSession {
         &mut self.terminal
     }
 
+    pub fn enable_mouse_capture(&mut self) -> std::io::Result<()> {
+        crate::views::emscripten_input::enable_mouse_capture()
+    }
+
     fn restore_terminal_state() -> std::io::Result<()> {
         let _ = crate::views::emscripten_input::disable_mouse_capture();
         crossterm::terminal::disable_raw_mode()?;
@@ -183,6 +195,109 @@ impl TuiSession {
 
 #[cfg(target_os = "emscripten")]
 impl Drop for TuiSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+/// Restores terminal state after an inline (non-alternate-screen) TUI session: positions the
+/// cursor just past the bottom of the rendered viewport before disabling raw mode, so the shell
+/// prompt reappears below the last frame instead of wherever ratatui's generic `restore()` (which
+/// assumes a full-screen alternate-screen session) would leave it. Shared by both `InlineTuiSession`
+/// variants below since it only touches `crossterm::cursor`/`crossterm::terminal`, neither of which
+/// need `mio` and so work identically on native and `target_os = "emscripten"`.
+fn restore_inline_terminal(viewport_area: Rect) -> std::io::Result<()> {
+    let target_line = viewport_area.y + viewport_area.height;
+    crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, target_line))?;
+    crossterm::execute!(std::io::stdout(), crossterm::cursor::Show)?;
+    crossterm::terminal::disable_raw_mode()?;
+    std::io::Write::flush(&mut std::io::stdout())
+}
+
+/// RAII guard for inline (non-alternate-screen) TUI sessions, e.g. `gen view`'s inline widget.
+/// Mirrors `TuiSession`, but uses `Viewport::Inline` and restores via
+/// [`restore_inline_terminal`] instead of leaving an alternate screen.
+#[cfg(not(target_os = "emscripten"))]
+pub struct InlineTuiSession {
+    terminal: CrosstermTerminal,
+    restored: bool,
+}
+
+#[cfg(not(target_os = "emscripten"))]
+impl InlineTuiSession {
+    pub fn enter(height: u16) -> io::Result<Self> {
+        let terminal = ratatui::try_init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(height),
+        })?;
+        Ok(Self {
+            terminal,
+            restored: false,
+        })
+    }
+
+    pub fn terminal_mut(&mut self) -> &mut CrosstermTerminal {
+        &mut self.terminal
+    }
+
+    pub fn restore(&mut self) -> io::Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+
+        self.restored = true;
+        restore_inline_terminal(self.terminal.get_frame().area())
+    }
+}
+
+#[cfg(not(target_os = "emscripten"))]
+impl Drop for InlineTuiSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+/// RAII guard for inline TUI sessions on `target_os = "emscripten"`. `ratatui::try_init_with_options`
+/// requires ratatui's `crossterm` cargo feature, which pulls in `mio` via `ratatui-crossterm`'s
+/// default-featured `crossterm` dependency (no emscripten backend), so the terminal is built
+/// manually on `EmscriptenBackend` instead, same as `TuiSession` does for the full-screen case.
+#[cfg(target_os = "emscripten")]
+pub struct InlineTuiSession {
+    terminal: EmscriptenTerminal,
+    restored: bool,
+}
+
+#[cfg(target_os = "emscripten")]
+impl InlineTuiSession {
+    pub fn enter(height: u16) -> std::io::Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        let terminal = ratatui::Terminal::with_options(
+            crate::views::emscripten_backend::EmscriptenBackend::new(std::io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Inline(height),
+            },
+        )?;
+        Ok(Self {
+            terminal,
+            restored: false,
+        })
+    }
+
+    pub fn terminal_mut(&mut self) -> &mut EmscriptenTerminal {
+        &mut self.terminal
+    }
+
+    pub fn restore(&mut self) -> std::io::Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+
+        self.restored = true;
+        restore_inline_terminal(self.terminal.get_frame().area())
+    }
+}
+
+#[cfg(target_os = "emscripten")]
+impl Drop for InlineTuiSession {
     fn drop(&mut self) {
         let _ = self.restore();
     }

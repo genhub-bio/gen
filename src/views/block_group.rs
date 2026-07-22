@@ -299,10 +299,7 @@ pub fn view_block_group(
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
-    #[cfg(not(target_os = "emscripten"))]
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-    #[cfg(target_os = "emscripten")]
-    crate::views::emscripten_input::enable_mouse_capture()?;
+    session.enable_mouse_capture()?;
     let terminal = session.terminal_mut();
 
     // Basic event loop

@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
     io::{Error, Result},
-    panic,
     time::{Duration, Instant},
 };
 
@@ -16,7 +15,6 @@ use gen_tui::{
     theme::current_theme,
 };
 use ratatui::{
-    TerminalOptions, Viewport,
     prelude::*,
     style::Color,
     widgets::{Block, Borders},
@@ -33,6 +31,7 @@ use crate::views::{
         AnnotationColorCache, GraphOverlay, group_track_key, has_path_overlay,
         project_path_overlay_nodes, remove_path_overlay, replace_track_overlays, set_path_overlay,
     },
+    tui_runtime,
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -80,7 +79,6 @@ impl TickEventSource {
     }
 }
 
-#[cfg(not(target_os = "emscripten"))]
 impl EventSource for TickEventSource {
     fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent> {
         let remaining = self
@@ -90,38 +88,8 @@ impl EventSource for TickEventSource {
 
         let wait = remaining.min(timeout);
 
-        if crossterm::event::poll(wait).unwrap_or(false) {
-            match crossterm::event::read().unwrap() {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    return Some(AppEvent::KeyPress(k));
-                }
-                Event::Resize(w, h) => {
-                    return Some(AppEvent::Resize(w, h));
-                }
-                _ => {}
-            }
-        }
-
-        if self.last_tick.elapsed() >= self.tick_rate {
-            self.last_tick = Instant::now();
-            return Some(AppEvent::Tick);
-        }
-
-        None
-    }
-}
-
-#[cfg(target_os = "emscripten")]
-impl EventSource for TickEventSource {
-    fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent> {
-        let remaining = self
-            .tick_rate
-            .checked_sub(self.last_tick.elapsed())
-            .unwrap_or(Duration::ZERO);
-
-        let wait = remaining.min(timeout);
-
-        if let Some(event) = crate::views::emscripten_input::poll_next(wait) {
+        tui_runtime::wait_for_event(wait);
+        if let Some(event) = tui_runtime::poll_immediate_event() {
             match event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     return Some(AppEvent::KeyPress(k));
@@ -271,29 +239,9 @@ fn show_inline_widget(
     block_group_id: Option<HashId>,
     history_ref: Option<&str>,
 ) -> Result<bool> {
-    #[cfg(not(target_os = "emscripten"))]
-    let terminal_result = panic::catch_unwind(|| {
-        ratatui::init_with_options(TerminalOptions {
-            viewport: Viewport::Inline(height),
-        })
-    });
-    // `ratatui::init_with_options` requires ratatui's `crossterm` cargo feature, which pulls in
-    // `mio` via `ratatui-crossterm`'s default-featured `crossterm` dependency (no emscripten
-    // backend). Build the terminal manually on our own `EmscriptenBackend` instead.
-    #[cfg(target_os = "emscripten")]
-    let terminal_result = panic::catch_unwind(|| {
-        crossterm::terminal::enable_raw_mode().expect("failed to enable raw mode");
-        ratatui::Terminal::with_options(
-            crate::views::emscripten_backend::EmscriptenBackend::new(std::io::stdout()),
-            TerminalOptions {
-                viewport: Viewport::Inline(height),
-            },
-        )
-        .expect("failed to initialize terminal")
-    });
-
-    match terminal_result {
-        Ok(mut terminal) => {
+    match tui_runtime::InlineTuiSession::enter(height) {
+        Ok(mut session) => {
+            let terminal = session.terminal_mut();
             let mut state = InlineGenGraphState::new(graph, conn, block_group_id, history_ref);
             for path in paths {
                 state.add_path(&path, conn)?;
@@ -392,24 +340,9 @@ fn show_inline_widget(
             }
 
             // Final render without border -> capture the viewport area
-            let viewport_area = terminal.get_frame().area();
-
             terminal.draw(|frame| render_final(frame, &mut state))?;
 
-            // For inline viewports, we need to manually restore terminal state
-            // (ratatui::restore() loses the cursor which resets cursor position incorrectly.
-
-            // Position cursor at the end of the viewport BEFORE restoring terminal mode
-            let target_line = viewport_area.y + viewport_area.height;
-            let _ =
-                crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, target_line));
-
-            // Now restore terminal modes manually (show cursor, disable raw mode)
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
-            let _ = crossterm::terminal::disable_raw_mode();
-
-            std::io::Write::flush(&mut std::io::stdout()).ok();
-
+            // `session` restores terminal state (cursor position, raw mode) on drop here.
             Ok(upgrade_requested)
         }
         Err(_) => {
