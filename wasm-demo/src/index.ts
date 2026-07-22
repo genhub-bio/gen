@@ -10,11 +10,11 @@ import localforage from 'localforage';
 import { GenShell } from './gen_shell';
 import { BrowserLoginBridge, splitOnBeginMessage } from './login_bridge';
 import { ServiceWorkerManager } from './service_worker_manager';
+import { buildShellEnvironment, buildTerminalOptions, TERMINAL_FONT_SIZE } from './terminal_setup';
+import { base16PaletteForMode, selectThemeMode } from './theme';
 import '../style/demo.css';
 
 const DRIVE_MOUNTPOINT = '/drive';
-const TERMINAL_FONT_FAMILY = '"JetBrains Mono", monospace';
-const TERMINAL_FONT_SIZE = 14;
 const FONT_LOAD_TIMEOUT_MS = 2000;
 
 // document.fonts.load() should settle quickly, but the Font Loading API is not
@@ -65,8 +65,25 @@ function initWebglAddon(term: Terminal): void {
   }
 }
 
+// Fixed for the lifetime of this terminal and shell; see the module doc on `selectThemeMode` for
+// why this is not re-evaluated if the OS preference changes later.
+function applyThemeBackground(mode: ReturnType<typeof selectThemeMode>): void {
+  const background = base16PaletteForMode(mode).base00;
+  document.documentElement.style.colorScheme = mode;
+  document.body.style.backgroundColor = background;
+  for (const id of ['terminal-wrap', 'targetdiv']) {
+    const element = document.getElementById(id);
+    if (element) {
+      element.style.backgroundColor = background;
+    }
+  }
+}
+
 async function runDemo(): Promise<void> {
   const baseUrl = window.location.href;
+  const themeMode = selectThemeMode();
+  // Set before the terminal opens so there is no black/white flash while xterm initializes.
+  applyThemeBackground(themeMode);
 
   const fontReady = waitForTerminalFont();
 
@@ -89,16 +106,7 @@ async function runDemo(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 100));
 
   const targetDiv = document.getElementById('targetdiv')!;
-  const term = new Terminal({
-    fontSize: TERMINAL_FONT_SIZE,
-    fontFamily: TERMINAL_FONT_FAMILY,
-    fontWeight: '400',
-    fontWeightBold: '600',
-    lineHeight: 1,
-    letterSpacing: 0,
-    customGlyphs: true,
-    rows: 40,
-  });
+  const term = new Terminal(buildTerminalOptions(themeMode));
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
 
@@ -177,10 +185,12 @@ async function runDemo(): Promise<void> {
     mountpoint: DRIVE_MOUNTPOINT,
     outputCallback: writeTerminalOutput,
     shellManager,
-    environment: {
+    environment: buildShellEnvironment(themeMode, {
       GEN_TERMINAL_ORIGIN: window.location.origin,
       GEN_LOGIN_CALLBACK_URL: new URL('gen-login-callback.html', baseUrl).href,
-    },
+      // Cockle's default `js-shell:` PS1 is replaced with a plain prompt for this terminal.
+      PS1: '> ',
+    }),
   };
   const shell = new GenShell(shellOptions);
 
@@ -196,6 +206,7 @@ async function runDemo(): Promise<void> {
   resizeObserver.observe(targetDiv);
 
   setupUpload(contentsManager);
+  setupHelpLink(shell);
 }
 
 function setupUpload(contentsManager: ContentsManager): void {
@@ -212,11 +223,30 @@ function setupUpload(contentsManager: ContentsManager): void {
 
       const content = await file.text();
       await contentsManager.save(file.name, { type: 'file', format: 'text', content });
-      status.textContent = `Uploaded to ${DRIVE_MOUNTPOINT}/${file.name}`;
+      status.textContent = `Added ${file.name} to ${DRIVE_MOUNTPOINT}`;
     })().catch(err => {
-      console.error('Upload failed', err);
-      status.textContent = `Upload failed: ${err}`;
+      console.error('Adding the file failed', err);
+      status.textContent = `Adding the file failed: ${err}`;
     });
+  });
+}
+
+const HELP_COMMAND = 'gen --help';
+// Gives the reader a moment to read the typed-out command before it runs, rather than having it
+// appear to execute instantly.
+const HELP_COMMAND_RUN_DELAY_MS = 900;
+
+// Types `gen --help` into the shell as though the reader had entered it themselves, pausing
+// before submitting it so newcomers can see the command before its output appears.
+function setupHelpLink(shell: GenShell): void {
+  const link = document.getElementById('help-link') as HTMLAnchorElement;
+  link.addEventListener('click', event => {
+    event.preventDefault();
+    void (async () => {
+      await shell.input(HELP_COMMAND);
+      await new Promise(resolve => setTimeout(resolve, HELP_COMMAND_RUN_DELAY_MS));
+      await shell.input('\r');
+    })();
   });
 }
 

@@ -6,11 +6,20 @@
   <script src="bundle.js"></script>
 </head>
 <body>
+  <div id="intro-bar">
+    <p>
+      This is a real terminal running <code>gen</code>, a command-line tool for version-controlled
+      genetic sequences, entirely in your browser. New to the command line? Click
+      <a id="help-link" href="#">here</a> to run <code>gen --help</code> and see what's available.
+    </p>
+  </div>
   <div id="upload-bar">
-    <label for="upload-input">Upload a file into /drive:</label>
+    <label for="upload-input">Add a file to /drive:</label>
     <input type="file" id="upload-input" />
     <span id="upload-status"></span>
   </div>
-  <div id="targetdiv"></div>
+  <div id="terminal-wrap">
+    <div id="targetdiv"></div>
+  </div>
 </body>
 </html>
