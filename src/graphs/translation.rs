@@ -14,11 +14,14 @@ use gen_models::{
     errors::OperationError,
     node::Node,
     operations::OperationInfo,
-    path::revcomp,
+    path::{Path, revcomp},
+    path_edge::PathEdge,
     sequence::Sequence,
     session_operations::{end_operation, start_operation},
+    traits::Query,
 };
 use petgraph::{Direction, graphmap::DiGraphMap, visit::EdgeRef};
+use rusqlite::params;
 use thiserror::Error;
 
 // NCBI table 1 – Standard
@@ -175,6 +178,8 @@ pub enum TranslationError {
     BlockGroupError(String),
     #[error("A sequence graph named '{0}' already exists in this sample")]
     DuplicateBlockGroup(String),
+    #[error("Path error: {0}")]
+    PathError(String),
 }
 
 pub struct TranslationParams<'a> {
@@ -566,6 +571,7 @@ fn virtual_id(graph_node: GraphNode) -> HashId {
 /// graph end; `extract_from_entry` always sets `entry_nodes` to a single node,
 /// with `exit_nodes` derived the same way from there to the graph end.
 struct TranslationSubgraph {
+    dna_block_group_id: HashId,
     graph: DiGraphMap<HashId, ()>,
     node_ranges: HashMap<HashId, (HashId, Option<i64>, Option<i64>)>,
     edge_chromosome_indices: HashMap<(HashId, HashId), Vec<i64>>,
@@ -677,6 +683,7 @@ fn extract_full_graph(
     }
 
     Ok(TranslationSubgraph {
+        dna_block_group_id: *block_group_id,
         graph,
         node_ranges,
         edge_chromosome_indices,
@@ -784,6 +791,7 @@ fn extract_from_entry(
     }
 
     Ok(TranslationSubgraph {
+        dna_block_group_id: *block_group_id,
         graph,
         node_ranges,
         edge_chromosome_indices,
@@ -995,6 +1003,7 @@ fn translate_from(
     label_hash: HashId,
 ) -> Result<BlockGroup, TranslationError> {
     let TranslationSubgraph {
+        dna_block_group_id,
         graph: subgraph,
         node_ranges,
         edge_chromosome_indices,
@@ -1419,6 +1428,9 @@ fn translate_from(
 
     // The `*` stop node's identity hash depends on every site that reaches it
     // across the whole walk, so it is only created once `stop_edges` is complete.
+    // Hoisted out of the `if` so Step 8 can route a template path's own walk
+    // into the same stop node instead of leaving it dangling.
+    let mut stop_id: Option<HashId> = None;
     if !stop_edges.is_empty() {
         let mut pred_hashes: Vec<String> = stop_edges
             .iter()
@@ -1427,8 +1439,9 @@ fn translate_from(
             .into_iter()
             .collect();
         pred_hashes.sort();
-        let (stop_id, _) =
+        let (stop_id_value, _) =
             create_protein_node(conn, &pred_hashes, &(STOP_CODON as char).to_string())?;
+        stop_id = Some(stop_id_value);
 
         let mut stop_exit_chromosome_indices: HashSet<i64> = HashSet::new();
         for edge in &stop_edges {
@@ -1437,7 +1450,7 @@ fn translate_from(
                 &block_group_id,
                 edge.predecessor_id,
                 edge.predecessor_coord,
-                stop_id,
+                stop_id_value,
                 0,
                 edge.chromosome_index,
             )?);
@@ -1447,7 +1460,7 @@ fn translate_from(
             block_group_edges.push(make_edge(
                 conn,
                 &block_group_id,
-                stop_id,
+                stop_id_value,
                 1,
                 PATH_END_NODE_ID,
                 0,
@@ -1464,7 +1477,337 @@ fn translate_from(
 
     BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
+    // Step 8: recreate the DNA block group's own paths on the protein graph, so
+    // the protein graph isn't left pathless (see `recreate_paths_on_protein_graph`).
+    let path_replay_context = PathReplayContext {
+        dna_by_node: &dna_by_node,
+        protein_node_ids: &protein_node_ids,
+        protein_identity_hashes: &protein_identity_hashes,
+        protein_amino_acid_len: &protein_amino_acid_len,
+        node_codons: &node_codons,
+        codon_table: &params.codon_table,
+        label_hash,
+        stop_id,
+    };
+    recreate_paths_on_protein_graph(
+        conn,
+        &dna_block_group_id,
+        &block_group_id,
+        &subgraph,
+        strand,
+        &path_replay_context,
+    )?;
+
     Ok(protein_bg)
+}
+
+/// Everything a path-replay walk needs about the already-computed protein
+/// graph and translation parameters, bundled to keep
+/// `recreate_paths_on_protein_graph`/`walk_linear_path` within a reasonable
+/// parameter count.
+#[derive(Clone, Copy)]
+struct PathReplayContext<'a> {
+    dna_by_node: &'a HashMap<HashId, String>,
+    protein_node_ids: &'a HashMap<(HashId, u8), HashId>,
+    protein_identity_hashes: &'a HashMap<(HashId, u8), String>,
+    protein_amino_acid_len: &'a HashMap<(HashId, u8), i64>,
+    node_codons: &'a HashMap<(HashId, u8), NodeCodons>,
+    codon_table: &'a CodonTable,
+    label_hash: HashId,
+    stop_id: Option<HashId>,
+}
+
+/// Recreates each of the DNA block group's own paths on the freshly created
+/// protein block group, so a protein sequence graph isn't left without a
+/// current path (which `propagate-annotations`, `view`, and other current-path
+/// consumers all rely on). Paths are replayed in ascending `created_on` order
+/// so `BlockGroup::get_current_path` (which picks the most recently created
+/// path) resolves to the protein equivalent of whichever path was current on
+/// the template. A path whose route never reaches the translated region, or
+/// which produces no protein-graph edges at all (e.g. too short to encode a
+/// single residue), is silently skipped rather than erroring -- that mirrors
+/// how the protein graph itself only anchors nodes it can actually translate.
+fn recreate_paths_on_protein_graph(
+    conn: &GraphConnection,
+    dna_block_group_id: &HashId,
+    protein_block_group_id: &HashId,
+    subgraph: &DiGraphMap<HashId, ()>,
+    strand: Strand,
+    context: &PathReplayContext,
+) -> Result<(), TranslationError> {
+    let template_paths = Path::try_query(
+        conn,
+        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on ASC",
+        params![dna_block_group_id],
+    )
+    .map_err(|e| TranslationError::PathError(e.to_string()))?;
+
+    if template_paths.is_empty() {
+        return Ok(());
+    }
+
+    // Every node in the DNA block group's graph, indexed by (real node id, slice
+    // start) so a path edge's target can be matched back to the exact GraphNode
+    // slice (and therefore virtual id) it enters -- the same virtual ids used to
+    // key `subgraph`/`dna_by_node`/`protein_node_ids`.
+    let gen_graph = BlockGroup::get_graph(conn, dna_block_group_id)
+        .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
+    let mut graph_node_by_start: HashMap<(HashId, i64), GraphNode> = HashMap::new();
+    for graph_node in gen_graph.nodes() {
+        graph_node_by_start.insert((graph_node.node_id, graph_node.sequence_start), graph_node);
+    }
+
+    for template_path in template_paths {
+        let edges = PathEdge::edges_for_path(conn, &template_path.id);
+
+        // Real DNA nodes along this path, in order, restricted to the maximal
+        // contiguous run that lies within the translated region -- a path can
+        // extend both before and after the region actually translated.
+        let mut virtual_ids: Vec<HashId> = Vec::new();
+        let mut entered_region = false;
+        for edge in &edges {
+            if is_terminal(edge.target_node_id) {
+                break;
+            }
+            let Some(&graph_node) =
+                graph_node_by_start.get(&(edge.target_node_id, edge.target_coordinate))
+            else {
+                break;
+            };
+            let virtual_node_id = virtual_id(graph_node);
+            if subgraph.contains_node(virtual_node_id) {
+                entered_region = true;
+                virtual_ids.push(virtual_node_id);
+            } else if entered_region {
+                break;
+            }
+        }
+
+        if virtual_ids.is_empty() {
+            continue;
+        }
+        if strand == Strand::Reverse {
+            virtual_ids.reverse();
+        }
+
+        let edge_ids = walk_linear_path(conn, context, &virtual_ids)?;
+        if edge_ids.is_empty() {
+            continue;
+        }
+        Path::create(conn, &template_path.name, protein_block_group_id, &edge_ids)
+            .map_err(|e| TranslationError::PathError(e.to_string()))?;
+    }
+
+    Ok(())
+}
+
+/// Connects `from` into the shared stop node and on to `PATH_END`, if a stop
+/// node exists for this translation. Used whenever a path replay walk hits an
+/// in-frame stop codon, mirroring how `codon_walk`/Step 6 route every stop
+/// site through the same node rather than ending the walk mid-air.
+fn route_to_stop(
+    conn: &GraphConnection,
+    stop_id: Option<HashId>,
+    from: &WalkFrom,
+    edge_ids: &mut Vec<HashId>,
+) -> Result<(), TranslationError> {
+    let Some(stop_id) = stop_id else {
+        return Ok(());
+    };
+    let into_stop = Edge::create(
+        conn,
+        from.id,
+        from.coord,
+        Strand::Forward,
+        stop_id,
+        0,
+        Strand::Forward,
+    )
+    .map_err(|e| TranslationError::EdgeError(e.to_string()))?;
+    edge_ids.push(into_stop.id);
+    let stop_to_end = Edge::create(
+        conn,
+        stop_id,
+        1,
+        Strand::Forward,
+        PATH_END_NODE_ID,
+        0,
+        Strand::Forward,
+    )
+    .map_err(|e| TranslationError::EdgeError(e.to_string()))?;
+    edge_ids.push(stop_to_end.id);
+    Ok(())
+}
+
+/// Mirrors `codon_walk`'s reading-frame/junction logic but along one
+/// predetermined, non-branching sequence of virtual node ids -- a specific
+/// template path's route through the translated region -- instead of the
+/// general subgraph. `Edge::create`/`create_protein_node` are both content-hash
+/// idempotent, so replaying the same walk that produced the protein graph's
+/// edges in the first place reconstructs the identical node/edge ids rather
+/// than creating new ones.
+fn walk_linear_path(
+    conn: &GraphConnection,
+    context: &PathReplayContext,
+    virtual_ids: &[HashId],
+) -> Result<Vec<HashId>, TranslationError> {
+    let PathReplayContext {
+        dna_by_node,
+        protein_node_ids,
+        protein_identity_hashes,
+        protein_amino_acid_len,
+        node_codons,
+        codon_table,
+        label_hash,
+        stop_id,
+    } = *context;
+
+    let mut edge_ids: Vec<HashId> = Vec::new();
+    let mut from = WalkFrom {
+        id: PATH_START_NODE_ID,
+        coord: 0,
+        identity_hash: label_hash.to_string(),
+    };
+    let mut pending: Vec<u8> = Vec::new();
+
+    for &node in virtual_ids {
+        let dna = dna_by_node.get(&node).map(|s| s.as_bytes()).unwrap_or(&[]);
+
+        if pending.is_empty() {
+            if let Some(&protein_id) = protein_node_ids.get(&(node, 0)) {
+                let edge = Edge::create(
+                    conn,
+                    from.id,
+                    from.coord,
+                    Strand::Forward,
+                    protein_id,
+                    0,
+                    Strand::Forward,
+                )
+                .map_err(|e| TranslationError::EdgeError(e.to_string()))?;
+                edge_ids.push(edge.id);
+                from = WalkFrom {
+                    id: protein_id,
+                    coord: *protein_amino_acid_len.get(&(node, 0)).unwrap_or(&0),
+                    identity_hash: protein_identity_hashes
+                        .get(&(node, 0))
+                        .cloned()
+                        .unwrap_or_default(),
+                };
+                let codons = node_codons.get(&(node, 0));
+                if codons.is_some_and(|c| c.is_terminal) {
+                    route_to_stop(conn, stop_id, &from, &mut edge_ids)?;
+                    return Ok(edge_ids);
+                }
+                pending = codons.map(|c| c.tail.clone()).unwrap_or_default();
+                continue;
+            }
+            if starts_with_stop(codon_table, dna) {
+                route_to_stop(conn, stop_id, &from, &mut edge_ids)?;
+                return Ok(edge_ids);
+            }
+            pending = dna.to_vec();
+            continue;
+        }
+
+        let need = 3 - pending.len();
+        if dna.len() < need {
+            pending.extend_from_slice(dna);
+            continue;
+        }
+        let mut codon = pending.clone();
+        codon.extend_from_slice(&dna[..need]);
+        let amino_acid = codon_table.translate_codon(&codon);
+        if amino_acid == STOP_CODON {
+            route_to_stop(conn, stop_id, &from, &mut edge_ids)?;
+            return Ok(edge_ids);
+        }
+        let amino_acid_char = amino_acid as char;
+        let (junction_id, junction_hash) = create_protein_node(
+            conn,
+            std::slice::from_ref(&from.identity_hash),
+            &amino_acid_char.to_string(),
+        )?;
+        let start_edge = Edge::create(
+            conn,
+            from.id,
+            from.coord,
+            Strand::Forward,
+            junction_id,
+            0,
+            Strand::Forward,
+        )
+        .map_err(|e| TranslationError::EdgeError(e.to_string()))?;
+        edge_ids.push(start_edge.id);
+
+        let anchor_frame = pending.len() as u8;
+        pending.clear();
+        let junction_from = WalkFrom {
+            id: junction_id,
+            coord: 1,
+            identity_hash: junction_hash.clone(),
+        };
+
+        if let Some(&protein_id) = protein_node_ids.get(&(node, anchor_frame)) {
+            let edge = Edge::create(
+                conn,
+                junction_id,
+                1,
+                Strand::Forward,
+                protein_id,
+                0,
+                Strand::Forward,
+            )
+            .map_err(|e| TranslationError::EdgeError(e.to_string()))?;
+            edge_ids.push(edge.id);
+            from = WalkFrom {
+                id: protein_id,
+                coord: *protein_amino_acid_len
+                    .get(&(node, anchor_frame))
+                    .unwrap_or(&0),
+                identity_hash: protein_identity_hashes
+                    .get(&(node, anchor_frame))
+                    .cloned()
+                    .unwrap_or_default(),
+            };
+            let codons = node_codons.get(&(node, anchor_frame));
+            if codons.is_some_and(|c| c.is_terminal) {
+                route_to_stop(conn, stop_id, &from, &mut edge_ids)?;
+                return Ok(edge_ids);
+            }
+            pending = codons.map(|c| c.tail.clone()).unwrap_or_default();
+            continue;
+        }
+
+        // No anchor at this node/frame: the trailing bytes after the codon begin
+        // the next codon, mirroring `codon_walk`'s junction "no anchor" branch.
+        from = junction_from;
+        let remainder = &dna[need..];
+        if starts_with_stop(codon_table, remainder) {
+            route_to_stop(conn, stop_id, &from, &mut edge_ids)?;
+            return Ok(edge_ids);
+        }
+        pending = remainder.to_vec();
+    }
+
+    // Close the path out at PATH_END, mirroring how Step 6 connects every exit
+    // anchor to PATH_END -- without this, the last real node visited has no
+    // trailing edge and `Path::blocks` silently drops it.
+    if from.id != PATH_START_NODE_ID {
+        let end_edge = Edge::create(
+            conn,
+            from.id,
+            from.coord,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .map_err(|e| TranslationError::EdgeError(e.to_string()))?;
+        edge_ids.push(end_edge.id);
+    }
+
+    Ok(edge_ids)
 }
 
 #[cfg(test)]
@@ -2003,6 +2346,94 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
             HashSet::from(["ME*".to_string()])
         );
+    }
+
+    #[test]
+    fn test_translate_recreates_template_path_on_protein_graph() {
+        // Node A = "ATGG": ATG→M, tail "G"; Node B = "AATGA": junction
+        // G+"AA"="GAA"→E; B[2..]="TGA"→*. Same shape as `translate_junction_codon`,
+        // but the DNA block group also carries a named path ("chr1") that should
+        // come out the other side on the protein graph.
+        let (conn, block_group) = new_block_group("test-gene");
+        let (node_a, len_a) = build_node(&conn, "ATGG", "a");
+        let (node_b, len_b) = build_node(&conn, "AATGA", "b");
+
+        let e_start_a = build_edge(&conn, PATH_START_NODE_ID, 0, node_a, 0);
+        let e_a_b = build_edge(&conn, node_a, len_a, node_b, 0);
+        let e_b_end = build_edge(&conn, node_b, len_b, PATH_END_NODE_ID, 0);
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[
+                build_block_group_edge(block_group.id, e_start_a, 0),
+                build_block_group_edge(block_group.id, e_a_b, 0),
+                build_block_group_edge(block_group.id, e_b_end, 0),
+            ],
+        );
+        Path::create(&conn, "chr1", &block_group.id, &[e_start_a, e_a_b, e_b_end]).unwrap();
+
+        let chain = vec![(node_a, len_a), (node_b, len_b)];
+        let annotation =
+            accession_annotation(&conn, &block_group.id, "test-gene", &chain, Strand::Forward);
+        let params = TranslationParams::new("test");
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group.id), params).unwrap();
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            HashSet::from(["ME*".to_string()])
+        );
+
+        let protein_path = BlockGroup::get_current_path(&conn, &protein.id)
+            .expect("protein graph should have a current path mirroring the template");
+        assert_eq!(protein_path.name, "chr1");
+        assert_eq!(protein_path.sequence(&conn).unwrap(), "ME*");
+    }
+
+    #[test]
+    fn test_translate_recreates_most_recent_template_path_as_current_on_protein_graph() {
+        // Same DNA graph as above, but with two paths created in a specific
+        // order -- the protein graph's current path must match whichever
+        // template path was created *last*, not just any of them.
+        let (conn, block_group) = new_block_group("test-gene");
+        let (node_a, len_a) = build_node(&conn, "ATGG", "a");
+        let (node_b, len_b) = build_node(&conn, "AATGA", "b");
+
+        let e_start_a = build_edge(&conn, PATH_START_NODE_ID, 0, node_a, 0);
+        let e_a_b = build_edge(&conn, node_a, len_a, node_b, 0);
+        let e_b_end = build_edge(&conn, node_b, len_b, PATH_END_NODE_ID, 0);
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[
+                build_block_group_edge(block_group.id, e_start_a, 0),
+                build_block_group_edge(block_group.id, e_a_b, 0),
+                build_block_group_edge(block_group.id, e_b_end, 0),
+            ],
+        );
+        Path::create(
+            &conn,
+            "older",
+            &block_group.id,
+            &[e_start_a, e_a_b, e_b_end],
+        )
+        .unwrap();
+        Path::create(
+            &conn,
+            "newer",
+            &block_group.id,
+            &[e_start_a, e_a_b, e_b_end],
+        )
+        .unwrap();
+
+        let chain = vec![(node_a, len_a), (node_b, len_b)];
+        let annotation =
+            accession_annotation(&conn, &block_group.id, "test-gene", &chain, Strand::Forward);
+        let params = TranslationParams::new("test");
+        let protein =
+            translate_annotation(&conn, &annotation, Some(&block_group.id), params).unwrap();
+
+        let protein_path = BlockGroup::get_current_path(&conn, &protein.id)
+            .expect("protein graph should have a current path");
+        assert_eq!(protein_path.name, "newer");
     }
 
     #[test]
