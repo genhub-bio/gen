@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fs::File, io, io::BufReader};
 
+use gen_core::HashId;
 use gen_models::{
     block_group::{BlockGroup, BlockGroupError},
     db::GraphConnection,
@@ -55,28 +56,24 @@ pub fn propagate_gff(
     let output_file = File::create(gff_output_filename).unwrap();
     let mut writer = gff::io::Writer::new(output_file);
 
-    let source_block_groups = Sample::get_block_groups(conn, collection_name, from_sample_name);
-    let target_block_groups = Sample::get_block_groups(conn, collection_name, to_sample_name);
-    let source_paths_by_bg_name = source_block_groups
-        .iter()
-        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
-        .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
-    let target_paths_by_bg_name = target_block_groups
-        .iter()
-        .map(|bg| Ok((bg.name.clone(), BlockGroup::get_current_path(conn, &bg.id)?)))
-        .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
+    let source_block_groups_by_name: HashMap<String, HashId> =
+        Sample::get_block_groups(conn, collection_name, from_sample_name)
+            .into_iter()
+            .map(|bg| (bg.name, bg.id))
+            .collect();
+    let target_block_groups_by_name: HashMap<String, HashId> =
+        Sample::get_block_groups(conn, collection_name, to_sample_name)
+            .into_iter()
+            .map(|bg| (bg.name, bg.id))
+            .collect();
 
-    let mut path_mappings_by_bg_name = HashMap::new();
-    for (name, target_path) in &target_paths_by_bg_name {
-        let source_path = source_paths_by_bg_name.get(name).unwrap();
-        let mapping = source_path.get_mapping_tree(conn, target_path)?;
-        path_mappings_by_bg_name.insert(name, mapping);
-    }
-
-    let sequence_lengths_by_path_name = target_paths_by_bg_name
-        .iter()
-        .map(|(name, path)| Ok((name.clone(), path.sequence(conn)?.len() as i64)))
-        .collect::<Result<HashMap<String, i64>, PathError>>()?;
+    // Only the block groups the GFF actually references need a current path resolved.
+    // A sample can also contain block groups with no path at all (e.g. a protein
+    // sequence graph created by `derive translation`, which lives in the same
+    // sample as the DNA graph it was translated from) -- resolving paths for every
+    // block group up front would fail on those even though they're never used here.
+    let mut path_mappings_by_name = HashMap::new();
+    let mut sequence_lengths_by_name: HashMap<String, i64> = HashMap::new();
 
     for result in reader.record_bufs() {
         let record = result?;
@@ -86,8 +83,19 @@ pub fn propagate_gff(
             start: record.start().get() as i64,
             end: record.end().get() as i64,
         };
-        let mapping_tree = path_mappings_by_bg_name.get(&path_name).unwrap();
-        let sequence_length = sequence_lengths_by_path_name.get(&path_name).unwrap();
+
+        if !path_mappings_by_name.contains_key(&path_name) {
+            let source_block_group_id = source_block_groups_by_name.get(&path_name).unwrap();
+            let target_block_group_id = target_block_groups_by_name.get(&path_name).unwrap();
+            let source_path = BlockGroup::get_current_path(conn, source_block_group_id)?;
+            let target_path = BlockGroup::get_current_path(conn, target_block_group_id)?;
+            let mapping = source_path.get_mapping_tree(conn, &target_path)?;
+            sequence_lengths_by_name
+                .insert(path_name.clone(), target_path.sequence(conn)?.len() as i64);
+            path_mappings_by_name.insert(path_name.clone(), mapping);
+        }
+        let mapping_tree = path_mappings_by_name.get(&path_name).unwrap();
+        let sequence_length = sequence_lengths_by_name.get(&path_name).unwrap();
         let propagated_annotation =
             Path::propagate_annotation(annotation, mapping_tree, *sequence_length).unwrap();
 
@@ -310,6 +318,47 @@ mod tests {
         sample_path
             .new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert)
             .unwrap();
+    }
+
+    fn add_pathless_block_group(conn: &GraphConnection, collection_name: &str, sample_name: &str) {
+        // Mimics a protein sequence graph created by `derive translation`, which is
+        // created in the same sample as the DNA graph it came from but never gets a
+        // `Path` row -- propagate_gff must not require a current path for it.
+        BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name,
+                sample_name,
+                name: "protein",
+                parent_block_group_id: None,
+                is_default: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_propagate_ignores_pathless_block_group_in_sample() {
+        let conn = get_connection();
+        create_block_group(&conn);
+        apply_child_sample_update_from_aa_fasta(&conn);
+        add_pathless_block_group(&conn, "test", Sample::DEFAULT_NAME);
+
+        let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+        let temp_dir = tempdir().expect("should create temp directory");
+        let output_path = temp_dir.path().join("output.gff");
+
+        propagate_gff(
+            &conn,
+            "test",
+            Sample::DEFAULT_NAME,
+            "child sample",
+            gff_path.to_str().expect("should convert gff path to UTF-8"),
+            output_path
+                .to_str()
+                .expect("should convert output path to UTF-8"),
+        )
+        .expect("should propagate gff even though the source sample has a pathless block group");
     }
 
     #[test]
