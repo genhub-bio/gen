@@ -30,6 +30,12 @@ The repository is a Cargo workspace. The root crate provides the `gen` CLI and c
 - `gen-tui/`, `gen-sugiyama/`: terminal UI and graph layout support.
 - `gen-python/`: PyO3/maturin Python bindings and Jupyter widget assets.
 - `gen-r/`: R package and Rust bridge crate.
+- `wasm-cli/`: browser-based terminal running `gen` compiled to
+  `wasm32-unknown-emscripten` via `@jupyterlite/cockle` and xterm.js. See
+  `wasm-cli/README.md` for build steps and, importantly, the Playwright
+  testing setup — two easy-to-miss details there (serving root vs.
+  `index.html`, waiting for `.xterm` instead of a fixed sleep) are the
+  difference between the shell booting and silently hanging forever.
 - `fixtures/`: shared test data. Prefer adding small, focused fixtures.
 - `tests/`: integration tests.
 - `docs/`, `examples/`, `paper/`: user docs, worked examples, and manuscript assets.
@@ -110,6 +116,8 @@ Use the narrowest reliable validation for the change, then broaden when touching
 - Give each new unit test a name that starts with `test_`.
 
 Some builds and tests need the Cap'n Proto compiler (`capnp`) installed. Python packaging targets may need `maturin`, and R targets may need Docker, R, and npm depending on the path exercised.
+
+For the `wasm-cli/` browser terminal, see `wasm-cli/README.md` for build (`make wasm`/`make wasm-test`) and browser-testing instructions.
 
 ## CLI And Fixtures
 

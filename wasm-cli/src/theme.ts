@@ -1,8 +1,8 @@
 import type { ITheme } from '@xterm/xterm';
 
 // Narrow representation of which Catppuccin flavor is active for a terminal/shell session.
-// Selected once at startup (see `selectThemeMode`) and never changed for the lifetime of the
-// session; there is no live theme switching.
+// `selectThemeMode` picks the initial value at startup from the OS preference; the light/dark
+// toggle in the intro bar can switch it live afterward (see `setupThemeToggle` in `index.ts`).
 export type ThemeMode = 'light' | 'dark';
 
 // A Base16 (https://github.com/chriskempson/base16) palette: sixteen named hex colors shared by
@@ -104,8 +104,8 @@ export function base16ToXtermTheme(palette: Base16Palette): ITheme {
 }
 
 // Picks the Catppuccin flavor for this session from the browser's current color-scheme
-// preference. Called once, before the terminal is constructed; the result is not re-evaluated if
-// the OS preference changes later.
+// preference, as the initial value before the terminal is constructed. Not re-evaluated if the OS
+// preference changes later; use the theme toggle for that.
 export function selectThemeMode(): ThemeMode {
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }

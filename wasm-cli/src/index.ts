@@ -1,5 +1,5 @@
 import type { IShell } from '@jupyterlite/cockle';
-import { ShellManager } from '@jupyterlite/cockle';
+import { ansi, ShellManager } from '@jupyterlite/cockle';
 import { ContentsManager } from '@jupyterlab/services';
 import { BrowserStorageDrive } from '@jupyterlite/services';
 import { FitAddon } from '@xterm/addon-fit';
@@ -11,7 +11,8 @@ import { GenShell } from './gen_shell';
 import { BrowserLoginBridge, splitOnBeginMessage } from './login_bridge';
 import { ServiceWorkerManager } from './service_worker_manager';
 import { buildShellEnvironment, buildTerminalOptions, TERMINAL_FONT_SIZE } from './terminal_setup';
-import { base16PaletteForMode, selectThemeMode } from './theme';
+import type { ThemeMode } from './theme';
+import { base16PaletteForMode, selectThemeMode, xtermThemeForMode } from './theme';
 import '../style/demo.css';
 
 const DRIVE_MOUNTPOINT = '/drive';
@@ -65,9 +66,8 @@ function initWebglAddon(term: Terminal): void {
   }
 }
 
-// Fixed for the lifetime of this terminal and shell; see the module doc on `selectThemeMode` for
-// why this is not re-evaluated if the OS preference changes later.
-function applyThemeBackground(mode: ReturnType<typeof selectThemeMode>): void {
+// Also called from `setupThemeToggle` whenever the reader flips the light/dark switch.
+function applyThemeBackground(mode: ThemeMode): void {
   const background = base16PaletteForMode(mode).base00;
   document.documentElement.style.colorScheme = mode;
   document.body.style.backgroundColor = background;
@@ -188,8 +188,9 @@ async function runDemo(): Promise<void> {
     environment: buildShellEnvironment(themeMode, {
       GEN_TERMINAL_ORIGIN: window.location.origin,
       GEN_LOGIN_CALLBACK_URL: new URL('gen-login-callback.html', baseUrl).href,
-      // Cockle's default `js-shell:` PS1 is replaced with a plain prompt for this terminal.
-      PS1: '> ',
+      // Cockle's default `js-shell:` PS1 is replaced with a plain prompt for this terminal;
+      // the `>` is colored so it stands out against the rest of the prompt line.
+      PS1: `${ansi.styleBrightBlue}>${ansi.styleReset} `,
     }),
   };
   const shell = new GenShell(shellOptions);
@@ -207,6 +208,22 @@ async function runDemo(): Promise<void> {
 
   setupUpload(contentsManager);
   setupHelpLink(shell);
+  setupThemeToggle(term, shell, themeMode);
+}
+
+// Wires the intro-bar light/dark switch to live-update the terminal's rendered theme, the page
+// background, and the shell's `GEN_THEME` environment variable together, so all three always
+// agree on which flavor is active.
+function setupThemeToggle(term: Terminal, shell: GenShell, initialMode: ThemeMode): void {
+  const input = document.getElementById('theme-toggle-input') as HTMLInputElement;
+  input.checked = initialMode === 'light';
+  input.addEventListener('change', () => {
+    const mode: ThemeMode = input.checked ? 'light' : 'dark';
+    applyThemeBackground(mode);
+    term.options.theme = xtermThemeForMode(mode);
+    void shell.themeChange(mode === 'dark');
+    void shell.setThemeEnvironmentVariable(mode);
+  });
 }
 
 function setupUpload(contentsManager: ContentsManager): void {
@@ -223,7 +240,7 @@ function setupUpload(contentsManager: ContentsManager): void {
 
       const content = await file.text();
       await contentsManager.save(file.name, { type: 'file', format: 'text', content });
-      status.textContent = `Added ${file.name} to ${DRIVE_MOUNTPOINT}`;
+      status.textContent = `Added ${file.name}`;
     })().catch(err => {
       console.error('Adding the file failed', err);
       status.textContent = `Adding the file failed: ${err}`;
