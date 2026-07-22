@@ -122,4 +122,4 @@ panic = "abort"
 [patch.crates-io]
 # Includes fixes to make the emscripten build work, plus the emscripten Fetch
 # HTTP transport for the DoltLite remote client (patches/0002 on the fork).
-rusqdoltlite = { git = "https://github.com/bobvh/rusqdoltlite", rev = "3fccc48f429ad6bb0e002508ebbba6402ec899fd" }
+rusqdoltlite = { git = "https://github.com/bobvh/rusqdoltlite", rev = "60c41ae633a0a653c1b44fa4befa002ed4b99a89" }
