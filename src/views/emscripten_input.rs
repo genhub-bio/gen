@@ -103,6 +103,10 @@ fn parse_cursor_position_report(bytes: &[u8]) -> Option<(u16, u16)> {
 }
 
 /// Parses a burst of raw terminal input bytes into zero or more events.
+///
+/// Only called by `poll_next` (`target_os = "emscripten"`) outside of tests, so a native,
+/// non-test build sees no caller and would otherwise warn this whole parse chain as dead code.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
 fn parse_bytes(bytes: &[u8]) -> Vec<Event> {
     let mut events = Vec::new();
     let mut i = 0;
@@ -125,6 +129,7 @@ fn parse_bytes(bytes: &[u8]) -> Vec<Event> {
     events
 }
 
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
 fn parse_single_byte(byte: u8) -> Option<Event> {
     let code = match byte {
         b'\r' => KeyCode::Enter,
@@ -138,6 +143,7 @@ fn parse_single_byte(byte: u8) -> Option<Event> {
 
 /// Parses an escape sequence starting at `bytes[0] == 0x1b`. Returns the event (if any) and how
 /// many bytes were consumed.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
 fn parse_escape(bytes: &[u8]) -> (Option<Event>, usize) {
     if bytes.len() < 2 {
         // Lone ESC with nothing following in this burst.
@@ -185,6 +191,7 @@ fn parse_escape(bytes: &[u8]) -> (Option<Event>, usize) {
 /// Parses an SGR mouse sequence `ESC [ < Cb ; Cx ; Cy M` (press/drag) or `...m` (release), per
 /// xterm.js's `CoreMouseService` SGR encoding: low 2 bits of Cb select the button, bit 5 (32) set
 /// means this is a drag/motion report.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
 fn parse_sgr_mouse(bytes: &[u8]) -> (Option<Event>, usize) {
     // bytes[0..=2] == ESC [ <
     let rest = &bytes[3..];

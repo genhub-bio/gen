@@ -6,7 +6,7 @@
 //! instead:
 //!
 //! 1. This process writes a sentinel-framed "begin" message to stdout. The host page's
-//!    main-thread JS (wasm-demo's `index.ts`, which already intercepts every byte of this
+//!    main-thread JS (wasm-cli's `index.ts`, which already intercepts every byte of this
 //!    process's stdout via cockle's `outputCallback` before it reaches the visible terminal)
 //!    recognizes the sentinel, strips it from what's displayed, and takes over: it attempts to
 //!    open the GenHub login URL in a popup, falling back to a clickable link if the popup is
@@ -101,8 +101,13 @@ pub fn build_login_url(
 }
 
 /// The result the host page's JS bridge reports back over stdin, one message per login attempt.
+///
+/// Only decoded by `receive_login_result` (`target_os = "emscripten"`) outside of tests, so a
+/// native, non-test build sees no caller and would otherwise warn this whole parse chain as dead
+/// code.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
 enum BridgeOutcome {
     Success {
         state: String,
@@ -134,6 +139,7 @@ pub enum BrowserLoginError {
 /// place that authenticates the callback: it compares the returned state against the nonce
 /// generated for the active attempt, exactly as `server::start_callback_server` does for the
 /// native flow. A callback is never accepted on the strength of a valid-looking JWT alone.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
 fn parse_bridge_message(json: &str, expected_state: &str) -> Result<AuthTokens, BrowserLoginError> {
     let outcome: BridgeOutcome = serde_json::from_str(json)
         .map_err(|error| BrowserLoginError::MalformedResult(error.to_string()))?;
@@ -167,6 +173,7 @@ fn parse_bridge_message(json: &str, expected_state: &str) -> Result<AuthTokens, 
 /// Finds the first complete `sentinel`-prefixed, terminator-delimited message in `buffer`, if
 /// any. Pure byte scanning; used both by the real stdin-polling loop below and directly by unit
 /// tests, so the framing logic itself needs no emscripten target or real stdin to exercise.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
 fn extract_sentinel_message(buffer: &[u8], sentinel: &str) -> Option<String> {
     let text = String::from_utf8_lossy(buffer);
     let start = text.find(sentinel)? + sentinel.len();

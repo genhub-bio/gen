@@ -71,15 +71,23 @@ gif:
 		fi; \
 		(cd $$dir && vhs $$(basename $$tape)) || exit 1; \
 	done
-# Builds gen for wasm32-unknown-emscripten and bundles it into the self-contained wasm-demo/ page
+# Builds gen for wasm32-unknown-emscripten and bundles it into the self-contained wasm-cli/ page
 # (built on the published @jupyterlite/cockle npm package, no sibling checkout of the cockle repo
-# needed). Requires an emsdk install (emcc/em++/emar;
-# https://emscripten.org/docs/getting_started/downloads.html, `./emsdk install 4.0.9 && ./emsdk
-# activate 4.0.9`) and micromamba (ships with miniforge, used by cockle's own wasm-package fetch
-# step for coreutils/grep/less/sed/cockle_fs). Override EMSDK_DIR/MICROMAMBA_DIR to match your
-# machine. -sFETCH=1 links Emscripten's Fetch API runtime (libfetch), which `gen remote`'s browser
-# HTTP transport calls directly; referencing emscripten_fetch() alone does not pull it in
-# automatically.
+# needed).
+#
+# Toolchain setup (one-time, both required):
+#   1. emsdk (emcc/em++/emar): https://emscripten.org/docs/getting_started/downloads.html
+#        git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
+#        ~/emsdk/emsdk install 4.0.9 && ~/emsdk/emsdk activate 4.0.9
+#   2. micromamba, used by cockle's own wasm-package fetch step for coreutils/grep/less/sed/
+#      cockle_fs (ships with miniforge: https://github.com/conda-forge/miniforge):
+#        curl -Ls https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-osx-arm64 \
+#          -o /usr/local/bin/micromamba && chmod +x /usr/local/bin/micromamba
+#      (or install via `brew install micromamba` / miniforge, whichever ships the binary you
+#      already point MICROMAMBA_DIR at)
+# Override EMSDK_DIR/MICROMAMBA_DIR below to match your machine. -sFETCH=1 links Emscripten's
+# Fetch API runtime (libfetch), which `gen remote`'s browser HTTP transport calls directly;
+# referencing emscripten_fetch() alone does not pull it in automatically.
 EMSDK_DIR ?= $(HOME)/emsdk
 MICROMAMBA_DIR ?= /opt/homebrew/Caskroom/miniforge/base
 wasm:
@@ -90,10 +98,12 @@ wasm:
 		CC=emcc CXX=em++ AR=emar RUSTFLAGS="-C panic=unwind -C opt-level=1 -C link-arg=-sSTACK_SIZE=8388608 -C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_NAME=Module -C link-arg=-sEXPORTED_RUNTIME_METHODS=FS,TTY,ENV -C link-arg=-lproxyfs.js -C link-arg=-sFETCH=1" \
 		cargo build --release --bin gen --target wasm32-unknown-emscripten \
 	'
-	cd wasm-demo && npm install
-	mkdir -p wasm-demo/gen-wasm
-	cp target/wasm32-unknown-emscripten/release/gen.js target/wasm32-unknown-emscripten/release/gen.wasm wasm-demo/gen-wasm/
-	cd wasm-demo && PATH="$(MICROMAMBA_DIR):$$PATH" npm run build
-# Serves the page built by `make wasm` in a cockle/JupyterLite terminal at http://localhost:4501.
+	cd wasm-cli && npm install
+	mkdir -p wasm-cli/gen-wasm
+	cp target/wasm32-unknown-emscripten/release/gen.js target/wasm32-unknown-emscripten/release/gen.wasm wasm-cli/gen-wasm/
+	cd wasm-cli && PATH="$(MICROMAMBA_DIR):$$PATH" npm run build
+# Serves the page built by `make wasm` in a cockle/JupyterLite terminal. Does not open a browser
+# tab itself -- once "Server running..." appears, open the printed URL by hand.
 wasm-test: wasm
-	cd wasm-demo && npm run serve
+	@echo "Serving wasm-cli/dist/ -- open http://localhost:4501 in your browser once the server below is ready."
+	cd wasm-cli && npm run serve

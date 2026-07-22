@@ -56,7 +56,7 @@ function initWebglAddon(term: Terminal): void {
     });
     term.loadAddon(addon);
     webglAddon = addon;
-    console.debug('[gen-wasm-demo] xterm.js WebGL renderer active.');
+    console.debug('[gen-wasm-cli] xterm.js WebGL renderer active.');
   } catch (error) {
     console.warn(
       'Unable to initialize the xterm.js WebGL renderer; using the fallback renderer.',

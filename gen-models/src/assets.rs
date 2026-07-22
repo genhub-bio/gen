@@ -1,10 +1,12 @@
+#[cfg(not(target_os = "emscripten"))]
+use std::sync::LazyLock;
 use std::{
     collections::HashMap,
     fs,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     string::ToString,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
 };
 
 use gen_core::{HashId, Sha256Hash, Workspace, calculate_hash};
@@ -15,7 +17,9 @@ use rusqlite::{
     types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use sha2::{Digest, Sha256};
-use url::{Position, Url};
+#[cfg(not(target_os = "emscripten"))]
+use url::Position;
+use url::Url;
 
 use crate::{
     db::GraphConnection,

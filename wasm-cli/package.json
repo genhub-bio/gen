@@ -1,7 +1,7 @@
 {
-    "name": "gen-wasm-demo",
+    "name": "gen-wasm-cli",
     "version": "1.0.0",
-    "description": "Standalone in-browser terminal for testing the gen wasm32-unknown-emscripten build, built on @jupyterlite/cockle",
+    "description": "Standalone in-browser terminal running the gen wasm32-unknown-emscripten build, built on @jupyterlite/cockle",
     "license": "Apache-2.0",
     "private": true,
     "scripts": {
