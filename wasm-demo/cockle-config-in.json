@@ -1,19 +1,19 @@
 {
   "packages": {
     "cockle_fs": {
-      "local_directory": "cockle_fs-wasm"
+      "version": "0.3.0=h8b79025_1"
     },
     "coreutils": {
-      "local_directory": "coreutils-wasm"
+      "version": "9.10=h072c4ef_2"
     },
     "grep": {
-      "local_directory": "grep-wasm"
+      "version": "3.12=h8b79025_0"
     },
     "less": {
-      "local_directory": "less-wasm"
+      "version": "693=hf259948_0"
     },
     "sed": {
-      "local_directory": "sed-wasm"
+      "version": "4.9=h072c4ef_0"
     },
     "gen": {
       "local_directory": "gen-wasm",

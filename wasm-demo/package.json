@@ -6,8 +6,9 @@
     "private": true,
     "scripts": {
         "build": "rspack build",
-        "postbuild": "npm run postbuild:copy-assets",
-        "postbuild:copy-assets": "copyfiles -u 1 assets/* dist/ && cp cockle-config.json dist/ && mkdir -p dist/gen dist/cockle_fs dist/coreutils dist/grep dist/less dist/sed && cp gen-wasm/* dist/gen/ && cp cockle_fs-wasm/* dist/cockle_fs/ && cp coreutils-wasm/* dist/coreutils/ && cp grep-wasm/* dist/grep/ && cp less-wasm/* dist/less/ && cp sed-wasm/* dist/sed/",
+        "postbuild": "npm run postbuild:copy-assets && npm run postbuild:prepare-wasm",
+        "postbuild:copy-assets": "copyfiles -u 1 assets/* dist/ && copyfiles -u 1 gen-wasm/* dist/gen-wasm/",
+        "postbuild:prepare-wasm": "node node_modules/@jupyterlite/cockle/lib/tools/prepare_wasm.js --copy dist/",
         "serve": "static-handler --coi --port 4501 dist/",
         "typecheck": "tsc --noEmit"
     },

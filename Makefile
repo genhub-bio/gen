@@ -75,17 +75,16 @@ gif:
 # (built on the published @jupyterlite/cockle npm package, no sibling checkout of the cockle repo
 # needed). Requires an emsdk install (emcc/em++/emar;
 # https://emscripten.org/docs/getting_started/downloads.html, `./emsdk install 4.0.9 && ./emsdk
-# activate 4.0.9`). Override EMSDK_DIR to match your machine. cockle's coreutils/grep/less/sed/
-# cockle_fs wasm packages are vendored under wasm-demo/*-wasm/ rather than fetched via micromamba
-# at build time -- see wasm-demo/VENDORED_PACKAGES.md. -sFETCH=1 links Emscripten's Fetch API
-# runtime (libfetch), which `gen remote`'s browser HTTP transport calls directly; referencing
-# emscripten_fetch() alone does not pull it in automatically.
+# activate 4.0.9`) and micromamba (ships with miniforge, used by cockle's own wasm-package fetch
+# step for coreutils/grep/less/sed/cockle_fs). Override EMSDK_DIR/MICROMAMBA_DIR to match your
+# machine. -sFETCH=1 links Emscripten's Fetch API runtime (libfetch), which `gen remote`'s browser
+# HTTP transport calls directly; referencing emscripten_fetch() alone does not pull it in
+# automatically.
 EMSDK_DIR ?= $(HOME)/emsdk
+MICROMAMBA_DIR ?= /opt/homebrew/Caskroom/miniforge/base
 wasm:
 	@test -f $(EMSDK_DIR)/emsdk_env.sh || (echo "emsdk not found at $(EMSDK_DIR); set EMSDK_DIR=/path/to/emsdk" && exit 1)
-	@for pkg in cockle_fs coreutils grep less sed; do \
-		test -d wasm-demo/$$pkg-wasm || (echo "wasm-demo/$$pkg-wasm/ missing; see wasm-demo/VENDORED_PACKAGES.md for how to fetch/re-vendor it" && exit 1); \
-	done
+	@test -x $(MICROMAMBA_DIR)/micromamba || (echo "micromamba not found in $(MICROMAMBA_DIR); set MICROMAMBA_DIR=/path/to/dir/containing/micromamba" && exit 1)
 	bash -lc '\
 		source $(EMSDK_DIR)/emsdk_env.sh && \
 		CC=emcc CXX=em++ AR=emar RUSTFLAGS="-C panic=unwind -C opt-level=1 -C link-arg=-sSTACK_SIZE=8388608 -C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_NAME=Module -C link-arg=-sEXPORTED_RUNTIME_METHODS=FS,TTY,ENV -C link-arg=-lproxyfs.js -C link-arg=-sFETCH=1" \
@@ -94,7 +93,7 @@ wasm:
 	cd wasm-demo && npm install
 	mkdir -p wasm-demo/gen-wasm
 	cp target/wasm32-unknown-emscripten/release/gen.js target/wasm32-unknown-emscripten/release/gen.wasm wasm-demo/gen-wasm/
-	cd wasm-demo && npm run build
+	cd wasm-demo && PATH="$(MICROMAMBA_DIR):$$PATH" npm run build
 # Serves the page built by `make wasm` in a cockle/JupyterLite terminal at http://localhost:4501.
 wasm-test: wasm
 	cd wasm-demo && npm run serve
