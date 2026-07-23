@@ -54,13 +54,6 @@ pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> Annot
 }
 
 /// Map `span`'s per-node segments onto the current graph.
-///
-/// A `node_id` identifies a parent `Node`, not a single slice of it: an edit that splits
-/// a node (a library insertion, a sequence update, ...) leaves several `GraphNode`s in the
-/// current graph sharing that same `node_id` but covering different, disjoint sequence
-/// ranges. Each segment is matched to whichever of those candidate slices its own range
-/// overlaps, rather than to an arbitrary one, so a same-`node_id` segment always lands on
-/// the fragment it actually belongs to.
 pub fn graph_locus_from_annotation_span(
     span: &AnnotationSpan,
     graph: &GenGraph,
@@ -113,11 +106,14 @@ pub fn span_label_text(span: &AnnotationSpan) -> String {
     }
 }
 
-/// Return `true` if every segment of `span` lies on the same node, i.e. the
-/// annotation does not cross a node boundary.
-pub fn span_is_single_node(span: &AnnotationSpan) -> bool {
-    match span.segments.first() {
-        Some(first) => span.segments.iter().all(|s| s.node_id == first.node_id),
+/// Return `true` if every segment of `span` resolves to the same `GraphNode`
+/// fragment in `graph`, i.e. the annotation does not cross a node boundary.
+pub fn span_is_single_node(span: &AnnotationSpan, graph: &GenGraph) -> bool {
+    let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+        return true;
+    };
+    match locus.slices.first() {
+        Some(first) => locus.slices.iter().all(|slice| slice.block == first.block),
         None => true,
     }
 }
@@ -126,24 +122,20 @@ pub fn span_is_single_node(span: &AnnotationSpan) -> bool {
 /// overlay in `Truncated` detail level.
 ///
 /// An annotation that crosses a node boundary, or that covers the full width
-/// of the single node it lies on, is kept: its label communicates something
-/// the collapsed node itself does not show. Only annotations confined to a
-/// partial slice of a single node are hidden, since those are the ones that
-/// pile up on combinatorial libraries made of many short nodes.
+/// of the single node it lies on, is kept. This way you avoid pileups of many
+/// small annotations that lie within the truncated sequence, but still show
+/// the annotations that get interrupted by variants since those are relevant.
 pub fn span_should_hide_in_truncated(span: &AnnotationSpan, graph: &GenGraph) -> bool {
-    if !span_is_single_node(span) {
+    let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+        return false;
+    };
+    let Some(first) = locus.slices.first() else {
+        return false;
+    };
+    if !locus.slices.iter().all(|slice| slice.block == first.block) {
         return false;
     }
-    let Some(segment) = span.segments.first() else {
-        return false;
-    };
-    let Some(node) = graph
-        .node_identifiers()
-        .find(|node| node.node_id == segment.node_id)
-    else {
-        return false;
-    };
-    !(segment.start <= node.sequence_start && segment.end >= node.sequence_end)
+    !(first.start == 0 && first.end as i64 >= first.block.length())
 }
 
 /// Return `true` if every segment of `span` at `idx` is fully contained within
@@ -357,16 +349,20 @@ mod tests {
 
     #[test]
     fn span_is_single_node_true_for_one_segment() {
+        let node = make_node("n1", 0, 10);
+        let graph = make_graph(&[node]);
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
             name: "x".into(),
             segments: vec![make_segment("n1", 0, 10, Strand::Forward)],
         };
-        assert!(span_is_single_node(&span));
+        assert!(span_is_single_node(&span, &graph));
     }
 
     #[test]
     fn span_is_single_node_true_when_all_segments_share_node() {
+        let node = make_node("n1", 0, 20);
+        let graph = make_graph(&[node]);
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
             name: "x".into(),
@@ -375,11 +371,14 @@ mod tests {
                 make_segment("n1", 10, 20, Strand::Forward),
             ],
         };
-        assert!(span_is_single_node(&span));
+        assert!(span_is_single_node(&span, &graph));
     }
 
     #[test]
     fn span_is_single_node_false_when_segments_span_multiple_nodes() {
+        let node_1 = make_node("n1", 0, 10);
+        let node_2 = make_node("n2", 0, 10);
+        let graph = make_graph(&[node_1, node_2]);
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
             name: "x".into(),
@@ -388,17 +387,45 @@ mod tests {
                 make_segment("n2", 0, 10, Strand::Forward),
             ],
         };
-        assert!(!span_is_single_node(&span));
+        assert!(!span_is_single_node(&span, &graph));
     }
 
     #[test]
     fn span_is_single_node_true_for_empty_segments() {
+        let graph = make_graph(&[]);
         let span = AnnotationSpan {
             id: HashId::convert_str("x"),
             name: "x".into(),
             segments: vec![],
         };
-        assert!(span_is_single_node(&span));
+        assert!(span_is_single_node(&span, &graph));
+    }
+
+    /// Segments on different fragments of a split node must not count as single-node,
+    /// even though they share a `node_id`.
+    #[test]
+    fn span_is_single_node_false_for_split_fragments() {
+        let node_id = HashId::convert_str("split-node");
+        let left_fragment = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 10,
+        };
+        let right_fragment = GraphNode {
+            node_id,
+            sequence_start: 10,
+            sequence_end: 20,
+        };
+        let graph = make_graph(&[left_fragment, right_fragment]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("x"),
+            name: "x".into(),
+            segments: vec![
+                make_segment("split-node", 5, 10, Strand::Forward),
+                make_segment("split-node", 10, 15, Strand::Forward),
+            ],
+        };
+        assert!(!span_is_single_node(&span, &graph));
     }
 
     #[test]
@@ -436,6 +463,33 @@ mod tests {
             segments: vec![
                 make_segment("n1", 5, 20, Strand::Forward),
                 make_segment("n2", 0, 5, Strand::Forward),
+            ],
+        };
+        assert!(!span_should_hide_in_truncated(&span, &graph));
+    }
+
+    /// Regression test: an annotation spanning a variant bubble must stay visible in
+    /// `Truncated`, even though its segments share one `node_id`.
+    #[test]
+    fn test_span_should_hide_in_truncated_false_for_bubble_span() {
+        let node_id = HashId::convert_str("split-node");
+        let before_bubble = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 10,
+        };
+        let after_bubble = GraphNode {
+            node_id,
+            sequence_start: 10,
+            sequence_end: 20,
+        };
+        let graph = make_graph(&[before_bubble, after_bubble]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("ori"),
+            name: "ori".into(),
+            segments: vec![
+                make_segment("split-node", 5, 10, Strand::Forward),
+                make_segment("split-node", 10, 15, Strand::Forward),
             ],
         };
         assert!(!span_should_hide_in_truncated(&span, &graph));
