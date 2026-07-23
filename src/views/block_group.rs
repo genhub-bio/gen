@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     time::{Duration, Instant},
 };
@@ -24,6 +24,7 @@ use rusqlite::params;
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
+        annotation_files::AnnotationFileEntry,
         annotation_groups::load_annotation_group_entries,
         annotations::{
             AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
@@ -198,6 +199,86 @@ fn load_annotation_groups_for_viewport(
     }
 }
 
+/// Shared inputs for loading an annotation file's track, common to activating one file
+/// (on checkbox toggle) and auto-activating every available file on load.
+struct AnnotationFileActivationContext<'a> {
+    conn: &'a GraphConnection,
+    history_ref: Option<&'a str>,
+    workspace: &'a gen_core::config::Workspace,
+    collection_name: &'a str,
+    block_group: &'a BlockGroup,
+    block_graph: &'a GenGraph,
+    query_window: Option<(i64, i64)>,
+}
+
+/// Load `entry`'s track and record its overlays, index availability, and loaded window.
+/// Shared by the checkbox toggle-on handlers and by automatic activation on load.
+fn activate_annotation_file(
+    context: &AnnotationFileActivationContext,
+    entry: &AnnotationFileEntry,
+    overlays: &mut Vec<GraphOverlay>,
+    annotation_file_index_available: &mut HashMap<HashId, bool>,
+    annotation_file_loaded_windows: &mut HashMap<HashId, (i64, i64)>,
+) -> Result<(), Box<dyn Error>> {
+    let node_filter: HashSet<HashId> = context
+        .block_graph
+        .nodes()
+        .map(|node| node.node_id)
+        .collect();
+    let request = AnnotationFileTrackRequest {
+        conn: context.conn,
+        history_ref: context.history_ref,
+        workspace: context.workspace,
+        collection_name: context.collection_name,
+        sample_name: context.block_group.sample_name.as_str(),
+        block_group_name: Some(&context.block_group.name),
+        query_window: context.query_window,
+        node_filter: &node_filter,
+        entry,
+    };
+    let load = load_annotation_file_track(&request)?;
+    let id = entry.file_addition.id;
+    replace_track_overlays(overlays, &file_track_key(&id), load.track.annotations);
+    annotation_file_index_available.insert(id, load.index_available);
+    if let Some(window) = load.loaded_window {
+        annotation_file_loaded_windows.insert(id, window);
+    } else {
+        annotation_file_loaded_windows.remove(&id);
+    }
+    Ok(())
+}
+
+/// Activate every annotation file that isn't already active, skipping any whose
+/// underlying file isn't available (deleted, moved, or otherwise unresolvable) so a
+/// missing file doesn't block the rest from showing. Mirrors
+/// `load_annotation_groups_for_viewport`'s auto-activation of DB-derived groups.
+fn auto_activate_annotation_files_for_viewport(
+    context: &AnnotationFileActivationContext,
+    entries: &[AnnotationFileEntry],
+    explorer_state: &mut CollectionExplorerState,
+    overlays: &mut Vec<GraphOverlay>,
+    annotation_file_index_available: &mut HashMap<HashId, bool>,
+    annotation_file_loaded_windows: &mut HashMap<HashId, (i64, i64)>,
+) {
+    for entry in entries {
+        let id = entry.file_addition.id;
+        if explorer_state.is_annotation_file_active(&id) {
+            continue;
+        }
+        if activate_annotation_file(
+            context,
+            entry,
+            overlays,
+            annotation_file_index_available,
+            annotation_file_loaded_windows,
+        )
+        .is_ok()
+        {
+            explorer_state.active_annotation_files.insert(id);
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "CLI entrypoint needs to forward explicit view selection and history state"
@@ -308,6 +389,7 @@ pub fn view_block_group(
     bar.finish();
 
     let mut annotation_groups_loaded = false;
+    let mut annotation_files_loaded = false;
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -486,47 +568,30 @@ pub fn view_block_group(
                                         let query_window =
                                             current_view_coordinate_window(&graph_controller)
                                                 .map(expand_query_window);
-                                        let node_filter: std::collections::HashSet<HashId> =
-                                            block_graph.nodes().map(|node| node.node_id).collect();
-                                        let request = AnnotationFileTrackRequest {
+                                        let context = AnnotationFileActivationContext {
                                             conn,
                                             history_ref,
                                             workspace,
                                             collection_name,
-                                            sample_name: bg.sample_name.as_str(),
-                                            block_group_name: Some(&bg.name),
+                                            block_group: bg,
+                                            block_graph: &block_graph,
                                             query_window,
-                                            node_filter: &node_filter,
-                                            entry,
                                         };
-                                        match load_annotation_file_track(&request) {
-                                            Ok(load) => {
-                                                replace_track_overlays(
-                                                    &mut overlays,
-                                                    &file_track_key(&toggled_id),
-                                                    load.track.annotations,
-                                                );
-                                                annotation_file_index_available
-                                                    .insert(toggled_id, load.index_available);
-                                                if let Some(window) = load.loaded_window {
-                                                    annotation_file_loaded_windows
-                                                        .insert(toggled_id, window);
-                                                } else {
-                                                    annotation_file_loaded_windows
-                                                        .remove(&toggled_id);
-                                                }
-                                            }
-                                            Err(err) => {
-                                                messages.push_warn(format!("{err}"));
-                                                explorer_state
-                                                    .deactivate_annotation_file(&toggled_id);
-                                                remove_track_overlays(
-                                                    &mut overlays,
-                                                    &file_track_key(&toggled_id),
-                                                );
-                                                annotation_file_index_available.remove(&toggled_id);
-                                                annotation_file_loaded_windows.remove(&toggled_id);
-                                            }
+                                        if let Err(err) = activate_annotation_file(
+                                            &context,
+                                            entry,
+                                            &mut overlays,
+                                            &mut annotation_file_index_available,
+                                            &mut annotation_file_loaded_windows,
+                                        ) {
+                                            messages.push_warn(format!("{err}"));
+                                            explorer_state.deactivate_annotation_file(&toggled_id);
+                                            remove_track_overlays(
+                                                &mut overlays,
+                                                &file_track_key(&toggled_id),
+                                            );
+                                            annotation_file_index_available.remove(&toggled_id);
+                                            annotation_file_loaded_windows.remove(&toggled_id);
                                         }
                                     }
                                 } else {
@@ -613,45 +678,30 @@ pub fn view_block_group(
                                 let query_window =
                                     current_view_coordinate_window(&graph_controller)
                                         .map(expand_query_window);
-                                let node_filter: std::collections::HashSet<HashId> =
-                                    block_graph.nodes().map(|node| node.node_id).collect();
-                                let request = AnnotationFileTrackRequest {
+                                let context = AnnotationFileActivationContext {
                                     conn,
                                     history_ref,
                                     workspace,
                                     collection_name,
-                                    sample_name: bg.sample_name.as_str(),
-                                    block_group_name: Some(&bg.name),
+                                    block_group: bg,
+                                    block_graph: &block_graph,
                                     query_window,
-                                    node_filter: &node_filter,
-                                    entry,
                                 };
-                                match load_annotation_file_track(&request) {
-                                    Ok(load) => {
-                                        replace_track_overlays(
-                                            &mut overlays,
-                                            &file_track_key(&toggled_id),
-                                            load.track.annotations,
-                                        );
-                                        annotation_file_index_available
-                                            .insert(toggled_id, load.index_available);
-                                        if let Some(window) = load.loaded_window {
-                                            annotation_file_loaded_windows
-                                                .insert(toggled_id, window);
-                                        } else {
-                                            annotation_file_loaded_windows.remove(&toggled_id);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        messages.push_warn(format!("{err}"));
-                                        explorer_state.deactivate_annotation_file(&toggled_id);
-                                        remove_track_overlays(
-                                            &mut overlays,
-                                            &file_track_key(&toggled_id),
-                                        );
-                                        annotation_file_index_available.remove(&toggled_id);
-                                        annotation_file_loaded_windows.remove(&toggled_id);
-                                    }
+                                if let Err(err) = activate_annotation_file(
+                                    &context,
+                                    entry,
+                                    &mut overlays,
+                                    &mut annotation_file_index_available,
+                                    &mut annotation_file_loaded_windows,
+                                ) {
+                                    messages.push_warn(format!("{err}"));
+                                    explorer_state.deactivate_annotation_file(&toggled_id);
+                                    remove_track_overlays(
+                                        &mut overlays,
+                                        &file_track_key(&toggled_id),
+                                    );
+                                    annotation_file_index_available.remove(&toggled_id);
+                                    annotation_file_loaded_windows.remove(&toggled_id);
                                 }
                             }
                         } else {
@@ -1175,6 +1225,13 @@ pub fn view_block_group(
             }
         })?;
 
+        // Whether this iteration auto-activated any annotations after already drawing the
+        // frame — if so, the sidebar checkboxes and canvas rendered this frame are stale
+        // (drawn before the activation ran) and need an immediate redraw rather than
+        // waiting for the next input event, or the newly-active annotations wouldn't
+        // appear on screen until the user happens to press a key.
+        let mut annotations_just_loaded = false;
+
         // After the first draw the viewport is populated. Load (or reload) annotation groups
         // using the viewport node IDs so only on-screen segments are fetched.
         if !annotation_groups_loaded && let Some(block_group) = current_block_group.as_ref() {
@@ -1194,6 +1251,38 @@ pub fn view_block_group(
                     &mut messages,
                 );
                 annotation_groups_loaded = true;
+                annotations_just_loaded = true;
+            }
+        }
+
+        // After the first draw the viewport is populated. Activate every available
+        // annotation file (one that resolves on disk) the same way DB-derived groups are
+        // auto-activated above; a file that fails to resolve is skipped rather than
+        // blocking the rest. Already-active files are left untouched here — panning past
+        // their loaded window is handled separately below.
+        if !annotation_files_loaded && let Some(block_group) = current_block_group.as_ref() {
+            let query_window =
+                current_view_coordinate_window(&graph_controller).map(expand_query_window);
+            if query_window.is_some() {
+                let context = AnnotationFileActivationContext {
+                    conn,
+                    history_ref,
+                    workspace,
+                    collection_name,
+                    block_group,
+                    block_graph: &block_graph,
+                    query_window,
+                };
+                auto_activate_annotation_files_for_viewport(
+                    &context,
+                    &explorer.data.annotation_files,
+                    &mut explorer_state,
+                    &mut overlays,
+                    &mut annotation_file_index_available,
+                    &mut annotation_file_loaded_windows,
+                );
+                annotation_files_loaded = true;
+                annotations_just_loaded = true;
             }
         }
 
@@ -1234,54 +1323,23 @@ pub fn view_block_group(
             annotation_file_loaded_windows.clear();
             explorer_state.active_annotation_groups.clear();
             annotation_groups_loaded = false;
-            if let Some(bg) = current_block_group.as_ref() {
-                let node_filter: std::collections::HashSet<HashId> =
-                    block_graph.nodes().map(|node| node.node_id).collect();
-                let query_window =
-                    current_view_coordinate_window(&graph_controller).map(expand_query_window);
-                for entry in explorer.data.annotation_files.iter() {
-                    let id = entry.file_addition.id;
-                    if !explorer_state.is_annotation_file_active(&id) {
-                        continue;
-                    }
-                    let request = AnnotationFileTrackRequest {
-                        conn,
-                        history_ref,
-                        workspace,
-                        collection_name,
-                        sample_name: bg.sample_name.as_str(),
-                        block_group_name: Some(&bg.name),
-                        query_window,
-                        node_filter: &node_filter,
-                        entry,
-                    };
-                    match load_annotation_file_track(&request) {
-                        Ok(load) => {
-                            replace_track_overlays(
-                                &mut overlays,
-                                &file_track_key(&id),
-                                load.track.annotations,
-                            );
-                            if let Some(window) = load.loaded_window {
-                                annotation_file_loaded_windows.insert(id, window);
-                            }
-                            annotation_file_index_available.insert(id, load.index_available);
-                        }
-                        Err(err) => {
-                            messages.push_warn(format!("{err}"));
-                            explorer_state.deactivate_annotation_file(&id);
-                        }
-                    }
-                }
-            }
+            // Files are re-activated fresh for the new block group by the auto-activation
+            // pass above (it runs again once `annotation_files_loaded` is reset), the same
+            // way groups are re-activated fresh on every block group switch.
+            explorer_state.active_annotation_files.clear();
+            annotation_files_loaded = false;
 
             is_loading = false;
             continue;
         }
 
-        // If an animation is running, wake up after tick_rate to advance it.
-        // If the display is idle, block indefinitely — the next input event will wake us.
-        let wait = if graph_controller.is_animating() {
+        // If an animation is running, wake up after tick_rate to advance it. If annotations
+        // were just auto-activated, redraw immediately so the change is visible without
+        // waiting on an input event. Otherwise block indefinitely — the next input event
+        // will wake us.
+        let wait = if annotations_just_loaded {
+            Duration::ZERO
+        } else if graph_controller.is_animating() {
             tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or(Duration::ZERO)
