@@ -2132,7 +2132,7 @@ impl Repository {
             let note = if detail_level == VisualDetail::Full {
                 " some annotations hidden due to space constraints "
             } else {
-                " some annotations hidden in truncated view "
+                " only annotations spanning a variant (edge) or filling a full node are shown "
             };
             let note_style = Style::default()
                 .fg(current_theme()[0x09])
