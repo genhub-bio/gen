@@ -722,12 +722,12 @@ impl LocalFsLocation {
         Ok(ChecksummedReader::new(Box::new(file)))
     }
 
-    fn checksum(&self, display_path: &str) -> Result<HashId, FileAdditionError> {
+    fn checksum(&self, display_path: &str) -> Result<Sha256Hash, FileAdditionError> {
         let file = match fs::File::open(&self.path) {
             Ok(file) => file,
             Err(err) => {
                 return match err.kind() {
-                    io::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
+                    io::ErrorKind::NotFound => Ok(Sha256Hash::convert_str("non-existent")),
                     io::ErrorKind::PermissionDenied => Err(
                         FileAdditionError::FilePermissionDenied(display_path.to_string()),
                     ),
@@ -739,7 +739,7 @@ impl LocalFsLocation {
         match calculate_reader_checksum(file) {
             Ok(checksum) => Ok(checksum),
             Err(err) => match err.kind() {
-                io::ErrorKind::NotFound => Ok(HashId::convert_str("non-existent")),
+                io::ErrorKind::NotFound => Ok(Sha256Hash::convert_str("non-existent")),
                 io::ErrorKind::PermissionDenied => Err(FileAdditionError::FilePermissionDenied(
                     display_path.to_string(),
                 )),
