@@ -33,6 +33,9 @@ use ratatui::{
 };
 
 #[cfg(target_os = "emscripten")]
+use crate::views::emscripten_input::read_cursor_position;
+
+#[cfg(target_os = "emscripten")]
 fn color_to_crossterm(color: Color) -> CrosstermColor {
     match color {
         Color::Reset => CrosstermColor::Reset,
@@ -200,7 +203,7 @@ impl<W: Write> Backend for EmscriptenBackend<W> {
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        crate::views::emscripten_input::read_cursor_position().map(|(x, y)| Position { x, y })
+        read_cursor_position().map(|(x, y)| Position { x, y })
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {

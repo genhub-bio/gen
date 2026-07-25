@@ -7,6 +7,8 @@
 //! Emscripten toolchain or a fake runtime.
 
 #[cfg(any(test, target_os = "emscripten"))]
+use core::ptr;
+#[cfg(any(test, target_os = "emscripten"))]
 use std::{ffi::CString, os::raw::c_char};
 
 #[cfg(any(test, target_os = "emscripten"))]
@@ -65,7 +67,7 @@ pub(super) fn header_pointer_array(strings: &[CString]) -> Option<Vec<*const c_c
         return None;
     }
     let mut pointers: Vec<*const c_char> = strings.iter().map(|value| value.as_ptr()).collect();
-    pointers.push(std::ptr::null());
+    pointers.push(ptr::null());
     Some(pointers)
 }
 
@@ -83,6 +85,7 @@ pub(super) fn c_buffer_to_string(buffer: &[c_char]) -> String {
 
 #[cfg(target_os = "emscripten")]
 mod fetch {
+    use core::{mem, ptr, slice};
     use std::ffi::CString;
 
     use super::{
@@ -125,7 +128,7 @@ mod fetch {
         // every field of `EmscriptenFetchAttr` (fixed-size char buffers, raw pointers, integers,
         // `bool`, `Option<fn>`) accepts an all-zero bit pattern.
         let mut attr: EmscriptenFetchAttr = unsafe {
-            let mut attr = std::mem::zeroed();
+            let mut attr = mem::zeroed();
             emscripten_fetch_attr_init(&mut attr);
             attr
         };
@@ -137,7 +140,7 @@ mod fetch {
         // function, which outlives the synchronous `emscripten_fetch` call below.
         attr.request_headers = header_pointers
             .as_ref()
-            .map_or(std::ptr::null(), |pointers| pointers.as_ptr());
+            .map_or(ptr::null(), |pointers| pointers.as_ptr());
         if let Some(body) = http_request.body {
             attr.request_data = body.as_ptr().cast::<i8>();
             attr.request_data_size = body.len();
@@ -182,7 +185,7 @@ mod fetch {
             // contract with `EMSCRIPTEN_FETCH_LOAD_TO_MEMORY` set, points at exactly `num_bytes`
             // initialized bytes that stay valid until `emscripten_fetch_close` runs; `guard` is
             // still alive (not yet dropped) for the duration of this slice's use.
-            unsafe { std::slice::from_raw_parts(data_pointer.cast::<u8>(), length) }.to_vec()
+            unsafe { slice::from_raw_parts(data_pointer.cast::<u8>(), length) }.to_vec()
         };
 
         // The browser fetch stack (and Emscripten's wrapper around it) reports transport-level
@@ -202,10 +205,8 @@ pub use fetch::request;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     mod method_buffer_tests {
-        use super::*;
+        use super::super::{BrowserHttpError, method_buffer};
 
         #[test]
         fn test_method_buffer_encodes_short_method() {
@@ -242,7 +243,9 @@ mod tests {
     }
 
     mod header_encoding_tests {
-        use super::*;
+        use std::ffi::CStr;
+
+        use super::super::{BrowserHttpError, c_char, header_c_strings, header_pointer_array};
 
         #[test]
         fn test_header_c_strings_rejects_embedded_null_in_name() {
@@ -287,9 +290,8 @@ mod tests {
 
             // SAFETY: test-only read-back through the exact `CString`s that produced these
             // pointers, all of which are still alive (owned by `strings`) at this point.
-            let read = |pointer: *const c_char| unsafe {
-                std::ffi::CStr::from_ptr(pointer).to_str().unwrap()
-            };
+            let read =
+                |pointer: *const c_char| unsafe { CStr::from_ptr(pointer).to_str().unwrap() };
             assert_eq!(read(pointers[0]), "Authorization");
             assert_eq!(read(pointers[1]), "Bearer token");
             assert_eq!(read(pointers[2]), "X-Test");
@@ -298,7 +300,7 @@ mod tests {
     }
 
     mod c_buffer_to_string_tests {
-        use super::*;
+        use super::super::{c_buffer_to_string, c_char};
 
         #[test]
         fn test_c_buffer_to_string_stops_at_null_terminator() {

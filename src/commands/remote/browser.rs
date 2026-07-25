@@ -27,6 +27,8 @@
 //! the native flow's `server::start_callback_server`.
 
 #[cfg(target_os = "emscripten")]
+use core::error::Error;
+#[cfg(target_os = "emscripten")]
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -65,7 +67,7 @@ fn jupyterlite_base_path() -> String {
 /// `jupyterlite_base_path`. Used both to build the callback URL and as the exact origin the host
 /// page must validate incoming `postMessage` results against.
 #[cfg(target_os = "emscripten")]
-fn terminal_origin() -> Result<String, Box<dyn std::error::Error>> {
+fn terminal_origin() -> Result<String, Box<dyn Error>> {
     std::env::var("GEN_TERMINAL_ORIGIN").map_err(|_| {
         "GEN_TERMINAL_ORIGIN is not set; the host page must set it before gen runs".into()
     })
@@ -213,7 +215,7 @@ fn callback_url(terminal_origin: &str) -> String {
 
 /// Logs in via the browser flow described at the top of this module.
 #[cfg(target_os = "emscripten")]
-pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn std::error::Error>> {
+pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn Error>> {
     let state = utils::generate_state().expect("Unable to generate random nonce.");
     let terminal_origin = terminal_origin()?;
     let callback_url = callback_url(&terminal_origin);
@@ -235,10 +237,8 @@ pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn std::error::Erro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     mod callback_url {
-        use super::*;
+        use super::super::build_callback_url;
 
         #[test]
         fn test_build_callback_url_with_base_path() {
@@ -266,7 +266,7 @@ mod tests {
     }
 
     mod login_url {
-        use super::*;
+        use super::super::build_login_url;
 
         #[test]
         fn test_build_login_url_preserves_callback_endpoint_and_params() {
@@ -293,7 +293,7 @@ mod tests {
     }
 
     mod sentinel_framing {
-        use super::*;
+        use super::super::{MESSAGE_TERMINATOR, RESULT_SENTINEL, extract_sentinel_message};
 
         #[test]
         fn test_extract_sentinel_message_finds_complete_message() {
@@ -329,7 +329,7 @@ mod tests {
     }
 
     mod bridge_message {
-        use super::*;
+        use super::super::{BrowserLoginError, parse_bridge_message};
 
         fn success_json(state: &str) -> String {
             format!(

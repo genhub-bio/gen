@@ -34,7 +34,7 @@ mod tests {
         thread,
     };
 
-    use super::*;
+    use super::{BrowserHttpError, HttpRequest, request};
 
     #[test]
     fn test_request_get_returns_status_and_body() {

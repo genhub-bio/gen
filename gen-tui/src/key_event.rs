@@ -13,6 +13,8 @@ pub use crossterm::event::{
 
 #[cfg(not(feature = "crossterm"))]
 mod shim {
+    use core::ops::BitOr;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Event {
         Key(KeyEvent),
@@ -54,7 +56,7 @@ mod shim {
         }
     }
 
-    impl std::ops::BitOr for KeyModifiers {
+    impl BitOr for KeyModifiers {
         type Output = Self;
 
         fn bitor(self, rhs: Self) -> Self {

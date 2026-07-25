@@ -21,7 +21,7 @@
 //! If the pinned Emscripten SDK version in `Makefile` ever changes, re-diff this file against the
 //! new `fetch.h` before relying on it again.
 
-use std::os::raw::{c_char, c_void};
+use core::ffi::{c_char, c_void};
 
 /// If passed, the body of the request will be present in full in the `onsuccess()` handler.
 pub const EMSCRIPTEN_FETCH_LOAD_TO_MEMORY: u32 = 1;

@@ -10,12 +10,15 @@
 //! through to cockle's `Atomics.wait`-based stdin poll. Verified empirically: idle `select()`
 //! calls correctly report not-ready, and the next call after a keypress correctly reports ready.
 
+use core::str;
 #[cfg(target_os = "emscripten")]
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    io::{Read, Write},
+    io::{self, Read, Write},
+    mem,
     os::fd::RawFd,
+    ptr,
     time::Duration,
 };
 
@@ -29,7 +32,7 @@ const STDIN_FD: RawFd = 0;
 /// Returns true if stdin has bytes available to read within `timeout`.
 #[cfg(target_os = "emscripten")]
 pub(crate) fn stdin_ready(timeout: Duration) -> bool {
-    let mut readfds: libc::fd_set = unsafe { std::mem::zeroed() };
+    let mut readfds: libc::fd_set = unsafe { mem::zeroed() };
     unsafe {
         libc::FD_ZERO(&mut readfds);
         libc::FD_SET(STDIN_FD, &mut readfds);
@@ -42,8 +45,8 @@ pub(crate) fn stdin_ready(timeout: Duration) -> bool {
         libc::select(
             STDIN_FD + 1,
             &mut readfds,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
             &mut tv,
         )
     };
@@ -56,7 +59,7 @@ pub(crate) fn stdin_ready(timeout: Duration) -> bool {
 #[cfg(target_os = "emscripten")]
 pub(crate) fn read_available() -> Vec<u8> {
     let mut buf = [0u8; 64];
-    match std::io::stdin().read(&mut buf) {
+    match io::stdin().read(&mut buf) {
         Ok(n) => buf[..n].to_vec(),
         Err(_) => Vec::new(),
     }
@@ -70,9 +73,9 @@ pub(crate) fn read_available() -> Vec<u8> {
 /// Only ever called once, before `poll_next`'s event loop starts, so there is no risk of
 /// consuming bytes that belong to a real keystroke.
 #[cfg(target_os = "emscripten")]
-pub fn read_cursor_position() -> std::io::Result<(u16, u16)> {
-    std::io::stdout().write_all(b"\x1b[6n")?;
-    std::io::stdout().flush()?;
+pub fn read_cursor_position() -> io::Result<(u16, u16)> {
+    io::stdout().write_all(b"\x1b[6n")?;
+    io::stdout().flush()?;
 
     let mut buffer = Vec::new();
     loop {
@@ -80,7 +83,7 @@ pub fn read_cursor_position() -> std::io::Result<(u16, u16)> {
             return Ok(pos);
         }
         if !stdin_ready(Duration::from_secs(2)) {
-            return Err(std::io::Error::other(
+            return Err(io::Error::other(
                 "timed out waiting for cursor position report",
             ));
         }
@@ -95,7 +98,7 @@ fn parse_cursor_position_report(bytes: &[u8]) -> Option<(u16, u16)> {
     let start = bytes.windows(2).position(|pair| pair == b"\x1b[")?;
     let rest = &bytes[start + 2..];
     let terminator = rest.iter().position(|&b| b == b'R')?;
-    let body = std::str::from_utf8(&rest[..terminator]).ok()?;
+    let body = str::from_utf8(&rest[..terminator]).ok()?;
     let mut parts = body.split(';');
     let row = parts.next()?.parse::<u16>().ok()?;
     let col = parts.next()?.parse::<u16>().ok()?;
@@ -200,7 +203,7 @@ fn parse_sgr_mouse(bytes: &[u8]) -> (Option<Event>, usize) {
         return (None, bytes.len());
     };
     let is_release = rest[terminator_pos] == b'm';
-    let params_str = match std::str::from_utf8(&rest[..terminator_pos]) {
+    let params_str = match str::from_utf8(&rest[..terminator_pos]) {
         Ok(s) => s,
         Err(_) => return (None, 3 + terminator_pos + 1),
     };
@@ -277,22 +280,26 @@ pub fn wait_ready(timeout: Duration) -> bool {
 /// `mio`-gated `event` module. xterm.js implements these modes/encoding natively (confirmed by
 /// reading its `CoreMouseService`/`InputHandler` source).
 #[cfg(target_os = "emscripten")]
-pub fn enable_mouse_capture() -> std::io::Result<()> {
-    write!(std::io::stdout(), "\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+pub fn enable_mouse_capture() -> io::Result<()> {
+    write!(io::stdout(), "\x1b[?1000h\x1b[?1002h\x1b[?1006h")
 }
 
 /// Disables SGR mouse tracking, matching `crossterm::event::DisableMouseCapture`.
 #[cfg(target_os = "emscripten")]
-pub fn disable_mouse_capture() -> std::io::Result<()> {
-    write!(std::io::stdout(), "\x1b[?1006l\x1b[?1002l\x1b[?1000l")
+pub fn disable_mouse_capture() -> io::Result<()> {
+    write!(io::stdout(), "\x1b[?1006l\x1b[?1002l\x1b[?1000l")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use gen_tui::key_event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+
+    use super::parse_bytes;
 
     #[test]
-    fn parses_plain_char() {
+    fn test_parses_plain_char() {
         assert_eq!(
             parse_bytes(b"a"),
             vec![Event::Key(KeyEvent::new(
@@ -303,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_enter_backspace_tab() {
+    fn test_parses_enter_backspace_tab() {
         assert_eq!(
             parse_bytes(b"\r\x7f\t"),
             vec![
@@ -315,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_arrow_keys() {
+    fn test_parses_arrow_keys() {
         assert_eq!(
             parse_bytes(b"\x1b[A\x1b[B\x1b[C\x1b[D"),
             vec![
@@ -328,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_backtab() {
+    fn test_parses_backtab() {
         assert_eq!(
             parse_bytes(b"\x1b[Z"),
             vec![Event::Key(KeyEvent::new(
@@ -339,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_bare_escape() {
+    fn test_parses_bare_escape() {
         assert_eq!(
             parse_bytes(b"\x1b"),
             vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))]
@@ -347,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_sgr_mouse_down_and_up() {
+    fn test_parses_sgr_mouse_down_and_up() {
         assert_eq!(
             parse_bytes(b"\x1b[<0;10;20M\x1b[<0;10;20m"),
             vec![
@@ -368,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_sgr_mouse_drag() {
+    fn test_parses_sgr_mouse_drag() {
         assert_eq!(
             parse_bytes(b"\x1b[<32;5;6M"),
             vec![Event::Mouse(MouseEvent {
