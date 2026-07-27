@@ -45,6 +45,20 @@ impl Query for AnnotationGroup {
 }
 
 impl AnnotationGroup {
+    /// Lists annotation groups visible at an optional historical reference.
+    pub fn all(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<AnnotationGroup> {
+        let table = AnnotationGroup::table_name_with_history_ref(history_ref);
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        AnnotationGroup::query(
+            conn,
+            &format!("SELECT * FROM {table} ORDER BY name"),
+            &params[..],
+        )
+    }
+
     pub fn create(conn: &GraphConnection, name: &str) -> rusqlite::Result<AnnotationGroup> {
         let mut stmt = conn
             .prepare("INSERT INTO annotation_groups (name) VALUES (?1) returning (name);")
@@ -1191,6 +1205,25 @@ mod tests {
             // since it's the closer match (depth 0 vs. depth 1) and error on tie.
             assert_eq!(listed, vec![child_annotation, parent_annotation]);
         }
+    }
+
+    #[test]
+    fn annotation_groups_all_lists_groups_in_name_order() {
+        let conn = get_connection(None).unwrap();
+        AnnotationGroup::create(&conn, "zebra").unwrap();
+        AnnotationGroup::create(&conn, "ant").unwrap();
+
+        let groups = AnnotationGroup::all(&conn, None);
+
+        assert_eq!(
+            groups,
+            vec![
+                AnnotationGroup { name: "ant".into() },
+                AnnotationGroup {
+                    name: "zebra".into()
+                }
+            ]
+        );
     }
 
     #[test]
