@@ -9,7 +9,7 @@ use gen_core::{
     errors::{ConfigError, ConnectionError},
 };
 use gen_models::{
-    assets::OperationKind,
+    assets::{AssetUri, LocalAssetUri, OperationKind},
     db::DbContext,
     errors::{FileAdditionError, OperationError},
     file_types::FileTypes,
@@ -63,23 +63,35 @@ impl PatchFile {
         format!("assets/{checksum}.{}", FileTypes::suffix(file_type))
     }
 
+    fn local_asset_filename(file: &OperationFileInfo) -> Option<String> {
+        if !LocalAssetUri::is_file_uri(&file.asset_uri) {
+            return None;
+        }
+        file.checksum
+            .as_ref()
+            .map(|checksum| <dyn AssetUri>::from_uri(&file.asset_uri).hashed_filename(checksum))
+    }
+
     fn from_file_addition(
         context: &DbContext,
         file: OperationFileInfo,
     ) -> Result<Self, CreatePatchError> {
-        if file.asset_uri.is_empty() {
+        let Some(checksum) = file.checksum else {
             return Ok(Self {
                 archive_path: String::new(),
                 file,
             });
-        }
+        };
+        let Some(asset_filename) = Self::local_asset_filename(&file) else {
+            return Ok(Self {
+                archive_path: String::new(),
+                file,
+            });
+        };
 
-        let source_asset_path = context
-            .workspace()
-            .asset_dir()?
-            .join(file.clone().hashed_filename());
+        let source_asset_path = context.workspace().asset_dir()?.join(asset_filename);
         let archive_path = if source_asset_path.exists() {
-            Self::asset_entry_name(file.checksum, file.file_type)
+            Self::asset_entry_name(checksum, file.file_type)
         } else {
             String::new()
         };
@@ -90,11 +102,10 @@ impl PatchFile {
     fn source_asset_path(
         &self,
         context: &DbContext,
-    ) -> Result<std::path::PathBuf, ConnectionError> {
-        Ok(context
-            .workspace()
-            .asset_dir()?
-            .join(self.file.hashed_filename()))
+    ) -> Result<std::path::PathBuf, CreatePatchError> {
+        let asset_filename = Self::local_asset_filename(&self.file)
+            .ok_or(CreatePatchError::MissingAssetChecksum(self.file.id))?;
+        Ok(context.workspace().asset_dir()?.join(asset_filename))
     }
 
     fn restore_from_archive<R>(
@@ -115,7 +126,9 @@ impl PatchFile {
             .map_err(ConnectionError::from)?;
         fs::create_dir_all(&asset_dir).map_err(|err| PatchError::Io(err.to_string()))?;
 
-        let asset_path = asset_dir.join(self.file.clone().hashed_filename());
+        let asset_filename = Self::local_asset_filename(&self.file)
+            .ok_or(PatchError::MissingAssetChecksum(self.file.id))?;
+        let asset_path = asset_dir.join(asset_filename);
         if asset_path.exists() {
             return Ok(false);
         }
@@ -180,6 +193,8 @@ pub enum PatchError {
     Zip(String),
     #[error("Unsupported patch format version {found}; current version is {current}")]
     UnsupportedFormatVersion { found: u32, current: u32 },
+    #[error("Patch asset {0} has archived content but no checksum")]
+    MissingAssetChecksum(HashId),
     #[error(
         "Cannot apply patch: the working set has uncommitted changes. Commit or reset them first."
     )]
@@ -251,6 +266,8 @@ pub enum CreatePatchError {
     OperationNotFound(DoltHashId),
     #[error("Patch selection does not contain an operation.")]
     EmptySelection,
+    #[error("Patch asset {0} has archived content but no checksum")]
+    MissingAssetChecksum(HashId),
     #[error("SQL Error: {0}")]
     SqliteError(#[from] SQLError),
     #[error("I/O Error: {0}")]
@@ -501,6 +518,7 @@ fn build_operation_patch(
     };
     let files = files
         .into_iter()
+        .filter(|file| LocalAssetUri::is_file_uri(&file.asset_uri))
         .map(|file| PatchFile::from_file_addition(context, file))
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -662,9 +680,11 @@ mod tests {
     use gen_core::BranchName;
     use gen_models::{
         annotations::add_annotation_file,
+        assets::{AssetRef, AssetRole, OperationAsset, OperationKind, OperationLog},
         collection::Collection,
         history::dolt::DoltHistoryStore,
-        operations::{FileAddition, add_files_operation, commit_operation_summary},
+        operations::{add_files_operation, commit_operation_summary},
+        traits::Query,
     };
     use tempfile::Builder;
 
@@ -1354,11 +1374,10 @@ mod tests {
             .unwrap()
             .file;
 
-        let restored_asset_path = target_context
-            .workspace()
-            .asset_dir()
-            .unwrap()
-            .join(restored_file.clone().hashed_filename());
+        let restored_asset_path = target_context.workspace().asset_dir().unwrap().join(
+            PatchFile::local_asset_filename(restored_file)
+                .expect("restored archive asset should have a checksum"),
+        );
         assert!(restored_asset_path.exists());
         assert_eq!(
             fs::read(restored_asset_path).unwrap(),
@@ -1369,24 +1388,80 @@ mod tests {
     #[test]
     fn test_patch_file_skips_archive_for_uri_only_asset() {
         let context = setup_gen_on_disk();
-        let file = FileAddition {
+        let operation_file = OperationFileInfo {
             id: HashId::convert_str("patch-uri"),
             asset_uri: "https://example.com/assets/reference.fa.gz".to_string(),
-            file_type: FileTypes::Fasta,
-            checksum: Sha256Hash::convert_str("checksum"),
-        };
-        let operation_file = OperationFileInfo {
-            id: file.id,
             filename: "reference.fa.gz".to_string(),
-            file_path: file.asset_uri.clone(),
-            asset_uri: file.asset_uri.clone(),
-            file_type: file.file_type,
-            checksum: file.checksum,
+            file_path: "https://example.com/assets/reference.fa.gz".to_string(),
+            file_type: FileTypes::Fasta,
+            checksum: None,
         };
 
         let patch_file = PatchFile::from_file_addition(&context, operation_file.clone()).unwrap();
 
         assert_eq!(patch_file.file, operation_file);
         assert_eq!(patch_file.archive_path, "");
+    }
+
+    #[test]
+    fn test_patch_round_trip_with_only_checksumless_remote_uri() {
+        let source_context = setup_gen_on_disk();
+        let graph_conn = source_context.graph().conn();
+        let operation_log = OperationLog {
+            id: HashId::convert_str("remote-only-operation"),
+            operation_kind: OperationKind::AddFile,
+            command: "track remote URI".to_string(),
+            created_on: 1,
+        };
+        let remote_asset = AssetRef {
+            id: HashId::convert_str("checksumless-remote-asset"),
+            uri: "s3://private-bucket/reference.fa".to_string(),
+            file_type: FileTypes::Fasta.as_str().to_string(),
+            checksum: None,
+            size: None,
+            role: AssetRole::Input,
+            logical_path: Some("inputs/reference.fa".to_string()),
+            name: Some("reference.fa".to_string()),
+            created_on: 1,
+        };
+        OperationLog::create(graph_conn, &operation_log).expect("should create operation log");
+        AssetRef::create(graph_conn, &remote_asset).expect("should create remote asset");
+        OperationAsset::create(
+            graph_conn,
+            &OperationAsset {
+                log_id: operation_log.id,
+                asset_ref_id: remote_asset.id,
+                role: AssetRole::Input,
+            },
+        )
+        .expect("should link remote asset");
+        let operation_hash = DoltHistoryStore::new(graph_conn)
+            .commit_all("track remote URI")
+            .expect("should commit remote asset");
+
+        let mut patch_stream = Cursor::new(Vec::new());
+        create_patch(&source_context, &[operation_hash], &mut patch_stream)
+            .expect("should create remote-only patch");
+        patch_stream.set_position(0);
+        let patches = load_patches(&mut patch_stream);
+        assert_eq!(patches.len(), 1);
+        assert!(
+            patches[0].files.is_empty(),
+            "remote URIs should be carried by Dolt statements, not ZIP asset entries"
+        );
+        assert!(
+            !patches[0].statements.is_empty(),
+            "remote asset metadata should remain in the Dolt patch"
+        );
+
+        let mut target_context = setup_gen_on_disk();
+        patch_stream.set_position(0);
+        apply_patch_archive(&mut target_context, &mut patch_stream)
+            .expect("should apply remote-only patch");
+
+        assert_eq!(
+            AssetRef::all(target_context.graph().conn()),
+            vec![remote_asset]
+        );
     }
 }

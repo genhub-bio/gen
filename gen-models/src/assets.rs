@@ -771,7 +771,9 @@ impl OpenDalLocation {
             Ok(reader) => reader,
             Err(err) => {
                 return match err.kind() {
-                    opendal::ErrorKind::NotFound => Ok(Sha256Hash::convert_str("non-existent")),
+                    opendal::ErrorKind::NotFound => {
+                        Err(FileAdditionError::FileNotFound(display_path.to_string()))
+                    }
                     opendal::ErrorKind::PermissionDenied => Err(
                         FileAdditionError::FilePermissionDenied(display_path.to_string()),
                     ),
@@ -785,7 +787,9 @@ impl OpenDalLocation {
         match calculate_reader_checksum(reader) {
             Ok(checksum) => Ok(checksum),
             Err(err) => match err.kind() {
-                io::ErrorKind::NotFound => Ok(Sha256Hash::convert_str("non-existent")),
+                io::ErrorKind::NotFound => {
+                    Err(FileAdditionError::FileNotFound(display_path.to_string()))
+                }
                 io::ErrorKind::PermissionDenied => Err(FileAdditionError::FilePermissionDenied(
                     display_path.to_string(),
                 )),
@@ -827,7 +831,7 @@ pub trait AssetUri {
         &self,
         workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
-    ) -> Result<Sha256Hash, FileAdditionError>;
+    ) -> Result<Option<Sha256Hash>, FileAdditionError>;
 
     fn stored_asset_uri(
         &self,
@@ -870,10 +874,11 @@ pub trait AssetUri {
             })
     }
 
-    fn generate_file_addition_id(checksum: &Sha256Hash, asset_uri: &str) -> HashId
+    fn generate_file_addition_id(checksum: Option<&Sha256Hash>, asset_uri: &str) -> HashId
     where
         Self: Sized,
     {
+        let checksum = checksum.map(Sha256Hash::to_string).unwrap_or_default();
         let combined = format!("{checksum};{asset_uri}");
         HashId(calculate_hash(&combined))
     }
@@ -977,9 +982,9 @@ impl AssetUri for LocalAssetUri {
         &self,
         workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
-    ) -> Result<Sha256Hash, FileAdditionError> {
+    ) -> Result<Option<Sha256Hash>, FileAdditionError> {
         if let Some(checksum_override) = checksum_override {
-            return Ok(checksum_override);
+            return Ok(Some(checksum_override));
         }
 
         let source_file_path = self.resolved_source_file_path(workspace)?;
@@ -991,6 +996,7 @@ impl AssetUri for LocalAssetUri {
         OpenDalLocation::from_workspace_path(workspace, &checksum_path)
             .map_err(opendal_file_addition_error)?
             .checksum(&checksum_path.to_string_lossy())
+            .map(Some)
     }
 
     fn stored_asset_uri(
@@ -1375,9 +1381,16 @@ impl LocalAssetUri {
         file_addition: &FileAddition,
         workspace: &Workspace,
     ) -> Result<(), FileStoreError> {
-        let asset_path = workspace
-            .asset_dir()?
-            .join(file_addition.clone().hashed_filename());
+        let asset_filename = file_addition.hashed_filename().ok_or_else(|| {
+            FileStoreError::IoError(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot store local asset without checksum: {}",
+                    file_addition.asset_uri
+                ),
+            ))
+        })?;
+        let asset_path = workspace.asset_dir()?.join(asset_filename);
         if asset_path.exists() {
             return Ok(());
         }
@@ -1463,8 +1476,8 @@ impl AssetUri for RemoteAssetUri {
         &self,
         _workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
-    ) -> Result<Sha256Hash, FileAdditionError> {
-        Ok(Self::checksum_for_uri(&self.asset_uri, checksum_override))
+    ) -> Result<Option<Sha256Hash>, FileAdditionError> {
+        Ok(checksum_override)
     }
 
     fn stored_asset_uri(
@@ -1497,10 +1510,6 @@ impl RemoteAssetUri {
         Self {
             asset_uri: asset_uri.to_string(),
         }
-    }
-
-    fn checksum_for_uri(asset_uri: &str, checksum_override: Option<Sha256Hash>) -> Sha256Hash {
-        checksum_override.unwrap_or_else(|| Sha256Hash::convert_str(asset_uri))
     }
 }
 
@@ -1926,8 +1935,8 @@ mod tests {
         let checksum = Sha256Hash([1u8; 32]);
         let file_path = "/path/to/file.txt";
 
-        let id1 = LocalAssetUri::generate_file_addition_id(&checksum, file_path);
-        let id2 = LocalAssetUri::generate_file_addition_id(&checksum, file_path);
+        let id1 = LocalAssetUri::generate_file_addition_id(Some(&checksum), file_path);
+        let id2 = LocalAssetUri::generate_file_addition_id(Some(&checksum), file_path);
 
         assert_eq!(id1, id2);
     }
@@ -1938,8 +1947,8 @@ mod tests {
         let file_path1 = "/path/to/file1.txt";
         let file_path2 = "/path/to/file2.txt";
 
-        let id1 = LocalAssetUri::generate_file_addition_id(&checksum, file_path1);
-        let id2 = LocalAssetUri::generate_file_addition_id(&checksum, file_path2);
+        let id1 = LocalAssetUri::generate_file_addition_id(Some(&checksum), file_path1);
+        let id2 = LocalAssetUri::generate_file_addition_id(Some(&checksum), file_path2);
 
         assert_ne!(id1, id2);
     }
@@ -1950,8 +1959,8 @@ mod tests {
         let checksum2 = Sha256Hash([2u8; 32]);
         let file_path = "/path/to/file.txt";
 
-        let id1 = LocalAssetUri::generate_file_addition_id(&checksum1, file_path);
-        let id2 = LocalAssetUri::generate_file_addition_id(&checksum2, file_path);
+        let id1 = LocalAssetUri::generate_file_addition_id(Some(&checksum1), file_path);
+        let id2 = LocalAssetUri::generate_file_addition_id(Some(&checksum2), file_path);
 
         assert_ne!(id1, id2);
     }
@@ -2391,7 +2400,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_asset_uri_reads_http_uri() {
+    fn test_remote_asset_uri_checksums_streamed_http_content() {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2407,8 +2416,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let started = Instant::now();
-            let mut served_get = false;
-            while !served_get && started.elapsed() < Duration::from_secs(5) {
+            let mut served_get_count = 0;
+            while served_get_count < 1 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -2416,8 +2425,8 @@ mod tests {
                 let mut request = [0; 1024];
                 let len = stream.read(&mut request).unwrap();
                 let request = String::from_utf8_lossy(&request[..len]);
-                served_get = request.starts_with("GET ");
-                if served_get {
+                if request.starts_with("GET ") {
+                    served_get_count += 1;
                     stream
                         .write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ninitial",
@@ -2431,18 +2440,21 @@ mod tests {
                         .unwrap();
                 }
             }
-            assert!(served_get);
+            assert_eq!(served_get_count, 1);
         });
 
         let context = setup_gen();
         let uri = format!("http://{addr}/asset.fa");
-        let mut reader = RemoteAssetUri::new(&uri)
-            .reader(context.workspace())
-            .unwrap();
+        let asset_uri = RemoteAssetUri::new(&uri);
+        assert_eq!(asset_uri.checksum(context.workspace(), None).unwrap(), None);
+        let mut reader = asset_uri.reader(context.workspace()).unwrap();
+        let checksum_handle = reader.checksum_handle();
         let mut contents = String::new();
         reader.read_to_string(&mut contents).unwrap();
 
         handle.join().unwrap();
-        assert_eq!(contents, "initial");
+        let expected_checksum = calculate_reader_checksum(contents.as_bytes()).unwrap();
+        assert_eq!(checksum_handle.checksum(), Some(expected_checksum));
+        assert_ne!(expected_checksum, Sha256Hash::convert_str(&uri));
     }
 }

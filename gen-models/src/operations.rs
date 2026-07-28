@@ -59,13 +59,7 @@ pub struct OperationFileInfo {
     pub file_path: String,
     pub asset_uri: String,
     pub file_type: FileTypes,
-    pub checksum: Sha256Hash,
-}
-
-impl OperationFileInfo {
-    pub fn hashed_filename(&self) -> String {
-        <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
-    }
+    pub checksum: Option<Sha256Hash>,
 }
 
 impl OperationFile {
@@ -98,9 +92,14 @@ impl OperationFile {
     pub fn storage_file_path(
         workspace: &Workspace,
         path_or_uri: &str,
-        checksum: &Sha256Hash,
+        checksum: Option<&Sha256Hash>,
     ) -> Result<String, FileAdditionError> {
         if LocalAssetUri::is_local_path_or_file_uri(path_or_uri) {
+            let checksum = checksum.ok_or_else(|| {
+                FileAdditionError::ChecksumError(format!(
+                    "local operation file has no checksum: {path_or_uri}"
+                ))
+            })?;
             LocalAssetUri::operation_file_path(workspace, path_or_uri, checksum)
         } else {
             Ok(path_or_uri.to_string())
@@ -159,7 +158,7 @@ pub fn commit_operation_summary(
             let logical_path = OperationFile::storage_file_path(
                 workspace,
                 &operation_file.file_path,
-                &file_addition.checksum,
+                file_addition.checksum.as_ref(),
             )?;
             Ok((file_addition, logical_path))
         })
@@ -232,7 +231,7 @@ pub(crate) fn track_operation_assets(
         let asset_ref_id = AssetRef::id_hash(
             &asset.file_addition.asset_uri,
             file_type,
-            Some(&asset.file_addition.checksum),
+            asset.file_addition.checksum.as_ref(),
             &asset.role,
             asset.logical_path,
             asset.name,
@@ -241,7 +240,7 @@ pub(crate) fn track_operation_assets(
             id: asset_ref_id,
             uri: asset.file_addition.asset_uri.clone(),
             file_type: file_type.to_string(),
-            checksum: Some(asset.file_addition.checksum),
+            checksum: asset.file_addition.checksum,
             size: None,
             role: asset.role.clone(),
             logical_path: asset.logical_path.map(str::to_string),
@@ -280,7 +279,7 @@ pub fn add_files_operation(
             let file_type = FileTypes::infer_from_path(path);
             let file_addition = FileAddition::prepare(workspace, path, file_type, None)?;
             let operation_file_path =
-                OperationFile::storage_file_path(workspace, path, &file_addition.checksum)?;
+                OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
             Ok::<(FileAddition, String, String), FileAdditionError>((
                 file_addition,
                 OperationFile::new(path.clone()).filename,
@@ -370,7 +369,7 @@ pub struct FileAddition {
     pub id: HashId,
     pub asset_uri: String,
     pub file_type: FileTypes,
-    pub checksum: Sha256Hash,
+    pub checksum: Option<Sha256Hash>,
 }
 
 impl Query for FileAddition {
@@ -407,11 +406,16 @@ impl FileAddition {
     ) -> Result<FileAddition, FileAdditionError> {
         let asset_uri = <dyn AssetUri>::new(workspace, file_path);
         let checksum = asset_uri.checksum(workspace, checksum_override)?;
-        let stored_asset_uri = asset_uri.stored_asset_uri(workspace, &checksum)?;
-        asset_uri.ensure_asset(workspace, &checksum)?;
+        let stored_asset_uri = match checksum.as_ref() {
+            Some(checksum) => asset_uri.stored_asset_uri(workspace, checksum)?,
+            None => asset_uri.uri().to_string(),
+        };
+        if let Some(checksum) = checksum.as_ref() {
+            asset_uri.ensure_asset(workspace, checksum)?;
+        }
 
         Ok(FileAddition {
-            id: LocalAssetUri::generate_file_addition_id(&checksum, &stored_asset_uri),
+            id: LocalAssetUri::generate_file_addition_id(checksum.as_ref(), &stored_asset_uri),
             asset_uri: stored_asset_uri,
             file_type,
             checksum,
@@ -427,8 +431,10 @@ impl FileAddition {
         asset_uri.store_file(self, workspace)
     }
 
-    pub fn hashed_filename(self) -> String {
-        <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
+    pub fn hashed_filename(&self) -> Option<String> {
+        self.checksum
+            .as_ref()
+            .map(|checksum| <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(checksum))
     }
 }
 
@@ -1192,7 +1198,7 @@ mod tests {
         let storage_path = OperationFile::storage_file_path(
             context.workspace(),
             &absolute_path.to_string_lossy(),
-            &checksum,
+            Some(&checksum),
         )
         .unwrap();
 
@@ -1219,14 +1225,14 @@ mod tests {
         let storage_path = OperationFile::storage_file_path(
             context.workspace(),
             &outside_path_string,
-            &file_addition.checksum,
+            file_addition.checksum.as_ref(),
         )
         .unwrap();
+        let checksum = file_addition
+            .checksum
+            .expect("local file addition should have a checksum");
 
-        assert_eq!(
-            storage_path,
-            format!(".gen/assets/{}.fa.bgz", file_addition.checksum)
-        );
+        assert_eq!(storage_path, format!(".gen/assets/{checksum}.fa.bgz"));
         assert_eq!(
             file_addition.asset_uri,
             LocalAssetUri::asset_uri(".gen/outside_root/simple.fa.bgz"),
@@ -1254,7 +1260,7 @@ mod tests {
         assert_eq!(fa1.file_path(), expected_asset_path);
 
         let relative1_id = LocalAssetUri::generate_file_addition_id(
-            &checksum,
+            Some(&checksum),
             &LocalAssetUri::asset_uri(&expected_asset_path),
         );
 
@@ -1264,7 +1270,10 @@ mod tests {
                 .workspace()
                 .asset_dir()
                 .unwrap()
-                .join(fa1.clone().hashed_filename())
+                .join(
+                    fa1.hashed_filename()
+                        .expect("local file addition should have a checksum"),
+                )
                 .exists()
         );
 
@@ -1312,7 +1321,11 @@ mod tests {
                 .workspace()
                 .asset_dir()
                 .unwrap()
-                .join(outside.clone().hashed_filename())
+                .join(
+                    outside
+                        .hashed_filename()
+                        .expect("local file addition should have a checksum"),
+                )
                 .exists()
         );
     }
@@ -1328,6 +1341,7 @@ mod tests {
 
         assert_eq!(addition.asset_uri, asset_uri);
         assert_eq!(addition.file_path(), asset_uri);
+        assert_eq!(addition.checksum, None);
         assert!(
             fs::read_dir(context.workspace().asset_dir().unwrap())
                 .unwrap()
@@ -1340,13 +1354,37 @@ mod tests {
     fn test_file_addition_prepare_remote_uri() {
         let context = setup_gen();
         let asset_uri = "s3://bucket/reference.fa";
+        let checksum = Sha256Hash::convert_str("remote S3 contents");
 
-        let addition =
-            FileAddition::prepare(context.workspace(), asset_uri, FileTypes::Fasta, None)
-                .expect("should prepare remote file addition");
+        let addition = FileAddition::prepare(
+            context.workspace(),
+            asset_uri,
+            FileTypes::Fasta,
+            Some(checksum),
+        )
+        .expect("should prepare remote file addition");
 
         assert_eq!(addition.asset_uri, asset_uri);
         assert_eq!(addition.file_path(), asset_uri);
+        assert_eq!(addition.checksum, Some(checksum));
+    }
+
+    #[test]
+    fn test_add_files_operation_does_not_read_remote_asset() {
+        let context = setup_gen();
+        let asset_uri = "http://127.0.0.1:1/asset.fa".to_string();
+
+        add_files_operation(
+            &context,
+            std::slice::from_ref(&asset_uri),
+            Some("track remote reference"),
+        )
+        .expect("should track remote asset");
+
+        let asset_refs = AssetRef::all(context.graph().conn());
+        assert_eq!(asset_refs.len(), 1);
+        assert_eq!(asset_refs[0].uri, asset_uri);
+        assert_eq!(asset_refs[0].checksum, None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use gen_core::{DoltHashId, HashId, Sha256Hash};
+use gen_core::{DoltHashId, HashId};
 use rusqlite::{ToSql, named_params, params, types::Value};
 use serde::{Deserialize, Serialize};
 
@@ -118,13 +118,7 @@ pub fn operation_asset_files_for_logs(
                 file_path,
                 asset_uri,
                 file_type,
-                checksum: row.get::<_, Option<Sha256Hash>>(3)?.ok_or_else(|| {
-                    rusqlite::Error::InvalidColumnType(
-                        3,
-                        "checksum".to_string(),
-                        rusqlite::types::Type::Blob,
-                    )
-                })?,
+                checksum: row.get(3)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()
@@ -204,11 +198,19 @@ fn patch_file_name(asset_uri: &str, logical_path: Option<&str>, name: Option<&st
 
 #[cfg(test)]
 mod tests {
-    use gen_core::DoltHashId;
+    use gen_core::{DoltHashId, HashId};
     use rusqlite::Connection;
 
-    use super::{DoltPatchStatement, apply_dolt_patch, load_dolt_patch};
-    use crate::{db::GraphConnection, history::dolt::commit_all};
+    use super::{
+        DoltPatchStatement, apply_dolt_patch, load_dolt_patch, operation_asset_files_for_logs,
+    };
+    use crate::{
+        assets::{AssetRef, AssetRole, OperationAsset, OperationKind, OperationLog},
+        db::GraphConnection,
+        file_types::FileTypes,
+        history::dolt::commit_all,
+        test_helpers::setup_gen,
+    };
 
     fn create_base_connection() -> GraphConnection {
         let conn = GraphConnection(Connection::open_in_memory().expect("should open database"));
@@ -235,6 +237,48 @@ mod tests {
             diff_type: "data".to_string(),
             statement: statement.to_string(),
         }
+    }
+
+    #[test]
+    fn test_operation_asset_files_for_logs_preserves_missing_checksum() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let log = OperationLog {
+            id: HashId::convert_str("checksumless-log"),
+            operation_kind: OperationKind::AddFile,
+            command: "add remote file".to_string(),
+            created_on: 1,
+        };
+        let asset = AssetRef {
+            id: HashId::convert_str("checksumless-asset"),
+            uri: "s3://private-bucket/reference.fa".to_string(),
+            file_type: FileTypes::Fasta.as_str().to_string(),
+            checksum: None,
+            size: None,
+            role: AssetRole::Input,
+            logical_path: Some("inputs/reference.fa".to_string()),
+            name: Some("reference.fa".to_string()),
+            created_on: 1,
+        };
+        OperationLog::create(conn, &log).expect("should create operation log");
+        AssetRef::create(conn, &asset).expect("should create checksumless asset");
+        OperationAsset::create(
+            conn,
+            &OperationAsset {
+                log_id: log.id,
+                asset_ref_id: asset.id,
+                role: AssetRole::Input,
+            },
+        )
+        .expect("should link checksumless asset");
+
+        let files = operation_asset_files_for_logs(conn, &[log.id], None)
+            .expect("should load checksumless operation asset");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].asset_uri, asset.uri);
+        assert_eq!(files[0].file_path, "inputs/reference.fa");
+        assert_eq!(files[0].checksum, None);
     }
 
     #[test]

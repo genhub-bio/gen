@@ -766,14 +766,17 @@ pub fn add_annotation_file(
     };
     let file_addition = FileAddition::prepare(workspace, path, file_type, None)?;
     let annotation_logical_path =
-        OperationFile::storage_file_path(workspace, path, &file_addition.checksum)?;
+        OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
     let prepared_index = if let Some(index_path) =
         annotation_index_file_path(workspace, path, index)
     {
         let index_file_type = FileTypes::infer_from_path(&index_path);
         let file_addition = FileAddition::prepare(workspace, &index_path, index_file_type, None)?;
-        let logical_path =
-            OperationFile::storage_file_path(workspace, &index_path, &file_addition.checksum)?;
+        let logical_path = OperationFile::storage_file_path(
+            workspace,
+            &index_path,
+            file_addition.checksum.as_ref(),
+        )?;
         let name = Path::new(&index_path)
             .file_name()
             .and_then(|value| value.to_str())
@@ -837,7 +840,7 @@ mod tests {
         block_group::{BlockGroup, PathCache},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         errors::OperationError,
-        operations::commit_operation_summary,
+        operations::{calculate_reader_checksum, commit_operation_summary},
         path::Path,
         path_edge::PathEdge,
         sample::Sample,
@@ -1527,6 +1530,14 @@ mod tests {
         assert_eq!(asset_refs.len(), 2);
         assert_eq!(asset_refs[0].role, AssetRole::Annotation);
         assert_eq!(asset_refs[1].role, AssetRole::AnnotationIndex);
+        assert_eq!(
+            asset_refs[0].checksum,
+            Some(calculate_reader_checksum("##gff-version 3\n".as_bytes()).unwrap())
+        );
+        assert_eq!(
+            asset_refs[1].checksum,
+            Some(calculate_reader_checksum("index".as_bytes()).unwrap())
+        );
         assert_eq!(asset_refs[1].file_type.as_str(), "none");
         assert_eq!(
             asset_refs[1]
@@ -1534,6 +1545,41 @@ mod tests {
                 .as_deref()
                 .expect("should store index logical path"),
             "fixtures/annotation-with-index.csi"
+        );
+    }
+
+    #[test]
+    fn test_add_annotation_file_does_not_read_remote_assets() {
+        let context = setup_gen();
+        let annotation_uri = "http://127.0.0.1:1/annotation.gff3".to_string();
+        let index_uri = "http://127.0.0.1:1/annotation.gff3.csi".to_string();
+
+        add_annotation_file(
+            &context,
+            &annotation_uri,
+            None,
+            Some(&index_uri),
+            Some("remote-annotation"),
+            None,
+        )
+        .expect("should track remote annotation assets");
+
+        let asset_refs = AssetRef::all(context.graph().conn());
+        assert_eq!(asset_refs.len(), 2);
+        assert!(
+            asset_refs
+                .iter()
+                .all(|asset_ref| asset_ref.checksum.is_none())
+        );
+        assert!(
+            asset_refs
+                .iter()
+                .any(|asset_ref| asset_ref.uri == annotation_uri)
+        );
+        assert!(
+            asset_refs
+                .iter()
+                .any(|asset_ref| asset_ref.uri == index_uri)
         );
     }
 
