@@ -25,27 +25,26 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("FASTA export called");
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
     // initialize the selected database if needed.
 
     conn.execute("BEGIN TRANSACTION", [])?;
-    operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
     export_fasta(
         conn,
         name,
         Some(cmd.sample.as_str()),
         &PathBuf::from(cmd.path),
+        cli_context.history_ref,
     )?;
 
     conn.execute("END TRANSACTION", [])?;
-    operation_conn.execute("END TRANSACTION", [])?;
 
     Ok(())
 }

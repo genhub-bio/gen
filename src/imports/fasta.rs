@@ -17,11 +17,10 @@ use gen_models::{
     errors::{CollectionError, SampleError},
     file_types::FileTypes,
     node::Node,
-    operations::{Operation, OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, OperationSummary},
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
 };
 use noodles::{bgzf, fasta};
 
@@ -29,7 +28,6 @@ use crate::{
     fasta::FastaError,
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
 };
-
 #[cfg_attr(
     all(debug_assertions, feature = "profiling"),
     tracing::instrument(skip(context, fasta, collection_name, sample))
@@ -40,10 +38,9 @@ pub fn import_fasta(
     collection_name: &str,
     sample: &str,
     shallow: bool,
-) -> Result<Operation, FastaError> {
+) -> Result<OperationSummary, FastaError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let mut session = start_operation(conn);
     let path = PathBuf::from(fasta);
 
     let asset_uri = <dyn AssetUri>::new(context.workspace(), fasta);
@@ -177,10 +174,8 @@ pub fn import_fasta(
     })?;
 
     let bar = add_saving_operation_bar(&progress_bar);
-    let op = end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
+    let operation_summary = OperationSummary::new(
+        OperationInfo {
             files: vec![
                 OperationFile::new(fasta.to_string())
                     .set_file_type(FileTypes::Fasta)
@@ -188,12 +183,10 @@ pub fn import_fasta(
             ],
             description: "fasta_addition".to_string(),
         },
-        &summary_str,
-        None,
-    )
-    .map_err(FastaError::OperationError);
+        summary_str,
+    );
     bar.finish();
-    op
+    Ok(operation_summary)
 }
 
 #[cfg(test)]
@@ -201,22 +194,27 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{errors::OperationError, traits::*};
+    use gen_models::{
+        assets::{AssetRef, OperationKind, OperationLog},
+        errors::OperationError,
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        operations::commit_operation_summary,
+        traits::*,
+    };
 
     use super::*;
-    use crate::{test_helpers::setup_gen, track_database};
+    use crate::test_helpers::setup_gen;
 
     #[test]
     fn test_add_fasta() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
+        let history_store = DoltHistoryStore::new(conn);
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
 
-        import_fasta(
+        let operation_summary = import_fasta(
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             "test",
@@ -224,6 +222,25 @@ mod tests {
             false,
         )
         .unwrap();
+        let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
+        let mut operation_logs = OperationLog::all(conn);
+        operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
+        assert_eq!(
+            operation_logs[0].operation_kind,
+            OperationKind::Other("fasta_addition".to_string())
+        );
+        let asset_refs = AssetRef::all(conn);
+        assert_eq!(asset_refs.len(), 1);
+        assert_eq!(asset_refs[0].uri, "file://.gen/outside_root/simple.fa");
+        assert!(
+            asset_refs[0]
+                .logical_path
+                .as_deref()
+                .is_some_and(|path| path.starts_with(".gen/assets/"))
+        );
+        assert_eq!(asset_refs[0].name.as_deref(), Some("simple.fa"));
+
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap(),
@@ -232,7 +249,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn).unwrap(),
+            path.sequence(conn, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }
@@ -241,8 +258,6 @@ mod tests {
     fn test_supports_normal_gz_fasta() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/gzipped.fa.gz");
@@ -266,8 +281,6 @@ mod tests {
     fn test_large_gz_fasta() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22.fa.gz");
 
@@ -292,8 +305,6 @@ mod tests {
     fn test_supports_bgzip_fasta() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let fasta_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz");
@@ -317,8 +328,6 @@ mod tests {
     fn test_add_fasta_creates_sample() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
@@ -339,7 +348,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn).unwrap(),
+            path.sequence(conn, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
         assert_eq!(
@@ -352,8 +361,6 @@ mod tests {
     fn test_add_fasta_shallow() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
@@ -374,7 +381,7 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn).unwrap(),
+            path.sequence(conn, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
     }
@@ -383,14 +390,12 @@ mod tests {
     fn test_deduplicates_nodes() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-        track_database(conn, op_conn).unwrap();
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let collection = "test".to_string();
 
-        import_fasta(
+        let operation_summary = import_fasta(
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
@@ -398,23 +403,22 @@ mod tests {
             false,
         )
         .unwrap();
+        commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(
             Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
             3
         );
 
-        let result_error = import_fasta(
+        let operation_summary = import_fasta(
             &context,
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
             false,
         )
-        .unwrap_err();
+        .unwrap();
+        let result_error = commit_operation_summary(&context, &operation_summary).unwrap_err();
 
-        assert!(matches!(
-            result_error,
-            FastaError::OperationError(OperationError::NoChanges)
-        ));
+        assert!(matches!(result_error, OperationError::NoChanges));
     }
 }

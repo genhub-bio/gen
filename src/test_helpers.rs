@@ -1,4 +1,4 @@
-use std::{fmt::Debug, fs, io::Write, ops::Add, path::PathBuf};
+use std::{fmt::Debug, fs, io::Write, ops::Add};
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
@@ -9,16 +9,13 @@ use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
-    db::{DbContext, GraphConnection, OperationsConnection},
+    db::{ConfigConnection, DbContext, GraphConnection},
     edge::Edge,
-    file_types::FileTypes,
-    migrations::{run_migrations, run_operation_migrations},
+    migrations::{run_config_migrations, run_migrations},
     node::Node,
-    operations::{Operation, OperationFile, OperationInfo},
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
 };
 
 pub fn create_bg(
@@ -68,9 +65,9 @@ pub fn get_connection<'a>(
     Ok(GraphConnection(conn))
 }
 
-pub fn get_operation_connection<'a>(
+pub fn get_config_connection<'a>(
     db_path: impl Into<Option<&'a str>>,
-) -> Result<OperationsConnection, ConnectionError> {
+) -> Result<ConfigConnection, ConnectionError> {
     let path: Option<&str> = db_path.into();
     let mut conn;
     if let Some(v) = path {
@@ -82,8 +79,8 @@ pub fn get_operation_connection<'a>(
         conn = Connection::open_in_memory().map_err(ConnectionError::OpenFailed)?;
     }
     rusqlite::vtab::array::load_module(&conn)?;
-    run_operation_migrations(&mut conn);
-    Ok(OperationsConnection(conn))
+    run_config_migrations(&mut conn);
+    Ok(ConfigConnection(conn))
 }
 
 pub fn setup_gen() -> DbContext {
@@ -91,27 +88,20 @@ pub fn setup_gen() -> DbContext {
     let workspace = Workspace::new(tmp_dir);
     workspace.ensure_gen_dir();
     let graph_conn = get_connection(None).expect("unable to open graph connection");
-    let operation_conn =
-        get_operation_connection(None).expect("unable to open operations connection");
-    DbContext::new(workspace, graph_conn, operation_conn)
+    let config_conn = get_config_connection(None).expect("unable to open config connection");
+    DbContext::new(workspace, graph_conn, config_conn).unwrap()
 }
 
 pub fn setup_gen_on_disk() -> DbContext {
     let tmp_dir = tempdir().unwrap().keep();
     let workspace = Workspace::new(tmp_dir);
     workspace.ensure_gen_dir();
-    let graph_conn = get_connection(
-        workspace
-            .ensure_gen_dir()
-            .join("default.db")
-            .to_str()
-            .unwrap(),
-    )
-    .expect("unable to open graph connection");
-    let operation_conn =
-        get_operation_connection(workspace.ensure_gen_dir().join("gen.db").to_str().unwrap())
-            .expect("unable to open operations connection");
-    DbContext::new(workspace, graph_conn, operation_conn)
+    let graph_conn = get_connection(workspace.graph_db_path().unwrap().to_str().unwrap())
+        .expect("unable to open graph connection");
+    let config_conn =
+        get_config_connection(workspace.ensure_gen_dir().join("gen.db").to_str().unwrap())
+            .expect("unable to open config connection");
+    DbContext::new(workspace, graph_conn, config_conn).unwrap()
 }
 
 pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
@@ -311,42 +301,6 @@ pub fn get_sample_bg(
     collection_name: &str,
     sample_name: &str,
 ) -> BlockGroup {
-    let mut results = Sample::get_block_groups(conn, collection_name, sample_name);
+    let mut results = Sample::get_block_groups(conn, collection_name, sample_name, None);
     results.pop().unwrap()
-}
-
-pub fn create_operation(
-    context: &DbContext,
-    file_path: &str,
-    file_type: FileTypes,
-    description: &str,
-    hash: impl Into<Option<HashId>>,
-) -> Operation {
-    let repo_root = context.repo_root().unwrap();
-    if !file_path.is_empty() && file_type != FileTypes::Changeset {
-        let full_path = if std::path::Path::new(file_path).is_absolute() {
-            PathBuf::from(file_path)
-        } else {
-            repo_root.join(file_path)
-        };
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        if !full_path.exists() {
-            fs::write(&full_path, b"test file content").unwrap();
-        }
-    }
-
-    let mut session = start_operation(context.graph().conn());
-    end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
-            files: vec![OperationFile::new(file_path.to_string()).set_file_type(file_type)],
-            description: description.to_string(),
-        },
-        "test operation",
-        hash.into(),
-    )
-    .unwrap()
 }

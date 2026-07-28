@@ -46,7 +46,7 @@ pub(crate) fn target_update_region(
     target_path: Option<&Path>,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
     let mut target_region = region.clone();
-    target_region.block_group = BlockGroup::get_by_id(conn, &target_block_group_id)?;
+    target_region.block_group = BlockGroup::get_by_id(conn, &target_block_group_id, None)?;
     target_region.path = if region.kind == ResolvedRegionKind::Path {
         Some(
             target_path

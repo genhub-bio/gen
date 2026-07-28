@@ -11,6 +11,8 @@ env:
   CARGO_TERM_COLOR: always
   GH_TOKEN: ${{ github.token }}
   RELEASE_NAME: ${{ github.ref_type == 'tag' && github.ref_name || 'nightly' }}
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   release-macos:
@@ -24,6 +26,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
       - name: Install Dependencies
         run: brew install capnp
       - name: x86 toolchain
@@ -111,16 +115,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto clang mold
       - name: arm toolchain
         run: |
           rustup target add aarch64-unknown-linux-gnu
           sudo apt install gcc-aarch64-linux-gnu
       - name: Build
         run: |
-          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target x86_64-unknown-linux-gnu --exclude gen-python --workspace
-          RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\" --exclude gen-python --workspace
+          RUSTFLAGS='-C target-feature=+crt-static -C link-arg=-fuse-ld=mold' cargo build --release --target x86_64-unknown-linux-gnu --exclude gen-python --workspace
+          RUSTFLAGS='-C target-feature=+crt-static -C link-arg=-B/usr/libexec/mold' cargo build --release --target aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\" --exclude gen-python --workspace
       - name: Ensure release exists
         run: |
           gh release view "$RELEASE_NAME" >/dev/null 2>&1 || gh release create "$RELEASE_NAME" --notes "" || gh release view "$RELEASE_NAME"

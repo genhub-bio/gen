@@ -8,8 +8,8 @@ use gen_models::{
 };
 
 use crate::{
-    commands::{cli_context::CliContext, get_default_collection},
-    imports::gfa::{GFAImportError, import_gfa},
+    commands::{cli_context::CliContext, commit_operation, get_default_collection},
+    imports::gfa::import_gfa,
 };
 
 /// Import a GFA file
@@ -37,45 +37,48 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("GFA import called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
-    operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
     let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
         cmd.sample.as_deref(),
         cmd.reference.as_deref(),
     )?;
-    if is_reference {
-        Sample::get_or_create(
+    if is_reference
+        && let Err(e) = Sample::get_or_create(
             conn,
             NewSample {
                 name: sample_name,
                 is_reference: true,
             },
-        )?;
+        )
+    {
+        conn.execute("ROLLBACK TRANSACTION;", [])?;
+        return Err(e.into());
     }
     match import_gfa(context, &PathBuf::from(cmd.path.clone()), name, sample_name) {
-        Ok(_) => {
-            println!("GFA imported.");
-            conn.execute("END TRANSACTION;", []).unwrap();
-            operation_conn.execute("END TRANSACTION;", []).unwrap();
-            Ok(())
-        }
-        Err(GFAImportError::OperationError(OperationError::NoChanges)) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("GFA already exists.");
-            Ok(())
+        Ok(operation_summary) => {
+            conn.execute("END TRANSACTION", [])?;
+            match commit_operation(context, &operation_summary) {
+                Ok(_) => {
+                    println!("GFA imported.");
+                    Ok(())
+                }
+                Err(OperationError::NoChanges) => {
+                    println!("GFA already exists.");
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
+            }
         }
         Err(e) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
             println!("Import failed.");
             Err(e.into())
         }

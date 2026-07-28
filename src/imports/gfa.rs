@@ -17,11 +17,10 @@ use gen_models::{
     },
     file_types::FileTypes,
     node::Node,
-    operations::{Operation, OperationFile, OperationInfo},
+    operations::{OperationFile, OperationInfo, OperationSummary},
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    session_operations::{end_operation, start_operation},
     traits::Query,
 };
 use indexmap::IndexSet;
@@ -34,7 +33,6 @@ use crate::{
     gfa_reader::Gfa,
     progress_bar::{get_handler, get_message_bar, get_progress_bar, get_time_elapsed_bar},
 };
-
 #[derive(Debug, Error, PartialEq)]
 pub enum GFAImportError {
     #[error("Operation Error: {0}")]
@@ -62,10 +60,9 @@ pub fn import_gfa(
     gfa_path: &FilePath,
     collection_name: &str,
     sample_name: &str,
-) -> Result<Operation, GFAImportError> {
+) -> Result<OperationSummary, GFAImportError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let mut session = start_operation(conn);
     match Collection::create(conn, collection_name) {
         Ok(_) => {}
         Err(CollectionError::Duplicate(_)) => {}
@@ -236,7 +233,7 @@ pub fn import_gfa(
     gen_bar.set_message("Creating Gen Objects");
     let edge_ids = Edge::bulk_create(conn, &edges.into_iter().collect::<Vec<EdgeData>>());
 
-    let saved_edges = Edge::query_by_ids(conn, &edge_ids);
+    let saved_edges = Edge::query_by_ids(conn, &edge_ids, None);
     let mut edge_ids_by_data = HashMap::new();
     for edge in saved_edges {
         let key = edge_data_from_fields(
@@ -373,7 +370,7 @@ pub fn import_gfa(
     let bar = progress_bar.add(get_progress_bar(None));
     bar.set_message("Breaking cycles");
     let message_bar = progress_bar.add(get_message_bar());
-    let graph = BlockGroup::get_graph(conn, &block_group.id)?;
+    let graph = BlockGroup::get_graph(conn, &block_group.id, None)?;
     let mut undirected_graph: UnGraphMap<GraphNode, GraphEdge> = UnGraphMap::new();
     for node in graph.nodes() {
         undirected_graph.add_node(node);
@@ -457,22 +454,18 @@ pub fn import_gfa(
     );
     bar.finish();
 
-    let op = end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
+    let operation_summary = OperationSummary::new(
+        OperationInfo {
             files: vec![
                 OperationFile::new(gfa_path.to_str().unwrap().to_string())
                     .set_file_type(FileTypes::GFA),
             ],
             description: "gfa_import".to_string(),
         },
-        &format!("Imported GFA {path}", path = gfa_path.to_str().unwrap()),
-        None,
-    )
-    .map_err(GFAImportError::OperationError);
+        format!("Imported GFA {path}", path = gfa_path.to_str().unwrap()),
+    );
     gen_bar.finish();
-    op
+    Ok(operation_summary)
 }
 
 fn edge_data_from_fields(
@@ -496,11 +489,15 @@ fn edge_data_from_fields(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::traits::*;
+    use gen_models::{
+        assets::{OperationKind, OperationLog},
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        operations::commit_operation_summary,
+    };
     use rusqlite::params;
 
     use super::*;
-    use crate::{test_helpers::setup_gen, track_database};
+    use crate::test_helpers::setup_gen;
 
     #[test]
     fn test_import_simple_gfa() {
@@ -509,9 +506,18 @@ mod tests {
         let collection_name = "test".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-
-        track_database(conn, context.operations().conn()).unwrap();
-        let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
+        let history_store = DoltHistoryStore::new(conn);
+        let operation_summary =
+            import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME)
+                .expect("should import simple gfa");
+        let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
+        let mut operation_logs = OperationLog::all(conn);
+        operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
+        assert_eq!(
+            operation_logs[0].operation_kind,
+            OperationKind::Other("gfa_import".to_string())
+        );
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let path = Path::query(
@@ -521,7 +527,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn);
+        let result = path.sequence(conn, None);
         assert_eq!(result.unwrap(), "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
@@ -535,8 +541,6 @@ mod tests {
         let collection_name = "test".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-
-        track_database(conn, context.operations().conn()).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, "new-sample");
         assert_eq!(
             Sample::get_by_name(conn, "new-sample").unwrap().name,
@@ -551,8 +555,6 @@ mod tests {
         let collection_name = "no path".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-
-        track_database(conn, context.operations().conn()).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
@@ -573,8 +575,6 @@ mod tests {
         let collection_name = "walk".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-
-        track_database(conn, context.operations().conn()).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
@@ -585,7 +585,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn);
+        let result = path.sequence(conn, None);
         assert_eq!(result.unwrap(), "ACCTACAAATTCAAAC");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
@@ -599,8 +599,6 @@ mod tests {
         let collection_name = "test".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-
-        track_database(conn, context.operations().conn()).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
@@ -611,7 +609,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn);
+        let result = path.sequence(conn, None);
         assert_eq!(result.unwrap(), "TATGCCAGCTGCGAATA");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
@@ -625,9 +623,6 @@ mod tests {
         let collection_name = "anderson promoters".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let paths = Path::query_for_collection(conn, &collection_name);
@@ -641,7 +636,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn);
+        let result = path.sequence(conn, None);
         let big_part = "TGCTAGCTACTAGTGAAAGAGGAGAAATACTAGATGGCTTCCTCCGAAGACGTTATCAAAGAGTTCATGCGTTTCAAAGTTCGTATGGAAGGTTCCGTTAACGGTCACGAGTTCGAAATCGAAGGTGAAGGTGAAGGTCGTCCGTACGAAGGTACCCAGACCGCTAAACTGAAAGTTACCAAAGGTGGTCCGCTGCCGTTCGCTTGGGACATCCTGTCCCCGCAGTTCCAGTACGGTTCCAAAGCTTACGTTAAACACCCGGCTGACATCCCGGACTACCTGAAACTGTCCTTCCCGGAAGGTTTCAAATGGGAACGTGTTATGAACTTCGAAGACGGTGGTGTTGTTACCGTTACCCAGGACTCCTCCCTGCAAGACGGTGAGTTCATCTACAAAGTTAAACTGCGTGGTACCAACTTCCCGTCCGACGGTCCGGTTATGCAGAAAAAAACCATGGGTTGGGAAGCTTCCACCGAACGTATGTACCCGGAAGACGGTGCTCTGAAAGGTGAAATCAAAATGCGTCTGAAACTGAAAGACGGTGGTCACTACGACGCTGAAGTTAAAACCACCTACATGGCTAAAAAACCGGTTCAGCTGCCGGGTGCTTACAAAACCGACATCAAACTGGACATCACCTCCCACAACGAAGACTACACCATCGTTGAACAGTACGAACGTGCTGAAGGTCGTCACTCCACCGGTGCTTAATAACGCTGATAGTGCTAGTGTAGATCGCTACTAGAGCCAGGCATCAAATAAAACGAAAGGCTCAGTCGAAAGACTGGGCCTTTCGTTTTATCTGTTGTTTGTCGGTGAACGCTCTCTACTAGAGTCACACTGGCTCACCTTCGGGTGGGCCTTTCTGCGTTTATATACTAGAAGCGGCCGCTGCAGGCTTCCTCGCTCACTGACTCGCTGCGCTCGGTCGTTCGGCTGCGGCGAGCGGTATCAGCTCACTCAAAGGCGGTAATACGGTTATCCACAGAATCAGGGGATAACGCAGGAAAGAACATGTGAGCAAAAGGCCAGCAAAAGGCCAGGAACCGTAAAAAGGCCGCGTTGCTGGCGTTTTTCCATAGGCTCCGCCCCCCTGACGAGCATCACAAAAATCGACGCTCAAGTCAGAGGTGGCGAAACCCGACAGGACTATAAAGATACCAGGCGTTTCCCCCTGGAAGCTCCCTCGTGCGCTCTCCTGTTCCGACCCTGCCGCTTACCGGATACCTGTCCGCCTTTCTCCCTTCGGGAAGCGTGGCGCTTTCTCATAGCTCACGCTGTAGGTATCTCAGTTCGGTGTAGGTCGTTCGCTCCAAGCTGGGCTGTGTGCACGAACCCCCCGTTCAGCCCGACCGCTGCGCCTTATCCGGTAACTATCGTCTTGAGTCCAACCCGGTAAGACACGACTTATCGCCACTGGCAGCAGCCACTGGTAACAGGATTAGCAGAGCGAGGTATGTAGGCGGTGCTACAGAGTTCTTGAAGTGGTGGCCTAACTACGGCTACACTAGAAGGACAGTATTTGGTATCTGCGCTCTGCTGAAGCCAGTTACCTTCGGAAAAAGAGTTGGTAGCTCTTGATCCGGCAAACAAACCACCGCTGGTAGCGGTGGTTTTTTTGTTTGCAAGCAGCAGATTACGCGCAGAAAAAAAGGATCTCAAGAAGATCCTTTGATCTTTTCTACGGGGTCTGACGCTCAGTGGAACGAAAACTCACGTTAAGGGATTTTGGTCATGAGATTATCAAAAAGGATCTTCACCTAGATCCTTTTAAATTAAAAATGAAGTTTTAAATCAATCTAAAGTATATATGAGTAAACTTGGTCTGACAGTTACCAATGCTTAATCAGTGAGGCACCTATCTCAGCGATCTGTCTATTTCGTTCATCCATAGTTGCCTGACTCCCCGTCGTGTAGATAACTACGATACGGGAGGGCTTACCATCTGGCCCCAGTGCTGCAATGATACCGCGAGACCCACGCTCACCGGCTCCAGATTTATCAGCAATAAACCAGCCAGCCGGAAGGGCCGAGCGCAGAAGTGGTCCTGCAACTTTATCCGCCTCCATCCAGTCTATTAATTGTTGCCGGGAAGCTAGAGTAAGTAGTTCGCCAGTTAATAGTTTGCGCAACGTTGTTGCCATTGCTACAGGCATCGTGGTGTCACGCTCGTCGTTTGGTATGGCTTCATTCAGCTCCGGTTCCCAACGATCAAGGCGAGTTACATGATCCCCCATGTTGTGCAAAAAAGCGGTTAGCTCCTTCGGTCCTCCGATCGTTGTCAGAAGTAAGTTGGCCGCAGTGTTATCACTCATGGTTATGGCAGCACTGCATAATTCTCTTACTGTCATGCCATCCGTAAGATGCTTTTCTGTGACTGGTGAGTACTCAACCAAGTCATTCTGAGAATAGTGTATGCGGCGACCGAGTTGCTCTTGCCCGGCGTCAATACGGGATAATACCGCGCCACATAGCAGAACTTTAAAAGTGCTCATCATTGGAAAACGTTCTTCGGGGCGAAAACTCTCAAGGATCTTACCGCTGTTGAGATCCAGTTCGATGTAACCCACTCGTGCACCCAACTGATCTTCAGCATCTTTTACTTTCACCAGCGTTTCTGGGTGAGCAAAAACAGGAAGGCAAAATGCCGCAAAAAAGGGAATAAGGGCGACACGGAAATGTTGAATACTCATACTCTTCCTTTTTCAATATTATTGAAGCATTTATCAGGGTTATTGTCTCATGAGCGGATACATATTTGAATGTATTTAGAAAAATAAACAAATAGGGGTTCCGCGCACATTTCCCCGAAAAGTGCCACCTGACGTCTAAGAAACCATTATTATCATGACATTAACCTATAAAAATAGGCGTATCACGAGGCAGAATTTCAGATAAAAAAAATCCTTAGCTTTCGCTAAGGATGATTTCTGGAATTCGCGGCCGCATCTAGAG";
         let expected_sequence_parts = vec![
             "T",
@@ -731,9 +726,6 @@ mod tests {
         let collection_name = "test".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
@@ -744,7 +736,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn);
+        let result = path.sequence(conn, None);
         assert_eq!(result.unwrap(), "AA");
 
         let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
@@ -761,9 +753,6 @@ mod tests {
         let collection_name = "test".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
@@ -784,9 +773,6 @@ mod tests {
         let collection_name = "test".to_string();
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);

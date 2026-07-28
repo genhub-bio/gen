@@ -1,35 +1,31 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use gen_core::{
-    HashId, NodeIntervalBlock, calculate_hash,
+    DoltHashId, HashId, NodeIntervalBlock, calculate_hash,
     config::Workspace,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{Row, params, types::Value};
+use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
     accession::{Accession, AccessionError, AccessionSpan, NewAccession},
-    changesets::{ChangesetModels, DatabaseChangeset, write_changeset},
-    db::{DbContext, GraphConnection, OperationsConnection},
+    assets::{AssetRole, OperationKind},
+    db::{DbContext, GraphConnection},
     errors::{FileAdditionError, OperationError},
     file_types::FileTypes,
-    files::GenDatabase,
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
-    metadata,
-    operations::{FileAddition, Operation, OperationFile, OperationInfo, OperationSummary},
-    session_operations::{DependencyModels, end_operation, start_operation},
+    history::{HistoryStore, dolt::DoltHistoryStore},
+    operations::{
+        FileAddition, OperationAssetRecord, OperationFile, OperationInfo, OperationSummary,
+        track_operation_assets,
+    },
     traits::Query,
 };
-
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AnnotationGroup {
     pub name: String,
@@ -49,6 +45,20 @@ impl Query for AnnotationGroup {
 }
 
 impl AnnotationGroup {
+    /// Lists annotation groups visible at an optional historical reference.
+    pub fn all(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<AnnotationGroup> {
+        let table = AnnotationGroup::table_name_with_history_ref(history_ref);
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        AnnotationGroup::query(
+            conn,
+            &format!("SELECT * FROM {table} ORDER BY name"),
+            &params[..],
+        )
+    }
+
     pub fn create(conn: &GraphConnection, name: &str) -> rusqlite::Result<AnnotationGroup> {
         let mut stmt = conn
             .prepare("INSERT INTO annotation_groups (name) VALUES (?1) returning (name);")
@@ -65,22 +75,38 @@ impl AnnotationGroup {
             Err(rusqlite::Error::SqliteFailure(err, _details))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                AnnotationGroup::get_by_id(conn, &name.to_string())
+                AnnotationGroup::get_by_id(conn, &name.to_string(), None)
                     .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
             }
             Err(err) => Err(err.into()),
         }
     }
 
-    pub fn query_by_sample(conn: &GraphConnection, sample_name: &str) -> Vec<AnnotationGroup> {
-        let query = "\
+    pub fn query_by_sample(
+        conn: &GraphConnection,
+        sample_name: &str,
+        history_ref: Option<&str>,
+    ) -> Vec<AnnotationGroup> {
+        let groups_table = AnnotationGroup::table_name_with_history_ref(history_ref);
+        let samples_table = if history_ref.is_some() {
+            "dolt_at_annotation_group_samples(:history_ref)"
+        } else {
+            "annotation_group_samples"
+        };
+        let query = format!(
+            "\
             select ag.* \
-            from annotation_groups ag \
-            join annotation_group_samples s \
+            from {groups_table} ag \
+            join {samples_table} s \
                 on ag.name = s.annotation_group \
-            where s.sample_name = ?1 \
-            order by ag.name;";
-        AnnotationGroup::query(conn, query, params![sample_name])
+            where s.sample_name = :sample_name \
+            order by ag.name;"
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":sample_name", &sample_name)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        AnnotationGroup::query(conn, &query, &params[..])
     }
 }
 
@@ -364,17 +390,63 @@ impl Annotation {
     pub fn query_by_sample(
         conn: &GraphConnection,
         sample_name: &str,
+        history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let query = "select a.* from annotations a left join annotation_group_samples s on (a.annotation_group = s.annotation_group) where s.sample_name = ?1";
-        Ok(Annotation::query(conn, query, params![sample_name]))
+        let annotations_table = Annotation::table_name_with_history_ref(history_ref);
+        let samples_table = if history_ref.is_some() {
+            "dolt_at_annotation_group_samples(:history_ref)"
+        } else {
+            "annotation_group_samples"
+        };
+        let query = format!(
+            "select annotations.* from {annotations_table} annotations \
+             join {samples_table} samples \
+               on annotations.annotation_group = samples.annotation_group \
+             where samples.sample_name = :sample_name"
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":sample_name", &sample_name)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        Ok(Annotation::query(conn, &query, &params[..]))
     }
 
     pub fn query_by_group(
         conn: &GraphConnection,
         group: &str,
+        history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let query = "select * from annotations where annotation_group = ?1";
-        Ok(Annotation::query(conn, query, params![group]))
+        let query = format!(
+            "select * from {} where annotation_group = :group",
+            Annotation::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":group", &group)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        Ok(Annotation::query(conn, &query, &params[..]))
+    }
+
+    pub fn query_by_group_and_block_group(
+        conn: &GraphConnection,
+        group: &str,
+        block_group_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Result<Vec<Annotation>, AnnotationError> {
+        let annotations_table = Annotation::table_name_with_history_ref(history_ref);
+        let accessions_table = Accession::table_name_with_history_ref(history_ref);
+        let query = format!(
+            "SELECT annotations.* FROM {annotations_table} annotations \
+             JOIN {accessions_table} accessions ON accessions.id = annotations.accession_id \
+             WHERE annotations.annotation_group = :group \
+               AND accessions.block_group_id = :block_group_id"
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
+            vec![(":group", &group), (":block_group_id", block_group_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        Ok(Annotation::query(conn, &query, &params[..]))
     }
 
     /// List every annotation on a block group, following the sample lineage.
@@ -558,32 +630,12 @@ pub enum AnnotationGroupError {
     DatabaseError(#[from] rusqlite::Error),
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
-pub struct AnnotationFileInfo {
-    pub file_addition: FileAddition,
-    pub index_file_addition: Option<FileAddition>,
-    pub name: Option<String>,
-    pub file_path: String,
-    pub index_file_path: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct AnnotationFileAdditionInput {
-    pub file_path: String,
-    pub file_type: FileTypes,
-    pub checksum_override: Option<HashId>,
-    pub name: Option<String>,
-    pub index_file_path: Option<String>,
-}
-
 #[derive(Debug, Error)]
 pub enum AnnotationFileError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
     #[error("File addition error: {0}")]
     FileAdditionError(#[from] FileAdditionError),
-    #[error("Index file must be Tabix, got: {0:?}")]
-    InvalidIndexFileType(FileTypes),
     #[error("Unsupported annotation file type: {0}")]
     UnsupportedFileType(String),
 }
@@ -660,18 +712,13 @@ pub fn add_annotation(
     group: Option<&str>,
     sample: &str,
     region: &str,
-) -> Result<Operation, Box<dyn std::error::Error>> {
+) -> Result<OperationSummary, Box<dyn std::error::Error>> {
     let graph_conn = context.graph().conn();
-    let operation_conn = context.operations().conn();
     let parsed_region = Region::parse(region)?;
     let resolved_region = crate::region::resolve(&parsed_region, graph_conn, collection, sample)?;
     let spans = AccessionSpan::from_resolved_region(graph_conn, &resolved_region, None)?;
 
-    let mut session = start_operation(graph_conn);
-    graph_conn.execute("BEGIN TRANSACTION", [])?;
-    operation_conn.execute("BEGIN TRANSACTION", [])?;
-
-    let accession = Accession::create(
+    let accession = Accession::get_or_create(
         graph_conn,
         &NewAccession {
             name: name.to_string(),
@@ -686,21 +733,13 @@ pub fn add_annotation(
         Annotation::get_or_create(graph_conn, name, annotation_group, &accession.id, None)?;
     AnnotationGroupSample::create(graph_conn, &annotation.group, sample)?;
 
-    let operation = end_operation(
-        context,
-        &mut session,
-        &OperationInfo {
+    Ok(OperationSummary::new(
+        OperationInfo {
             files: vec![],
             description: format!("add annotation {name}"),
         },
-        &format!("add annotation {name}"),
-        None,
-    )?;
-
-    graph_conn.execute("END TRANSACTION", [])?;
-    operation_conn.execute("END TRANSACTION", [])?;
-
-    Ok(operation)
+        format!("add annotation {name}"),
+    ))
 }
 
 pub fn add_annotation_file(
@@ -710,11 +749,9 @@ pub fn add_annotation_file(
     index: Option<&str>,
     name: Option<&str>,
     message: Option<&str>,
-) -> Result<Operation, Box<dyn std::error::Error>> {
+) -> Result<DoltHashId, Box<dyn std::error::Error>> {
     let workspace = context.workspace();
-    let operation_conn = context.operations().conn();
     let graph_conn = context.graph().conn();
-    let db_uuid = metadata::get_db_uuid(graph_conn);
 
     let file_type = match format {
         Some(format) => parse_annotation_file_type(format)?,
@@ -727,320 +764,65 @@ pub fn add_annotation_file(
             parse_annotation_file_type(&ext)?
         }
     };
-    let file_addition =
-        FileAddition::get_or_create(workspace, operation_conn, path, file_type, None)?;
-    let index_file_path = annotation_index_file_path(workspace, path, index);
-    let index_file_addition = if let Some(index_file_path) = index_file_path {
-        Some(FileAddition::get_or_create(
-            workspace,
-            operation_conn,
-            &index_file_path,
-            FileTypes::Tabix,
-            None,
-        )?)
-    } else {
-        None
-    };
-
-    let stored_file_path =
+    let file_addition = FileAddition::prepare(workspace, path, file_type, None)?;
+    let annotation_logical_path =
         OperationFile::storage_file_path(workspace, path, &file_addition.checksum)?;
-    let stored_index_file_path = if let Some(index_file_addition) = index_file_addition.as_ref() {
-        Some(OperationFile::storage_file_path(
-            workspace,
-            path,
-            &index_file_addition.checksum,
-        )?)
+    let prepared_index = if let Some(index_path) =
+        annotation_index_file_path(workspace, path, index)
+    {
+        let index_file_type = FileTypes::infer_from_path(&index_path);
+        let file_addition = FileAddition::prepare(workspace, &index_path, index_file_type, None)?;
+        let logical_path =
+            OperationFile::storage_file_path(workspace, &index_path, &file_addition.checksum)?;
+        let name = Path::new(&index_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string);
+        Some((file_addition, logical_path, name))
     } else {
         None
     };
-
     let name_value = name.unwrap_or_default();
-    let index_file_addition_id = index_file_addition
+    let index_file_addition_id = prepared_index
         .as_ref()
-        .map(|index_file| index_file.id.to_string())
+        .map(|(index_file, _, _)| index_file.id.to_string())
         .unwrap_or_default();
-    let stored_index_file_path_value = stored_index_file_path.as_deref().unwrap_or_default();
-
-    let operation_hash = HashId(calculate_hash(&format!(
-        "{file_addition_id}:{name_value}:{index_file_addition_id}:{stored_file_path}:{stored_index_file_path_value}",
+    let log_id = HashId(calculate_hash(&format!(
+        "{file_addition_id}:{name_value}:{index_file_addition_id}",
         file_addition_id = file_addition.id
     )));
-    let operation = match Operation::create(operation_conn, "annotation-file", &operation_hash) {
-        Ok(operation) => operation,
-        Err(rusqlite::Error::SqliteFailure(err, _details))
-            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            return Err(OperationError::NoChanges.into());
-        }
-        Err(err) => return Err(err.into()),
-    };
-    AnnotationFile::link_to_operation(
-        operation_conn,
-        &operation.hash,
-        &file_addition.id,
-        index_file_addition
-            .as_ref()
-            .map(|index_file| &index_file.id),
-        name,
-        &stored_file_path,
-        stored_index_file_path.as_deref(),
-    )?;
-    Operation::add_database(operation_conn, &operation.hash, &db_uuid)?;
     let summary = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("Add annotation file {path}"));
-    OperationSummary::create(operation_conn, &operation.hash, &summary);
-
-    let gen_db = GenDatabase::get_by_uuid(operation_conn, &db_uuid)?;
-    write_changeset(
-        workspace,
-        &operation,
-        DatabaseChangeset {
-            db_path: gen_db.path,
-            changes: ChangesetModels::default(),
-        },
-        &DependencyModels::default(),
-    );
-
-    if file_type != FileTypes::Changeset && file_type != FileTypes::None {
-        file_addition.store_file(workspace)?;
-        if let Some(index_file_addition) = index_file_addition {
-            index_file_addition.store_file(workspace)?;
-        }
-    }
-
-    Ok(operation)
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct AnnotationFile {
-    pub id: i64,
-    pub operation_hash: HashId,
-    pub file_addition_id: HashId,
-    pub index_file_addition_id: Option<HashId>,
-    pub name: Option<String>,
-    pub file_path: String,
-    pub index_file_path: Option<String>,
-}
-
-impl Query for AnnotationFile {
-    type Model = AnnotationFile;
-
-    const TABLE_NAME: &'static str = "annotation_files";
-
-    fn process_row(row: &Row) -> Self::Model {
-        AnnotationFile {
-            id: row.get(0).unwrap(),
-            operation_hash: row.get(1).unwrap(),
-            file_addition_id: row.get(2).unwrap(),
-            index_file_addition_id: row.get(3).unwrap(),
-            name: row.get(4).unwrap(),
-            file_path: row.get(5).unwrap(),
-            index_file_path: row.get(6).unwrap(),
-        }
-    }
-}
-
-impl AnnotationFile {
-    pub fn load_index(
-        conn: &OperationsConnection,
-        file_addition_id: Option<&HashId>,
-    ) -> Result<Option<FileAddition>, AnnotationFileError> {
-        let Some(file_addition_id) = file_addition_id else {
-            return Ok(None);
-        };
-        let index_file_addition = FileAddition::get_by_id(conn, file_addition_id).ok_or(
-            AnnotationFileError::DatabaseError(rusqlite::Error::QueryReturnedNoRows),
-        )?;
-        if index_file_addition.file_type != FileTypes::Tabix {
-            return Err(AnnotationFileError::InvalidIndexFileType(
-                index_file_addition.file_type,
-            ));
-        }
-        Ok(Some(index_file_addition))
-    }
-
-    pub fn link_to_operation(
-        conn: &OperationsConnection,
-        operation_hash: &HashId,
-        file_addition_id: &HashId,
-        index_file_addition_id: Option<&HashId>,
-        name: Option<&str>,
-        file_path: &str,
-        index_file_path: Option<&str>,
-    ) -> Result<(), AnnotationFileError> {
-        AnnotationFile::load_index(conn, index_file_addition_id)?;
-        let query = "INSERT INTO annotation_files (operation_hash, file_addition_id, index_file_addition_id, name, file_path, index_file_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
-        let mut stmt = conn.prepare(query)?;
-        stmt.execute(params![
-            operation_hash,
-            file_addition_id,
-            index_file_addition_id,
-            name,
-            file_path,
-            index_file_path
-        ])?;
-        Ok(())
-    }
-
-    pub fn add_to_operation(
-        workspace: &Workspace,
-        conn: &OperationsConnection,
-        operation_hash: &HashId,
-        input: &AnnotationFileAdditionInput,
-    ) -> Result<FileAddition, AnnotationFileError> {
-        let file_addition = FileAddition::get_or_create(
-            workspace,
-            conn,
-            &input.file_path,
-            input.file_type,
-            input.checksum_override,
-        )?;
-        let index_file_addition = if let Some(index_file_path) = input.index_file_path.as_ref() {
-            Some(FileAddition::get_or_create(
-                workspace,
-                conn,
-                index_file_path,
-                FileTypes::Tabix,
-                None,
-            )?)
-        } else {
-            None
-        };
-
-        let file_path =
-            OperationFile::storage_file_path(workspace, &input.file_path, &file_addition.checksum)?;
-        let index_file_path = if let Some(index_file_addition) = index_file_addition.as_ref() {
-            if let Some(index_file_path) = input.index_file_path.as_deref() {
-                Some(OperationFile::storage_file_path(
-                    workspace,
-                    index_file_path,
-                    &index_file_addition.checksum,
-                )?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        AnnotationFile::link_to_operation(
-            conn,
-            operation_hash,
-            &file_addition.id,
-            index_file_addition.as_ref().map(|index| &index.id),
-            input.name.as_deref(),
-            &file_path,
-            index_file_path.as_deref(),
-        )?;
-        Ok(file_addition)
-    }
-
-    pub fn get_files_for_operation(
-        conn: &OperationsConnection,
-        operation_hash: &HashId,
-    ) -> Vec<AnnotationFileInfo> {
-        let query = "select fa.*, af.index_file_addition_id, af.name, af.file_path, af.index_file_path from file_additions fa join annotation_files af on (fa.id = af.file_addition_id) where af.operation_hash = ?1";
-        let mut stmt = conn.prepare(query).unwrap();
-        let rows = stmt
-            .query_map(params![operation_hash], |row| {
-                Ok((
-                    FileAddition::process_row(row),
-                    row.get::<_, Option<HashId>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                ))
-            })
-            .unwrap();
-        rows.map(|row| {
-            let (file_addition, index_file_addition_id, name, file_path, index_file_path) =
-                row.unwrap();
-            AnnotationFileInfo {
-                file_addition,
-                index_file_addition: AnnotationFile::load_index(
-                    conn,
-                    index_file_addition_id.as_ref(),
-                )
-                .unwrap(),
-                name,
-                file_path,
-                index_file_path,
-            }
-        })
-        .collect()
-    }
-
-    pub fn get_all_files(conn: &OperationsConnection) -> Vec<AnnotationFileInfo> {
-        let query = "select fa.*, af.index_file_addition_id, af.name, af.file_path, af.index_file_path from file_additions fa join annotation_files af on (fa.id = af.file_addition_id)";
-        let mut stmt = conn.prepare(query).unwrap();
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    FileAddition::process_row(row),
-                    row.get::<_, Option<HashId>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                ))
-            })
-            .unwrap();
-        let mut entries: Vec<AnnotationFileInfo> = rows
-            .map(|row| {
-                let (file_addition, index_file_addition_id, name, file_path, index_file_path) =
-                    row.unwrap();
-                AnnotationFileInfo {
-                    file_addition,
-                    index_file_addition: AnnotationFile::load_index(
-                        conn,
-                        index_file_addition_id.as_ref(),
-                    )
-                    .unwrap(),
-                    name,
-                    file_path,
-                    index_file_path,
-                }
-            })
-            .collect();
-        entries.sort_by(|a, b| {
-            let a_path = a.file_addition.file_path();
-            let b_path = b.file_addition.file_path();
-            let a_name = std::path::Path::new(a_path)
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| a_path.to_string());
-            let b_name = std::path::Path::new(b_path)
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| b_path.to_string());
-            a_name.cmp(&b_name).then_with(|| a_path.cmp(b_path))
+    let mut tracked_assets = vec![OperationAssetRecord {
+        file_addition: &file_addition,
+        role: AssetRole::Annotation,
+        logical_path: Some(&annotation_logical_path),
+        name,
+    }];
+    if let Some((index_file_addition, index_logical_path, index_name)) = prepared_index.as_ref() {
+        tracked_assets.push(OperationAssetRecord {
+            file_addition: index_file_addition,
+            role: AssetRole::AnnotationIndex,
+            logical_path: Some(index_logical_path),
+            name: index_name.as_deref(),
         });
-        entries
+    }
+    track_operation_assets(
+        graph_conn,
+        Some(&log_id),
+        &OperationKind::AnnotationFile,
+        &summary,
+        &tracked_assets,
+    )?;
+    let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
+    if history_store.status()?.is_empty() {
+        return Err(OperationError::NoChanges.into());
     }
 
-    pub fn query_by_operations(
-        conn: &OperationsConnection,
-        operations: &[HashId],
-    ) -> Result<HashMap<HashId, Vec<FileAddition>>, AnnotationFileError> {
-        let query = "select fa.*, af.operation_hash from file_additions fa left join annotation_files af on (fa.id = af.file_addition_id) where af.operation_hash in rarray(?1)";
-        let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map(
-            params![Rc::new(
-                operations
-                    .iter()
-                    .map(|h| Value::from(*h))
-                    .collect::<Vec<Value>>()
-            )],
-            |row| Ok((FileAddition::process_row(row), row.get::<_, HashId>(4)?)),
-        )?;
-        rows.into_iter()
-            .try_fold(HashMap::new(), |mut acc: HashMap<_, Vec<_>>, row| {
-                let (item, hash) = row?;
-                acc.entry(hash).or_default().push(item);
-                Ok(acc)
-            })
-            .map_err(AnnotationFileError::DatabaseError)
-    }
+    let commit_hash = history_store.commit_all(&summary)?;
+
+    Ok(commit_hash)
 }
 
 #[cfg(test)]
@@ -1051,16 +833,17 @@ mod tests {
 
     use super::*;
     use crate::{
+        assets::{AssetRef, AssetRole, OperationAsset, OperationLog},
         block_group::{BlockGroup, PathCache},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         errors::OperationError,
-        files::GenDatabase,
-        metadata,
+        operations::commit_operation_summary,
         path::Path,
         path_edge::PathEdge,
         sample::Sample,
         sample_lineage::SampleLineage,
         test_helpers::{create_bg, get_connection, setup_block_group, setup_gen},
+        traits::Query,
     };
 
     mod region_resolver {
@@ -1106,7 +889,7 @@ mod tests {
             let _ = Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
 
             let other_block_group = create_bg(&conn, "test", "test", "other");
-            let edge_ids = PathEdge::edges_for_path(&conn, &path.id)
+            let edge_ids = PathEdge::edges_for_path(&conn, &path.id, None)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
@@ -1157,7 +940,7 @@ mod tests {
                     .unwrap();
 
             let child_block_group = create_bg(&conn, "test", "child", "chr1");
-            let edge_ids = PathEdge::edges_for_path(&conn, &parent_path.id)
+            let edge_ids = PathEdge::edges_for_path(&conn, &parent_path.id, None)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
@@ -1208,7 +991,7 @@ mod tests {
                     .unwrap();
 
             let child_block_group = create_bg(&conn, "test", "child", "chr1");
-            let edge_ids = PathEdge::edges_for_path(&conn, &parent_path.id)
+            let edge_ids = PathEdge::edges_for_path(&conn, &parent_path.id, None)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
@@ -1250,7 +1033,7 @@ mod tests {
             annotation_name: &str,
         ) -> Annotation {
             let block_group = create_bg(conn, collection_name, sample_name, block_group_name);
-            let edge_ids = PathEdge::edges_for_path(conn, &parent_path.id)
+            let edge_ids = PathEdge::edges_for_path(conn, &parent_path.id, None)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
@@ -1425,6 +1208,25 @@ mod tests {
     }
 
     #[test]
+    fn annotation_groups_all_lists_groups_in_name_order() {
+        let conn = get_connection(None).unwrap();
+        AnnotationGroup::create(&conn, "zebra").unwrap();
+        AnnotationGroup::create(&conn, "ant").unwrap();
+
+        let groups = AnnotationGroup::all(&conn, None);
+
+        assert_eq!(
+            groups,
+            vec![
+                AnnotationGroup { name: "ant".into() },
+                AnnotationGroup {
+                    name: "zebra".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn create_annotation_with_samples() {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);
@@ -1465,11 +1267,11 @@ mod tests {
             vec!["sample-1".to_string(), "sample-2".to_string()]
         );
 
-        let by_sample = Annotation::query_by_sample(&conn, "sample-1").unwrap();
+        let by_sample = Annotation::query_by_sample(&conn, "sample-1", None).unwrap();
         assert_eq!(by_sample.len(), 1);
         assert_eq!(by_sample[0], annotation);
 
-        let by_group = Annotation::query_by_group(&conn, "project-tracks").unwrap();
+        let by_group = Annotation::query_by_group(&conn, "project-tracks", None).unwrap();
         assert_eq!(by_group, vec![annotation]);
     }
 
@@ -1537,42 +1339,6 @@ mod tests {
     }
 
     #[test]
-    fn add_annotation_file_to_operation() {
-        let context = setup_gen();
-        let op_conn = context.operations().conn();
-        let workspace = context.workspace();
-        let repo_root = workspace.repo_root().unwrap();
-        let annotation_path = repo_root.join("fixtures").join("annotation.gff3");
-        fs::create_dir_all(annotation_path.parent().unwrap()).unwrap();
-        fs::write(&annotation_path, "##gff-version 3\n").unwrap();
-
-        let op_hash = HashId::random_str();
-        let _ = crate::operations::Operation::create(op_conn, "annotation-file", &op_hash)
-            .expect("should create operation");
-
-        let file_addition = AnnotationFile::add_to_operation(
-            workspace,
-            op_conn,
-            &op_hash,
-            &AnnotationFileAdditionInput {
-                file_path: annotation_path.to_string_lossy().to_string(),
-                file_type: FileTypes::Gff3,
-                checksum_override: None,
-                name: Some("fixtures-annotation".to_string()),
-                index_file_path: None,
-            },
-        )
-        .unwrap();
-
-        let files = AnnotationFile::get_files_for_operation(op_conn, &op_hash);
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].file_addition, file_addition);
-        assert_eq!(files[0].file_path, "fixtures/annotation.gff3");
-        assert!(files[0].index_file_addition.is_none());
-        assert!(files[0].index_file_path.is_none());
-    }
-
-    #[test]
     fn parse_annotation_file_type_values() {
         assert_eq!(parse_annotation_file_type("gff3").unwrap(), FileTypes::Gff3);
         assert_eq!(parse_annotation_file_type("GFF").unwrap(), FileTypes::Gff3);
@@ -1593,12 +1359,10 @@ mod tests {
     fn add_annotation_creates_annotation() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
-        let operation_conn = context.operations().conn();
-        let db_uuid = metadata::get_db_uuid(graph_conn);
-        let _ = GenDatabase::create(operation_conn, &db_uuid, "test-db", "test-db-path").unwrap();
+        let history_store = DoltHistoryStore::new(graph_conn);
         let _ = setup_block_group(graph_conn);
 
-        let operation = add_annotation(
+        let operation_summary = add_annotation(
             &context,
             "test",
             "gene-a",
@@ -1607,20 +1371,55 @@ mod tests {
             "chr1:1-5",
         )
         .unwrap();
-        assert_eq!(operation.change_type, "add annotation gene-a");
+        let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
+        let mut operation_logs = OperationLog::all(graph_conn);
+        operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
+        assert_eq!(
+            operation_logs[0].operation_kind,
+            OperationKind::Other("add annotation gene-a".to_string())
+        );
 
-        let annotations = Annotation::query_by_group(graph_conn, "track-1").unwrap();
+        let annotations = Annotation::query_by_group(graph_conn, "track-1", None).unwrap();
         assert_eq!(annotations.len(), 1);
         assert_eq!(annotations[0].name, "gene-a");
+    }
+
+    #[test]
+    fn test_add_annotation_detects_no_changes() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let _ = setup_block_group(graph_conn);
+
+        let operation_summary = add_annotation(
+            &context,
+            "test",
+            "gene-a",
+            Some("track-1"),
+            "test",
+            "chr1:1-5",
+        )
+        .unwrap();
+        commit_operation_summary(&context, &operation_summary).unwrap();
+
+        let operation_summary = add_annotation(
+            &context,
+            "test",
+            "gene-a",
+            Some("track-1"),
+            "test",
+            "chr1:1-5",
+        )
+        .unwrap();
+        let err = commit_operation_summary(&context, &operation_summary).unwrap_err();
+        assert_eq!(err, OperationError::NoChanges);
     }
 
     #[test]
     fn add_annotation_file_creates_operation() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
-        let operation_conn = context.operations().conn();
-        let db_uuid = metadata::get_db_uuid(graph_conn);
-        let _ = GenDatabase::create(operation_conn, &db_uuid, "test-db", "test-db-path").unwrap();
+        let history_store = DoltHistoryStore::new(graph_conn);
 
         let repo_root = context.workspace().repo_root().unwrap();
         let annotation_path = repo_root.join("fixtures").join("annotation.gff3");
@@ -1628,7 +1427,7 @@ mod tests {
         fs::write(&annotation_path, "##gff-version 3\n").unwrap();
         let annotation_path_str = annotation_path.to_string_lossy().to_string();
 
-        let operation = add_annotation_file(
+        let commit_hash = add_annotation_file(
             &context,
             &annotation_path_str,
             None,
@@ -1637,12 +1436,38 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(operation.change_type, "annotation-file");
+        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
 
-        let files = AnnotationFile::get_files_for_operation(operation_conn, &operation.hash);
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].name.as_deref(), Some("track-1"));
-
+        let mut asset_refs = AssetRef::all(graph_conn);
+        asset_refs.sort_by(|left, right| left.role.as_str().cmp(right.role.as_str()));
+        let mut operation_logs = OperationLog::all(graph_conn);
+        operation_logs.sort_by_key(|operation_log| operation_log.created_on);
+        assert_eq!(asset_refs.len(), 1);
+        assert_eq!(asset_refs[0].role, AssetRole::Annotation);
+        assert_eq!(asset_refs[0].name.as_deref(), Some("track-1"));
+        assert!(
+            asset_refs[0]
+                .logical_path
+                .as_deref()
+                .unwrap_or_default()
+                .ends_with("fixtures/annotation.gff3")
+        );
+        assert_eq!(operation_logs.len(), 1);
+        assert_eq!(
+            operation_logs[0].operation_kind,
+            OperationKind::AnnotationFile
+        );
+        let operation_assets = OperationAsset::by_log_id(graph_conn, &operation_logs[0].id);
+        assert_eq!(operation_assets.len(), 1);
+        assert_eq!(operation_assets[0].role, AssetRole::Annotation);
+        assert!(
+            history_store
+                .log(None)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.commit_hash == commit_hash
+                    && entry.message.contains("Add annotation file"))
+        );
         let err = add_annotation_file(
             &context,
             &annotation_path_str,
@@ -1656,5 +1481,105 @@ mod tests {
             .downcast_ref::<OperationError>()
             .expect("should be an OperationError");
         assert_eq!(*op_err, OperationError::NoChanges);
+    }
+
+    #[test]
+    fn test_add_annotation_file_tracks_explicit_non_tabix_index() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+
+        let repo_root = context
+            .workspace()
+            .repo_root()
+            .expect("should have repo root");
+        let annotation_path = repo_root
+            .join("fixtures")
+            .join("annotation-with-index.gff3");
+        let index_path = repo_root.join("fixtures").join("annotation-with-index.csi");
+        fs::create_dir_all(
+            annotation_path
+                .parent()
+                .expect("should have annotation parent directory"),
+        )
+        .expect("should create fixture directory");
+        fs::write(&annotation_path, "##gff-version 3\n").expect("should write annotation fixture");
+        fs::write(&index_path, "index").expect("should write index fixture");
+
+        add_annotation_file(
+            &context,
+            annotation_path
+                .to_str()
+                .expect("should encode annotation path"),
+            None,
+            Some(index_path.to_str().expect("should encode index path")),
+            Some("track-with-index"),
+            None,
+        )
+        .expect("should create annotation file operation");
+
+        let mut asset_refs = AssetRef::all(graph_conn);
+        asset_refs.sort_by(|left, right| {
+            left.role
+                .as_str()
+                .cmp(right.role.as_str())
+                .then_with(|| left.logical_path.cmp(&right.logical_path))
+        });
+        assert_eq!(asset_refs.len(), 2);
+        assert_eq!(asset_refs[0].role, AssetRole::Annotation);
+        assert_eq!(asset_refs[1].role, AssetRole::AnnotationIndex);
+        assert_eq!(asset_refs[1].file_type.as_str(), "none");
+        assert_eq!(
+            asset_refs[1]
+                .logical_path
+                .as_deref()
+                .expect("should store index logical path"),
+            "fixtures/annotation-with-index.csi"
+        );
+    }
+
+    #[test]
+    fn test_add_annotation_file_does_not_store_absolute_external_index_path() {
+        let context = setup_gen();
+        let graph_conn = context.graph().conn();
+        let repo_root = context
+            .workspace()
+            .repo_root()
+            .expect("should have repo root");
+        let annotation_path = repo_root.join("annotation.gff3");
+        fs::write(&annotation_path, "##gff-version 3\n").expect("should write annotation fixture");
+
+        let external_dir = tempfile::tempdir().expect("should create external directory");
+        let index_path = external_dir.path().join("private-index.csi");
+        fs::write(&index_path, "private index contents").expect("should write external index");
+        let index_path = index_path
+            .to_str()
+            .expect("should encode external index path");
+
+        add_annotation_file(
+            &context,
+            annotation_path
+                .to_str()
+                .expect("should encode annotation path"),
+            None,
+            Some(index_path),
+            None,
+            None,
+        )
+        .expect("should create annotation file operation");
+
+        let index_asset = AssetRef::all(graph_conn)
+            .into_iter()
+            .find(|asset| asset.role == AssetRole::AnnotationIndex)
+            .expect("should store annotation index asset");
+        let checksum = index_asset
+            .checksum
+            .expect("local index asset should have checksum");
+        let expected_logical_path = format!(".gen/assets/{checksum}.csi");
+        assert_eq!(
+            index_asset.logical_path.as_deref(),
+            Some(expected_logical_path.as_str())
+        );
+        assert_ne!(index_asset.logical_path.as_deref(), Some(index_path));
+        assert!(!index_asset.uri.contains(index_path));
     }
 }

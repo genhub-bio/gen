@@ -3,13 +3,14 @@ use std::fs::File;
 use anyhow::Result;
 use clap::Args;
 use gen_models::{
+    errors::OperationError,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
     sample::{NewSample, Sample},
 };
 
 use crate::{
-    commands::{cli_context::CliContext, get_default_collection},
+    commands::{cli_context::CliContext, commit_operation, get_default_collection},
     imports::genbank::{GenBankImportOptions, import_genbank},
 };
 
@@ -44,16 +45,15 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Genbank import called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
-    operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
     let mut reader: Box<dyn std::io::Read> = if cmd.path.ends_with(".gz") {
         let file = File::open(cmd.path.clone()).unwrap();
         Box::new(flate2::read::GzDecoder::new(file))
@@ -64,14 +64,17 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.sample.as_deref(),
         cmd.reference.as_deref(),
     )?;
-    if is_reference {
-        Sample::get_or_create(
+    if is_reference
+        && let Err(e) = Sample::get_or_create(
             conn,
             NewSample {
                 name: sample_name,
                 is_reference: true,
             },
-        )?;
+        )
+    {
+        conn.execute("ROLLBACK TRANSACTION;", [])?;
+        return Err(e.into());
     }
     let mut options = GenBankImportOptions::default().annotation_name_from_path(&cmd.path);
     options.add_annotations = !cmd.no_annotations;
@@ -87,15 +90,22 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         },
         options,
     ) {
-        Ok(_) => {
-            println!("GenBank imported.");
-            conn.execute("END TRANSACTION;", []).unwrap();
-            operation_conn.execute("END TRANSACTION;", []).unwrap();
-            Ok(())
+        Ok(operation_summary) => {
+            conn.execute("END TRANSACTION", [])?;
+            match commit_operation(context, &operation_summary) {
+                Ok(_) => {
+                    println!("GenBank imported.");
+                    Ok(())
+                }
+                Err(OperationError::NoChanges) => {
+                    println!("GenBank already exists.");
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
+            }
         }
         Err(err) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
             println!("Import failed: {err:?}");
             Err(err.into())
         }

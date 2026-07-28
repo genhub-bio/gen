@@ -6,9 +6,9 @@ use gen_models::{
 };
 
 use crate::{
-    commands::{cli_context::CliContext, get_default_collection},
+    commands::{cli_context::CliContext, commit_operation, get_default_collection},
     graphs::combinatorial_library::parse_library,
-    imports::library::{LibraryImportError, import_library},
+    imports::library::import_library,
 };
 
 /// Import Library files
@@ -42,33 +42,36 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Library import called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
-
-    conn.execute("BEGIN TRANSACTION", []).unwrap();
-    operation_conn.execute("BEGIN TRANSACTION", []).unwrap();
 
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
     let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
         cmd.sample.as_deref(),
         cmd.reference.as_deref(),
     )?;
-    if is_reference {
-        Sample::get_or_create(
+    let parts_list = parse_library(&cmd.parts.clone().unwrap(), &cmd.library.clone().unwrap())?;
+
+    let parts_path = cmd.parts.unwrap();
+    let library_path = cmd.library.unwrap();
+
+    conn.execute("BEGIN TRANSACTION", [])?;
+
+    if is_reference
+        && let Err(e) = Sample::get_or_create(
             conn,
             NewSample {
                 name: sample_name,
                 is_reference: true,
             },
-        )?;
+        )
+    {
+        conn.execute("ROLLBACK TRANSACTION;", [])?;
+        return Err(e.into());
     }
-    let parts_list = parse_library(&cmd.parts.clone().unwrap(), &cmd.library.clone().unwrap())?;
-
-    let parts_path = cmd.parts.unwrap();
-    let library_path = cmd.library.unwrap();
 
     match import_library(
         context,
@@ -79,19 +82,22 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         Some(&parts_path),
         Some(&library_path),
     ) {
-        Ok(_) => {
-            println!("Imported library file {library_path} and parts file {parts_path}");
-            conn.execute("END TRANSACTION;", []).unwrap();
-            operation_conn.execute("END TRANSACTION;", []).unwrap();
-            Ok(())
-        }
-        Err(LibraryImportError::OperationError(OperationError::NoChanges)) => {
-            conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            operation_conn.execute("ROLLBACK TRANSACTION;", []).unwrap();
-            println!("Library already exists.");
-            Ok(())
+        Ok(operation_summary) => {
+            conn.execute("END TRANSACTION", [])?;
+            match commit_operation(context, &operation_summary) {
+                Ok(_) => {
+                    println!("Imported library file {library_path} and parts file {parts_path}");
+                    Ok(())
+                }
+                Err(OperationError::NoChanges) => {
+                    println!("Library already exists.");
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
+            }
         }
         Err(e) => {
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
             println!("Library import failed: {}", e);
             Err(e.into())
         }

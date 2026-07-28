@@ -142,12 +142,14 @@ impl PathEdge {
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for (index2, edge_id) in chunk.iter().enumerate() {
                 rows_to_insert.push("(?, ?, ?, ?)".to_string());
-                let index_in = index1 * 100000 + index2;
-                let hash = HashId(calculate_hash(&format!("{path_id}:{edge_id}:{index_in}")));
+                let index_in_path = (index1 * 100000 + index2) as i64;
+                let hash = HashId(calculate_hash(&format!(
+                    "{path_id}:{edge_id}:{index_in_path}"
+                )));
                 params.push(Box::new(hash));
                 params.push(Box::new(path_id));
                 params.push(Box::new(edge_id));
-                params.push(Box::new(index_in));
+                params.push(Box::new(index_in_path));
             }
 
             let sql = format!(
@@ -173,17 +175,25 @@ impl PathEdge {
         conn.execute(statement, params![path_id]).unwrap();
     }
 
-    pub fn edges_for_path(conn: &GraphConnection, path_id: &HashId) -> Vec<Edge> {
-        let path_edges = PathEdge::query(
-            conn,
-            "select * from path_edges where path_id = ?1 order by index_in_path ASC",
-            params![path_id],
+    pub fn edges_for_path(
+        conn: &GraphConnection,
+        path_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Vec<Edge> {
+        let query = format!(
+            "select * from {} where path_id = :path_id order by index_in_path ASC",
+            Self::table_name_with_history_ref(history_ref)
         );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":path_id", path_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        let path_edges = PathEdge::query(conn, &query, &params[..]);
         let edge_ids = path_edges
             .into_iter()
             .map(|path_edge| path_edge.edge_id)
             .collect::<Vec<HashId>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids);
+        let edges = Edge::query_by_ids(conn, &edge_ids, history_ref);
         let edges_by_id = edges
             .into_iter()
             .map(|edge| (edge.id, edge))
@@ -211,7 +221,7 @@ impl PathEdge {
             .iter()
             .map(|path_edge| path_edge.edge_id)
             .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids);
+        let edges = Edge::query_by_ids(conn, &edge_ids, None);
         let edges_by_id = edges
             .into_iter()
             .map(|edge| (edge.id, edge))

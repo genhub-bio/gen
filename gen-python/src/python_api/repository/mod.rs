@@ -1,10 +1,16 @@
-use std::path::PathBuf;
+use std::cell::RefCell;
 
-use r#gen::{get_connection, get_operation_connection, track_database};
+use r#gen::{get_config_connection, get_connection};
 use gen_core::config::Workspace;
 use gen_models::{
-    block_group::BlockGroup, collection::Collection, db::DbContext, node::Node,
-    operations::Defaults, sample::Sample, traits::Query,
+    block_group::BlockGroup,
+    collection::Collection,
+    db::DbContext,
+    errors::OperationError,
+    node::Node,
+    operations::{Defaults, OperationInfo, OperationSummary, commit_operation_summary},
+    sample::Sample,
+    traits::Query,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
@@ -25,13 +31,7 @@ pub mod updates;
 
 fn tx_begin(context: &DbContext) -> PyResult<()> {
     let conn = context.graph().conn();
-    let op_conn = context.operations().conn();
-    track_database(conn, op_conn)
-        .map_err(|e| PyRuntimeError::new_err(format!("Error tracking database: {e}")))?;
     conn.execute("BEGIN TRANSACTION", [])
-        .map_err(sqlite_err_to_pyerr)?;
-    op_conn
-        .execute("BEGIN TRANSACTION", [])
         .map_err(sqlite_err_to_pyerr)?;
     Ok(())
 }
@@ -42,41 +42,80 @@ fn tx_commit(context: &DbContext) -> PyResult<()> {
         .conn()
         .execute("END TRANSACTION", [])
         .map_err(sqlite_err_to_pyerr)?;
-    context
-        .operations()
-        .conn()
-        .execute("END TRANSACTION", [])
-        .map_err(sqlite_err_to_pyerr)?;
     Ok(())
 }
 
 fn tx_rollback(context: &DbContext) {
     context.graph().conn().execute("ROLLBACK", []).ok();
-    context.operations().conn().execute("ROLLBACK", []).ok();
 }
 
-pub(crate) fn run_write<F, T>(context: &DbContext, managed: bool, op: F) -> PyResult<T>
+pub(crate) fn run_operation_write<F, T, M>(
+    repository: &PyRepository,
+    op: F,
+    map_operation_error: M,
+) -> PyResult<T>
 where
-    F: FnOnce(&DbContext) -> PyResult<T>,
+    F: FnOnce(&DbContext) -> PyResult<(T, OperationSummary)>,
+    M: FnOnce(OperationError) -> PyErr,
 {
+    let managed = !repository.in_transaction;
     if managed {
-        tx_begin(context)?;
+        tx_begin(&repository.context)?;
     }
-    match op(context) {
-        Ok(val) => {
-            if managed && let Err(e) = tx_commit(context) {
-                tx_rollback(context);
-                return Err(e);
-            }
-            Ok(val)
-        }
+
+    let (value, operation_summary) = match op(&repository.context) {
+        Ok(value) => value,
         Err(err) => {
             if managed {
-                tx_rollback(context);
+                tx_rollback(&repository.context);
             }
-            Err(err)
+            return Err(err);
+        }
+    };
+
+    if managed {
+        if let Err(err) = tx_commit(&repository.context) {
+            tx_rollback(&repository.context);
+            return Err(err);
+        }
+        commit_operation_summary(&repository.context, &operation_summary)
+            .map_err(map_operation_error)?;
+    } else {
+        repository
+            .pending_operation_summaries
+            .borrow_mut()
+            .push(operation_summary);
+    }
+
+    Ok(value)
+}
+
+fn combine_operation_summaries(
+    mut operation_summaries: Vec<OperationSummary>,
+) -> Option<OperationSummary> {
+    match operation_summaries.len() {
+        0 => None,
+        1 => operation_summaries.pop(),
+        _ => {
+            let mut files = Vec::new();
+            let mut summaries = Vec::with_capacity(operation_summaries.len());
+            for operation_summary in operation_summaries {
+                files.extend(operation_summary.operation_info.files);
+                summaries.push(operation_summary.summary);
+            }
+            Some(OperationSummary::new(
+                OperationInfo {
+                    files,
+                    description: "python_transaction".to_string(),
+                },
+                summaries.join("\n"),
+            ))
         }
     }
+}
+
+fn operation_err_to_pyerr(err: OperationError) -> PyErr {
+    PyRuntimeError::new_err(err.to_string())
 }
 
 /// The main entry point for the gen Python module.
@@ -87,11 +126,12 @@ where
 pub struct PyRepository {
     pub context: DbContext,
     pub in_transaction: bool,
+    pending_operation_summaries: RefCell<Vec<OperationSummary>>,
 }
 
 impl PyRepository {
     pub(crate) fn get_default_collection(&self) -> String {
-        Defaults::get(self.context.operations().conn())
+        Defaults::get(self.context.config().conn())
             .and_then(|d| d.collection_name)
             .unwrap_or_else(|| "default".to_string())
     }
@@ -112,11 +152,15 @@ impl PyRepository {
         collection_name: &str,
         sample_name: &str,
     ) -> PySample {
-        let block_groups =
-            Sample::get_block_groups(self.context.graph().conn(), collection_name, sample_name)
-                .into_iter()
-                .map(|bg| self.to_py_block_group(bg))
-                .collect();
+        let block_groups = Sample::get_block_groups(
+            self.context.graph().conn(),
+            collection_name,
+            sample_name,
+            None,
+        )
+        .into_iter()
+        .map(|bg| self.to_py_block_group(bg))
+        .collect();
         PySample::new(
             collection_name.to_string(),
             sample_name.to_string(),
@@ -131,16 +175,21 @@ impl PyRepository {
         sample_name: &str,
         name: &str,
     ) -> PyResult<PySequenceGraph> {
-        Sample::get_block_groups(self.context.graph().conn(), collection_name, sample_name)
-            .into_iter()
-            .find(|bg| bg.name == name)
-            .map(|bg| self.to_py_block_group(bg))
-            .ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "Block group '{}' not found in sample '{}'",
-                    name, sample_name
-                ))
-            })
+        Sample::get_block_groups(
+            self.context.graph().conn(),
+            collection_name,
+            sample_name,
+            None,
+        )
+        .into_iter()
+        .find(|bg| bg.name == name)
+        .map(|bg| self.to_py_block_group(bg))
+        .ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "Block group '{}' not found in sample '{}'",
+                name, sample_name
+            ))
+        })
     }
 }
 
@@ -155,14 +204,11 @@ impl PyRepository {
         };
 
         let gen_dir = workspace.ensure_gen_dir();
-        let ops_path = gen_dir.join("gen.db");
-        let ops_conn = get_operation_connection(Some(ops_path))
+        let config_path = gen_dir.join("gen.db");
+        let config_conn = get_config_connection(Some(config_path))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-        let db_path = Defaults::get(&ops_conn)
-            .and_then(|d| d.db_name)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| gen_dir.join("default.db"));
+        let db_path = gen_dir.join("default.db");
 
         let graph_conn = get_connection(db_path.clone()).map_err(|err| {
             PyRuntimeError::new_err(format!(
@@ -172,8 +218,10 @@ impl PyRepository {
         })?;
 
         Ok(PyRepository {
-            context: DbContext::new(workspace, graph_conn, ops_conn),
+            context: DbContext::new(workspace, graph_conn, config_conn)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
             in_transaction: false,
+            pending_operation_summaries: RefCell::new(Vec::new()),
         })
     }
 
@@ -184,11 +232,11 @@ impl PyRepository {
 
     #[getter]
     fn get_db_path(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let defaults = Defaults::get(self.context.operations().conn());
-        let path = defaults
-            .and_then(|d| d.db_name)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.context.workspace().ensure_gen_dir().join("default.db"));
+        let path = self
+            .context
+            .workspace()
+            .graph_db_path()
+            .unwrap_or_else(|_| self.context.workspace().ensure_gen_dir().join("default.db"));
         path_to_py_path(py, &path)
     }
 
@@ -206,7 +254,11 @@ impl PyRepository {
     }
 
     fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<()> {
+        if slf.in_transaction {
+            return Err(PyRuntimeError::new_err("transaction already active"));
+        }
         tx_begin(&slf.context)?;
+        slf.pending_operation_summaries.borrow_mut().clear();
         slf.in_transaction = true;
         Ok(())
     }
@@ -219,10 +271,24 @@ impl PyRepository {
     ) -> PyResult<bool> {
         slf.in_transaction = false;
         if exc_type.is_some() {
+            slf.pending_operation_summaries.borrow_mut().clear();
             tx_rollback(&slf.context);
-        } else if let Err(e) = tx_commit(&slf.context) {
+            return Ok(false);
+        }
+
+        let operation_summaries = slf
+            .pending_operation_summaries
+            .borrow_mut()
+            .drain(..)
+            .collect::<Vec<_>>();
+        if let Err(err) = tx_commit(&slf.context) {
             tx_rollback(&slf.context);
-            return Err(e);
+            return Err(err);
+        }
+
+        if let Some(operation_summary) = combine_operation_summaries(operation_summaries) {
+            commit_operation_summary(&slf.context, &operation_summary)
+                .map_err(operation_err_to_pyerr)?;
         }
         Ok(false)
     }
@@ -247,7 +313,7 @@ impl PyRepository {
     fn get_sequence_graph_by_id(&self, id: &PyHashId) -> PyResult<PySequenceGraph> {
         let conn = self.context.graph().conn();
         let block_group =
-            BlockGroup::get_by_id(conn, &id.hash_id).map_err(block_group_err_to_pyerr)?;
+            BlockGroup::get_by_id(conn, &id.hash_id, None).map_err(block_group_err_to_pyerr)?;
         Ok(self.to_py_block_group(block_group))
     }
 
@@ -264,7 +330,7 @@ impl PyRepository {
         collection_name: &str,
     ) -> PyResult<Vec<PySequenceGraph>> {
         let conn = self.context.graph().conn();
-        Ok(Collection::get_block_groups(conn, collection_name)
+        Ok(Collection::get_block_groups(conn, collection_name, None)
             .into_iter()
             .map(|bg| self.to_py_block_group(bg))
             .collect())
@@ -313,7 +379,7 @@ impl PyRepository {
 
     fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
         let sequences_by_node_id =
-            Node::get_sequences_by_node_ids(self.context.graph().conn(), &[node_key.node_id]);
+            Node::get_sequences_by_node_ids(self.context.graph().conn(), &[node_key.node_id], None);
         let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "Node with id {:?} not found",
@@ -328,7 +394,7 @@ impl PyRepository {
 
 #[cfg(test)]
 mod python_tests {
-    use std::fs;
+    use std::{cell::RefCell, fs};
 
     use r#gen::test_helpers::setup_gen_on_disk;
     use pyo3::{PyTypeInfo, prelude::*, py_run};
@@ -343,6 +409,7 @@ mod python_tests {
             PyRepository {
                 context: ctx,
                 in_transaction: false,
+                pending_operation_summaries: RefCell::new(Vec::new()),
             },
         )
         .unwrap()

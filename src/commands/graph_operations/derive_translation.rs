@@ -1,12 +1,16 @@
 use anyhow::{Error, Result};
 use gen_core::{Strand, region::Region};
-use gen_models::{db::DbContext, region::resolve};
+use gen_models::{
+    db::DbContext,
+    errors::OperationError,
+    operations::{OperationInfo, OperationSummary},
+    region::resolve,
+};
 
 use crate::{
-    commands::get_default_collection,
+    commands::{commit_operation, get_default_collection},
     graphs::translation::{
-        CodonTable, TranslationOperationError, TranslationParams, translate_annotation,
-        translate_from_path, with_translation_operation,
+        CodonTable, TranslationParams, translate_annotation, translate_from_path,
     },
 };
 
@@ -24,12 +28,12 @@ pub fn derive_translation_operation(
     db_context: &DbContext,
     args: DeriveTranslationArgs,
 ) -> Result<(), Error> {
-    let operation_conn = db_context.operations().conn();
+    let config_conn = db_context.config().conn();
     let graph_conn = db_context.graph().conn();
 
     let collection_name = match args.collection {
         Some(c) => c,
-        None => get_default_collection(operation_conn),
+        None => get_default_collection(config_conn),
     };
 
     let resolved_strand = match args.strand.as_deref() {
@@ -71,24 +75,41 @@ pub fn derive_translation_operation(
     // present or the region is a block group / path, translate from the resolved start
     // coordinate instead. Either way translation reads forward to its own first in-frame
     // stop codon; neither path is bounded by a declared end coordinate.
-    let protein_bg = if resolved.annotation.is_some()
-        && resolved.start == resolved.anchor_start
-        && resolved.end == resolved.anchor_end
-    {
-        with_translation_operation(db_context, region_str, || {
-            translate_annotation(
-                graph_conn,
-                resolved.annotation.as_ref().unwrap(),
-                Some(&bg_id),
-                tr_params,
-            )
-        })
-        .map_err(op_err)?
-    } else {
-        with_translation_operation(db_context, region_str, || {
-            translate_from_path(graph_conn, &bg_id, resolved.start, tr_params)
-        })
-        .map_err(op_err)?
+    graph_conn.execute("BEGIN TRANSACTION", [])?;
+
+    let protein_result = match resolved.annotation.as_ref() {
+        Some(annotation)
+            if resolved.start == resolved.anchor_start && resolved.end == resolved.anchor_end =>
+        {
+            translate_annotation(graph_conn, annotation, Some(&bg_id), tr_params)
+        }
+        _ => translate_from_path(graph_conn, &bg_id, resolved.start, tr_params),
+    };
+    let protein_bg = match protein_result {
+        Ok(protein_bg) => protein_bg,
+        Err(err) => {
+            graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
+            return Err(Error::msg(err.to_string()));
+        }
+    };
+    let operation_summary = OperationSummary::new(
+        OperationInfo {
+            files: vec![],
+            description: "translate annotation".to_string(),
+        },
+        format!(
+            " {}: protein sequence graph derived from {region_str}",
+            protein_bg.name
+        ),
+    );
+    graph_conn.execute("END TRANSACTION", [])?;
+    match commit_operation(db_context, &operation_summary) {
+        Ok(_) => {}
+        Err(OperationError::NoChanges) => {
+            println!("Warning: No changes made.");
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
     };
     let label = region_str.clone();
 
@@ -98,8 +119,4 @@ pub fn derive_translation_operation(
     );
 
     Ok(())
-}
-
-fn op_err(e: TranslationOperationError) -> Error {
-    Error::msg(e.to_string())
 }

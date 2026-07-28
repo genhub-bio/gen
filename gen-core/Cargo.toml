@@ -16,13 +16,14 @@ gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.2.1" }
 itertools = "0.14.0"
 capnp = { version = "0.24" }
 noodles = { version = "0.101.0", features = ["gff"] }
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { package = "rusqdoltlite", version = "0.40.14", features = ["bundled", "fallible_uint"] }
 serde = {  version = "1.0.219", features = ["derive"] }
 thiserror = "1.0"
 sha2 = "0.10.9"
 hex = "0.4.3"
 rand = "0.10.1"
 uuid = { version = "1.18.1", features = ["v7"] }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 pyo3 = { version = "0.25.1", optional = true }
 pyo3-macros = { version = "0.25.1", optional = true }
 

@@ -1,332 +1,264 @@
-use std::collections::{HashMap, HashSet};
+//! Views a patch archive by materializing it and using Gen's normal operation-diff viewer.
+//!
+//! A patch archive contains ordered schema and data statements plus any referenced asset files; it
+//! does not contain the domain-level [`OperationDiff`] consumed by the diff TUI. To construct that
+//! diff, this module copies the current graph database into a temporary workspace, creates a
+//! throwaway branch at the patch's base commit, applies the archive there, and compares the base
+//! commit with the newly materialized target commit using [`collect_operation_diff`]. The result is
+//! then displayed through [`view_diff`], keeping patch and history views consistent.
+//!
+//! The temporary workspace prevents patch statements, Dolt commits, and restored asset files from
+//! changing the user's live workspace. The temporary branch serves a separate purpose: patch
+//! application creates commits, so it needs a writable branch rooted at the exact base commit even
+//! when that historical commit is not the head of an existing branch. Both exist only in the copied
+//! repository and are removed with the temporary directory. The prepared view retains ownership of
+//! that directory so its database and assets remain available until rendering finishes.
+//!
+//! A first-commit patch has no base state or statements to replay. In that case, the archived target
+//! commit already present in the copied history is compared directly with an empty history.
 
-use gen_core::{
-    HashId,
-    Strand::{self, Forward},
-    config::Workspace,
-    is_end_node, is_start_node, is_terminal,
-};
-use gen_graph::{GenGraph, GraphEdge, GraphNode};
+use std::io::{Read, Seek};
+
+use gen_core::{BranchName, CommitRef, HashId, errors::ConfigError};
+use gen_diff::operations::{DiffRange, OperationDiff, OperationDiffError, collect_operation_diff};
 use gen_models::{
-    block_group_edge::BlockGroupEdge,
-    changesets::ChangesetModels,
-    db::DbContext,
-    edge::Edge,
-    errors::OperationError,
-    node::Node,
-    operations::Operation,
-    sequence::{Sequence, SequenceError},
-    session_operations::DependencyModels,
-    traits::Query,
+    db::{DbContext, get_config_connection, get_connection},
+    history::{HistoryStore, dolt::DoltHistoryStore},
 };
-use html_escape;
-use itertools::Itertools;
-use petgraph::{Direction, graphmap::DiGraphMap};
+use rusqlite::MAIN_DB;
+use tempfile::{TempDir, tempdir};
+use thiserror::Error;
 
-use crate::patch::OperationPatch;
+use crate::{
+    patch::{PatchError, apply_patch_archive_to_isolated_context, load_operation_patches},
+    views::diff::view_diff,
+};
 
-pub fn get_change_graph_from_hash(
-    context: &DbContext,
-    hash: &HashId,
-) -> Result<HashMap<HashId, GenGraph>, OperationError> {
-    let op_conn = context.operations().conn();
-    let operation = Operation::get_by_id(op_conn, hash)
-        .ok_or(OperationError::NoOperation(format!("{hash}")))?;
-
-    let workspace = context.workspace();
-    let changeset = operation.get_changeset(workspace);
-    let dependencies = operation.get_changeset_dependencies(workspace);
-
-    Ok(get_change_graph(&changeset.changes, &dependencies))
+#[derive(Debug, Error)]
+pub enum PatchViewError {
+    #[error("Applied patch did not create a target commit.")]
+    MissingTargetCommit,
+    #[error("Configuration error: {0}")]
+    Config(#[from] ConfigError),
+    #[error("Diff error: {0}")]
+    Diff(#[from] OperationDiffError),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Patch error: {0}")]
+    Patch(#[from] PatchError),
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
-pub fn get_change_graph(
-    changes: &ChangesetModels,
-    dependencies: &DependencyModels,
-) -> HashMap<HashId, GenGraph> {
-    let start_node = Node::get_start_node();
-    let end_node = Node::get_end_node();
-    let mut bges_by_bg: HashMap<HashId, Vec<&BlockGroupEdge>> = HashMap::new();
-    let mut edges_by_id: HashMap<HashId, &Edge> = HashMap::new();
-    let mut nodes_by_id: HashMap<HashId, &Node> = HashMap::new();
-    nodes_by_id.insert(start_node.id, &start_node);
-    nodes_by_id.insert(end_node.id, &end_node);
-    let mut sequences_by_hash: HashMap<HashId, &Sequence> = HashMap::new();
-    let mut block_graphs: HashMap<HashId, GenGraph> = HashMap::new();
-
-    for bge in changes.block_group_edges.iter() {
-        bges_by_bg
-            .entry(bge.block_group_id)
-            .and_modify(|l| l.push(bge))
-            .or_insert_with(|| vec![bge]);
-    }
-    for edge in changes.edges.iter().chain(dependencies.edges.iter()) {
-        edges_by_id.insert(edge.id, edge);
-    }
-    for node in changes.nodes.iter().chain(dependencies.nodes.iter()) {
-        nodes_by_id.insert(node.id, node);
-    }
-    for seq in changes
-        .sequences
-        .iter()
-        .chain(dependencies.sequences.iter())
-    {
-        sequences_by_hash.insert(seq.hash, seq);
-    }
-
-    for (bg_id, bg_edges) in bges_by_bg.iter() {
-        // There are 2 graphs created here. The first graph is our normal graph of nodes
-        // and edges. This graph is then used to make our second graph representing the spans
-        // of each node (blocks).
-        let mut graph: DiGraphMap<HashId, Vec<(i64, i64)>> = DiGraphMap::new();
-        let mut block_graph = GenGraph::new();
-        block_graph.add_node(GraphNode {
-            node_id: start_node.id,
-            sequence_start: 0,
-            sequence_end: 0,
-        });
-        block_graph.add_node(GraphNode {
-            node_id: end_node.id,
-            sequence_start: 0,
-            sequence_end: 0,
-        });
-        for bg_edge in bg_edges {
-            let edge = *edges_by_id.get(&bg_edge.edge_id).unwrap();
-            if let Some(weights) = graph.edge_weight_mut(edge.source_node_id, edge.target_node_id) {
-                weights.push((edge.source_coordinate, edge.target_coordinate));
-            } else {
-                graph.add_edge(
-                    edge.source_node_id,
-                    edge.target_node_id,
-                    vec![(edge.source_coordinate, edge.target_coordinate)],
-                );
-            }
-        }
-
-        for node in graph.nodes() {
-            // This is where we make the block graph. For this, we figure out the positions of
-            // all incoming and outgoing edges from the node. Then we make blocks between those
-            // positions.
-            if is_terminal(node) {
-                continue;
-            }
-            let in_ports = graph
-                .edges_directed(node, Direction::Incoming)
-                .flat_map(|(_src, _dest, weights)| {
-                    weights.iter().map(|(_, tp)| *tp).collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            let out_ports = graph
-                .edges_directed(node, Direction::Outgoing)
-                .flat_map(|(_src, _dest, weights)| {
-                    weights.iter().map(|(fp, _tp)| *fp).collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-
-            let node_obj = *nodes_by_id.get(&node).unwrap();
-            let sequence = *sequences_by_hash.get(&node_obj.sequence_hash).unwrap();
-            let s_len = sequence.length;
-            let mut block_starts: HashSet<i64> = HashSet::from_iter(in_ports.iter().copied());
-            block_starts.insert(0);
-            for x in out_ports.iter() {
-                if *x < s_len - 1 {
-                    block_starts.insert(*x);
-                }
-            }
-            let mut block_ends: HashSet<i64> = HashSet::from_iter(out_ports.iter().copied());
-            block_ends.insert(s_len);
-            for x in in_ports.iter() {
-                if *x > 0 {
-                    block_ends.insert(*x);
-                }
-            }
-
-            let block_starts = block_starts.into_iter().sorted().collect::<Vec<_>>();
-            let block_ends = block_ends.into_iter().sorted().collect::<Vec<_>>();
-
-            let mut blocks = vec![];
-            for (i, j) in block_starts.iter().zip(block_ends.iter()) {
-                let node = GraphNode {
-                    node_id: node,
-                    sequence_start: *i,
-                    sequence_end: *j,
-                };
-                block_graph.add_node(node);
-                blocks.push(node);
-            }
-
-            for (i, j) in blocks.iter().tuple_windows() {
-                block_graph.add_edge(
-                    *i,
-                    *j,
-                    vec![GraphEdge {
-                        edge_id: HashId::pad_str(1),
-                        source_strand: Strand::Forward,
-                        target_strand: Forward,
-                        chromosome_index: 0,
-                        phased: 0,
-                        created_on: 0,
-                    }],
-                );
-            }
-        }
-
-        for (src, dest, weights) in graph.all_edges() {
-            for (fp, tp) in weights {
-                if !(is_end_node(src) && is_start_node(dest)) {
-                    let source_block = block_graph
-                        .nodes()
-                        .find(|node| node.node_id == src && node.sequence_end == *fp)
-                        .unwrap();
-                    let dest_block = block_graph
-                        .nodes()
-                        .find(|node| node.node_id == dest && node.sequence_start == *tp)
-                        .unwrap();
-                    block_graph.add_edge(
-                        source_block,
-                        dest_block,
-                        vec![GraphEdge {
-                            edge_id: HashId::pad_str(1),
-                            source_strand: Strand::Forward,
-                            target_strand: Forward,
-                            chromosome_index: 0,
-                            phased: 0,
-                            created_on: 0,
-                        }],
-                    );
-                }
-            }
-        }
-        block_graphs.insert(*bg_id, block_graph);
-    }
-    block_graphs
+struct PreparedPatchView {
+    _temporary_workspace: TempDir,
+    context: DbContext,
+    diff: OperationDiff,
 }
 
-pub fn view_patches(
-    workspace: &Workspace,
-    patches: &[OperationPatch],
-) -> Result<HashMap<HashId, HashMap<HashId, String>>, SequenceError> {
-    // For each blockgroup in a patch, a .dot file is generated showing how the base sequence
-    // has been updated.
-    let mut diagrams: HashMap<HashId, HashMap<HashId, String>> = HashMap::new();
+fn temporary_branch_name(temporary_workspace: &TempDir) -> BranchName {
+    let suffix = HashId::convert_str(&temporary_workspace.path().to_string_lossy());
+    BranchName(format!("gen-patch-view-{suffix}"))
+}
 
-    for patch in patches {
-        // The beginning work is loading the models from the patch as well as dependencies. Once
-        // loaded, a graph is created of the added nodes and returned as a dot string
-        let mut bg_dots: HashMap<HashId, String> = HashMap::new();
+fn prepare_patch_view<R>(
+    source_context: &DbContext,
+    reader: &mut R,
+) -> Result<PreparedPatchView, PatchViewError>
+where
+    R: Read + Seek,
+{
+    reader.rewind()?;
+    let operation_patches = load_operation_patches(&mut *reader)?;
+    let base_commit = operation_patches.base_commit_hash;
+    let archived_target_commit = operation_patches.target_commit_hash;
 
-        let op_info = &patch.operation;
-        let changeset = op_info.get_changeset(workspace);
-        let dependencies = op_info.get_changeset_dependencies(workspace);
+    let temporary_workspace = tempdir()?;
+    let workspace = gen_core::config::Workspace::new(temporary_workspace.path());
+    workspace.ensure_gen_dir();
+    let graph_path = workspace.graph_db_path()?;
+    source_context
+        .graph()
+        .conn()
+        .backup(MAIN_DB, &graph_path, None)?;
 
-        let block_graphs = get_change_graph(&changeset.changes, &dependencies);
+    let graph_conn = get_connection(&graph_path)?;
+    let config_conn = get_config_connection(workspace.gen_db_path()?)?;
+    let mut context = DbContext::new_raw(workspace, graph_conn, config_conn);
+    let history_store = DoltHistoryStore::new(context.graph().conn());
+    let temporary_branch = temporary_branch_name(&temporary_workspace);
+    let branch_start = base_commit.as_ref().unwrap_or(&archived_target_commit);
+    history_store.create_branch(
+        &temporary_branch,
+        Some(&CommitRef(branch_start.to_string())),
+    )?;
+    history_store.checkout_branch(&temporary_branch)?;
 
-        let mut sequences_by_hash: HashMap<HashId, &Sequence> = HashMap::new();
-        for seq in changeset
-            .changes
-            .sequences
-            .iter()
-            .chain(dependencies.sequences.iter())
-        {
-            sequences_by_hash.insert(seq.hash, seq);
-        }
-        let mut node_sequence_hashes: HashMap<HashId, HashId> = HashMap::new();
-        for node in changeset
-            .changes
-            .nodes
-            .iter()
-            .chain(dependencies.nodes.iter())
-        {
-            node_sequence_hashes.insert(node.id, node.sequence_hash);
-        }
+    let target_commit = if base_commit.is_some() {
+        reader.rewind()?;
+        apply_patch_archive_to_isolated_context(&mut context, reader)?;
+        DoltHistoryStore::new(context.graph().conn())
+            .current_head()?
+            .ok_or(PatchViewError::MissingTargetCommit)?
+    } else {
+        archived_target_commit
+    };
+    let diff = collect_operation_diff(
+        context.graph().conn(),
+        base_commit,
+        target_commit,
+        DiffRange::TwoDot,
+    )?;
 
-        for (bg_id, block_graph) in block_graphs.iter() {
-            let mut dot = "digraph {\n    rankdir=LR\n    node [shape=none]\n".to_string();
-            for node in block_graph.nodes() {
-                let node_id = node.node_id;
-                let start = node.sequence_start;
-                let end = node.sequence_end;
-                let dot_node_id = format!("{node_id}.{start}.{end}");
-                if is_terminal(node.node_id) {
-                    let label = if is_start_node(node.node_id) {
-                        "start"
-                    } else {
-                        "end"
-                    };
-                    dot.push_str(&format!(
-                        "\"{dot_node_id}\" [label=\"{label}\", shape=ellipse]\n",
-                    ));
-                    continue;
-                }
+    Ok(PreparedPatchView {
+        _temporary_workspace: temporary_workspace,
+        context,
+        diff,
+    })
+}
 
-                let seq_hash = *node_sequence_hashes.get(&node.node_id).unwrap();
-                let seq = *sequences_by_hash.get(&seq_hash).unwrap();
-                let len = end - start;
+pub fn view_patch<R>(source_context: &DbContext, reader: &mut R) -> Result<(), PatchViewError>
+where
+    R: Read + Seek,
+{
+    let prepared = prepare_patch_view(source_context, reader)?;
+    view_diff(prepared.context.graph().conn(), &prepared.diff)?;
+    Ok(())
+}
 
-                let formatted_seq = if len > 7 {
-                    format!(
-                        "{s}...{e}",
-                        s = seq.get_sequence(start, start + 3)?,
-                        e = seq.get_sequence(end - 3, end)?
-                    )
-                } else {
-                    seq.get_sequence(start, end)?
-                };
+#[cfg(test)]
+mod tests {
+    use std::{io::Cursor, path::PathBuf};
 
-                let coordinates = format!("{node_id}:{start}-{end}");
+    use gen_diff::{
+        graph::{DiffGraphEdge, DiffGraphNode},
+        operations::{BlockGroupDiff, DiffRange, OperationDiff, collect_operation_diff},
+    };
+    use gen_models::{
+        history::{HistoryStore, dolt::DoltHistoryStore},
+        operations::commit_operation_summary,
+        sample::Sample,
+    };
 
-                let label = format!(
-                    "<\
-                <TABLE BORDER='0'>\
-                    <TR>\
-                        <TD BORDER='1' ALIGN='CENTER' PORT='seq'>\
-                            <FONT POINT-SIZE='12' FACE='Monospace'>{escaped_seq}</FONT>\
-                        </TD>\
-                    </TR>\
-                    <TR>\
-                        <TD ALIGN='CENTER'>\
-                            <FONT POINT-SIZE='10'>{coordinates}</FONT>\
-                        </TD>\
-                    </TR>\
-                </TABLE>\
-                >",
-                    escaped_seq = html_escape::encode_safe(&formatted_seq)
-                );
+    use super::prepare_patch_view;
+    use crate::{
+        imports::fasta::import_fasta, patch::create_patch, test_helpers::setup_gen_on_disk,
+    };
 
-                dot.push_str(&format!("\"{dot_node_id}\" [label={label}]\n",));
-            }
-
-            for (src_node, dst_node, _) in block_graph.all_edges() {
-                let src = src_node.node_id;
-                let s_fp = src_node.sequence_start;
-                let s_tp = src_node.sequence_end;
-                let dest = dst_node.node_id;
-                let d_fp = dst_node.sequence_start;
-                let d_tp = dst_node.sequence_end;
-                // Edges between adjacent blocks from the same node don't have an arrowhead
-                // and are dashed because they represent the reference and can't be traversed.
-                // TODO: In a heterozygous genome this isn't true. Check needs to be expanded.
-                let style = if src == dest && d_fp == s_tp + 1 {
-                    "dashed"
-                } else {
-                    "solid"
-                };
-                let arrow = if src == dest && d_fp == s_tp + 1 {
-                    "none"
-                } else {
-                    "normal"
-                };
-                let headport = if is_end_node(dest) { "w" } else { "seq:w" };
-                let tailport = if is_start_node(src) { "e" } else { "seq:e" };
-                dot.push_str(&format!(
-                    "\"{src}.{s_fp}.{s_tp}\" -> \"{dest}.{d_fp}.{d_tp}\" [arrowhead={arrow}, headport=\"{headport}\", tailport=\"{tailport}\", style=\"{style}\"]\n"
-                ));
-            }
-
-            dot.push('}');
-            bg_dots.insert(*bg_id, dot);
-        }
-        diagrams.insert(patch.operation.hash, bg_dots);
+    fn without_node_operation(mut node: DiffGraphNode) -> DiffGraphNode {
+        node.change.operation = None;
+        node
     }
-    Ok(diagrams)
+
+    fn without_edge_operation(mut edge: DiffGraphEdge) -> DiffGraphEdge {
+        edge.change.operation = None;
+        edge
+    }
+
+    fn sorted_nodes(diff: &BlockGroupDiff) -> Vec<DiffGraphNode> {
+        let mut nodes = diff
+            .graph
+            .nodes()
+            .map(without_node_operation)
+            .collect::<Vec<_>>();
+        nodes.sort();
+        nodes
+    }
+
+    fn sorted_edges(
+        diff: &BlockGroupDiff,
+    ) -> Vec<(DiffGraphNode, DiffGraphNode, Vec<DiffGraphEdge>)> {
+        let mut edges = diff
+            .graph
+            .all_edges()
+            .map(|(source, target, edges)| {
+                (
+                    without_node_operation(source),
+                    without_node_operation(target),
+                    edges.iter().copied().map(without_edge_operation).collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges
+    }
+
+    fn assert_same_graphical_diff(expected: &OperationDiff, actual: &OperationDiff) {
+        let mut expected_graphs = expected.diff_graph.iter().collect::<Vec<_>>();
+        expected_graphs.sort_by_key(|diff| diff.id);
+        let mut actual_graphs = actual.diff_graph.iter().collect::<Vec<_>>();
+        actual_graphs.sort_by_key(|diff| diff.id);
+
+        assert_eq!(actual_graphs.len(), expected_graphs.len());
+        for (actual, expected) in actual_graphs.into_iter().zip(expected_graphs) {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.source_block_group, expected.source_block_group);
+            assert_eq!(actual.target_block_group, expected.target_block_group);
+            assert_eq!(sorted_nodes(actual), sorted_nodes(expected));
+            assert_eq!(sorted_edges(actual), sorted_edges(expected));
+        }
+    }
+
+    fn import_fixture(context: &gen_models::db::DbContext, sample: &str) {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_string_lossy()
+            .to_string();
+        let operation = import_fasta(context, &fixture_path, "default", sample, false)
+            .expect("should import the FASTA fixture");
+        commit_operation_summary(context, &operation).expect("should commit the FASTA import");
+    }
+
+    #[test]
+    fn test_first_commit_patch_produces_same_diff_as_source_history() {
+        let source_context = setup_gen_on_disk();
+        import_fixture(&source_context, Sample::DEFAULT_NAME);
+        let history = DoltHistoryStore::new(source_context.graph().conn())
+            .log(None)
+            .expect("should load source history");
+        let target_hash = history[0].commit_hash;
+        let expected = collect_operation_diff(
+            source_context.graph().conn(),
+            None,
+            target_hash,
+            DiffRange::TwoDot,
+        )
+        .expect("should collect the first source history diff");
+
+        let mut archive = Cursor::new(Vec::new());
+        create_patch(&source_context, &[target_hash], &mut archive)
+            .expect("should export the first source operation as a patch");
+        let prepared = prepare_patch_view(&source_context, &mut archive)
+            .expect("should prepare the first-commit patch for viewing");
+
+        assert_same_graphical_diff(&expected, &prepared.diff);
+    }
+
+    #[test]
+    fn test_exported_patch_produces_same_diff_as_source_history() {
+        let source_context = setup_gen_on_disk();
+        import_fixture(&source_context, Sample::DEFAULT_NAME);
+        import_fixture(&source_context, "patch-view-sample");
+
+        let history = DoltHistoryStore::new(source_context.graph().conn())
+            .log(None)
+            .expect("should load source history");
+        let target_hash = history[0].commit_hash;
+        let base_hash = history[1].commit_hash;
+        let expected = collect_operation_diff(
+            source_context.graph().conn(),
+            Some(base_hash),
+            target_hash,
+            DiffRange::TwoDot,
+        )
+        .expect("should collect the source history diff");
+
+        let mut archive = Cursor::new(Vec::new());
+        create_patch(&source_context, &[target_hash], &mut archive)
+            .expect("should export the source operation as a patch");
+        let prepared = prepare_patch_view(&source_context, &mut archive)
+            .expect("should prepare the exported patch for viewing");
+
+        assert_same_graphical_diff(&expected, &prepared.diff);
+    }
 }

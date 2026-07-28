@@ -43,7 +43,7 @@ impl PyHashId {
         }
     }
 
-    /// Returns the HashId as a 32-byte bytes object.
+    /// Returns the HashId as a 16-byte bytes object.
     #[expect(
         clippy::wrong_self_convention,
         reason = "exposed to Python as to_bytes(); pyo3 pyclass methods require &self"

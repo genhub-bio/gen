@@ -14,7 +14,7 @@ mod tests {
     use petgraph::visit::Dfs;
 
     use crate::{
-        imports::gfa::import_gfa, test_helpers::setup_gen, track_database,
+        imports::gfa::import_gfa, test_helpers::setup_gen,
         views::gen_graph_widget::GenGraphNodeSizer,
     };
 
@@ -25,7 +25,7 @@ mod tests {
         // Setup environment and database
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
+        let config_conn = context.config().conn();
 
         // Load Anderson GFA file
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");
@@ -37,11 +37,11 @@ mod tests {
         let collection_name = "/";
 
         // Track the database before starting operations
-        track_database(conn, op_conn).expect("Failed to track database");
         import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME)
             .expect("GFA import failed");
 
-        let gen_graph = Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME).unwrap();
+        let gen_graph =
+            Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME, None).unwrap();
 
         // Test with small partitions to force inter-partition edges
         let config = GraphConfig {

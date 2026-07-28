@@ -37,6 +37,7 @@ pub fn translate_bed<R, W>(
     conn: &GraphConnection,
     collection: &str,
     sample: &str,
+    history_ref: Option<&str>,
     reader: R,
     writer: &mut W,
 ) -> Result<(), BedError>
@@ -48,7 +49,7 @@ where
     let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
     let mut bed_writer = bed::io::Writer::<6, _>::new(writer);
 
-    let bgs = Sample::get_block_groups(conn, collection, sample);
+    let bgs = Sample::get_block_groups(conn, collection, sample, history_ref);
     let sample_bgs: HashMap<String, &BlockGroup> = HashMap::from_iter(
         bgs.iter()
             .map(|bg| (bg.name.clone(), bg))
@@ -57,7 +58,8 @@ where
 
     // Load all reference aliases, to accommodate alternate reference names in the GFF file
     let references = sample_bgs.keys().cloned().collect::<Vec<String>>();
-    let references_by_alias = ReferenceAlias::get_references_by_alias(conn, references)?;
+    let references_by_alias =
+        ReferenceAlias::get_references_by_alias(conn, references, history_ref)?;
 
     let mut paths: HashMap<HashId, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
 
@@ -74,11 +76,11 @@ where
             let projection = match paths.entry(bg.id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let path = BlockGroup::get_current_path(conn, &bg.id)?;
-                    let graph = BlockGroup::get_graph(conn, &bg.id)?;
+                    let path = BlockGroup::get_current_path(conn, &bg.id, history_ref)?;
+                    let graph = BlockGroup::get_graph(conn, &bg.id, history_ref)?;
                     let mut tree = IntervalTree::default();
                     let mut position: i64 = 0;
-                    for (node, strand) in project_path(&graph, &path.blocks(conn)?) {
+                    for (node, strand) in project_path(&graph, &path.blocks(conn, history_ref)?) {
                         if !is_terminal(node.node_id) {
                             let end_position = position + node.length();
                             tree.insert(position..end_position, (node, strand));
@@ -143,6 +145,7 @@ mod tests {
             &conn,
             &collection,
             "foo",
+            None,
             File::open(bed_path.clone()).expect("should open fixture bed"),
             &mut buffer,
         )
@@ -151,13 +154,13 @@ mod tests {
         assert_eq!(
             results,
             concat!(
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t1\t3\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t3\t4\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t4\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "b59698a422128d20462c44537b2d23ef\t1\t3\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
+                "b59698a422128d20462c44537b2d23ef\t3\t4\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
+                "b59698a422128d20462c44537b2d23ef\t4\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
+                "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
+                "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
 
@@ -166,6 +169,7 @@ mod tests {
             &conn,
             &collection,
             Sample::DEFAULT_NAME,
+            None,
             File::open(bed_path).expect("should open fixture bed"),
             &mut buffer,
         )
@@ -174,11 +178,11 @@ mod tests {
         assert_eq!(
             results,
             concat!(
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t1\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "b59698a422128d20462c44537b2d23ef\t1\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
+                "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
+                "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
     }
@@ -210,6 +214,7 @@ mod tests {
             &conn,
             &collection,
             Sample::DEFAULT_NAME,
+            None,
             File::open(bed_path).expect("should open fixture bed"),
             &mut buffer,
         )
@@ -219,11 +224,11 @@ mod tests {
         assert_eq!(
             results,
             concat!(
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t1\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "b59698a422128d20462c44537b2d23ef\t1\t10\tabc123.1\t0\t-\t1\t10\t0,0,0\t3\t102,188,129,\t0,3508,4691,\n",
+                "b59698a422128d20462c44537b2d23ef\t5\t8\txyz.1\t0\t-\t5\t8\t0,0,0\t1\t113,\t0,\n",
+                "b59698a422128d20462c44537b2d23ef\t10\t16\txyz.2\t0\t+\t10\t16\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "b59698a422128d20462c44537b2d23ef\t14\t17\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
+                "6b460b727030cae3bae7cf389074d4ba\t17\t23\tfoo.1\t0\t+\t14\t23\t0,0,0\t2\t142,326,\t0,10710,\n",
             )
         );
     }

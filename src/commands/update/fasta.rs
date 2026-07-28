@@ -1,9 +1,9 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::sample::Sample;
+use gen_models::{errors::OperationError, sample::Sample};
 
 use crate::{
-    commands::{cli_context::CliContext, get_default_collection},
+    commands::{cli_context::CliContext, commit_operation, get_default_collection},
     updates::fasta::update_with_fasta,
 };
 
@@ -38,18 +38,17 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with fasta called");
 
     let context = cli_context.context;
-    let operation_conn = context.operations().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", [])?;
-    operation_conn.execute("BEGIN TRANSACTION", [])?;
 
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
 
-    if let Err(err) = update_with_fasta(
+    match update_with_fasta(
         context,
         name,
         cmd.sample.as_str(),
@@ -58,13 +57,18 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path,
         cmd.no_reference_path_update,
     ) {
-        conn.execute("ROLLBACK TRANSACTION;", [])?;
-        operation_conn.execute("ROLLBACK TRANSACTION;", [])?;
-        return Err(err.into());
-    }
-
-    conn.execute("END TRANSACTION;", [])?;
-    operation_conn.execute("END TRANSACTION;", [])?;
+        Ok(operation_summary) => {
+            conn.execute("END TRANSACTION", [])?;
+            match commit_operation(context, &operation_summary) {
+                Ok(_) | Err(OperationError::NoChanges) => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Err(err) => {
+            conn.execute("ROLLBACK TRANSACTION;", [])?;
+            return Err(err.into());
+        }
+    };
 
     Ok(())
 }

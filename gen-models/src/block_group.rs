@@ -16,6 +16,7 @@ use gen_graph::{
     GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
     flatten_to_interval_tree,
 };
+use indexmap::IndexSet;
 use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
@@ -332,21 +333,46 @@ impl BlockGroup {
         Ok(())
     }
 
-    pub fn get_by_id(conn: &GraphConnection, id: &HashId) -> Result<BlockGroup, BlockGroupError> {
-        let query = "SELECT * FROM block_groups WHERE id = ?1";
-        let mut stmt = match conn.prepare(query) {
-            Ok(stmt) => stmt,
-            Err(e) => return Err(BlockGroupError::DatabaseError(e)),
-        };
-        match stmt.query_row([id], |row| Ok(Self::process_row(row))) {
-            Ok(res) => Ok(res),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(BlockGroupError::QueryError(
-                QueryError::ResultsNotFound(format!("BlockGroup with id {id} not found")),
-            )),
-            Err(_) => Err(BlockGroupError::DatabaseError(
-                rusqlite::Error::QueryReturnedNoRows,
-            )),
+    pub fn get_by_id(
+        conn: &GraphConnection,
+        id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Result<BlockGroup, BlockGroupError> {
+        <Self as Query>::get_by_id(conn, id, history_ref).ok_or_else(|| {
+            BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
+                "BlockGroup with id {id} not found"
+            )))
+        })
+    }
+
+    pub fn get_by_name(
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+        name: &str,
+        history_ref: Option<&str>,
+    ) -> Result<BlockGroup, BlockGroupError> {
+        let query = format!(
+            "select * from {} where collection_name = :collection_name \
+             and sample_name = :sample_name and name = :name",
+            BlockGroup::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
+            (":collection_name", &collection_name),
+            (":sample_name", &sample_name),
+            (":name", &name),
+        ];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
         }
+        BlockGroup::try_query(conn, &query, &params[..])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
+                    "BlockGroup named {name} for sample {sample_name} in collection {collection_name} not found"
+                )))
+            })
     }
 
     pub fn get_reference_block_groups(
@@ -377,7 +403,7 @@ impl BlockGroup {
         );
 
         for path in &existing_paths {
-            let edge_ids = PathEdge::edges_for_path(conn, &path.id)
+            let edge_ids = PathEdge::edges_for_path(conn, &path.id, None)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
@@ -416,6 +442,7 @@ impl BlockGroup {
             sample_name,
             group_name,
             &parent_samples,
+            None,
         )?;
 
         if parent_block_groups.is_empty() {
@@ -455,9 +482,10 @@ impl BlockGroup {
         sample_name: &str,
         group_name: &str,
         parent_samples: &[String],
+        history_ref: Option<&str>,
     ) -> Result<Vec<BlockGroup>, BlockGroupError> {
         let parent_samples = if parent_samples.is_empty() {
-            Sample::get_parent_names(conn, sample_name)
+            Sample::get_parent_names(conn, sample_name, history_ref)
         } else {
             parent_samples.to_vec()
         };
@@ -465,24 +493,28 @@ impl BlockGroup {
             return Ok(vec![]);
         }
 
-        BlockGroup::try_query(
-            conn,
-            "select * from block_groups
-             where collection_name = ?1 AND sample_name IN rarray(?2) AND name = ?3
+        let query = format!(
+            "select * from {}
+             where collection_name = :collection_name AND sample_name IN rarray(:parent_samples) AND name = :group_name
              order by sample_name, created_on, id",
-            params![
-                collection_name,
-                Rc::new(
-                    parent_samples
-                        .iter()
-                        .cloned()
-                        .map(SQLValue::from)
-                        .collect::<Vec<_>>()
-                ),
-                group_name
-            ],
-        )
-        .map_err(BlockGroupError::from)
+            BlockGroup::table_name_with_history_ref(history_ref)
+        );
+        let parent_sample_values = Rc::new(
+            parent_samples
+                .iter()
+                .cloned()
+                .map(SQLValue::from)
+                .collect::<Vec<_>>(),
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
+            (":collection_name", &collection_name),
+            (":parent_samples", &parent_sample_values),
+            (":group_name", &group_name),
+        ];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        BlockGroup::try_query(conn, &query, &params[..]).map_err(BlockGroupError::from)
     }
 
     fn copy_contents_from(
@@ -491,7 +523,7 @@ impl BlockGroup {
         source_block_group: &BlockGroup,
     ) -> Result<(), BlockGroupError> {
         let new_block_group_edges =
-            BlockGroupEdge::edges_for_block_group(conn, &source_block_group.id)
+            BlockGroupEdge::edges_for_block_group(conn, &source_block_group.id, None)
                 .into_iter()
                 .map(|edge| BlockGroupEdgeData {
                     block_group_id: self.id,
@@ -522,9 +554,10 @@ impl BlockGroup {
     pub fn get_graph(
         conn: &GraphConnection,
         block_group_id: &HashId,
+        history_ref: Option<&str>,
     ) -> Result<GenGraph, BlockGroupError> {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id);
-        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges)?;
+        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, history_ref);
+        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, history_ref)?;
         let (graph, _) = Edge::build_graph(&edges, &blocks);
         Ok(graph)
     }
@@ -536,7 +569,7 @@ impl BlockGroup {
         block_group_id: &HashId,
         edges: &[AugmentedEdge],
     ) -> Result<GenGraph, BlockGroupError> {
-        let blocks = Edge::blocks_from_edges(conn, block_group_id, edges)?;
+        let blocks = Edge::blocks_from_edges(conn, block_group_id, edges, None)?;
         let edges_vec = edges.to_vec();
         let (graph, _) = Edge::build_graph(&edges_vec, &blocks);
         Ok(graph)
@@ -602,11 +635,11 @@ impl BlockGroup {
         block_group_id: &HashId,
         _prune: bool,
     ) -> Result<HashSet<String>, BlockGroupError> {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id)
+        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
             .into_iter()
             .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
             .collect::<Vec<_>>();
-        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges)?;
+        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, None)?;
 
         let (mut graph, _) = Edge::build_graph(&edges, &blocks);
         BlockGroup::prune_graph(&mut graph);
@@ -704,6 +737,10 @@ impl BlockGroup {
         Ok(accession)
     }
 
+    #[cfg_attr(
+        feature = "profiling",
+        tracing::instrument(skip(conn, changes, tree_map))
+    )]
     pub fn insert_changes(
         conn: &GraphConnection,
         changes: &[BlockGroupChange],
@@ -773,32 +810,42 @@ impl BlockGroup {
         )
     }
 
+    #[cfg_attr(
+        feature = "profiling",
+        tracing::instrument(skip(conn, new_augmented_edges_by_block_group, new_accession_edges))
+    )]
     fn persist_insert_changes(
         conn: &GraphConnection,
         new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
         new_accession_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
     ) -> Result<(), BlockGroupError> {
-        let mut edge_data_map = HashMap::new();
-
         for (block_group_id, new_augmented_edges) in new_augmented_edges_by_block_group {
-            let new_edges = new_augmented_edges
+            let mut unique_new_edges = new_augmented_edges
                 .iter()
                 .map(|augmented_edge| augmented_edge.edge_data)
+                .collect::<IndexSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>();
-            let edge_ids = Edge::bulk_create(conn, &new_edges);
-            for (i, edge_data) in new_edges.iter().enumerate() {
-                edge_data_map.insert(*edge_data, edge_ids[i]);
-            }
-            let new_block_group_edges = edge_ids
+            unique_new_edges.sort_unstable();
+            let edge_ids = Edge::bulk_create(conn, &unique_new_edges);
+            let edge_id_by_data = unique_new_edges
+                .into_iter()
+                .zip(edge_ids)
+                .collect::<HashMap<_, _>>();
+            let mut new_block_group_edges = new_augmented_edges
                 .iter()
-                .enumerate()
-                .map(|(i, edge_id)| BlockGroupEdgeData {
+                .map(|augmented_edge| BlockGroupEdgeData {
                     block_group_id,
-                    edge_id: *edge_id,
-                    chromosome_index: new_augmented_edges[i].chromosome_index,
-                    phased: new_augmented_edges[i].phased,
+                    edge_id: *edge_id_by_data
+                        .get(&augmented_edge.edge_data)
+                        .expect("should find inserted edge id for augmented edge"),
+                    chromosome_index: augmented_edge.chromosome_index,
+                    phased: augmented_edge.phased,
                 })
+                .collect::<IndexSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>();
+            new_block_group_edges.sort_unstable();
             BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
         }
 
@@ -824,9 +871,11 @@ impl BlockGroup {
                 }
             }
         }
+
         Ok(())
     }
 
+    #[cfg_attr(feature = "profiling", tracing::instrument(skip(change, tree)))]
     pub fn set_up_new_edges(
         change: &BlockGroupChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
@@ -1078,7 +1127,7 @@ impl BlockGroup {
         remove_ambiguous_positions: bool,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
         // make a tree where every node has a span in the graph.
-        let mut graph = BlockGroup::get_graph(conn, block_group_id)?;
+        let mut graph = BlockGroup::get_graph(conn, block_group_id, None)?;
         BlockGroup::prune_graph(&mut graph);
         Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
     }
@@ -1086,12 +1135,18 @@ impl BlockGroup {
     pub fn get_current_path(
         conn: &GraphConnection,
         block_group_id: &HashId,
+        history_ref: Option<&str>,
     ) -> Result<Path, BlockGroupError> {
-        let paths = Path::try_query(
-            conn,
-            "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
-            params![block_group_id],
-        )?;
+        let query = format!(
+            "SELECT * FROM {} WHERE block_group_id = :block_group_id ORDER BY created_on DESC",
+            Path::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
+            vec![(":block_group_id", block_group_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        let paths = Path::try_query(conn, &query, &params[..])?;
         paths.first().cloned().ok_or_else(|| {
             BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
                 "No current path found for block group {block_group_id}"
@@ -1130,7 +1185,7 @@ impl BlockGroup {
         target_block_group_id: &HashId,
         create_terminal_edges: bool,
     ) -> Result<(), BlockGroupError> {
-        let current_graph = BlockGroup::get_graph(conn, source_block_group_id)?;
+        let current_graph = BlockGroup::get_graph(conn, source_block_group_id, None)?;
         let start_node = current_graph
             .nodes()
             .find(|node| {
@@ -1154,7 +1209,7 @@ impl BlockGroup {
             .iter()
             .map(|(_to, _from, edge_info)| edge_info[0].edge_id)
             .collect::<Vec<_>>();
-        let source_edges = Edge::query_by_ids(conn, &subgraph_edge_ids);
+        let source_edges = Edge::query_by_ids(conn, &subgraph_edge_ids, None);
 
         let source_block_group_edges = BlockGroupEdge::specific_edges_for_block_group(
             conn,
@@ -1492,8 +1547,8 @@ mod tests {
             vec![Sample::DEFAULT_NAME.to_string()],
         );
         assert_eq!(
-            BlockGroupEdge::edges_for_block_group(conn, &bg1.id),
-            BlockGroupEdge::edges_for_block_group(conn, &bg2)
+            BlockGroupEdge::edges_for_block_group(conn, &bg1.id, None),
+            BlockGroupEdge::edges_for_block_group(conn, &bg2, None)
         );
     }
 
@@ -1672,7 +1727,7 @@ mod tests {
             HashSet::from_iter(vec!["CCCC".to_string()])
         );
         assert_eq!(
-            Sample::get_all_sequences(conn, "test", "child", false).unwrap(),
+            Sample::get_all_sequences(conn, "test", "child", false, None).unwrap(),
             HashSet::from_iter(vec!["AAAA".to_string(), "CCCC".to_string()])
         );
     }
@@ -1741,7 +1796,7 @@ mod tests {
         assert_eq!(block_groups[0].sample_name, "child_sample");
         assert_eq!(block_groups[0].name, "chr1");
         assert!(block_groups[0].parent_block_group_id.is_none());
-        assert!(BlockGroupEdge::edges_for_block_group(conn, &block_groups[0].id).is_empty());
+        assert!(BlockGroupEdge::edges_for_block_group(conn, &block_groups[0].id, None).is_empty());
     }
 
     #[test]
@@ -1883,7 +1938,7 @@ mod tests {
         .collect::<Vec<_>>();
 
         BlockGroupEdge::bulk_create(&conn, &block_group_edges);
-        let graph = BlockGroup::get_graph(&conn, &bg.id).unwrap();
+        let graph = BlockGroup::get_graph(&conn, &bg.id, None).unwrap();
 
         // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
         // 2 terminal blocks: START, END
@@ -2062,9 +2117,9 @@ mod tests {
         .unwrap();
 
         let mut path_cache = PathCache::new(conn);
-        let parent_a_path_len = parent_a_path.length(conn).unwrap();
-        let parent_b_path_len = parent_b_path.length(conn).unwrap();
-        let parent_b_alt_path_len = parent_b_alt_path.length(conn).unwrap();
+        let parent_a_path_len = parent_a_path.length(conn, None).unwrap();
+        let parent_b_path_len = parent_b_path.length(conn, None).unwrap();
+        let parent_b_alt_path_len = parent_b_alt_path.length(conn, None).unwrap();
         BlockGroup::add_accession(
             conn,
             &parent_a_path,
@@ -2209,7 +2264,7 @@ mod tests {
 
         let accession =
             BlockGroup::add_accession(conn, &path, "test", 3, 10, &mut path_cache).unwrap();
-        let nodes = Accession::get_nodes_by_id(conn, &accession.id);
+        let nodes = Accession::get_nodes_by_id(conn, &accession.id, None);
 
         assert_eq!(accession.length(conn).unwrap(), 7);
         assert_eq!(nodes.len(), 1);
@@ -2298,7 +2353,8 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let annotation_accession = Accession::get_by_id(&conn, &annotation.accession_id).unwrap();
+        let annotation_accession =
+            Accession::get_by_id(&conn, &annotation.accession_id, None).unwrap();
         let region =
             ResolvedGenRegion::from_annotation(&conn, &annotation, &annotation_accession, 5, 15)
                 .unwrap();
@@ -3276,7 +3332,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let bg = BlockGroup::get_by_id(conn, &new_bg_id).unwrap();
+        let bg = BlockGroup::get_by_id(conn, &new_bg_id, None).unwrap();
         let region = ResolvedGenRegion {
             block_group: bg,
             path: None,
@@ -3512,7 +3568,7 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id).unwrap();
+        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id, None).unwrap();
         let gc_region = ResolvedGenRegion {
             block_group: gc_bg,
             path: None,
@@ -3580,7 +3636,7 @@ mod tests {
             path_end: 11,
             strand: Strand::Forward,
         };
-        let bg = BlockGroup::get_by_id(conn, &new_bg_id).unwrap();
+        let bg = BlockGroup::get_by_id(conn, &new_bg_id, None).unwrap();
         let region = ResolvedGenRegion {
             block_group: bg,
             path: None,
@@ -3657,7 +3713,7 @@ mod tests {
             path_end: 24,
             strand: Strand::Forward,
         };
-        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id).unwrap();
+        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id, None).unwrap();
         let gc_region = ResolvedGenRegion {
             block_group: gc_bg,
             path: None,
@@ -3732,7 +3788,7 @@ mod tests {
             path_end: 12,
             strand: Strand::Forward,
         };
-        let bg = BlockGroup::get_by_id(conn, &new_bg_id).unwrap();
+        let bg = BlockGroup::get_by_id(conn, &new_bg_id, None).unwrap();
         let region = ResolvedGenRegion {
             block_group: bg,
             path: None,
@@ -3807,7 +3863,7 @@ mod tests {
             path_end: 24,
             strand: Strand::Forward,
         };
-        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id).unwrap();
+        let gc_bg = BlockGroup::get_by_id(conn, &gc_bg_id, None).unwrap();
         let gc_region = ResolvedGenRegion {
             block_group: gc_bg,
             path: None,
@@ -3935,7 +3991,7 @@ mod tests {
                 .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
                 .unwrap();
             assert_eq!(
-                insert_path.sequence(conn).unwrap(),
+                insert_path.sequence(conn, None).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
             );
 
@@ -3953,7 +4009,7 @@ mod tests {
                 .query(Range { start: 15, end: 25 })
                 .map(|x| x.value)
                 .collect::<Vec<_>>();
-            blocks.sort_by(|a, b| a.start.cmp(&b.start));
+            blocks.sort_by_key(|a| a.start);
             let start_block = blocks[0];
             let start_node_coordinate = 15 - start_block.start + start_block.sequence_start;
             let end_block = blocks[blocks.len() - 1];
@@ -4073,7 +4129,7 @@ mod tests {
                 .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
                 .unwrap();
             assert_eq!(
-                insert_path.sequence(conn).unwrap(),
+                insert_path.sequence(conn, None).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
             );
 
@@ -4157,7 +4213,7 @@ mod tests {
                 .new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2)
                 .unwrap();
             assert_eq!(
-                insert2_path.sequence(conn).unwrap(),
+                insert2_path.sequence(conn, None).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
             );
 
@@ -4177,7 +4233,7 @@ mod tests {
                 .query(Range { start: 15, end: 36 })
                 .map(|x| x.value)
                 .collect::<Vec<_>>();
-            blocks.sort_by(|a, b| a.start.cmp(&b.start));
+            blocks.sort_by_key(|a| a.start);
             let start_block = blocks[0];
             let start_node_coordinate = 15 - start_block.start + start_block.sequence_start;
             let end_block = blocks[blocks.len() - 1];
@@ -4301,7 +4357,7 @@ mod tests {
                 .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
                 .unwrap();
             assert_eq!(
-                insert_path.sequence(conn).unwrap(),
+                insert_path.sequence(conn, None).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
             );
 
@@ -4384,7 +4440,7 @@ mod tests {
                 .new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2)
                 .unwrap();
             assert_eq!(
-                insert2_path.sequence(conn).unwrap(),
+                insert2_path.sequence(conn, None).unwrap(),
                 "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
             );
 
@@ -4458,7 +4514,7 @@ mod tests {
                 .query(Range { start: 15, end: 36 })
                 .map(|x| x.value)
                 .collect::<Vec<_>>();
-            blocks.sort_by(|a, b| a.start.cmp(&b.start));
+            blocks.sort_by_key(|a| a.start);
             let start_block = blocks[0];
             let start_node_coordinate = 15 - start_block.start + start_block.sequence_start;
             let end_block = blocks[blocks.len() - 1];

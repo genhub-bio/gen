@@ -1,12 +1,11 @@
 use std::fs;
 
-use gen_core::{Workspace, errors::ConnectionError};
+use gen_core::errors::ConnectionError;
 use gen_models::{
-    db::{DbContext, GraphConnection, OperationsConnection},
-    migrations::{run_migrations, run_operation_migrations},
+    db::{ConfigConnection, GraphConnection},
+    migrations::{run_config_migrations, run_migrations},
 };
 use rusqlite::Connection;
-use tempfile::tempdir;
 
 pub fn get_connection<'a>(
     db_path: impl Into<Option<&'a str>>,
@@ -26,9 +25,9 @@ pub fn get_connection<'a>(
     Ok(GraphConnection(conn))
 }
 
-pub fn get_operation_connection<'a>(
+pub fn get_config_connection<'a>(
     db_path: impl Into<Option<&'a str>>,
-) -> Result<OperationsConnection, ConnectionError> {
+) -> Result<ConfigConnection, ConnectionError> {
     let path: Option<&str> = db_path.into();
     let mut conn;
     if let Some(v) = path {
@@ -40,15 +39,6 @@ pub fn get_operation_connection<'a>(
         conn = Connection::open_in_memory().map_err(ConnectionError::OpenFailed)?;
     }
     rusqlite::vtab::array::load_module(&conn)?;
-    run_operation_migrations(&mut conn);
-    Ok(OperationsConnection(conn))
-}
-
-pub fn setup_gen() -> DbContext {
-    let tmp_dir = tempdir().unwrap().keep();
-    let workspace = Workspace::new(tmp_dir);
-    workspace.ensure_gen_dir();
-    let graph_conn = get_connection(None).unwrap();
-    let operation_conn = get_operation_connection(None).unwrap();
-    DbContext::new(workspace, graph_conn, operation_conn)
+    run_config_migrations(&mut conn);
+    Ok(ConfigConnection(conn))
 }

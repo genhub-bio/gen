@@ -6,12 +6,8 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::HashId;
 use gen_models::{
-    block_group::BlockGroup,
-    collection::Collection,
-    db::{GraphConnection, OperationsConnection},
-    file_types::FileTypes,
-    sample::Sample,
-    sample_lineage::SampleLineage,
+    block_group::BlockGroup, collection::Collection, db::GraphConnection, file_types::FileTypes,
+    sample::Sample, sample_lineage::SampleLineage,
 };
 use gen_tui::theme::current_theme;
 use ratatui::{
@@ -125,7 +121,7 @@ pub struct CollectionExplorerData {
     pub sample_parents: HashMap<String, Vec<String>>,
     /// The block groups for each sample
     pub sample_block_groups: HashMap<String, Vec<(gen_core::HashId, String)>>,
-    /// Annotation files available in the operations database
+    /// Annotation files available in the graph database
     pub annotation_files: Vec<AnnotationFileEntry>,
     /// Annotation groups associated with the selected block-group lineage (if any)
     pub annotation_groups: Vec<AnnotationGroupEntry>,
@@ -135,20 +131,20 @@ pub struct CollectionExplorerData {
 /// block groups, sample block groups, and immediate sub-collections.
 pub fn gather_collection_explorer_data(
     conn: &GraphConnection,
-    op_conn: &OperationsConnection,
     selected_block_group: Option<&BlockGroup>,
     full_collection_name: &str,
+    history_ref: Option<&str>,
 ) -> CollectionExplorerData {
     let current_collection = collection_basename(full_collection_name).to_string();
     let _parent = parent_collection(full_collection_name);
 
-    let reference_samples = Sample::get_reference_samples(conn)
+    let reference_samples = Sample::get_reference_samples(conn, history_ref)
         .into_iter()
         .map(|sample| sample.name)
         .collect::<HashSet<_>>();
 
     // 3) Gather all samples associated with the entire collection
-    let all_blocks = Collection::get_block_groups(conn, full_collection_name);
+    let all_blocks = Collection::get_block_groups(conn, full_collection_name, history_ref);
     let mut sample_names: HashSet<String> =
         all_blocks.iter().map(|bg| bg.sample_name.clone()).collect();
     let mut collection_samples: Vec<String> = sample_names.drain().collect();
@@ -165,14 +161,14 @@ pub fn gather_collection_explorer_data(
     let mut sample_parents = HashMap::new();
     let mut sample_roots = Vec::new();
     for sample in &collection_samples {
-        let mut parents = SampleLineage::get_parents(conn, sample)
+        let mut parents = SampleLineage::get_parents(conn, sample, history_ref)
             .into_iter()
             .filter(|parent| collection_sample_set.contains(parent))
             .collect::<Vec<_>>();
         parents.sort();
         parents.dedup();
 
-        let mut children = SampleLineage::get_children(conn, sample)
+        let mut children = SampleLineage::get_children(conn, sample, history_ref)
             .into_iter()
             .filter(|child| collection_sample_set.contains(child))
             .collect::<Vec<_>>();
@@ -191,7 +187,7 @@ pub fn gather_collection_explorer_data(
     // 4) For each sample, retrieve block groups
     let mut sample_block_groups = HashMap::new();
     for sample in &collection_samples {
-        let bgs = Sample::get_block_groups(conn, full_collection_name, sample);
+        let bgs = Sample::get_block_groups(conn, full_collection_name, sample, history_ref);
         let pairs = bgs
             .iter()
             .map(|bg| (bg.id, bg.name.clone()))
@@ -199,9 +195,9 @@ pub fn gather_collection_explorer_data(
         sample_block_groups.insert(sample.clone(), pairs);
     }
 
-    let annotation_files = load_annotation_file_entries(op_conn);
+    let annotation_files = load_annotation_file_entries(conn, history_ref);
     let annotation_groups = selected_block_group
-        .map(|block_group| load_annotation_group_entries(conn, block_group))
+        .map(|block_group| load_annotation_group_entries(conn, block_group, history_ref))
         .unwrap_or_default();
 
     CollectionExplorerData {
@@ -404,17 +400,18 @@ pub struct CollectionExplorer {
 impl CollectionExplorer {
     pub fn new(
         conn: &GraphConnection,
-        op_conn: &gen_models::db::OperationsConnection,
+        _config_conn: &gen_models::db::ConfigConnection,
         sample_name: Option<&str>,
         selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
+        history_ref: Option<&str>,
     ) -> Self {
         let _ = sample_name;
         let data = gather_collection_explorer_data(
             conn,
-            op_conn,
             selected_block_group,
             full_collection_name,
+            history_ref,
         );
         Self { data }
     }
@@ -423,17 +420,18 @@ impl CollectionExplorer {
     pub fn refresh(
         &mut self,
         conn: &GraphConnection,
-        op_conn: &gen_models::db::OperationsConnection,
+        _config_conn: &gen_models::db::ConfigConnection,
         sample_name: Option<&str>,
         selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
+        history_ref: Option<&str>,
     ) -> bool {
         let _ = sample_name;
         let new_data = gather_collection_explorer_data(
             conn,
-            op_conn,
             selected_block_group,
             full_collection_name,
+            history_ref,
         );
         let changed = self.data.reference_samples != new_data.reference_samples
             || self.data.sample_block_groups != new_data.sample_block_groups
@@ -989,10 +987,85 @@ impl StatefulWidget for &CollectionExplorer {
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{block_group::BlockGroup, sample::Sample};
+    use gen_models::{
+        block_group::{BlockGroup, NewBlockGroup},
+        history::dolt::commit_all,
+        sample::{NewSample, Sample},
+    };
 
     use super::*;
-    use crate::test_helpers::setup_gen;
+    use crate::test_helpers::{setup_gen, setup_gen_on_disk};
+
+    #[test]
+    fn test_collection_explorer_resolves_block_groups_from_history_ref() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        Collection::create(conn, "history-collection").expect("should create collection");
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "history-sample",
+                ..Default::default()
+            },
+        )
+        .expect("should create sample");
+        let historical_block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: "history-collection",
+                sample_name: "history-sample",
+                name: "removed-graph",
+                ..Default::default()
+            },
+        )
+        .expect("should create historical block group");
+        let historical_commit =
+            commit_all(conn, "add historical graph").expect("should commit historical graph");
+        let historical_ref = historical_commit.to_string();
+        BlockGroup::delete(
+            conn,
+            "history-collection",
+            "history-sample",
+            "removed-graph",
+        )
+        .expect("should delete current block group");
+        commit_all(conn, "remove historical graph").expect("should commit graph removal");
+
+        assert!(
+            BlockGroup::get_by_name(
+                conn,
+                "history-collection",
+                "history-sample",
+                "removed-graph",
+                None,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            BlockGroup::get_by_name(
+                conn,
+                "history-collection",
+                "history-sample",
+                "removed-graph",
+                Some(&historical_ref),
+            )
+            .expect("should resolve block group at historical ref"),
+            historical_block_group
+        );
+
+        let current = gather_collection_explorer_data(conn, None, "history-collection", None);
+        let historical = gather_collection_explorer_data(
+            conn,
+            None,
+            "history-collection",
+            Some(&historical_ref),
+        );
+        assert!(current.collection_samples.is_empty());
+        assert_eq!(
+            historical.sample_block_groups["history-sample"],
+            vec![(historical_block_group.id, "removed-graph".to_string())]
+        );
+    }
 
     /// For these tests we create an in-memory database, run minimal schema
     /// creation, and insert data to test gather_collection_explorer_data.
@@ -1077,8 +1150,8 @@ mod tests {
         .unwrap();
 
         // Call the function under test—notice we pass the full path
-        let op_conn = context.operations().conn();
-        let explorer_data = gather_collection_explorer_data(conn, op_conn, None, "/foo/bar");
+        let _config_conn = context.config().conn();
+        let explorer_data = gather_collection_explorer_data(conn, None, "/foo/bar", None);
 
         // Verify results
         // (A) The final path component is "bar"

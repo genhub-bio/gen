@@ -343,15 +343,16 @@ impl GraphPage {
         let block_group_id = self.block_group_id.ok_or(AnnotationError::DatabaseError(
             rusqlite::Error::QueryReturnedNoRows,
         ))?;
-        let current_block_group = BlockGroup::get_by_id(conn, &block_group_id)
+        let current_block_group = BlockGroup::get_by_id(conn, &block_group_id, None)
             .map_err(|_| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
         let node_ids = self.all_node_ids();
-        let entry = load_annotation_group_entries(conn, &current_block_group)
+        let entry = load_annotation_group_entries(conn, &current_block_group, None)
             .into_iter()
             .find(|entry| entry.name == group)
             .ok_or_else(|| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
+            history_ref: None,
             current_block_group: &current_block_group,
             entry: &entry,
             node_ids: &node_ids,
@@ -363,10 +364,10 @@ impl GraphPage {
         let Some(bg_id) = self.block_group_id else {
             return;
         };
-        let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id) else {
+        let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id, None) else {
             return;
         };
-        for name in annotation_group_names(conn, &current_block_group) {
+        for name in annotation_group_names(conn, &current_block_group, None) {
             if let Ok(track) = self.load_group_as_track(conn, &name) {
                 self.push_track_as_overlays(track);
             }
@@ -388,10 +389,10 @@ impl GraphPage {
         let Some(bg_id) = self.block_group_id else {
             return;
         };
-        let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id) else {
+        let Ok(current_block_group) = BlockGroup::get_by_id(conn, &bg_id, None) else {
             return;
         };
-        for name in annotation_group_names(conn, &current_block_group) {
+        for name in annotation_group_names(conn, &current_block_group, None) {
             if let Ok(track) = self.load_group_as_track(conn, &name) {
                 self.push_track_as_overlays_with_colors(track, color_map);
             }
@@ -737,9 +738,9 @@ impl GraphPage {
         let highlight_color = self.resolve_color(color)?;
         let conn = self.open_conn()?;
 
-        let path = BlockGroup::get_current_path(&conn, &block_group_id)
+        let path = BlockGroup::get_current_path(&conn, &block_group_id, None)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let path_blocks = path.blocks(&conn).unwrap_or_default();
+        let path_blocks = path.blocks(&conn, None).unwrap_or_default();
         let path_nodes = project_path_overlay_nodes(self.controller.graph(), &path_blocks);
 
         if path_nodes.is_empty() {
@@ -810,7 +811,7 @@ impl GraphPage {
 
         let track = if let Some(bg_id) = self.block_group_id {
             let conn = self.open_conn()?;
-            let bg = BlockGroup::get_by_id(&conn, &bg_id)
+            let bg = BlockGroup::get_by_id(&conn, &bg_id, None)
                 .map_err(|e| PyRuntimeError::new_err(format!("Block group not found: {e}")))?;
 
             let path = std::path::Path::new(file_path);
@@ -826,6 +827,7 @@ impl GraphPage {
                     &conn,
                     &bg.collection_name,
                     sample,
+                    None,
                     BufReader::new(
                         File::open(file_path)
                             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
@@ -837,6 +839,7 @@ impl GraphPage {
                     &conn,
                     &bg.collection_name,
                     sample,
+                    None,
                     File::open(file_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
                     &mut buffer,
                 )
@@ -929,7 +932,7 @@ impl GraphPage {
             )
         })?;
         let conn = self.open_conn()?;
-        let block_group = BlockGroup::get_by_id(&conn, bg_id)
+        let block_group = BlockGroup::get_by_id(&conn, bg_id, None)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let annotations = Annotation::query_with_lineage(
             &conn,
@@ -941,7 +944,7 @@ impl GraphPage {
         Ok(annotations
             .into_iter()
             .map(|a| PyAnnotation {
-                ann_segments: annotation_segments(&conn, &a),
+                ann_segments: annotation_segments(&conn, &a, None),
                 inner: a,
                 context: None,
                 source_block_group_id: Some(*bg_id),
@@ -1086,7 +1089,8 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
         .path()
         .map(PathBuf::from)
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-    let graph = BlockGroup::get_graph(graph_conn, &sg.id).map_err(block_group_err_to_pyerr)?;
+    let graph =
+        BlockGroup::get_graph(graph_conn, &sg.id, None).map_err(block_group_err_to_pyerr)?;
     let mut page = GraphPage::new(sg.name.clone(), db_path, graph);
     page.block_group_id = Some(sg.id);
     Ok(page)
@@ -1186,7 +1190,7 @@ impl PyGraphController {
         if let Page::Pending(page_ref) = page {
             let conn = get_connection(&page_ref.db_path)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            let graph = BlockGroup::get_graph(&conn, &page_ref.block_group_id)
+            let graph = BlockGroup::get_graph(&conn, &page_ref.block_group_id, None)
                 .map_err(block_group_err_to_pyerr)?;
             let mut loaded = GraphPage::new(page_ref.name.clone(), page_ref.db_path.clone(), graph);
             loaded.block_group_id = Some(page_ref.block_group_id);
@@ -1510,7 +1514,7 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("test DB must be file-backed");
         let (bg_id, _) = setup_block_group(graph_handle.conn());
-        let graph = BlockGroup::get_graph(graph_handle.conn(), &bg_id)
+        let graph = BlockGroup::get_graph(graph_handle.conn(), &bg_id, None)
             .map_err(crate::python_api::utils::block_group_err_to_pyerr)?;
         let mut ctrl = PyGraphController::new(db_path, graph);
         if let Some(node_detail) = detail {

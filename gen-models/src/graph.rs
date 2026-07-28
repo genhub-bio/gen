@@ -24,8 +24,8 @@ pub fn expand(
     block_group_id: &HashId,
     node_id: HashId,
 ) -> bool {
-    let edges_1hop =
-        Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id]).unwrap_or_default();
+    let edges_1hop = Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id], None)
+        .unwrap_or_default();
 
     let mut neighbor_ids: Vec<HashId> = edges_1hop
         .iter()
@@ -38,8 +38,9 @@ pub fn expand(
     let mut all_edges: HashMap<HashId, AugmentedEdge> =
         edges_1hop.into_iter().map(|ae| (ae.edge.id, ae)).collect();
     if !neighbor_ids.is_empty() {
-        let neighbor_edges = Edge::edges_for_block_group_nodes(conn, block_group_id, &neighbor_ids)
-            .unwrap_or_default();
+        let neighbor_edges =
+            Edge::edges_for_block_group_nodes(conn, block_group_id, &neighbor_ids, None)
+                .unwrap_or_default();
         for ae in neighbor_edges {
             all_edges.entry(ae.edge.id).or_insert(ae);
         }

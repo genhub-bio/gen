@@ -376,7 +376,7 @@ impl Accession {
                     block_group_id: new.block_group_id,
                     parent_accession_id: new.parent_accession_id,
                 };
-                let nodes = Self::get_nodes_by_id(conn, &accession.id);
+                let nodes = Self::get_nodes_by_id(conn, &accession.id, None);
                 if nodes.is_empty() {
                     Self::insert_spans(conn, &accession.id, &new.spans)?;
                 } else if !Self::nodes_match_spans(&nodes, &new.spans) {
@@ -424,16 +424,24 @@ impl Accession {
         Ok(())
     }
 
-    pub fn get_nodes_by_id(conn: &GraphConnection, accession_id: &HashId) -> Vec<AccessionNode> {
-        AccessionNode::query(
-            conn,
-            "select * from accession_nodes where accession_id = ?1 order by index_in_path;",
-            params![accession_id],
-        )
+    pub fn get_nodes_by_id(
+        conn: &GraphConnection,
+        accession_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Vec<AccessionNode> {
+        let query = format!(
+            "select * from {} where accession_id = :accession_id order by index_in_path;",
+            AccessionNode::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":accession_id", accession_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        AccessionNode::query(conn, &query, &params[..])
     }
 
     pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
-        let nodes = Self::get_nodes_by_id(conn, &self.id);
+        let nodes = Self::get_nodes_by_id(conn, &self.id, None);
         if nodes.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
         }
@@ -474,7 +482,7 @@ impl Accession {
     }
 
     pub fn length(&self, conn: &GraphConnection) -> Result<i64, AccessionError> {
-        let nodes = Self::get_nodes_by_id(conn, &self.id);
+        let nodes = Self::get_nodes_by_id(conn, &self.id, None);
         if nodes.is_empty() {
             return Err(AccessionError::MissingPath(self.id));
         }
@@ -803,7 +811,7 @@ mod tests {
             let _ = BlockGroup::add_accession(conn, &path, "mreB", 5, 15, &mut path_cache).unwrap();
 
             let other_block_group = create_bg(conn, "test", "test", "other");
-            let edge_ids = PathEdge::edges_for_path(conn, &path.id)
+            let edge_ids = PathEdge::edges_for_path(conn, &path.id, None)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
@@ -834,18 +842,10 @@ mod tests {
     #[test]
     fn test_accession_capnp_serialization() {
         let accession = Accession {
-            id: "0000000000000000000000000000000000000000000000000000000000000200"
-                .try_into()
-                .unwrap(),
+            id: HashId::pad_str(200),
             name: "test_accession".to_string(),
-            block_group_id: "0000000000000000000000000000000000000000000000000000000000000150"
-                .try_into()
-                .unwrap(),
-            parent_accession_id: Some(
-                "0000000000000000000000000000000000000000000000000000000000000100"
-                    .try_into()
-                    .unwrap(),
-            ),
+            block_group_id: HashId::pad_str(150),
+            parent_accession_id: Some(HashId::pad_str(100)),
         };
 
         let mut message = TypedBuilder::<accession::Owned>::new_default();
@@ -859,13 +859,9 @@ mod tests {
     #[test]
     fn test_accession_capnp_serialization_no_parent() {
         let accession = Accession {
-            id: "0000000000000000000000000000000000000000000000000000000000000201"
-                .try_into()
-                .unwrap(),
+            id: HashId::pad_str(201),
             name: "test_accession_2".to_string(),
-            block_group_id: "0000000000000000000000000000000000000000000000000000000000000151"
-                .try_into()
-                .unwrap(),
+            block_group_id: HashId::pad_str(151),
             parent_accession_id: None,
         };
 
@@ -880,9 +876,7 @@ mod tests {
     #[test]
     fn test_accession_node_capnp_serialization() {
         let accession_node = AccessionNode {
-            id: "0000000000000000000000000000030000000000000000000000000000000000"
-                .try_into()
-                .unwrap(),
+            id: HashId::pad_str(300),
             accession_id: HashId::convert_str("accession"),
             node_id: HashId::convert_str("20"),
             sequence_start: 2,
@@ -971,7 +965,7 @@ mod tests {
         let accession = Accession::create(conn, &new_accession).unwrap();
 
         assert_eq!(accession.name, "test");
-        let nodes = Accession::get_nodes_by_id(conn, &accession.id);
+        let nodes = Accession::get_nodes_by_id(conn, &accession.id, None);
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].node_id, HashId::convert_str("test-a-node"));
         assert_eq!(nodes[0].index_in_path, 0);
@@ -998,7 +992,7 @@ mod tests {
         let second = Accession::get_or_create(conn, &new_accession).unwrap();
 
         assert_eq!(second.id, first.id);
-        assert_eq!(Accession::get_nodes_by_id(conn, &second.id).len(), 1);
+        assert_eq!(Accession::get_nodes_by_id(conn, &second.id, None).len(), 1);
     }
 
     #[test]
@@ -1345,7 +1339,7 @@ mod tests {
         ];
 
         assert_eq!(
-            Accession::get_nodes_by_id(conn, &accession.id),
+            Accession::get_nodes_by_id(conn, &accession.id, None),
             expected_nodes
                 .into_iter()
                 .map(AccessionNode::from)

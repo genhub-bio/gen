@@ -16,7 +16,7 @@ Although most human genomes are present as a linear fasta file, for this example
 located in [fixtures/chr22_het.gfa](../fixtures/chr22_het.gfa). We start by importing this file to a database
 
 ```console
-gen --db example.db import --name k562 --gaf chr22_het.gfa  
+gen import --name k562 --gaf chr22_het.gfa
 ```
 
 For this, we accept a csv file format which gen will autoformat into a fasta file for each update we wish to make.
@@ -55,7 +55,7 @@ This file can then be fed to an aligner. Here are several examples:
 First, we need to export to a common graph format, GFA
 
 ```console
-gen --db example.db export -n k562 -g k562.gfa
+gen export -n k562 -g k562.gfa
 ```
 
 Then we can use this for various programs:
@@ -95,7 +95,7 @@ This indicates the left arm starts at node `44.0` in our graph and aligns for 50
 This GAF is then fed into gen via:
 
 ```console
-gen --db example.db update-gaf -n k562 --csv example.csv --gaf example.gaf --sample child
+gen update-gaf -n k562 --csv example.csv --gaf example.gaf --sample child
 ```
 
 This will create a new sample (or reuse a sample if it exists) with the name "child". This new entry will contain a copy

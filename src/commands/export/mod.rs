@@ -9,6 +9,8 @@ mod gfa;
 
 #[derive(Debug, Args, Clone)]
 pub struct Command {
+    #[arg(long = "ref")]
+    pub history_ref: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }

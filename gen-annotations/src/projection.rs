@@ -48,8 +48,9 @@ impl From<&AccessionNode> for AnnotationSegment {
 pub fn annotation_segments(
     conn: &GraphConnection,
     annotation: &Annotation,
+    history_ref: Option<&str>,
 ) -> Vec<AnnotationSegment> {
-    Accession::get_nodes_by_id(conn, &annotation.accession_id)
+    Accession::get_nodes_by_id(conn, &annotation.accession_id, history_ref)
         .iter()
         .map(AnnotationSegment::from)
         .collect()

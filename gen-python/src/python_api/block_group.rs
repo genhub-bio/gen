@@ -9,15 +9,19 @@ use r#gen::{
     graphs::{
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
         translation::{
-            translate_annotation, translate_block_group, translate_from_path,
-            with_translation_operation,
+            TranslationError, translate_annotation, translate_block_group, translate_from_path,
         },
     },
 };
 use gen_annotations::projection::annotation_segments;
 use gen_graph::GraphNode;
 use gen_models::{
-    annotations::Annotation, block_group::BlockGroup, db::DbContext, node::Node, sample::Sample,
+    annotations::Annotation,
+    block_group::BlockGroup,
+    db::DbContext,
+    node::Node,
+    operations::{OperationInfo, OperationSummary, commit_operation_summary},
+    sample::Sample,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
@@ -40,6 +44,47 @@ pub(crate) fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
             "Unknown sequence_kind '{s}'; use 'exact', 'dna', 'ssdna', or 'protein'"
         ))),
     }
+}
+
+fn run_translation_operation<F>(
+    context: &DbContext,
+    label: &str,
+    translate: F,
+) -> PyResult<BlockGroup>
+where
+    F: FnOnce() -> Result<BlockGroup, TranslationError>,
+{
+    let graph_conn = context.graph().conn();
+    graph_conn
+        .execute("BEGIN TRANSACTION", [])
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    let protein_bg = match translate() {
+        Ok(block_group) => block_group,
+        Err(err) => {
+            graph_conn.execute("ROLLBACK", []).ok();
+            return Err(PyRuntimeError::new_err(err.to_string()));
+        }
+    };
+
+    graph_conn
+        .execute("END TRANSACTION", [])
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    let operation_summary = OperationSummary::new(
+        OperationInfo {
+            files: vec![],
+            description: "translate annotation".to_string(),
+        },
+        format!(
+            " {}: protein sequence graph derived from {label}",
+            protein_bg.name
+        ),
+    );
+    commit_operation_summary(context, &operation_summary)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    Ok(protein_bg)
 }
 
 /// A sequence graph returned by a ``Repository``.
@@ -188,7 +233,8 @@ impl PySequenceGraph {
             )
         })?;
         let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
 
         let gen_dir = context.workspace().ensure_gen_dir();
@@ -249,7 +295,8 @@ impl PySequenceGraph {
         fs::create_dir_all(&index_dir)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
         let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let normalized = kind != SequenceKind::Exact;
         let index = SeedIndex::build(&matcher, k, normalized);
@@ -296,7 +343,7 @@ impl PySequenceGraph {
     /// ``Repository``.
     fn get_node_sequence(&self, node: &PyGraphNode) -> PyResult<String> {
         let conn = self.require_context("get_node_sequence()")?.graph().conn();
-        let sequences = Node::get_sequences_by_node_ids(conn, &[node.node_id]);
+        let sequences = Node::get_sequences_by_node_ids(conn, &[node.node_id], None);
         let sequence = sequences.get(&node.node_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "Node with id {:?} not found",
@@ -310,7 +357,8 @@ impl PySequenceGraph {
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_dict()")?.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         let dict = PyDict::new(py);
         let nodes: Vec<PyGraphNode> = graph
             .nodes()
@@ -345,7 +393,8 @@ impl PySequenceGraph {
 
     fn to_rustworkx(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_rustworkx()")?.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         {
             let rustworkx = PyModule::import(py, "rustworkx").map_err(|_| {
                 pyo3::exceptions::PyModuleNotFoundError::new_err(
@@ -386,7 +435,8 @@ impl PySequenceGraph {
 
     fn to_networkx(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_networkx()")?.graph().conn();
-        let graph = BlockGroup::get_graph(conn, &self.id).map_err(block_group_err_to_pyerr)?;
+        let graph =
+            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
         {
             let networkx = PyModule::import(py, "networkx").map_err(|_| {
                 pyo3::exceptions::PyModuleNotFoundError::new_err(
@@ -449,6 +499,7 @@ impl PySequenceGraph {
             &self.collection_name,
             Some(&self.sample_name),
             &PathBuf::from(&filename),
+            None,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export FASTA '{}': {e}", filename)))
     }
@@ -470,6 +521,7 @@ impl PySequenceGraph {
             &PathBuf::from(&filename),
             &self.sample_name,
             node_max,
+            None,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export GFA '{}': {e}", filename)))
     }
@@ -485,7 +537,7 @@ impl PySequenceGraph {
         let writer = fs::File::create(&filename).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create '{}': {e}", filename))
         })?;
-        export_genbank(conn, &self.collection_name, &self.sample_name, writer).map_err(|e| {
+        export_genbank(conn, &self.collection_name, &self.sample_name, writer, None).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to export GenBank '{}': {e}", filename))
         })
     }
@@ -508,7 +560,7 @@ impl PySequenceGraph {
         Ok(annotations
             .into_iter()
             .map(|a| PyAnnotation {
-                ann_segments: annotation_segments(conn, &a),
+                ann_segments: annotation_segments(conn, &a, None),
                 inner: a,
                 context: Some(ctx.clone()),
                 source_block_group_id: Some(bg_id),
@@ -571,24 +623,21 @@ impl PySequenceGraph {
                 let label = self.name.clone();
                 let bg_id = self.id;
                 if let Some(start) = start {
-                    with_translation_operation(ctx, &label, || {
+                    run_translation_operation(ctx, &label, || {
                         translate_from_path(conn, &bg_id, start, params)
                     })
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                 } else {
-                    with_translation_operation(ctx, &label, || {
+                    run_translation_operation(ctx, &label, || {
                         translate_block_group(conn, &bg_id, params)
                     })
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                 }
             }
             Some(region) => {
                 if let Ok(ann) = region.extract::<PyRef<PyAnnotation>>() {
                     let annotation = ann.inner.clone();
-                    with_translation_operation(ctx, &annotation.name, || {
+                    run_translation_operation(ctx, &annotation.name, || {
                         translate_annotation(conn, &annotation, Some(&self.id), params)
                     })
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                 } else if let Ok(region_str) = region.extract::<&str>() {
                     // Resolution scoped to self: named path first, then annotation in lineage.
                     let path = BlockGroup::get_path_by_name(conn, &self.id, region_str)
@@ -596,10 +645,9 @@ impl PySequenceGraph {
 
                     if path.is_some() {
                         let coordinate = start.unwrap_or(0);
-                        with_translation_operation(ctx, region_str, || {
+                        run_translation_operation(ctx, region_str, || {
                             translate_from_path(conn, &self.id, coordinate, params)
                         })
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                     } else {
                         let annotation = Annotation::query_with_lineage(
                             conn,
@@ -617,10 +665,9 @@ impl PySequenceGraph {
                             ))
                         })?;
 
-                        with_translation_operation(ctx, region_str, || {
+                        run_translation_operation(ctx, region_str, || {
                             translate_annotation(conn, &annotation, Some(&self.id), params)
                         })
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                     }
                 } else {
                     return Err(PyRuntimeError::new_err(
@@ -628,7 +675,7 @@ impl PySequenceGraph {
                     ));
                 }
             }
-        };
+        }?;
 
         Ok(self.to_py_block_group(protein_bg))
     }
@@ -694,7 +741,7 @@ impl PySequenceGraph {
             &self.name,
             Some(&self.id),
         );
-        let found = BlockGroup::get_by_id(conn, &child_id)
+        let found = BlockGroup::get_by_id(conn, &child_id, None)
             .map_err(|e| PyRuntimeError::new_err(format!("Subgraph created but not found: {e}")))?;
         Ok(self.to_py_block_group(found))
     }
@@ -733,7 +780,7 @@ impl PySequenceGraph {
         let conn = ctx.graph().conn();
         let prefix = format!("{}.", self.name);
         Ok(
-            Sample::get_block_groups(conn, &self.collection_name, &new_sample)
+            Sample::get_block_groups(conn, &self.collection_name, &new_sample, None)
                 .into_iter()
                 .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
                 .map(|bg| self.to_py_block_group(bg))

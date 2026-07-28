@@ -25,21 +25,23 @@ pub fn export_fasta(
     collection_name: &str,
     sample_name: Option<&str>,
     filename: &PathBuf,
+    history_ref: Option<&str>,
 ) -> Result<(), FastaExportError> {
     let block_groups = if let Some(sample_name) = sample_name {
-        Sample::get_block_groups(conn, collection_name, sample_name)
+        Sample::get_block_groups(conn, collection_name, sample_name, history_ref)
     } else {
-        Collection::get_block_groups(conn, collection_name)
+        Collection::get_block_groups(conn, collection_name, history_ref)
     };
 
     let file = File::create(filename)?;
     let mut writer = fasta::io::Writer::new(file);
 
     for block_group in block_groups {
-        let path = BlockGroup::get_current_path(conn, &block_group.id)?;
+        let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
 
         let definition = fasta::record::Definition::new(block_group.name, None);
-        let sequence = fasta::record::Sequence::from(path.sequence(conn)?.into_bytes());
+        let sequence =
+            fasta::record::Sequence::from(path.sequence(conn, history_ref)?.into_bytes());
         let record = fasta::Record::new(definition, sequence);
 
         writer.write_record(&record)?;
@@ -60,8 +62,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        imports::fasta::import_fasta, test_helpers::setup_gen, track_database,
-        updates::fasta::update_with_fasta,
+        imports::fasta::import_fasta, test_helpers::setup_gen, updates::fasta::update_with_fasta,
     };
 
     #[test]
@@ -70,9 +71,6 @@ mod tests {
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -86,7 +84,7 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
-        export_fasta(conn, &collection, None, &filename).unwrap();
+        export_fasta(conn, &collection, None, &filename, None).unwrap();
 
         let mut fasta_reader = fasta::io::reader::Builder
             .build_from_path(filename)
@@ -119,9 +117,6 @@ mod tests {
         let mut fasta_update_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_update_path.push("fixtures/aaaaaaaa.fa");
         let conn = context.graph().conn();
-        let op_conn = context.operations().conn();
-
-        track_database(conn, op_conn).unwrap();
 
         let collection = "test".to_string();
 
@@ -145,7 +140,7 @@ mod tests {
 
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
-        export_fasta(conn, &collection, Some("child sample"), &filename).unwrap();
+        export_fasta(conn, &collection, Some("child sample"), &filename, None).unwrap();
 
         let mut fasta_reader = fasta::io::reader::Builder
             .build_from_path(filename)

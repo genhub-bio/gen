@@ -1428,9 +1428,7 @@ mod tests {
                     sequence_end: 5,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1450,9 +1448,7 @@ mod tests {
                     sequence_end: 5,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1472,9 +1468,7 @@ mod tests {
                     sequence_end: 3,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1494,9 +1488,7 @@ mod tests {
                     sequence_end: 15,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1516,9 +1508,7 @@ mod tests {
                     sequence_end: 15,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1538,9 +1528,7 @@ mod tests {
                     sequence_end: 0,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1637,9 +1625,7 @@ mod tests {
                     sequence_end: 5,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1659,9 +1645,7 @@ mod tests {
                     sequence_end: 5,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1681,9 +1665,7 @@ mod tests {
                     sequence_end: 3,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1703,9 +1685,7 @@ mod tests {
                     sequence_end: 10,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1725,9 +1705,7 @@ mod tests {
                     sequence_end: 10,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1748,9 +1726,7 @@ mod tests {
                     sequence_end: 15,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1771,9 +1747,7 @@ mod tests {
                     sequence_end: 3,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1794,9 +1768,7 @@ mod tests {
                     sequence_end: 7,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1817,9 +1789,7 @@ mod tests {
                     sequence_end: 2,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1839,9 +1809,7 @@ mod tests {
                     sequence_end: 7,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1862,9 +1830,7 @@ mod tests {
                     sequence_end: 15,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,
@@ -1885,9 +1851,7 @@ mod tests {
                     sequence_end: 0,
                 },
                 vec![GraphEdge {
-                    edge_id: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .try_into()
-                        .unwrap(),
+                    edge_id: "00000000000000000000000000000000".try_into().unwrap(),
                     source_strand: Strand::Forward,
                     target_strand: Strand::Forward,
                     chromosome_index: 0,

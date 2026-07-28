@@ -157,7 +157,7 @@ impl PyRepository {
 
         let conn = self.context.graph().conn();
         let child_id = BlockGroup::get_id(&first.collection_name, &new_sample, &new_region, None);
-        let found = BlockGroup::get_by_id(conn, &child_id).map_err(|e| {
+        let found = BlockGroup::get_by_id(conn, &child_id, None).map_err(|e| {
             PyRuntimeError::new_err(format!("Stitched BG created but not found: {e}"))
         })?;
         Ok(self.to_py_block_group(found))

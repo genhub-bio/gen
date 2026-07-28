@@ -45,7 +45,8 @@ impl PyRepository {
         };
 
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, &bg.id).map_err(block_group_err_to_pyerr)?;
+            let graph =
+                BlockGroup::get_graph(conn, &bg.id, None).map_err(block_group_err_to_pyerr)?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index = SeedIndex::build(&matcher, k, normalized);
             let path = index_dir.join(format!("{}.bin", bg.id));
@@ -92,7 +93,8 @@ impl PyRepository {
         let query_bytes = query.as_bytes();
         let mut results = Vec::new();
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, &bg.id).map_err(block_group_err_to_pyerr)?;
+            let graph =
+                BlockGroup::get_graph(conn, &bg.id, None).map_err(block_group_err_to_pyerr)?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
 
             let index_path = self

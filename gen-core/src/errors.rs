@@ -4,8 +4,8 @@ use thiserror::Error;
 pub enum HashError {
     #[error("Invalid hex string: {0}")]
     InvalidHex(#[from] hex::FromHexError),
-    #[error("Hash must be 32 bytes, got {0}")]
-    InvalidLength(usize),
+    #[error("Hash must be {expected} bytes, got {actual}")]
+    InvalidLength { expected: usize, actual: usize },
 }
 
 #[derive(Debug, Error, PartialEq)]

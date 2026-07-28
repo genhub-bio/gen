@@ -33,6 +33,7 @@ pub fn translate_gff<R, W>(
     conn: &GraphConnection,
     collection: &str,
     sample: &str,
+    history_ref: Option<&str>,
     reader: R,
     writer: &mut W,
 ) -> Result<(), GffError>
@@ -43,7 +44,7 @@ where
     let mut gff_reader = gff::io::Reader::new(reader);
     let mut gff_writer = gff::io::Writer::new(writer);
 
-    let bgs = Sample::get_block_groups(conn, collection, sample);
+    let bgs = Sample::get_block_groups(conn, collection, sample, history_ref);
     let sample_bgs: HashMap<String, &BlockGroup> = HashMap::from_iter(
         bgs.iter()
             .map(|bg| (bg.name.clone(), bg))
@@ -52,7 +53,8 @@ where
 
     // Load all reference aliases, to accommodate alternate reference names in the GFF file
     let references = sample_bgs.keys().cloned().collect::<Vec<String>>();
-    let references_by_alias = ReferenceAlias::get_references_by_alias(conn, references)?;
+    let references_by_alias =
+        ReferenceAlias::get_references_by_alias(conn, references, history_ref)?;
 
     let mut paths: HashMap<HashId, IntervalTree<i64, (GraphNode, Strand)>> = HashMap::new();
 
@@ -69,11 +71,11 @@ where
             let projection = match paths.entry(bg.id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let path = BlockGroup::get_current_path(conn, &bg.id)?;
-                    let graph = BlockGroup::get_graph(conn, &bg.id)?;
+                    let path = BlockGroup::get_current_path(conn, &bg.id, history_ref)?;
+                    let graph = BlockGroup::get_graph(conn, &bg.id, history_ref)?;
                     let mut tree = IntervalTree::default();
                     let mut position: i64 = 0;
-                    for (node, strand) in project_path(&graph, &path.blocks(conn)?) {
+                    for (node, strand) in project_path(&graph, &path.blocks(conn, history_ref)?) {
                         if !is_terminal(node.node_id) {
                             // GFF indexing is one based, inclusive, so we add 1 to the start.
                             // Take a sequence that is 1-4 in our coordinates, this converts to:
@@ -139,6 +141,7 @@ mod tests {
             &conn,
             &collection,
             "foo",
+            None,
             BufReader::new(File::open(gff_path.clone()).expect("should open fixture gff")),
             &mut buffer,
         )
@@ -147,24 +150,24 @@ mod tests {
         assert_eq!(
             results,
             concat!(
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t1\t3\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t4\t4\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t5\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t1\t3\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t4\t4\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t5\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t5\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\tgene\t4\t4\t.\t-\t.\tID=ENSG00000277248.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\tgene\t5\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\ttranscript\t4\t4\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\ttranscript\t5\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t4\t4\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t5\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t1\t3\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t4\t4\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t5\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t1\t3\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t4\t4\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t5\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t5\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t4\t4\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t5\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t4\t4\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t5\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t4\t4\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t5\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
             )
         );
 
@@ -173,6 +176,7 @@ mod tests {
             &conn,
             &collection,
             Sample::DEFAULT_NAME,
+            None,
             BufReader::new(File::open(gff_path).expect("should open fixture gff")),
             &mut buffer,
         )
@@ -181,17 +185,17 @@ mod tests {
         assert_eq!(
             results,
             concat!(
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
             )
         );
     }
@@ -223,6 +227,7 @@ mod tests {
             &conn,
             &collection,
             Sample::DEFAULT_NAME,
+            None,
             BufReader::new(File::open(gff_path.clone()).expect("should open fixture gff")),
             &mut buffer,
         )
@@ -231,17 +236,17 @@ mod tests {
         assert_eq!(
             results,
             concat!(
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "086ae30894dda8efdc19d4dfadd5e6e24af8066e9ee63e56abe897993bebd112\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
-                "0cbb0b7e8171228e0ea97287f369c0099f0ccabc6a9950320650bc27bd974c8a\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\tgene\t1\t17\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\tgene\t18\t20\t.\t-\t.\tID=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\ttranscript\t1\t17\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\ttranscript\t18\t20\t.\t-\t.\tID=ENST00000724296.1;Parent=ENSG00000294541.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t4\t8\t.\t-\t.\tID=exon:ENST00000724296.1:1;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t10\t14\t.\t-\t.\tID=exon:ENST00000724296.1:2;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tHAVANA\texon\t16\t17\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "6b460b727030cae3bae7cf389074d4ba\tHAVANA\texon\t18\t19\t.\t-\t.\tID=exon:ENST00000724296.1:3;Parent=ENST00000724296.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\tgene\t3\t15\t.\t-\t.\tID=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\ttranscript\t3\t15\t.\t-\t.\tID=ENST00000615943.1;Parent=ENSG00000277248.1\n",
+                "b59698a422128d20462c44537b2d23ef\tENSEMBL\texon\t3\t15\t.\t-\t.\tID=exon:ENST00000615943.1:1;Parent=ENST00000615943.1\n",
             )
         );
     }
