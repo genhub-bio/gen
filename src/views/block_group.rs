@@ -204,7 +204,7 @@ fn load_annotation_groups_for_viewport(
 )]
 pub fn view_block_group(
     conn: &GraphConnection,
-    op_conn: &gen_models::db::ConfigConnection,
+    config_conn: &gen_models::db::ConfigConnection,
     workspace: &gen_core::config::Workspace,
     name: Option<String>,
     sample_name: Option<String>,
@@ -287,7 +287,7 @@ pub fn view_block_group(
     // Create explorer and its state that persists across frames
     let mut explorer = CollectionExplorer::new(
         conn,
-        op_conn,
+        config_conn,
         sample_name.as_deref(),
         current_block_group.as_ref(),
         collection_name,
@@ -749,7 +749,7 @@ pub fn view_block_group(
                 .map(|bg| bg.sample_name.as_str());
             if explorer.refresh(
                 conn,
-                op_conn,
+                config_conn,
                 selected_sample,
                 current_block_group.as_ref(),
                 collection_name,
@@ -1219,7 +1219,7 @@ pub fn view_block_group(
                 .map(|bg| bg.sample_name.as_str());
             if explorer.refresh(
                 conn,
-                op_conn,
+                config_conn,
                 selected_sample,
                 current_block_group.as_ref(),
                 collection_name,

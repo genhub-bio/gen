@@ -4,7 +4,7 @@ use rusqlite_migration::Migrations;
 use thiserror::Error;
 
 static MIGRATION_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations/core");
-static OPERATIONS_MIGRATION_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations/operations");
+static CONFIG_MIGRATION_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations/config");
 
 const MIGRATION_COMMIT_MESSAGE: &str = "Apply Gen schema migrations";
 
@@ -58,8 +58,8 @@ fn apply_graph_migrations(conn: &mut Connection) -> Result<bool, MigrationError>
     Ok(pending_migrations > 0)
 }
 
-pub fn run_operation_migrations(conn: &mut Connection) {
-    let migrations = Migrations::from_directory(&OPERATIONS_MIGRATION_DIR).unwrap();
+pub fn run_config_migrations(conn: &mut Connection) {
+    let migrations = Migrations::from_directory(&CONFIG_MIGRATION_DIR).unwrap();
 
     // Apply some PRAGMA, often better to do it outside of migrations
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))

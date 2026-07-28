@@ -42,7 +42,7 @@ pub use gen_models as models;
 use gen_models::{
     db::{ConfigConnection, GraphConnection},
     history::dolt::{active_branch, checkout},
-    migrations::{run_migrations, run_operation_migrations},
+    migrations::{run_config_migrations, run_migrations},
 };
 use noodles::vcf::variant::record::samples::series::value::genotype::Phasing;
 use rusqlite::{Connection, OpenFlags};
@@ -91,7 +91,7 @@ pub fn get_config_connection(
     };
     let mut conn = Connection::open(&path)?;
     rusqlite::vtab::array::load_module(&conn).unwrap();
-    run_operation_migrations(&mut conn);
+    run_config_migrations(&mut conn);
     Ok(ConfigConnection(conn))
 }
 
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reopening_operation_connection_on_disk_reuses_existing_schema() {
+    fn test_reopening_config_connection_on_disk_reuses_existing_schema() {
         let temp_dir = tempfile::tempdir().expect("should create temp directory");
         let workspace = Workspace::new(temp_dir.path());
         workspace.ensure_gen_dir();

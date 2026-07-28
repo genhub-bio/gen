@@ -3,7 +3,7 @@ use std::fs;
 use gen_core::errors::ConnectionError;
 use gen_models::{
     db::{ConfigConnection, GraphConnection},
-    migrations::{run_migrations, run_operation_migrations},
+    migrations::{run_config_migrations, run_migrations},
 };
 use rusqlite::Connection;
 
@@ -39,6 +39,6 @@ pub fn get_config_connection<'a>(
         conn = Connection::open_in_memory().map_err(ConnectionError::OpenFailed)?;
     }
     rusqlite::vtab::array::load_module(&conn)?;
-    run_operation_migrations(&mut conn);
+    run_config_migrations(&mut conn);
     Ok(ConfigConnection(conn))
 }

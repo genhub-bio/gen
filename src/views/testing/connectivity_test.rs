@@ -25,7 +25,7 @@ mod tests {
         // Setup environment and database
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         // Load Anderson GFA file
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");

@@ -44,6 +44,7 @@ These are extremely important details about data models.
 
 - Write comments that explain the workflow intent and non-obvious rationale: what this code enables, who uses it, and why the approach is necessary. Keep them concise; don’t restate the code. For complex, multi-function workflows, explain how these pieces fit together and the overall goal.
 - No banner comments (lines of `---`, `===`, or similar dividers). No double blank lines.
+- Do not have an Arguments and Errors section for docstrings unless explicitly requested. It's redundant when parameter names are clear and typed.
 
 ## Rust Conventions
 

@@ -121,7 +121,7 @@ pub struct CollectionExplorerData {
     pub sample_parents: HashMap<String, Vec<String>>,
     /// The block groups for each sample
     pub sample_block_groups: HashMap<String, Vec<(gen_core::HashId, String)>>,
-    /// Annotation files available in the operations database
+    /// Annotation files available in the graph database
     pub annotation_files: Vec<AnnotationFileEntry>,
     /// Annotation groups associated with the selected block-group lineage (if any)
     pub annotation_groups: Vec<AnnotationGroupEntry>,
@@ -400,7 +400,7 @@ pub struct CollectionExplorer {
 impl CollectionExplorer {
     pub fn new(
         conn: &GraphConnection,
-        _op_conn: &gen_models::db::ConfigConnection,
+        _config_conn: &gen_models::db::ConfigConnection,
         sample_name: Option<&str>,
         selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
@@ -420,7 +420,7 @@ impl CollectionExplorer {
     pub fn refresh(
         &mut self,
         conn: &GraphConnection,
-        _op_conn: &gen_models::db::ConfigConnection,
+        _config_conn: &gen_models::db::ConfigConnection,
         sample_name: Option<&str>,
         selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
@@ -1150,7 +1150,7 @@ mod tests {
         .unwrap();
 
         // Call the function under test—notice we pass the full path
-        let _op_conn = context.config().conn();
+        let _config_conn = context.config().conn();
         let explorer_data = gather_collection_explorer_data(conn, None, "/foo/bar", None);
 
         // Verify results

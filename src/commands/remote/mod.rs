@@ -191,17 +191,17 @@ mod tests {
         #[test]
         fn test_remote_add_command() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Test successful add
             let cmd = RemoteCommand::Add {
                 name: "origin".to_string(),
                 url: "https://genhub.bio/user/repo.gen".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd).is_ok());
+            assert!(handle_remote_command(config_conn, &cmd).is_ok());
 
             // Verify remote was added
-            let remote = Remote::get_by_name(op_conn, "origin").unwrap();
+            let remote = Remote::get_by_name(config_conn, "origin").unwrap();
             assert_eq!(remote.name, "origin");
             assert_eq!(remote.url, "https://genhub.bio/user/repo.gen");
 
@@ -210,96 +210,101 @@ mod tests {
                 name: "origin".to_string(),
                 url: "https://different.com/repo.gen".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_duplicate).is_err());
+            assert!(handle_remote_command(config_conn, &cmd_duplicate).is_err());
         }
 
         #[test]
         fn test_remote_add_validation_errors() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Test invalid name
             let cmd_invalid_name = RemoteCommand::Add {
                 name: "invalid name".to_string(),
                 url: "https://genhub.bio/user/repo.gen".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_invalid_name).is_err());
+            assert!(handle_remote_command(config_conn, &cmd_invalid_name).is_err());
 
             // Test invalid URL
             let cmd_invalid_url = RemoteCommand::Add {
                 name: "origin".to_string(),
                 url: "not-a-url".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_invalid_url).is_err());
+            assert!(handle_remote_command(config_conn, &cmd_invalid_url).is_err());
 
             // Test empty name
             let cmd_empty_name = RemoteCommand::Add {
                 name: "".to_string(),
                 url: "https://genhub.bio/user/repo.gen".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_empty_name).is_err());
+            assert!(handle_remote_command(config_conn, &cmd_empty_name).is_err());
 
             // Test empty URL
             let cmd_empty_url = RemoteCommand::Add {
                 name: "origin".to_string(),
                 url: "".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_empty_url).is_err());
+            assert!(handle_remote_command(config_conn, &cmd_empty_url).is_err());
         }
 
         #[test]
         fn test_remote_list_command() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Test list with no remotes
             let cmd_list = RemoteCommand::List;
-            assert!(handle_remote_command(op_conn, &cmd_list).is_ok());
+            assert!(handle_remote_command(config_conn, &cmd_list).is_ok());
 
             // Add some remotes
-            Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
-            Remote::create(op_conn, "upstream", "https://genhub.bio/upstream/repo.gen").unwrap();
+            Remote::create(config_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
+            Remote::create(
+                config_conn,
+                "upstream",
+                "https://genhub.bio/upstream/repo.gen",
+            )
+            .unwrap();
 
             // Test list with remotes
-            assert!(handle_remote_command(op_conn, &cmd_list).is_ok());
+            assert!(handle_remote_command(config_conn, &cmd_list).is_ok());
         }
 
         #[test]
         fn test_remote_remove_command() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Add a remote first
-            Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
+            Remote::create(config_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
 
             // Test successful remove
             let cmd_remove = RemoteCommand::Remove {
                 name: "origin".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_remove).is_ok());
+            assert!(handle_remote_command(config_conn, &cmd_remove).is_ok());
 
             // Verify remote was removed
-            assert!(Remote::get_by_name_optional(op_conn, "origin").is_none());
+            assert!(Remote::get_by_name_optional(config_conn, "origin").is_none());
 
             // Test remove non-existent remote
             let cmd_remove_missing = RemoteCommand::Remove {
                 name: "nonexistent".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_remove_missing).is_err());
+            assert!(handle_remote_command(config_conn, &cmd_remove_missing).is_err());
         }
 
         #[test]
         fn test_remote_remove_clears_default() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Add a remote and set it as default
-            Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
-            Defaults::set_default_remote(op_conn, Some("origin")).unwrap();
+            Remote::create(config_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
+            Defaults::set_default_remote(config_conn, Some("origin")).unwrap();
 
             // Verify default is set
             assert_eq!(
-                Defaults::get_default_remote(op_conn),
+                Defaults::get_default_remote(config_conn),
                 Some("origin".to_string())
             );
 
@@ -307,29 +312,29 @@ mod tests {
             let cmd_remove = RemoteCommand::Remove {
                 name: "origin".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_remove).is_ok());
+            assert!(handle_remote_command(config_conn, &cmd_remove).is_ok());
 
             // Verify default was cleared
-            assert_eq!(Defaults::get_default_remote(op_conn), None);
+            assert_eq!(Defaults::get_default_remote(config_conn), None);
         }
 
         #[test]
         fn test_remote_set_default_command() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Add a remote first
-            Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
+            Remote::create(config_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
 
             // Test successful set default
             let cmd_set_default = RemoteCommand::SetDefault {
                 name: "origin".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_set_default).is_ok());
+            assert!(handle_remote_command(config_conn, &cmd_set_default).is_ok());
 
             // Verify default was set
             assert_eq!(
-                Defaults::get_default_remote(op_conn),
+                Defaults::get_default_remote(config_conn),
                 Some("origin".to_string())
             );
 
@@ -337,24 +342,24 @@ mod tests {
             let cmd_set_default_missing = RemoteCommand::SetDefault {
                 name: "nonexistent".to_string(),
             };
-            assert!(handle_remote_command(op_conn, &cmd_set_default_missing).is_err());
+            assert!(handle_remote_command(config_conn, &cmd_set_default_missing).is_err());
         }
 
         #[test]
         fn test_remote_get_default_command() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Test get default when none is set
             let cmd_get_default = RemoteCommand::GetDefault;
-            assert!(handle_remote_command(op_conn, &cmd_get_default).is_ok());
+            assert!(handle_remote_command(config_conn, &cmd_get_default).is_ok());
 
             // Add a remote and set it as default
-            Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
-            Defaults::set_default_remote(op_conn, Some("origin")).unwrap();
+            Remote::create(config_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
+            Defaults::set_default_remote(config_conn, Some("origin")).unwrap();
 
             // Test get default when one is set
-            assert!(handle_remote_command(op_conn, &cmd_get_default).is_ok());
+            assert!(handle_remote_command(config_conn, &cmd_get_default).is_ok());
         }
     }
 }

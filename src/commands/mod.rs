@@ -20,11 +20,15 @@ pub mod profile;
 pub mod remote;
 pub mod update;
 
+/// Creates the Dolt commit after the caller has ended its SQL transaction.
+///
+/// The command or binding that begins a transaction also owns its commit or
+/// rollback. If operation metadata preparation or the Dolt commit fails after
+/// that boundary, this restores the graph working set to `HEAD`.
 pub fn commit_operation(
     context: &DbContext,
     operation_summary: &OperationSummary,
 ) -> Result<DoltHashId, OperationError> {
-    context.graph().conn().execute("END TRANSACTION", [])?;
     match commit_operation_summary(context, operation_summary) {
         Ok(commit_hash) => Ok(commit_hash),
         Err(operation_error) => {
@@ -584,6 +588,13 @@ mod tests {
                 "operation whose asset preparation fails",
             );
 
+            graph
+                .execute("END TRANSACTION", [])
+                .expect("should end graph transaction");
+            assert!(
+                graph.is_autocommit(),
+                "the caller should end its transaction before committing the operation"
+            );
             let result = commit_operation(&context, &operation_summary);
 
             assert!(

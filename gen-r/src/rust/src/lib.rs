@@ -114,7 +114,7 @@ fn begin_transactions(context: &GenDbContext) -> std::result::Result<(), String>
         .map_err(|err| format!("Failed to begin graph transaction: {err}"))?;
     config_conn
         .execute("BEGIN TRANSACTION", [])
-        .map_err(|err| format!("Failed to begin operations transaction: {err}"))?;
+        .map_err(|err| format!("Failed to begin config transaction: {err}"))?;
     Ok(())
 }
 
@@ -123,10 +123,14 @@ fn end_transactions(
     operation_summary: &OperationSummary,
 ) -> std::result::Result<(), String> {
     let config_conn = context.config().conn();
+    let graph_conn = context.graph().conn();
 
+    graph_conn
+        .execute("END TRANSACTION", [])
+        .map_err(|err| format!("Failed to commit graph transaction: {err}"))?;
     config_conn
         .execute("END TRANSACTION", [])
-        .map_err(|err| format!("Failed to commit operations transaction: {err}"))?;
+        .map_err(|err| format!("Failed to commit config transaction: {err}"))?;
     commit_operation(context, operation_summary)
         .map_err(|err| format!("Failed to commit graph operation: {err}"))?;
     Ok(())
@@ -987,9 +991,9 @@ impl Repository {
             None => Workspace::from_current_dir(),
         };
         let gen_dir = workspace.ensure_gen_dir();
-        let ops_path = gen_dir.join("gen.db");
-        let ops_conn = get_config_connection(Some(ops_path))
-            .map_err(|e| Error::Other(format!("Failed to open operations database: {e}")))?;
+        let config_path = gen_dir.join("gen.db");
+        let config_conn = get_config_connection(Some(config_path))
+            .map_err(|e| Error::Other(format!("Failed to open config database: {e}")))?;
         let db_path = gen_dir.join("default.db");
         let graph_conn = get_connection(db_path.clone()).map_err(|e| {
             Error::Other(format!(
@@ -998,7 +1002,7 @@ impl Repository {
             ))
         })?;
         Ok(Repository {
-            context: GenDbContext::new(workspace, graph_conn, ops_conn)
+            context: GenDbContext::new(workspace, graph_conn, config_conn)
                 .map_err(|err| Error::Other(err.to_string()))?,
         })
     }

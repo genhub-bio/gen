@@ -34,12 +34,12 @@ pub fn derive_subgraph_operation(
     region: String,
     backbone: Option<String>,
 ) -> Result<(), Error> {
-    let operation_conn = db_context.config().conn();
+    let config_conn = db_context.config().conn();
     let graph_conn = db_context.graph().conn();
 
     let collection_name = &(match name {
         Some(collection) => collection,
-        None => get_default_collection(operation_conn),
+        None => get_default_collection(config_conn),
     });
     let sample_name = sample.clone();
     let new_sample_name = new_sample.clone();
@@ -84,6 +84,7 @@ pub fn derive_subgraph_operation(
         },
         summary_str,
     );
+    graph_conn.execute("END TRANSACTION", [])?;
     match commit_operation(db_context, &operation_summary) {
         Ok(_) => {}
         Err(OperationError::NoChanges) => {
