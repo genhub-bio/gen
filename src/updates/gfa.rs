@@ -598,7 +598,7 @@ mod tests {
         conn: &GraphConnection,
         block_group_id: HashId,
     ) -> (HashId, HashId, HashId, HashId) {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
         let a_node_id = edges
             .iter()
             .find(|edge| edge.edge.source_node_id == PATH_START_NODE_ID)
@@ -641,7 +641,7 @@ mod tests {
         .unwrap();
         let block_group = crate::test_helpers::get_sample_bg(conn, "test", Sample::DEFAULT_NAME);
         let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
-        let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id);
+        let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id, None);
         let original_node_id = path_edges
             .iter()
             .find(|edge| edge.source_node_id == PATH_START_NODE_ID)
@@ -724,7 +724,7 @@ mod tests {
     fn test_gfa_update_preserves_incoming_edges_at_actual_divergence() {
         let (context, block_group_id, new_node_id, branch_node_id) = run_gfa_boundary_update(true);
         let conn = context.graph().conn();
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
 
         assert!(edges.iter().any(|edge| {
             edge.edge.source_node_id == branch_node_id && edge.edge.target_node_id == new_node_id
@@ -735,7 +735,7 @@ mod tests {
     fn test_gfa_update_preserves_outgoing_edges_at_actual_rejoin() {
         let (context, block_group_id, new_node_id, branch_node_id) = run_gfa_boundary_update(false);
         let conn = context.graph().conn();
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
 
         assert!(edges.iter().any(|edge| {
             edge.edge.source_node_id == new_node_id && edge.edge.target_node_id == branch_node_id
@@ -746,13 +746,13 @@ mod tests {
     fn test_gfa_change_preserves_incoming_edges_at_start_boundary() {
         let conn = get_connection(None).unwrap();
         let (block_group_id, _) = setup_block_group(&conn);
-        let (a_node_id, t_node_id, _, g_node_id) = gfa_test_node_ids(&conn, block_group_id);
+        let (_, t_node_id, c_node_id, g_node_id) = gfa_test_node_ids(&conn, block_group_id);
         let branch_edge = Edge::create(
             &conn,
-            g_node_id,
+            t_node_id,
             10,
             Strand::Forward,
-            t_node_id,
+            g_node_id,
             0,
             Strand::Forward,
         )
@@ -771,7 +771,7 @@ mod tests {
             &conn,
             block_group_id,
             &NodePoint {
-                id: t_node_id,
+                id: g_node_id,
                 coordinate: 0,
                 strand: Strand::Forward,
             },
@@ -782,7 +782,7 @@ mod tests {
             },
         );
 
-        for source_node_id in [a_node_id, g_node_id] {
+        for source_node_id in [c_node_id, t_node_id] {
             assert!(
                 edges.iter().any(|edge| {
                     edge.source_node_id == source_node_id && edge.target_node_id == new_node_id

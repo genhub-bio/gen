@@ -31,7 +31,7 @@ pub(crate) fn adjacent_boundary_points(
     start_points: &[NodePoint],
     end_points: &[NodePoint],
 ) -> (Vec<NodePoint>, Vec<NodePoint>) {
-    let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+    let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
     let mut incoming_points = Vec::new();
     let mut outgoing_points = Vec::new();
     for edge in edges {
@@ -224,7 +224,7 @@ fn reference_path_update_edges(
         "select * from edges where source_node_id = ?1",
         rusqlite::params![node_id],
     );
-    let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id);
+    let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id, None);
     let incoming_edge = match &region.start_anchors {
         Some(anchors) => path_edges
             .iter()
@@ -283,7 +283,7 @@ fn update_reference_path(
     edge_to_new_node: &gen_models::edge::Edge,
     edge_from_new_node: &gen_models::edge::Edge,
 ) -> Result<(), gen_models::errors::PathError> {
-    let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id);
+    let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id, None);
     let boundary_indices = region
         .start_anchors
         .as_ref()
@@ -461,7 +461,7 @@ mod tests {
         conn: &GraphConnection,
         block_group_id: HashId,
     ) -> (HashId, HashId, HashId, HashId) {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
         let a_node_id = edges
             .iter()
             .find(|edge| edge.edge.is_start_edge())

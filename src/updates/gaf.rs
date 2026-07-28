@@ -459,14 +459,14 @@ mod tests {
     use super::*;
     use crate::{
         imports::gfa::import_gfa,
-        test_helpers::{get_connection, setup_block_group, setup_gen},
+        test_helpers::{setup_block_group, setup_gen},
     };
 
     fn gaf_test_node_ids(
         conn: &gen_models::db::GraphConnection,
         block_group_id: HashId,
     ) -> (HashId, HashId, HashId, HashId) {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
         let a_node_id = edges
             .iter()
             .find(|edge| edge.edge.source_node_id == PATH_START_NODE_ID)
@@ -494,24 +494,23 @@ mod tests {
         (a_node_id, t_node_id, c_node_id, g_node_id)
     }
 
-    #[test]
-    fn test_gaf_change_preserves_incoming_edges_at_start_boundary() {
-        let conn = get_connection(None).unwrap();
-        let (block_group_id, _) = setup_block_group(&conn);
-        let (a_node_id, t_node_id, _, g_node_id) = gaf_test_node_ids(&conn, block_group_id);
-        let sequence_node_id = HashId::convert_str("insert-node");
+    fn run_gaf_boundary_update(incoming: bool) -> (DbContext, HashId, HashId, [HashId; 2]) {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let (block_group_id, _) = setup_block_group(conn);
+        let (_, t_node_id, c_node_id, g_node_id) = gaf_test_node_ids(conn, block_group_id);
         let branch_edge = Edge::create(
-            &conn,
-            g_node_id,
+            conn,
+            t_node_id,
             10,
             Strand::Forward,
-            t_node_id,
+            g_node_id,
             0,
             Strand::Forward,
         )
         .unwrap();
         BlockGroupEdge::bulk_create(
-            &conn,
+            conn,
             &[BlockGroupEdgeData {
                 block_group_id,
                 edge_id: branch_edge.id,
@@ -520,75 +519,73 @@ mod tests {
             }],
         );
 
-        let edges = plan_gaf_change_edges(
-            &conn,
-            block_group_id,
-            sequence_node_id,
-            2,
-            Some(&NodePoint {
-                id: t_node_id,
-                coordinate: 0,
-                strand: Strand::Forward,
-            }),
-            None,
-        );
+        let (anchor_node_id, left_coordinate, right_coordinate, adjacent_node_ids) = if incoming {
+            (g_node_id, 0, 2, [c_node_id, t_node_id])
+        } else {
+            (t_node_id, 8, 10, [c_node_id, g_node_id])
+        };
+        let mut csv_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(csv_file, "id,left,sequence,right\nchange,A,NN,C").unwrap();
+        let mut gaf_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            gaf_file,
+            "change_left\t1\t0\t1\t+\t>{anchor_node_id}\t10\t{left_coordinate}\t{left_coordinate}\t{left_coordinate}\t1\t60\ttp:A:P\tcg:Z:1M"
+        )
+        .unwrap();
+        writeln!(
+            gaf_file,
+            "change_right\t1\t0\t1\t+\t>{anchor_node_id}\t10\t{right_coordinate}\t{right_coordinate}\t1\t1\t60\ttp:A:P\tcg:Z:1M"
+        )
+        .unwrap();
+        update_with_gaf(
+            &context,
+            gaf_file.path(),
+            csv_file.path(),
+            "test",
+            "updated",
+            Some("test"),
+        )
+        .unwrap();
 
-        for source_node_id in [a_node_id, g_node_id] {
-            assert!(
-                edges.iter().any(|edge| {
-                    edge.source_node_id == source_node_id && edge.target_node_id == sequence_node_id
-                }),
-                "GAF update should retain incoming route from {source_node_id}",
-            );
+        let updated_block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
+        let new_node_id = Node::query(
+            conn,
+            "select n.* from nodes n left join sequences s on n.sequence_hash = s.hash where s.sequence = ?1",
+            params!["NN"],
+        )[0]
+        .id;
+        (
+            context,
+            updated_block_group.id,
+            new_node_id,
+            adjacent_node_ids,
+        )
+    }
+
+    #[test]
+    fn test_update_with_gaf_preserves_all_incoming_edges_at_node_start() {
+        let (context, block_group_id, new_node_id, source_node_ids) = run_gaf_boundary_update(true);
+        let edges =
+            BlockGroupEdge::edges_for_block_group(context.graph().conn(), &block_group_id, None);
+        for source_node_id in source_node_ids {
+            assert!(edges.iter().any(|edge| {
+                edge.edge.source_node_id == source_node_id
+                    && edge.edge.target_node_id == new_node_id
+            }));
         }
     }
 
     #[test]
-    fn test_gaf_change_preserves_outgoing_edges_at_end_boundary() {
-        let conn = get_connection(None).unwrap();
-        let (block_group_id, _) = setup_block_group(&conn);
-        let (_, t_node_id, c_node_id, g_node_id) = gaf_test_node_ids(&conn, block_group_id);
-        let sequence_node_id = HashId::convert_str("insert-node");
-        let branch_edge = Edge::create(
-            &conn,
-            t_node_id,
-            10,
-            Strand::Forward,
-            g_node_id,
-            0,
-            Strand::Forward,
-        )
-        .unwrap();
-        BlockGroupEdge::bulk_create(
-            &conn,
-            &[BlockGroupEdgeData {
-                block_group_id,
-                edge_id: branch_edge.id,
-                chromosome_index: 0,
-                phased: 0,
-            }],
-        );
-
-        let edges = plan_gaf_change_edges(
-            &conn,
-            block_group_id,
-            sequence_node_id,
-            2,
-            None,
-            Some(&NodePoint {
-                id: t_node_id,
-                coordinate: 10,
-                strand: Strand::Forward,
-            }),
-        );
-
-        for target_node_id in [c_node_id, g_node_id] {
-            assert!(
-                edges.iter().any(|edge| {
-                    edge.source_node_id == sequence_node_id && edge.target_node_id == target_node_id
-                }),
-                "GAF update should retain outgoing route to {target_node_id}",
-            );
+    fn test_update_with_gaf_preserves_all_outgoing_edges_at_node_end() {
+        let (context, block_group_id, new_node_id, target_node_ids) =
+            run_gaf_boundary_update(false);
+        let edges =
+            BlockGroupEdge::edges_for_block_group(context.graph().conn(), &block_group_id, None);
+        for target_node_id in target_node_ids {
+            assert!(edges.iter().any(|edge| {
+                edge.edge.source_node_id == new_node_id
+                    && edge.edge.target_node_id == target_node_id
+            }));
         }
     }
 

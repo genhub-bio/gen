@@ -113,7 +113,7 @@ mod tests {
         let context = setup_gen();
         let conn = context.graph().conn();
         let (block_group_id, _) = setup_block_group(conn);
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
         let a_node_id = edges
             .iter()
             .find(|edge| edge.edge.is_start_edge())
@@ -138,23 +138,44 @@ mod tests {
             .unwrap()
             .edge
             .target_node_id;
+        let branch_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("GG")
+            .save(conn)
+            .unwrap();
+        let branch_node_id = Node::create(
+            conn,
+            &branch_sequence.hash,
+            &HashId::convert_str("reference-path-branch"),
+        )
+        .unwrap();
         let branch_edges = [
             Edge::create(
                 conn,
-                g_node_id,
+                a_node_id,
                 10,
                 Strand::Forward,
-                t_node_id,
+                c_node_id,
                 0,
                 Strand::Forward,
             )
             .unwrap(),
             Edge::create(
                 conn,
-                t_node_id,
+                c_node_id,
                 10,
                 Strand::Forward,
-                a_node_id,
+                branch_node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap(),
+            Edge::create(
+                conn,
+                branch_node_id,
+                branch_sequence.length,
+                Strand::Forward,
+                g_node_id,
                 0,
                 Strand::Forward,
             )
@@ -178,7 +199,7 @@ mod tests {
             "test",
             "test",
             "updated",
-            "chr1:10-20",
+            "chr1:20-30",
             "NN",
             false,
         )
@@ -189,7 +210,7 @@ mod tests {
             BlockGroup::get_current_path(conn, &updated_block_group.id, None).unwrap();
         assert_eq!(
             updated_path.sequence(conn, None).unwrap(),
-            "AAAAAAAAAANNCCCCCCCCCCGGGGGGGGGG"
+            "AAAAAAAAAATTTTTTTTTTNNGGGGGGGGGG"
         );
     }
 

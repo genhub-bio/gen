@@ -734,7 +734,7 @@ mod tests {
 
         let conn = context.graph().conn();
         let block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
         for branch_node_id in branch_node_ids {
             assert!(
                 edges.iter().any(|edge| {
@@ -765,7 +765,7 @@ mod tests {
 
         let conn = context.graph().conn();
         let block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
         for branch_node_id in branch_node_ids {
             assert!(
                 edges.iter().any(|edge| {
@@ -796,7 +796,7 @@ mod tests {
 
         let conn = context.graph().conn();
         let block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
         for branch_node_id in branch_node_ids {
             assert!(
                 edges.iter().any(|edge| {
@@ -827,7 +827,7 @@ mod tests {
 
         let conn = context.graph().conn();
         let block_group = crate::test_helpers::get_sample_bg(conn, "test", "updated");
-        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id);
+        let edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
         for branch_node_id in branch_node_ids {
             assert!(
                 edges.iter().any(|edge| {

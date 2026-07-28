@@ -643,7 +643,7 @@ impl ResolvedGenRegion {
             if boundary_positions.is_empty() && end_boundary_positions.is_empty() {
                 Vec::new()
             } else {
-                BlockGroupEdge::edges_for_block_group(conn, &change.region.block_group.id)
+                BlockGroupEdge::edges_for_block_group(conn, &change.region.block_group.id, None)
             };
         let incoming_edges = boundary_positions
             .into_iter()
