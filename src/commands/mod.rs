@@ -12,6 +12,8 @@ pub mod checkout;
 pub mod cli_context;
 pub mod clone;
 pub mod derive;
+#[cfg(target_os = "emscripten")]
+pub mod emscripten_http_test;
 pub mod export;
 pub mod graph_operations;
 pub mod import;
@@ -79,6 +81,15 @@ pub enum Commands {
     /// Profile a command and print cumulative per-function timings.
     #[command(arg_required_else_help(true))]
     Profile(profile::Command),
+    #[cfg(target_os = "emscripten")]
+    /// Diagnostic-only: exercise the browser Fetch HTTP transport directly. Not part of the
+    /// supported CLI surface; hidden from `--help`.
+    #[command(
+        name = "__emscripten-http-test",
+        hide = true,
+        arg_required_else_help(true)
+    )]
+    EmscriptenHttpTest(emscripten_http_test::Command),
     /// Commands for importing
     Import(import::Command),
     /// Commands for updating
