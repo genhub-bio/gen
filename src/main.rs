@@ -108,6 +108,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
+    #[cfg(target_os = "emscripten")]
+    if let Some(Commands::EmscriptenHttpTest(cmd)) = &cli.command {
+        return r#gen::commands::emscripten_http_test::execute(cmd);
+    }
     #[cfg(feature = "profiling")]
     if let Some(Commands::Profile(cmd)) = &cli.command {
         return r#gen::commands::profile::execute(cmd.clone());
@@ -259,6 +263,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::CacheClear {}) => {
             unreachable!("cache-clear is handled before opening the workspace databases")
+        }
+        #[cfg(target_os = "emscripten")]
+        Some(Commands::EmscriptenHttpTest(..)) => {
+            unreachable!(
+                "emscripten http test commands are handled before opening the workspace databases"
+            )
         }
         #[cfg(feature = "profiling")]
         Some(Commands::Profile(cmd)) => r#gen::commands::profile::execute(cmd.clone()),

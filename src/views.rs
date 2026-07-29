@@ -8,6 +8,8 @@ pub mod collection;
 pub mod diff;
 pub mod diff_graph;
 pub mod dot_export;
+pub mod emscripten_backend;
+pub mod emscripten_input;
 pub mod gen_graph_widget;
 pub mod graph_overlay;
 pub mod helpers;
