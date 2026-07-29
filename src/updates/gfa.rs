@@ -1,19 +1,15 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io::Error as IOError,
-};
+use std::collections::{HashMap, HashSet};
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal};
 use gen_models::{
     block_group::BlockGroup,
-    block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
+    block_group_edge::AugmentedEdgeData,
     db::{DbContext, GraphConnection},
-    edge::{Edge, EdgeData},
+    edge::EdgeData,
     file_types::FileTypes,
     node::Node,
     operations::{OperationFile, OperationInfo, OperationSummary},
     path::Path,
-    sample::Sample,
     sequence::Sequence,
 };
 
@@ -22,7 +18,9 @@ use crate::{
     gfa::bool_to_strand,
     gfa_reader::{Gfa, Segment},
     graphs::NodePoint,
-    updates::adjacent_boundary_points,
+    updates::{
+        adjacent_boundary_points, create_block_group_edges, prepare_child_sample_block_groups,
+    },
 };
 
 fn plan_gfa_boundary_edges(
@@ -106,14 +104,12 @@ pub fn update_with_gfa(
     */
     let conn = context.graph().conn();
 
-    let _new_sample = Sample::get_or_create_child(
+    let block_groups = prepare_child_sample_block_groups::<SequenceUpdateError>(
         conn,
         collection_name,
+        parent_sample_name,
         new_sample_name,
-        vec![parent_sample_name.to_string()],
-    )
-    .map_err(IOError::other)?;
-    let block_groups = Sample::get_block_groups(conn, collection_name, new_sample_name, None);
+    )?;
 
     // NOTE: Only getting the current path for each block group because it's the most likely one to
     // be the basis for an update
@@ -540,40 +536,9 @@ fn create_new_path_from_existing(
         });
     }
 
-    let new_edge_ids = Edge::bulk_create(
-        conn,
-        &new_path_edges
-            .iter()
-            .map(|edge| edge.edge_data)
-            .collect::<Vec<EdgeData>>(),
-    );
-    let healing_edge_ids = Edge::bulk_create(
-        conn,
-        &healing_edges
-            .iter()
-            .map(|edge| edge.edge_data)
-            .collect::<Vec<EdgeData>>(),
-    );
-    let boundary_edge_ids = Edge::bulk_create(
-        conn,
-        &boundary_edges
-            .iter()
-            .map(|edge| edge.edge_data)
-            .collect::<Vec<EdgeData>>(),
-    );
-    let all_edges = [new_path_edges, healing_edges, boundary_edges].concat();
-    let all_edge_ids = [new_edge_ids.clone(), healing_edge_ids, boundary_edge_ids].concat();
-    let block_group_edges = all_edge_ids
-        .iter()
-        .enumerate()
-        .map(|(i, edge_id)| BlockGroupEdgeData {
-            block_group_id,
-            edge_id: *edge_id,
-            chromosome_index: all_edges[i].chromosome_index,
-            phased: all_edges[i].phased,
-        })
-        .collect::<Vec<BlockGroupEdgeData>>();
-    BlockGroupEdge::bulk_create(conn, &block_group_edges);
+    let new_edge_ids = create_block_group_edges(conn, block_group_id, &new_path_edges);
+    create_block_group_edges(conn, block_group_id, &healing_edges);
+    create_block_group_edges(conn, block_group_id, &boundary_edges);
     Path::create(conn, unmatched_path_name, &block_group_id, &new_edge_ids)?;
 
     Ok(())
@@ -584,7 +549,12 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{io::Write as _, path::PathBuf};
 
-    use gen_models::traits::Query;
+    use gen_models::{
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        edge::Edge,
+        sample::Sample,
+        traits::Query,
+    };
     use rusqlite::types::Value as SQLValue;
     use tempfile::NamedTempFile;
 

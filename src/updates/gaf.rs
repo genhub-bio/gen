@@ -11,9 +11,9 @@ use csv::Error as CsvError;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
     block_group::BlockGroup,
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    block_group_edge::AugmentedEdgeData,
     db::DbContext,
-    edge::{Edge, EdgeData},
+    edge::EdgeData,
     errors::{NodeError, OperationError, SampleError, SequenceError},
     file_types::FileTypes,
     node::Node,
@@ -26,7 +26,11 @@ use regex::Regex;
 use rusqlite::{params, types::Value};
 use thiserror::Error;
 
-use crate::{graphs::NodePoint, read_lines, updates::adjacent_boundary_points};
+use crate::{
+    graphs::NodePoint,
+    read_lines,
+    updates::{adjacent_boundary_points, create_block_group_edges},
+};
 
 #[derive(Debug, serde::Deserialize)]
 struct CSVRow {
@@ -421,17 +425,15 @@ where
                     left_anchor.as_ref(),
                     right_anchor.as_ref(),
                 );
-                let edge_ids = Edge::bulk_create(conn, &new_edges);
-                let new_block_group_edges = edge_ids
+                let augmented_edges = new_edges
                     .iter()
-                    .map(|edge_id| BlockGroupEdgeData {
-                        block_group_id: bg.id,
-                        edge_id: *edge_id,
+                    .map(|edge_data| AugmentedEdgeData {
+                        edge_data: *edge_data,
                         chromosome_index: 0,
                         phased: 0,
                     })
                     .collect::<Vec<_>>();
-                BlockGroupEdge::bulk_create(conn, &new_block_group_edges);
+                create_block_group_edges(conn, bg.id, &augmented_edges);
             }
         }
     }
@@ -453,7 +455,11 @@ mod tests {
     use std::path::PathBuf;
 
     use gen_graph::{GraphEdge, GraphNode};
-    use gen_models::traits::Query;
+    use gen_models::{
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        edge::Edge,
+        traits::Query,
+    };
     use petgraph::Direction;
 
     use super::*;

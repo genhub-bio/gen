@@ -4,15 +4,13 @@ use gen_core::Strand;
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
     block_group::BlockGroup,
-    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    block_group_edge::AugmentedEdgeData,
     db::DbContext,
-    edge::Edge,
     errors::{BlockGroupError, OperationError, PathError, SampleError},
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo, OperationSummary},
     path::Path,
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
-    sample::Sample,
 };
 use thiserror::Error;
 
@@ -26,7 +24,10 @@ use crate::{
         operators::{GraphOperationError, derive_chunks, make_stitch_from_block_groups},
         stitch,
     },
-    updates::{adjacent_boundary_points, resolve_update_region},
+    updates::{
+        adjacent_boundary_points, create_block_group_edges, prepare_child_sample_block_groups,
+        resolve_update_region,
+    },
 };
 
 /// Creates a top-level accession anchored at a single resolved graph
@@ -227,28 +228,16 @@ fn target_library_block_groups(
     new_sample_name: &str,
     resolved_region: &ResolvedGenRegion,
 ) -> Result<Vec<BlockGroup>, UpdateWithLibraryError> {
-    let _new_sample = Sample::get_or_create_child(
+    let block_groups = prepare_child_sample_block_groups::<UpdateWithLibraryError>(
         conn,
         collection_name,
+        parent_sample_name,
         new_sample_name,
-        vec![parent_sample_name.to_string()],
     )?;
-    let block_groups = Sample::get_block_groups(conn, collection_name, parent_sample_name, None);
-
-    let mut target_block_groups = vec![];
-    for block_group in block_groups {
-        let new_block_groups = BlockGroup::get_or_create_sample_block_groups(
-            conn,
-            collection_name,
-            new_sample_name,
-            &block_group.name,
-            vec![parent_sample_name.to_string()],
-        )?;
-
-        if block_group.name == resolved_region.block_group.name {
-            target_block_groups = new_block_groups;
-        }
-    }
+    let target_block_groups = block_groups
+        .into_iter()
+        .filter(|block_group| block_group.name == resolved_region.block_group.name)
+        .collect::<Vec<_>>();
 
     if target_block_groups.is_empty() {
         return Err(UpdateWithLibraryError::Region(GenRegionError::NotFound(
@@ -536,31 +525,25 @@ fn preserve_library_boundary_points(
     block_group_id: gen_core::HashId,
     positions: &[gen_graph::GraphNodePosition],
 ) -> Result<(), UpdateWithLibraryError> {
-    let edge_data = positions
+    let edges = positions
         .iter()
         .map(|position| {
             let coordinate = position.coordinate();
-            gen_models::edge::EdgeData {
-                source_node_id: position.graph_node.node_id,
-                source_coordinate: coordinate,
-                source_strand: gen_core::Strand::Forward,
-                target_node_id: position.graph_node.node_id,
-                target_coordinate: coordinate,
-                target_strand: gen_core::Strand::Forward,
+            AugmentedEdgeData {
+                edge_data: gen_models::edge::EdgeData {
+                    source_node_id: position.graph_node.node_id,
+                    source_coordinate: coordinate,
+                    source_strand: gen_core::Strand::Forward,
+                    target_node_id: position.graph_node.node_id,
+                    target_coordinate: coordinate,
+                    target_strand: gen_core::Strand::Forward,
+                },
+                chromosome_index: 0,
+                phased: 0,
             }
         })
         .collect::<Vec<_>>();
-    let edge_ids = Edge::bulk_create(conn, &edge_data);
-    let block_group_edges = edge_ids
-        .iter()
-        .map(|edge_id| BlockGroupEdgeData {
-            block_group_id,
-            edge_id: *edge_id,
-            chromosome_index: 0,
-            phased: 0,
-        })
-        .collect::<Vec<_>>();
-    BlockGroupEdge::bulk_create(conn, &block_group_edges);
+    create_block_group_edges(conn, block_group_id, &edges);
     Ok(())
 }
 
@@ -577,6 +560,7 @@ mod tests {
         edge::Edge,
         node::Node,
         path::Path,
+        sample::Sample,
         sample_lineage::SampleLineage,
         sequence::Sequence,
     };

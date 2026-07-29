@@ -3,7 +3,7 @@ use std::{io::Read, str};
 use gb_io::reader;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::DbContext,
@@ -21,7 +21,7 @@ use rusqlite::{params, types::Value};
 
 use crate::{
     genbank::{EditType, GenBankError, process_sequence},
-    updates::prepare_path_update_region,
+    updates::{InsertChangeData, apply_update_change},
 };
 
 pub fn update_with_genbank<'a, R>(
@@ -164,8 +164,7 @@ where
                     let end = edit.end;
                     let region =
                         ResolvedGenRegion::from_path(conn, block_group.id, &path, start, end)?;
-                    let region = prepare_path_update_region(conn, &region)?;
-                    let change = match edit.edit_type {
+                    let data = match edit.edit_type {
                         EditType::Insertion | EditType::Replacement => {
                             let change_seq = Sequence::new()
                                 .sequence(&edit.new_sequence)
@@ -184,8 +183,7 @@ where
                                     new_hash = change_seq.hash,
                                 )),
                             )?;
-                            BlockGroupChange {
-                                region: region.clone(),
+                            InsertChangeData {
                                 path_accession: None,
                                 block: PathBlock {
                                     node_id: change_node,
@@ -201,8 +199,7 @@ where
                                 preserve_edge: true,
                             }
                         }
-                        EditType::Deletion => BlockGroupChange {
-                            region,
+                        EditType::Deletion => InsertChangeData {
                             path_accession: None,
                             block: PathBlock {
                                 node_id: wt_node_id,
@@ -218,7 +215,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    BlockGroup::insert_change(conn, &change).unwrap();
+                    apply_update_change(conn, &region, data, false)?;
                 }
             }
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),

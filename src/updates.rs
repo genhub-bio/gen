@@ -2,7 +2,7 @@ use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Strand};
 use gen_graph::{GraphNode, GraphNodePosition};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange},
-    block_group_edge::BlockGroupEdge,
+    block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::Edge,
     errors::{
@@ -29,6 +29,29 @@ pub mod gfa;
 pub mod library;
 pub mod sequence;
 pub mod vcf;
+
+pub(crate) fn create_block_group_edges(
+    conn: &GraphConnection,
+    block_group_id: HashId,
+    edges: &[AugmentedEdgeData],
+) -> Vec<HashId> {
+    let edge_ids = Edge::bulk_create(
+        conn,
+        &edges.iter().map(|edge| edge.edge_data).collect::<Vec<_>>(),
+    );
+    let block_group_edges = edge_ids
+        .iter()
+        .zip(edges)
+        .map(|(edge_id, edge)| BlockGroupEdgeData {
+            block_group_id,
+            edge_id: *edge_id,
+            chromosome_index: edge.chromosome_index,
+            phased: edge.phased,
+        })
+        .collect::<Vec<_>>();
+    BlockGroupEdge::bulk_create(conn, &block_group_edges);
+    edge_ids
+}
 
 pub(crate) fn adjacent_boundary_points(
     conn: &GraphConnection,
@@ -133,19 +156,38 @@ impl InsertChangeData {
     }
 }
 
-pub(crate) fn insert_update_change(
-    conn: &GraphConnection,
+impl From<&BlockGroupChange> for InsertChangeData {
+    fn from(change: &BlockGroupChange) -> Self {
+        Self {
+            block: change.block.clone(),
+            path_accession: change.path_accession.clone(),
+            chromosome_index: change.chromosome_index,
+            phased: change.phased,
+            preserve_edge: change.preserve_edge,
+        }
+    }
+}
+
+pub(crate) fn build_update_change(
     region: ResolvedGenRegion,
     data: InsertChangeData,
-) -> Result<(), BlockGroupError> {
-    let change = BlockGroupChange {
+) -> BlockGroupChange {
+    BlockGroupChange {
         region,
         path_accession: data.path_accession,
         block: data.block,
         chromosome_index: data.chromosome_index,
         phased: data.phased,
         preserve_edge: data.preserve_edge,
-    };
+    }
+}
+
+pub(crate) fn insert_update_change(
+    conn: &GraphConnection,
+    region: ResolvedGenRegion,
+    data: InsertChangeData,
+) -> Result<(), BlockGroupError> {
+    let change = build_update_change(region, data);
     BlockGroup::insert_change(conn, &change)
 }
 
@@ -329,6 +371,70 @@ fn update_reference_path(
     Ok(())
 }
 
+pub(crate) fn apply_update_change(
+    conn: &GraphConnection,
+    region: &ResolvedGenRegion,
+    data: InsertChangeData,
+    should_update_reference_path: bool,
+) -> Result<(), BlockGroupError> {
+    let prepared_region = prepare_path_update_region(conn, region)?;
+    let path = prepared_region.path.clone();
+    let node_id = data.block.node_id;
+    let is_deletion = data.block.block_sequence.is_empty();
+    insert_update_change(conn, prepared_region.clone(), data)?;
+
+    if should_update_reference_path && let Some(path) = path {
+        if is_deletion {
+            let _ = path.new_path_with_deletion(conn, region.start, region.end);
+        } else {
+            let (edge_to_new_node, edge_from_new_node) =
+                reference_path_update_edges(conn, node_id, &prepared_region, &path)?;
+            update_reference_path(
+                conn,
+                &path,
+                &prepared_region,
+                &edge_to_new_node,
+                &edge_from_new_node,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_child_sample_block_groups<E>(
+    conn: &GraphConnection,
+    collection_name: &str,
+    parent_sample_name: &str,
+    new_sample_name: &str,
+) -> Result<Vec<BlockGroup>, E>
+where
+    E: From<BlockGroupError> + From<SampleError>,
+{
+    Sample::get_or_create_child(
+        conn,
+        collection_name,
+        new_sample_name,
+        vec![parent_sample_name.to_string()],
+    )?;
+    let parent_block_groups =
+        Sample::get_block_groups(conn, collection_name, parent_sample_name, None);
+    for block_group in parent_block_groups {
+        BlockGroup::get_or_create_sample_block_groups(
+            conn,
+            collection_name,
+            new_sample_name,
+            &block_group.name,
+            vec![parent_sample_name.to_string()],
+        )?;
+    }
+    Ok(Sample::get_block_groups(
+        conn,
+        collection_name,
+        new_sample_name,
+        None,
+    ))
+}
+
 pub(crate) fn apply_sequence_updates<E>(
     conn: &GraphConnection,
     update: &SequenceUpdate<'_>,
@@ -337,37 +443,20 @@ pub(crate) fn apply_sequence_updates<E>(
 where
     E: From<BlockGroupError>
         + From<NodeError>
-        + From<PathError>
-        + From<QueryError>
         + From<SampleError>
         + From<SequenceError>
         + From<GenRegionError>,
 {
-    Sample::get_or_create_child(
-        conn,
-        update.collection_name,
-        update.new_sample_name,
-        vec![update.parent_sample_name.to_string()],
-    )?;
-    let block_groups = Sample::get_block_groups(
+    let block_groups = prepare_child_sample_block_groups::<E>(
         conn,
         update.collection_name,
         update.parent_sample_name,
-        None,
-    );
-    let mut target_block_groups = Vec::new();
-    for block_group in block_groups {
-        let new_block_groups = BlockGroup::get_or_create_sample_block_groups(
-            conn,
-            update.collection_name,
-            update.new_sample_name,
-            &block_group.name,
-            vec![update.parent_sample_name.to_string()],
-        )?;
-        if block_group.name == update.region.block_group.name {
-            target_block_groups = new_block_groups;
-        }
-    }
+        update.new_sample_name,
+    )?;
+    let target_block_groups = block_groups
+        .into_iter()
+        .filter(|block_group| block_group.name == update.region.block_group.name)
+        .collect::<Vec<_>>();
     if target_block_groups.is_empty() {
         return Err(E::from(GenRegionError::NotFound(
             update.region.block_group.name.clone(),
@@ -419,26 +508,12 @@ where
             };
             let target_region =
                 target_update_region(conn, update.region, target_block_group.id, path.as_ref())?;
-            let target_region = prepare_path_update_region(conn, &target_region)?;
-            let reference_region = target_region.clone();
-            insert_update_change(conn, target_region, InsertChangeData::new(block))?;
-
-            if should_update_reference_path && let Some(path) = &path {
-                if sequence.is_empty() {
-                    let _ =
-                        path.new_path_with_deletion(conn, update.region.start, update.region.end);
-                } else {
-                    let (edge_to_new_node, edge_from_new_node) =
-                        reference_path_update_edges(conn, node_id, &reference_region, path)?;
-                    update_reference_path(
-                        conn,
-                        path,
-                        &reference_region,
-                        &edge_to_new_node,
-                        &edge_from_new_node,
-                    )?;
-                }
-            }
+            apply_update_change(
+                conn,
+                &target_region,
+                InsertChangeData::new(block),
+                should_update_reference_path,
+            )?;
         }
     }
     Ok(change_count)

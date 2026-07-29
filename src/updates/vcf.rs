@@ -39,7 +39,7 @@ use thiserror::Error;
 use crate::{
     parse_genotype,
     progress_bar::{add_saving_operation_bar, get_handler, get_progress_bar},
-    updates::prepare_path_update_region,
+    updates::{InsertChangeData, build_update_change, prepare_path_update_region},
 };
 
 const VCF_CHANGE_APPLY_CHUNK_SIZE: usize = 5_000;
@@ -167,14 +167,16 @@ fn prepare_change(
         path_end: ref_end,
         strand: Strand::Forward,
     };
-    Ok(BlockGroupChange {
+    Ok(build_update_change(
         region,
-        path_accession: ids,
-        block: new_block,
-        chromosome_index,
-        phased,
-        preserve_edge,
-    })
+        InsertChangeData {
+            block: new_block,
+            path_accession: ids,
+            chromosome_index,
+            phased,
+            preserve_edge,
+        },
+    ))
 }
 
 #[cfg_attr(
@@ -679,14 +681,7 @@ pub fn update_with_vcf(
                         let mut region = change.region.clone();
                         region.kind = ResolvedRegionKind::BlockGroup;
                         region.remove_ambiguous_positions = true;
-                        BlockGroupChange {
-                            region,
-                            path_accession: change.path_accession.clone(),
-                            block: change.block.clone(),
-                            chromosome_index: change.chromosome_index,
-                            phased: change.phased,
-                            preserve_edge: change.preserve_edge,
-                        }
+                        build_update_change(region, InsertChangeData::from(change))
                     })
                     .collect::<Vec<_>>();
                 BlockGroup::insert_changes(conn, &in_place_changes, Some(&mut tree_map)).unwrap();
