@@ -1677,6 +1677,7 @@ dependencies = [
  "gen-tui",
  "getrandom 0.3.4",
  "html-escape",
+ "http",
  "httparse",
  "include_dir",
  "indexmap",

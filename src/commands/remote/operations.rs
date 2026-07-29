@@ -67,7 +67,6 @@ use gen_models::{
     },
     operations::{Defaults, Remote, RemoteBranch, calculate_file_checksum},
 };
-use reqwest::blocking::{Body, Client};
 use rusqlite::Error as SqlError;
 use url::Url;
 
@@ -77,6 +76,7 @@ use crate::{
             AssetTransferRequest, CapabilityRequest, RemoteOperation, RepositoryRemote,
             acquire_asset_transfers, acquire_capability,
         },
+        http::{self, HttpRequest},
         login_origin,
     },
     get_config_connection, get_connection_for_branch, get_raw_connection,
@@ -218,7 +218,6 @@ fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn std::error::Er
 }
 
 fn upload_asset(
-    client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
@@ -252,19 +251,20 @@ fn upload_asset(
         )
         .into());
     }
-    let file = fs::File::open(&source_path)?;
-    let length = file.metadata()?.len();
-    let response = client
-        .put(url)
-        .header("content-type", "application/octet-stream")
-        .body(Body::sized(file, length))
-        .send()
-        .map_err(|error| error.without_url())?;
-    if !response.status().is_success() {
+    // Buffered fully in memory: `http::request` has no streaming-upload path (see
+    // `commands::remote::http`'s module docs). Fine for the asset sizes exercised so far; revisit
+    // if a real upload exposes a memory problem.
+    let contents = fs::read(&source_path)?;
+    let response = http::request(HttpRequest {
+        method: "PUT",
+        url,
+        headers: &[("Content-Type", "application/octet-stream")],
+        body: Some(&contents),
+    })?;
+    if !(200..300).contains(&response.status) {
         return Err(format!(
             "Asset {} upload failed with HTTP {}",
-            asset.id,
-            response.status()
+            asset.id, response.status
         )
         .into());
     }
@@ -338,7 +338,6 @@ fn conflict_destination_path(
 /// of the file. If the hash is unknown, we download the file and mark it as a conflict via a
 /// .conflict extension
 fn download_asset(
-    client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     previous_assets: &HashMap<HashId, AssetRef>,
@@ -380,20 +379,24 @@ fn download_asset(
         .unwrap_or("asset");
     let temporary_path = destination_path.with_file_name(format!(".{file_name}.{}.part", asset.id));
     let result = (|| {
-        let mut response = client
-            .get(url)
-            .send()
-            .map_err(|error| error.without_url())?;
-        if !response.status().is_success() {
+        // Buffered fully in memory: `http::request` has no streaming-download path (see
+        // `commands::remote::http`'s module docs). Fine for the asset sizes exercised so far;
+        // revisit if a real download exposes a memory problem.
+        let response = http::request(HttpRequest {
+            method: "GET",
+            url,
+            headers: &[],
+            body: None,
+        })?;
+        if !(200..300).contains(&response.status) {
             return Err(format!(
                 "Asset {} download failed with HTTP {}",
-                asset.id,
-                response.status()
+                asset.id, response.status
             )
             .into());
         }
         let mut file = fs::File::create(&temporary_path)?;
-        std::io::copy(&mut response, &mut file)?;
+        file.write_all(&response.body)?;
         file.flush()?;
         drop(file);
         if calculate_file_checksum(&temporary_path)? != expected_checksum {
@@ -445,7 +448,6 @@ fn transfer_assets(
         .map(|history_ref| Assets::get_branch_assets(graph, history_ref))
         .transpose()?
         .unwrap_or_default();
-    let client = Client::new();
     for transfer in response.assets {
         let asset = assets.remove(&transfer.id).ok_or_else(|| {
             format!(
@@ -454,10 +456,10 @@ fn transfer_assets(
             )
         })?;
         match operation {
-            RemoteOperation::Push => upload_asset(&client, workspace, &asset, &transfer.url)?,
+            RemoteOperation::Push => upload_asset(workspace, &asset, &transfer.url)?,
             RemoteOperation::Clone | RemoteOperation::Pull => {
                 if let DownloadAssetOutcome::Conflict(conflict_path) =
-                    download_asset(&client, workspace, &asset, &previous_assets, &transfer.url)?
+                    download_asset(workspace, &asset, &previous_assets, &transfer.url)?
                 {
                     let destination_path = materialization_destination_path(
                         workspace,
@@ -686,7 +688,6 @@ mod tests {
         history::dolt::{commit_all, hash_of, remote_rows, remove_remote},
         operations::{Defaults, Remote, calculate_reader_checksum},
     };
-    use reqwest::blocking::Client;
     use rusqlite::{Connection, Error as SqlError};
     use tempfile::tempdir;
 
@@ -970,14 +971,8 @@ mod tests {
         let remote_asset = test_asset(remote_contents, "reference.fa", 2);
         let (url, server) = serve_asset(remote_contents);
 
-        let outcome = download_asset(
-            &Client::new(),
-            &workspace,
-            &remote_asset,
-            &HashMap::new(),
-            &url,
-        )
-        .expect("should download conflicting asset");
+        let outcome = download_asset(&workspace, &remote_asset, &HashMap::new(), &url)
+            .expect("should download conflicting asset");
         server.join().expect("asset server should finish");
 
         let conflict = temp.path().join("reference.fa.conflict");
@@ -1000,14 +995,8 @@ mod tests {
         let remote_asset = test_asset(remote_contents, "reference.fa", 2);
         let (url, server) = serve_asset(remote_contents);
 
-        let outcome = download_asset(
-            &Client::new(),
-            &workspace,
-            &remote_asset,
-            &previous_assets,
-            &url,
-        )
-        .expect("should replace unchanged tracked file");
+        let outcome = download_asset(&workspace, &remote_asset, &previous_assets, &url)
+            .expect("should replace unchanged tracked file");
         server.join().expect("asset server should finish");
 
         assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
@@ -1029,14 +1018,8 @@ mod tests {
         let remote_asset = test_asset(remote_contents, "reference.fa", 2);
         let (url, server) = serve_asset(remote_contents);
 
-        let outcome = download_asset(
-            &Client::new(),
-            &workspace,
-            &remote_asset,
-            &previous_assets,
-            &url,
-        )
-        .expect("should download conflicting asset");
+        let outcome = download_asset(&workspace, &remote_asset, &previous_assets, &url)
+            .expect("should download conflicting asset");
         server.join().expect("asset server should finish");
 
         let conflict = temp.path().join("reference.fa.conflict");
