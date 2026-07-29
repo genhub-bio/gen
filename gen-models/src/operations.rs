@@ -267,7 +267,7 @@ pub(crate) fn track_operation_assets(
 )]
 pub fn add_files_operation(
     context: &DbContext,
-    files: &[String],
+    files: &[OperationFile],
     message: Option<&str>,
 ) -> Result<DoltHashId, AddFilesOperationError> {
     let workspace = context.workspace();
@@ -275,14 +275,21 @@ pub fn add_files_operation(
 
     let file_additions = files
         .iter()
-        .map(|path| {
-            let file_type = FileTypes::infer_from_path(path);
-            let file_addition = FileAddition::prepare(workspace, path, file_type, None)?;
-            let operation_file_path =
-                OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
+        .map(|operation_file| {
+            let file_addition = FileAddition::prepare(
+                workspace,
+                &operation_file.file_path,
+                operation_file.file_type,
+                operation_file.checksum_override,
+            )?;
+            let operation_file_path = OperationFile::storage_file_path(
+                workspace,
+                &operation_file.file_path,
+                file_addition.checksum.as_ref(),
+            )?;
             Ok::<(FileAddition, String, String), FileAdditionError>((
                 file_addition,
-                OperationFile::new(path.clone()).filename,
+                operation_file.filename.clone(),
                 operation_file_path,
             ))
         })
@@ -307,7 +314,7 @@ pub fn add_files_operation(
 
     let summary = message.map(str::to_string).unwrap_or_else(|| {
         if files.len() == 1 {
-            format!("Add file {}", files[0])
+            format!("Add file {}", files[0].file_path)
         } else {
             format!("Add {} files", files.len())
         }
@@ -405,15 +412,11 @@ impl FileAddition {
         checksum_override: Option<Sha256Hash>,
     ) -> Result<FileAddition, FileAdditionError> {
         let asset_uri = <dyn AssetUri>::new(workspace, file_path);
-        let checksum = asset_uri.checksum(workspace, checksum_override)?;
+        let checksum = asset_uri.prepare_asset(workspace, checksum_override)?;
         let stored_asset_uri = match checksum.as_ref() {
             Some(checksum) => asset_uri.stored_asset_uri(workspace, checksum)?,
             None => asset_uri.uri().to_string(),
         };
-        if let Some(checksum) = checksum.as_ref() {
-            asset_uri.ensure_asset(workspace, checksum)?;
-        }
-
         Ok(FileAddition {
             id: LocalAssetUri::generate_file_addition_id(checksum.as_ref(), &stored_asset_uri),
             asset_uri: stored_asset_uri,
@@ -1370,13 +1373,40 @@ mod tests {
     }
 
     #[test]
+    fn test_file_addition_rejects_incorrect_local_checksum_override() {
+        let context = setup_gen();
+        let path = context.workspace().repo_root().unwrap().join("asset.fa");
+        fs::write(&path, "actual contents").expect("should write local asset");
+
+        let error = FileAddition::prepare(
+            context.workspace(),
+            path.to_str().expect("should encode local asset path"),
+            FileTypes::Fasta,
+            Some(Sha256Hash::convert_str("different contents")),
+        )
+        .expect_err("should reject incorrect checksum override");
+
+        assert!(
+            matches!(error, FileAdditionError::ChecksumError(_)),
+            "should report a checksum error: {error}"
+        );
+        assert_eq!(
+            fs::read_dir(context.workspace().asset_dir().unwrap())
+                .expect("should read asset directory")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn test_add_files_operation_does_not_read_remote_asset() {
         let context = setup_gen();
         let asset_uri = "http://127.0.0.1:1/asset.fa".to_string();
+        let operation_file = OperationFile::new(&asset_uri);
 
         add_files_operation(
             &context,
-            std::slice::from_ref(&asset_uri),
+            std::slice::from_ref(&operation_file),
             Some("track remote reference"),
         )
         .expect("should track remote asset");
@@ -1385,6 +1415,26 @@ mod tests {
         assert_eq!(asset_refs.len(), 1);
         assert_eq!(asset_refs[0].uri, asset_uri);
         assert_eq!(asset_refs[0].checksum, None);
+    }
+
+    #[test]
+    fn test_add_files_operation_passes_remote_checksum_override() {
+        let context = setup_gen();
+        let asset_uri = "http://127.0.0.1:1/asset.fa";
+        let checksum = Sha256Hash::convert_str("known remote contents");
+        let operation_file = OperationFile::new(asset_uri).set_checksum_override(checksum);
+
+        add_files_operation(
+            &context,
+            std::slice::from_ref(&operation_file),
+            Some("track checksummed remote reference"),
+        )
+        .expect("should track remote asset without reading it");
+
+        let asset_refs = AssetRef::all(context.graph().conn());
+        assert_eq!(asset_refs.len(), 1);
+        assert_eq!(asset_refs[0].uri, asset_uri);
+        assert_eq!(asset_refs[0].checksum, Some(checksum));
     }
 
     #[test]
@@ -1398,10 +1448,14 @@ mod tests {
         fs::write(repo_root.join("unique.txt"), "unique contents").unwrap();
 
         let _operation_1_hash =
-            add_files_operation(&context, &["shared.txt".to_string()], Some("first")).unwrap();
+            add_files_operation(&context, &[OperationFile::new("shared.txt")], Some("first"))
+                .unwrap();
         let _operation_2_hash = add_files_operation(
             &context,
-            &["shared.txt".to_string(), "unique.txt".to_string()],
+            &[
+                OperationFile::new("shared.txt"),
+                OperationFile::new("unique.txt"),
+            ],
             Some("second"),
         )
         .unwrap();
@@ -1461,8 +1515,8 @@ mod tests {
         add_files_operation(
             &context,
             &[
-                alpha_path.to_string_lossy().to_string(),
-                beta_path.to_string_lossy().to_string(),
+                OperationFile::new(alpha_path.to_string_lossy()),
+                OperationFile::new(beta_path.to_string_lossy()),
             ],
             Some("same asset, different filenames"),
         )?;
@@ -1493,7 +1547,10 @@ mod tests {
 
         let _operation_hash = add_files_operation(
             &context,
-            &["alpha.fa".to_string(), "beta.fa".to_string()],
+            &[
+                OperationFile::new("alpha.fa"),
+                OperationFile::new("beta.fa"),
+            ],
             Some("import references"),
         )
         .unwrap();
@@ -1539,7 +1596,7 @@ mod tests {
 
         let operation_hash = add_files_operation(
             &context,
-            &["alpha.fa".to_string()],
+            &[OperationFile::new("alpha.fa")],
             Some("import reference"),
         )
         .unwrap();

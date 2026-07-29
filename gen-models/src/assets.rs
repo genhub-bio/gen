@@ -99,10 +99,6 @@ fn opendal_file_addition_error(err: opendal::Error) -> FileAdditionError {
     FileAdditionError::FileReadError(io::Error::other(err))
 }
 
-fn opendal_file_store_error(err: opendal::Error) -> FileStoreError {
-    FileStoreError::IoError(io::Error::other(err))
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AssetRole {
     Input,
@@ -624,10 +620,6 @@ impl ChecksumHandle {
         let state = self.state.lock().unwrap();
         if state.complete { state.checksum } else { None }
     }
-
-    pub fn finalized_checksum(&self) -> Option<Sha256Hash> {
-        self.state.lock().unwrap().checksum
-    }
 }
 
 pub struct ChecksummedReader {
@@ -652,32 +644,28 @@ impl ChecksummedReader {
             state: Arc::clone(&self.state),
         }
     }
-}
 
-impl Read for ChecksummedReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let bytes_read = self.inner.read(buf)?;
-        let mut state = self.state.lock().unwrap();
-        if bytes_read == 0 {
-            if state.checksum.is_none() {
-                let finalized = state.hasher.clone().finalize();
-                state.checksum = Some(Sha256Hash(finalized.into()));
-            }
-            state.complete = true;
-        } else {
-            state.hasher.update(&buf[..bytes_read]);
-        }
-        Ok(bytes_read)
-    }
-}
-
-impl Drop for ChecksummedReader {
-    fn drop(&mut self) {
+    fn finish(&self) {
         let mut state = self.state.lock().unwrap();
         if state.checksum.is_none() {
             let finalized = state.hasher.clone().finalize();
             state.checksum = Some(Sha256Hash(finalized.into()));
         }
+        state.complete = true;
+    }
+}
+
+impl Read for ChecksummedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes_read = self.inner.read(buf)?;
+        if bytes_read == 0 {
+            if !buf.is_empty() {
+                self.finish();
+            }
+        } else {
+            self.state.lock().unwrap().hasher.update(&buf[..bytes_read]);
+        }
+        Ok(bytes_read)
     }
 }
 
@@ -765,61 +753,6 @@ impl OpenDalLocation {
             .map_err(opendal_file_addition_error)?;
         Ok(ChecksummedReader::new(Box::new(reader)))
     }
-
-    fn checksum(&self, display_path: &str) -> Result<Sha256Hash, FileAdditionError> {
-        let reader = match self.operator.reader(&self.path) {
-            Ok(reader) => reader,
-            Err(err) => {
-                return match err.kind() {
-                    opendal::ErrorKind::NotFound => {
-                        Err(FileAdditionError::FileNotFound(display_path.to_string()))
-                    }
-                    opendal::ErrorKind::PermissionDenied => Err(
-                        FileAdditionError::FilePermissionDenied(display_path.to_string()),
-                    ),
-                    _ => Err(opendal_file_addition_error(err)),
-                };
-            }
-        }
-        .into_std_read(..)
-        .map_err(opendal_file_addition_error)?;
-
-        match calculate_reader_checksum(reader) {
-            Ok(checksum) => Ok(checksum),
-            Err(err) => match err.kind() {
-                io::ErrorKind::NotFound => {
-                    Err(FileAdditionError::FileNotFound(display_path.to_string()))
-                }
-                io::ErrorKind::PermissionDenied => Err(FileAdditionError::FilePermissionDenied(
-                    display_path.to_string(),
-                )),
-                _ => Err(FileAdditionError::FileReadError(err)),
-            },
-        }
-    }
-
-    fn copy_to_local_path(
-        &self,
-        workspace: &Workspace,
-        destination_path: &Path,
-    ) -> io::Result<u64> {
-        let asset_location =
-            Self::from_workspace_path(workspace, destination_path).map_err(io::Error::other)?;
-        let mut reader = self
-            .operator
-            .reader(&self.path)
-            .map_err(io::Error::other)?
-            .into_std_read(..)
-            .map_err(io::Error::other)?;
-        let mut writer = asset_location
-            .operator
-            .writer(&asset_location.path)
-            .map_err(io::Error::other)?
-            .into_std_write();
-        let bytes_copied = io::copy(&mut reader, &mut writer)?;
-        writer.close()?;
-        Ok(bytes_copied)
-    }
 }
 
 pub trait AssetUri {
@@ -827,7 +760,8 @@ pub trait AssetUri {
 
     fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError>;
 
-    fn checksum(
+    /// Prepares any local storage needed for the asset and returns its known content checksum.
+    fn prepare_asset(
         &self,
         workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
@@ -838,12 +772,6 @@ pub trait AssetUri {
         workspace: &Workspace,
         checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError>;
-
-    fn ensure_asset(
-        &self,
-        workspace: &Workspace,
-        checksum: &Sha256Hash,
-    ) -> Result<(), FileAdditionError>;
 
     fn store_file(
         &self,
@@ -978,24 +906,12 @@ impl AssetUri for LocalAssetUri {
             .reader()
     }
 
-    fn checksum(
+    fn prepare_asset(
         &self,
         workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
     ) -> Result<Option<Sha256Hash>, FileAdditionError> {
-        if let Some(checksum_override) = checksum_override {
-            return Ok(Some(checksum_override));
-        }
-
-        let source_file_path = self.resolved_source_file_path(workspace)?;
-        let checksum_path = if source_file_path.is_file() {
-            source_file_path
-        } else {
-            PathBuf::from(self.file_path())
-        };
-        OpenDalLocation::from_workspace_path(workspace, &checksum_path)
-            .map_err(opendal_file_addition_error)?
-            .checksum(&checksum_path.to_string_lossy())
+        self.stage_asset_copy(workspace, checksum_override)
             .map(Some)
     }
 
@@ -1013,18 +929,6 @@ impl AssetUri for LocalAssetUri {
         let source_asset_uri = Self::new(&source_file_path.to_string_lossy());
         let relative_file_path = Self::asset_relative_path(workspace, &source_asset_uri, checksum)?;
         Ok(Self::asset_uri(&relative_file_path))
-    }
-
-    fn ensure_asset(
-        &self,
-        workspace: &Workspace,
-        checksum: &Sha256Hash,
-    ) -> Result<(), FileAdditionError> {
-        let source_file_path = self.resolved_source_file_path(workspace)?;
-        if source_file_path.is_file() {
-            Self::ensure_asset_copy(workspace, &source_file_path, checksum)?;
-        }
-        Ok(())
     }
 
     fn store_file(
@@ -1309,6 +1213,54 @@ impl LocalAssetUri {
         )))
     }
 
+    fn stage_asset_copy(
+        &self,
+        workspace: &Workspace,
+        checksum_override: Option<Sha256Hash>,
+    ) -> Result<Sha256Hash, FileAdditionError> {
+        let asset_dir = workspace.asset_dir()?;
+        fs::create_dir_all(&asset_dir).map_err(FileAdditionError::FileReadError)?;
+        if let Some(checksum) = checksum_override {
+            let asset_path = asset_dir.join(self.asset_filename(&checksum));
+            if asset_path.exists() {
+                return Ok(checksum);
+            }
+        }
+
+        // Local assets must be retained in the content-addressed store. Hashing this copy while
+        // it is streamed avoids a separate checksum-only read of large genomic files.
+        let mut reader = self.reader(workspace)?;
+        let checksum_handle = reader.checksum_handle();
+        let mut staged_file = tempfile::NamedTempFile::new_in(&asset_dir)
+            .map_err(FileAdditionError::FileReadError)?;
+        io::copy(&mut reader, &mut staged_file).map_err(FileAdditionError::FileReadError)?;
+        staged_file
+            .flush()
+            .map_err(FileAdditionError::FileReadError)?;
+        let checksum = checksum_handle.checksum().ok_or_else(|| {
+            FileAdditionError::ChecksumError(format!(
+                "local asset stream did not reach EOF: {}",
+                self.uri()
+            ))
+        })?;
+        if let Some(expected_checksum) = checksum_override
+            && checksum != expected_checksum
+        {
+            return Err(FileAdditionError::ChecksumError(format!(
+                "local asset checksum does not match the provided checksum: {}",
+                self.uri()
+            )));
+        }
+
+        let asset_path = asset_dir.join(self.asset_filename(&checksum));
+        match staged_file.persist_noclobber(asset_path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
+        }
+        Ok(checksum)
+    }
+
     fn sanitize_relative_path(path: &Path) -> Result<PathBuf, FileAdditionError> {
         let mut sanitized = PathBuf::new();
         for component in path.components() {
@@ -1354,34 +1306,11 @@ impl LocalAssetUri {
         normalized
     }
 
-    /// This exists along with store_file because store_file uses an existing FileAddition
-    /// object to determine where to where to store the file, while this method uses the
-    /// provided source_path.
-    pub fn ensure_asset_copy(
-        workspace: &Workspace,
-        source_path: &Path,
-        checksum: &Sha256Hash,
-    ) -> Result<(), FileAdditionError> {
-        let asset_uri = Self::new(&source_path.to_string_lossy());
-        let asset_path = workspace
-            .asset_dir()?
-            .join(asset_uri.asset_filename(checksum));
-        if asset_path.exists() {
-            return Ok(());
-        }
-
-        OpenDalLocation::from_workspace_path(workspace, source_path)
-            .map_err(opendal_file_addition_error)?
-            .copy_to_local_path(workspace, &asset_path)
-            .map_err(FileAdditionError::FileReadError)?;
-        Ok(())
-    }
-
     pub fn store_file(
         file_addition: &FileAddition,
         workspace: &Workspace,
     ) -> Result<(), FileStoreError> {
-        let asset_filename = file_addition.hashed_filename().ok_or_else(|| {
+        let checksum = file_addition.checksum.ok_or_else(|| {
             FileStoreError::IoError(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -1390,25 +1319,22 @@ impl LocalAssetUri {
                 ),
             ))
         })?;
-        let asset_path = workspace.asset_dir()?.join(asset_filename);
+        let asset_uri = Self::new(&file_addition.asset_uri);
+        let asset_path = workspace
+            .asset_dir()?
+            .join(asset_uri.asset_filename(&checksum));
         if asset_path.exists() {
             return Ok(());
         }
 
-        let source_path = Self::resolve_source_path(workspace, &file_addition.asset_uri).map_err(
-            |err| match err {
-                FileAdditionError::FileReadError(err) => FileStoreError::IoError(err),
+        asset_uri
+            .stage_asset_copy(workspace, Some(checksum))
+            .map(|_| ())
+            .map_err(|error| match error {
+                FileAdditionError::ConfigError(error) => FileStoreError::ConfigError(error),
+                FileAdditionError::FileReadError(error) => FileStoreError::IoError(error),
                 other => FileStoreError::IoError(io::Error::other(other)),
-            },
-        )?;
-        if source_path == asset_path {
-            return Ok(());
-        }
-        OpenDalLocation::from_workspace_path(workspace, &source_path)
-            .map_err(opendal_file_store_error)?
-            .copy_to_local_path(workspace, &asset_path)
-            .map_err(FileStoreError::IoError)?;
-        Ok(())
+            })
     }
 }
 
@@ -1472,7 +1398,7 @@ impl AssetUri for RemoteAssetUri {
         OpenDalLocation::from_remote_uri(&self.asset_uri)?.reader()
     }
 
-    fn checksum(
+    fn prepare_asset(
         &self,
         _workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
@@ -1486,14 +1412,6 @@ impl AssetUri for RemoteAssetUri {
         _checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError> {
         Ok(self.asset_uri.clone())
-    }
-
-    fn ensure_asset(
-        &self,
-        _workspace: &Workspace,
-        _checksum: &Sha256Hash,
-    ) -> Result<(), FileAdditionError> {
-        Ok(())
     }
 
     fn store_file(
@@ -1526,7 +1444,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        history::dolt::commit_all, operations::calculate_file_checksum, test_helpers::setup_gen,
+        history::dolt::commit_all,
+        operations::{calculate_file_checksum, calculate_reader_checksum},
+        test_helpers::setup_gen,
         traits::Query,
     };
 
@@ -2446,7 +2366,10 @@ mod tests {
         let context = setup_gen();
         let uri = format!("http://{addr}/asset.fa");
         let asset_uri = RemoteAssetUri::new(&uri);
-        assert_eq!(asset_uri.checksum(context.workspace(), None).unwrap(), None);
+        assert_eq!(
+            asset_uri.prepare_asset(context.workspace(), None).unwrap(),
+            None
+        );
         let mut reader = asset_uri.reader(context.workspace()).unwrap();
         let checksum_handle = reader.checksum_handle();
         let mut contents = String::new();

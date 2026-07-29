@@ -891,7 +891,7 @@ mod tests {
         search_branch_names, set_commit_author_email, set_commit_author_name, status_rows,
     };
     use crate::{
-        annotations::add_annotation_file,
+        annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         assets::{AssetRef, AssetRole, OperationAsset, OperationKind},
         collection::Collection,
         db,
@@ -1644,6 +1644,7 @@ mod tests {
             None,
             Some("fixture-track"),
             Some("annotation diff contract"),
+            AnnotationFileChecksumOverrides::default(),
         )
         .expect("should commit annotation-file asset refs");
 

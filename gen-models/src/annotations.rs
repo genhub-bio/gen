@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use gen_core::{
-    DoltHashId, HashId, NodeIntervalBlock, calculate_hash,
+    DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, calculate_hash,
     config::Workspace,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -742,6 +742,15 @@ pub fn add_annotation(
     ))
 }
 
+/// Optional content checksums collected while annotation assets were already being streamed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AnnotationFileChecksumOverrides {
+    /// Checksum of the annotation file.
+    pub annotation: Option<Sha256Hash>,
+    /// Checksum of the annotation index.
+    pub index: Option<Sha256Hash>,
+}
+
 pub fn add_annotation_file(
     context: &DbContext,
     path: &str,
@@ -749,6 +758,7 @@ pub fn add_annotation_file(
     index: Option<&str>,
     name: Option<&str>,
     message: Option<&str>,
+    checksum_overrides: AnnotationFileChecksumOverrides,
 ) -> Result<DoltHashId, Box<dyn std::error::Error>> {
     let workspace = context.workspace();
     let graph_conn = context.graph().conn();
@@ -764,27 +774,32 @@ pub fn add_annotation_file(
             parse_annotation_file_type(&ext)?
         }
     };
-    let file_addition = FileAddition::prepare(workspace, path, file_type, None)?;
+    let file_addition =
+        FileAddition::prepare(workspace, path, file_type, checksum_overrides.annotation)?;
     let annotation_logical_path =
         OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
-    let prepared_index = if let Some(index_path) =
-        annotation_index_file_path(workspace, path, index)
-    {
-        let index_file_type = FileTypes::infer_from_path(&index_path);
-        let file_addition = FileAddition::prepare(workspace, &index_path, index_file_type, None)?;
-        let logical_path = OperationFile::storage_file_path(
-            workspace,
-            &index_path,
-            file_addition.checksum.as_ref(),
-        )?;
-        let name = Path::new(&index_path)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .map(str::to_string);
-        Some((file_addition, logical_path, name))
-    } else {
-        None
-    };
+    let prepared_index =
+        if let Some(index_path) = annotation_index_file_path(workspace, path, index) {
+            let index_file_type = FileTypes::infer_from_path(&index_path);
+            let file_addition = FileAddition::prepare(
+                workspace,
+                &index_path,
+                index_file_type,
+                checksum_overrides.index,
+            )?;
+            let logical_path = OperationFile::storage_file_path(
+                workspace,
+                &index_path,
+                file_addition.checksum.as_ref(),
+            )?;
+            let name = Path::new(&index_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string);
+            Some((file_addition, logical_path, name))
+        } else {
+            None
+        };
     let name_value = name.unwrap_or_default();
     let index_file_addition_id = prepared_index
         .as_ref()
@@ -1437,6 +1452,7 @@ mod tests {
             None,
             Some("track-1"),
             None,
+            AnnotationFileChecksumOverrides::default(),
         )
         .unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
@@ -1478,6 +1494,7 @@ mod tests {
             None,
             Some("track-1"),
             None,
+            AnnotationFileChecksumOverrides::default(),
         )
         .unwrap_err();
         let op_err = err
@@ -1517,6 +1534,7 @@ mod tests {
             Some(index_path.to_str().expect("should encode index path")),
             Some("track-with-index"),
             None,
+            AnnotationFileChecksumOverrides::default(),
         )
         .expect("should create annotation file operation");
 
@@ -1561,6 +1579,7 @@ mod tests {
             Some(&index_uri),
             Some("remote-annotation"),
             None,
+            AnnotationFileChecksumOverrides::default(),
         )
         .expect("should track remote annotation assets");
 
@@ -1581,6 +1600,44 @@ mod tests {
                 .iter()
                 .any(|asset_ref| asset_ref.uri == index_uri)
         );
+    }
+
+    #[test]
+    fn test_add_annotation_file_passes_remote_checksum_overrides() {
+        let context = setup_gen();
+        let annotation_uri = "http://127.0.0.1:1/annotation.gff3";
+        let index_uri = "http://127.0.0.1:1/annotation.gff3.csi";
+        let annotation_checksum = Sha256Hash::convert_str("known annotation contents");
+        let index_checksum = Sha256Hash::convert_str("known index contents");
+
+        add_annotation_file(
+            &context,
+            annotation_uri,
+            None,
+            Some(index_uri),
+            Some("remote-annotation"),
+            None,
+            AnnotationFileChecksumOverrides {
+                annotation: Some(annotation_checksum),
+                index: Some(index_checksum),
+            },
+        )
+        .expect("should track checksummed remote assets without reading them");
+
+        let asset_refs = AssetRef::all(context.graph().conn());
+        assert_eq!(asset_refs.len(), 2);
+        let annotation = asset_refs
+            .iter()
+            .find(|asset_ref| asset_ref.role == AssetRole::Annotation)
+            .expect("should track annotation asset");
+        let index = asset_refs
+            .iter()
+            .find(|asset_ref| asset_ref.role == AssetRole::AnnotationIndex)
+            .expect("should track annotation index");
+        assert_eq!(annotation.uri, annotation_uri);
+        assert_eq!(annotation.checksum, Some(annotation_checksum));
+        assert_eq!(index.uri, index_uri);
+        assert_eq!(index.checksum, Some(index_checksum));
     }
 
     #[test]
@@ -1610,6 +1667,7 @@ mod tests {
             Some(index_path),
             None,
             None,
+            AnnotationFileChecksumOverrides::default(),
         )
         .expect("should create annotation file operation");
 

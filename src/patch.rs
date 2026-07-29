@@ -77,6 +77,9 @@ impl PatchFile {
         file: OperationFileInfo,
     ) -> Result<Self, CreatePatchError> {
         let Some(checksum) = file.checksum else {
+            if LocalAssetUri::is_file_uri(&file.asset_uri) {
+                return Err(CreatePatchError::MissingAssetChecksum(file.id));
+            }
             return Ok(Self {
                 archive_path: String::new(),
                 file,
@@ -679,11 +682,11 @@ mod tests {
 
     use gen_core::BranchName;
     use gen_models::{
-        annotations::add_annotation_file,
+        annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         assets::{AssetRef, AssetRole, OperationAsset, OperationKind, OperationLog},
         collection::Collection,
         history::dolt::DoltHistoryStore,
-        operations::{add_files_operation, commit_operation_summary},
+        operations::{OperationFile, add_files_operation, commit_operation_summary},
         traits::Query,
     };
     use tempfile::Builder;
@@ -700,7 +703,7 @@ mod tests {
 
         let add_file_commit_hash = add_files_operation(
             context,
-            &[fasta_path.to_string_lossy().to_string()],
+            &[OperationFile::new(fasta_path.to_string_lossy())],
             Some("track fasta fixture"),
         )
         .expect("should commit add-file fixture");
@@ -713,6 +716,7 @@ mod tests {
             None,
             Some("fixture-track"),
             Some("track annotation fixture"),
+            AnnotationFileChecksumOverrides::default(),
         )
         .expect("should commit annotation fixture");
         let annotation_operation = current_history_operation_hash(context);
@@ -1098,7 +1102,7 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let _op_1 = add_files_operation(
             &context,
-            &[fasta_path.to_string_lossy().to_string()],
+            &[OperationFile::new(fasta_path.to_string_lossy())],
             Some("track fasta fixture"),
         )
         .expect("should commit main branch fixture");
@@ -1125,6 +1129,7 @@ mod tests {
             None,
             Some("branch-track"),
             Some("track branch annotation"),
+            AnnotationFileChecksumOverrides::default(),
         )
         .expect("should commit branch annotation");
         let op_2 = current_history_operation_hash(&context);
@@ -1352,7 +1357,7 @@ mod tests {
 
         let operation_hash = add_files_operation(
             &source_context,
-            &[external_file.path().to_string_lossy().to_string()],
+            &[OperationFile::new(external_file.path().to_string_lossy())],
             Some("track external fasta"),
         )
         .expect("should commit external fasta");
@@ -1401,6 +1406,53 @@ mod tests {
 
         assert_eq!(patch_file.file, operation_file);
         assert_eq!(patch_file.archive_path, "");
+    }
+
+    #[test]
+    fn test_create_patch_rejects_checksumless_local_asset() {
+        let source_context = setup_gen_on_disk();
+        let graph_conn = source_context.graph().conn();
+        let operation_log = OperationLog {
+            id: HashId::convert_str("checksumless-local-operation"),
+            operation_kind: OperationKind::AddFile,
+            command: "track checksumless local file".to_string(),
+            created_on: 1,
+        };
+        let local_asset = AssetRef {
+            id: HashId::convert_str("checksumless-local-patch-asset"),
+            uri: "file://inputs/reference.fa".to_string(),
+            file_type: FileTypes::Fasta.as_str().to_string(),
+            checksum: None,
+            size: None,
+            role: AssetRole::Input,
+            logical_path: Some("inputs/reference.fa".to_string()),
+            name: Some("reference.fa".to_string()),
+            created_on: 1,
+        };
+        OperationLog::create(graph_conn, &operation_log).expect("should create operation log");
+        AssetRef::create(graph_conn, &local_asset).expect("should create local asset");
+        OperationAsset::create(
+            graph_conn,
+            &OperationAsset {
+                log_id: operation_log.id,
+                asset_ref_id: local_asset.id,
+                role: AssetRole::Input,
+            },
+        )
+        .expect("should link local asset");
+        let operation_hash = DoltHistoryStore::new(graph_conn)
+            .commit_all("track checksumless local file")
+            .expect("should commit local asset");
+
+        let mut patch_stream = Cursor::new(Vec::new());
+        let error = create_patch(&source_context, &[operation_hash], &mut patch_stream)
+            .expect_err("checksumless local patch asset should be rejected");
+
+        assert!(matches!(
+            error,
+            CreatePatchError::MissingAssetChecksum(id)
+                if id == local_asset.id
+        ));
     }
 
     #[test]

@@ -30,7 +30,7 @@ use gen_annotations::translate;
 use gen_core::{BranchName, CommitRef, config::Workspace, range::Range, region::Region};
 use gen_diff::operations::collect_operation_diff;
 use gen_models::{
-    annotations::{add_annotation, add_annotation_file},
+    annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
     block_group::BlockGroup,
     collection::Collection,
     db::{ConfigConnection, DbContext, GraphConnection},
@@ -39,7 +39,7 @@ use gen_models::{
         HistoryStore,
         dolt::{DoltHistoryStore, branch_rows},
     },
-    operations::{Defaults, RemoteBranch, add_files_operation},
+    operations::{Defaults, OperationFile, RemoteBranch, add_files_operation},
     reference_alias::ReferenceAlias,
     sample::Sample,
     traits::Query,
@@ -660,12 +660,18 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 index.as_deref(),
                 name.as_deref(),
                 message.as_deref(),
+                AnnotationFileChecksumOverrides::default(),
             )?;
             println!("Annotation file added in operation {commit_hash}");
             Ok(())
         }
         Some(Commands::AddFile { files, message }) => {
-            let commit_hash = add_files_operation(&db_context, &files, message.as_deref())?;
+            let operation_files = files
+                .into_iter()
+                .map(OperationFile::new)
+                .collect::<Vec<_>>();
+            let commit_hash =
+                add_files_operation(&db_context, &operation_files, message.as_deref())?;
             println!("Files added in operation {commit_hash}");
             Ok(())
         }

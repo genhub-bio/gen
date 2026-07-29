@@ -11,7 +11,7 @@ pub struct AnnotationAssetEntry {
     pub id: gen_core::HashId,
     pub asset_uri: String,
     pub file_type: FileTypes,
-    pub checksum: gen_core::Sha256Hash,
+    pub checksum: Option<gen_core::Sha256Hash>,
 }
 
 impl AnnotationAssetEntry {
@@ -21,8 +21,10 @@ impl AnnotationAssetEntry {
             .unwrap_or(&self.asset_uri)
     }
 
-    pub fn hashed_filename(&self) -> String {
-        <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(&self.checksum)
+    pub fn hashed_filename(&self) -> Option<String> {
+        self.checksum
+            .as_ref()
+            .map(|checksum| <dyn AssetUri>::from_uri(&self.asset_uri).hashed_filename(checksum))
     }
 }
 
@@ -34,13 +36,13 @@ pub struct AnnotationFileEntry {
     pub display_name: String,
 }
 
-fn asset_entry_from_ref(asset_ref: &AssetRef) -> Option<AnnotationAssetEntry> {
-    Some(AnnotationAssetEntry {
+fn asset_entry_from_ref(asset_ref: &AssetRef) -> AnnotationAssetEntry {
+    AnnotationAssetEntry {
         id: asset_ref.id,
         asset_uri: asset_ref.uri.clone(),
         file_type: FileTypes::from_storage_tag(&asset_ref.file_type),
-        checksum: asset_ref.checksum?,
-    })
+        checksum: asset_ref.checksum,
+    }
 }
 
 pub fn load_annotation_file_entries(
@@ -52,13 +54,8 @@ pub fn load_annotation_file_entries(
     let mut entries = Vec::with_capacity(annotation_files.len());
     for annotation_file in annotation_files {
         let asset_ref = &annotation_file.annotation;
-        let Some(file_addition) = asset_entry_from_ref(asset_ref) else {
-            continue;
-        };
-        let index_file_addition = annotation_file
-            .index
-            .as_ref()
-            .and_then(asset_entry_from_ref);
+        let file_addition = asset_entry_from_ref(asset_ref);
+        let index_file_addition = annotation_file.index.as_ref().map(asset_entry_from_ref);
         let name = asset_ref.name.clone();
         let display_name = name.clone().unwrap_or_else(|| {
             FsPath::new(file_addition.file_path())
@@ -80,7 +77,7 @@ pub fn load_annotation_file_entries(
 mod tests {
     use std::path::PathBuf;
 
-    use gen_models::annotations::add_annotation_file;
+    use gen_models::annotations::{AnnotationFileChecksumOverrides, add_annotation_file};
 
     use super::load_annotation_file_entries;
     use crate::test_helpers::setup_gen_on_disk;
@@ -97,6 +94,7 @@ mod tests {
             None,
             Some("fixture-track"),
             Some("add-annotation"),
+            AnnotationFileChecksumOverrides::default(),
         )
         .expect("should create annotation file operation");
 
@@ -109,5 +107,34 @@ mod tests {
             gen_models::file_types::FileTypes::Gff3
         );
         assert!(entries[0].index_file_addition.is_none());
+    }
+
+    #[test]
+    fn test_loads_checksumless_remote_annotation_and_index_entries() {
+        let context = setup_gen_on_disk();
+        let annotation_uri = "https://example.com/annotations/genes.gff3";
+        let index_uri = "https://example.com/annotations/genes.gff3.tbi";
+
+        add_annotation_file(
+            &context,
+            annotation_uri,
+            None,
+            Some(index_uri),
+            Some("remote-track"),
+            Some("add remote annotation"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should create remote annotation file operation");
+
+        let entries = load_annotation_file_entries(context.graph().conn(), None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_addition.asset_uri, annotation_uri);
+        assert_eq!(entries[0].file_addition.checksum, None);
+        let index = entries[0]
+            .index_file_addition
+            .as_ref()
+            .expect("remote index should remain visible");
+        assert_eq!(index.asset_uri, index_uri);
+        assert_eq!(index.checksum, None);
     }
 }
