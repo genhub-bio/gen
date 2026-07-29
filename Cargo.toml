@@ -39,7 +39,6 @@ gen-core = { path = "gen-core", version = "0.2.1" }
 gen-diff = { path = "gen-diff", version = "0.2.1" }
 gen-models = { path = "gen-models", version = "0.2.1" }
 gen-graph = { path = "gen-graph", version = "0.2.1" }
-gen-tui = { path = "gen-tui", version = "0.2.1" }
 gen-annotations = { path = "gen-annotations", version = "0.2.1" }
 gen-capnp-schemas = { path = "gen-capnp-schemas", version = "0.2.1" }
 clap = { version = "4.5.32", features = ["derive"] }
@@ -49,7 +48,7 @@ fallible-streaming-iterator = "0.1.9"
 include_dir = "0.7.4"
 intervaltree = "0.2.7"
 itertools = "0.14.0"
-noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "fasta", "gff", "gtf", "vcf"] }
+noodles = { version = "0.101.0", features = ["bed", "bgzf", "core", "fasta", "gff", "gtf", "tabix", "vcf"] }
 petgraph = "0.6.5"
 rusqlite = { package = "rusqdoltlite", version = "0.40.14", features = ["bundled", "array", "limits", "fallible_uint", "backup"] }
 rusqlite_migration = { package = "rusqdoltlite_migration", version = "2.6.4" , features = ["from-directory"]}
@@ -64,18 +63,11 @@ gb-io = "0.9.0"
 thiserror = "2.0.12"
 indicatif = "0.18.3"
 html-escape = "0.2.13"
-ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
-crossterm = "0.29.0"
 log = "0.4.26"
 env_logger = "0.11.7"
-rat-text = "3.0.3"
-rat-cursor = "2.0.0"
-tui-widget-list = "0.15.0"
 url-parse = "1.0.10"
 url = "2.5.0"
 once_cell = "1.21.3"
-webbrowser = "1.0.5"
-reqwest = { version = "0.12.23", default-features = false,features = ["blocking", "json", "multipart", "stream", "rustls-tls"] }
 rand = "0.10.1"
 base64 = "0.22.1"
 getrandom = "0.3.3"
@@ -89,6 +81,30 @@ zip = "2.4.2"
 tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["registry"], optional = true }
 pprof = { version = "0.15.0", optional = true }
+# Used by src/views/emscripten_input.rs for a `select(2)`-based bounded-wait stdin poll on
+# emscripten (where crossterm's `events` feature is unavailable, see below); the parsing logic
+# in that module is plain and unit-tested natively too, hence a plain (non-target-gated) dep.
+libc = "0.2"
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+gen-tui = { path = "gen-tui", version = "0.2.1" }
+crossterm = "0.29.0"
+webbrowser = "1.0.5"
+reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "json", "multipart", "stream", "rustls-tls"] }
+ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
+rat-text = "3.0.3"
+rat-cursor = "2.0.0"
+tui-widget-list = "0.15.0"
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+gen-tui = { path = "gen-tui", version = "0.2.1", default-features = false }
+# `events` (keyboard/mouse reading) needs mio, unavailable on wasm; `terminal::size()`
+# and friends don't need it, and work under cockle's ioctl(TIOCGWINSZ) emulation.
+crossterm = { version = "0.29.0", default-features = false, features = ["windows"] }
+# ratatui's default "crossterm" feature pulls the full crossterm crate (mio again);
+# gen-tui already renders without a live terminal backend on this target.
+ratatui = { version = "0.30.0", default-features = false, features = ["unstable-rendered-line-info", "std", "underline-color", "all-widgets", "macros", "layout-cache"] }
+tui-widget-list = "0.15.0"
 
 [dev-dependencies]
 cargo-llvm-cov = "0.8.5"
@@ -102,3 +118,8 @@ strip = "symbols"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[patch.crates-io]
+# Includes fixes to make the emscripten build work, plus the emscripten Fetch
+# HTTP transport for the DoltLite remote client (patches/0002 on the fork).
+rusqdoltlite = { git = "https://github.com/bobvh/rusqdoltlite", rev = "91dc809018144a57a7ff942af82733e7ca689eb7" }
