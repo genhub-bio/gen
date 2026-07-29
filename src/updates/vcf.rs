@@ -251,7 +251,7 @@ fn prepare_vcf_entry(
         node_id,
         has_ref,
     )?;
-    prepare_path_update_region(conn, &mut change.region)?;
+    change.region = prepare_path_update_region(conn, &change.region)?;
     Ok(VcfEntry {
         sample_name: sample_name.to_string(),
         change,

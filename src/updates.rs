@@ -4,8 +4,13 @@ use gen_models::{
     block_group::{BlockGroup, BlockGroupChange},
     block_group_edge::BlockGroupEdge,
     db::GraphConnection,
-    errors::BlockGroupError,
+    edge::Edge,
+    errors::{
+        BlockGroupError, NodeError, PathError, QueryError, QueryError::ResultsNotFound,
+        SampleError, SequenceError,
+    },
     path::Path,
+    path_edge::PathEdge,
     region::{
         GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind, resolve_accession,
         resolve_annotation, resolve_path,
@@ -154,13 +159,14 @@ pub(crate) struct SequenceUpdate<'a> {
 
 pub(crate) fn prepare_path_update_region(
     conn: &GraphConnection,
-    region: &mut ResolvedGenRegion,
-) -> Result<(), BlockGroupError> {
+    region: &ResolvedGenRegion,
+) -> Result<ResolvedGenRegion, BlockGroupError> {
+    let mut prepared_region = region.clone();
     if region.kind != ResolvedRegionKind::Path
         || region.start <= 0
         || region.end >= region.feature_length
     {
-        return Ok(());
+        return Ok(prepared_region);
     }
     let path = region
         .path
@@ -187,9 +193,9 @@ pub(crate) fn prepare_path_update_region(
     let ends_at_node_boundary =
         region.end - end_block.start + end_block.sequence_start == end_block.sequence_end;
     if !starts_at_node_boundary && !ends_at_node_boundary {
-        return Ok(());
+        return Ok(prepared_region);
     }
-    region.start_anchors = Some(vec![GraphNodePosition {
+    prepared_region.start_anchors = Some(vec![GraphNodePosition {
         graph_node: GraphNode {
             node_id: start_block.node_id,
             sequence_start: start_block.sequence_start,
@@ -197,7 +203,7 @@ pub(crate) fn prepare_path_update_region(
         },
         offset: region.start - start_block.start,
     }]);
-    region.end_anchors = Some(vec![GraphNodePosition {
+    prepared_region.end_anchors = Some(vec![GraphNodePosition {
         graph_node: GraphNode {
             node_id: end_block.node_id,
             sequence_start: end_block.sequence_start,
@@ -205,7 +211,7 @@ pub(crate) fn prepare_path_update_region(
         },
         offset: region.end - end_block.start,
     }]);
-    Ok(())
+    Ok(prepared_region)
 }
 
 fn reference_path_update_edges(
@@ -213,18 +219,18 @@ fn reference_path_update_edges(
     node_id: HashId,
     region: &ResolvedGenRegion,
     path: &Path,
-) -> Result<(gen_models::edge::Edge, gen_models::edge::Edge), gen_models::errors::QueryError> {
-    let incoming_edges = gen_models::edge::Edge::query(
+) -> Result<(Edge, Edge), QueryError> {
+    let incoming_edges = Edge::query(
         conn,
         "select * from edges where target_node_id = ?1",
         rusqlite::params![node_id],
     );
-    let outgoing_edges = gen_models::edge::Edge::query(
+    let outgoing_edges = Edge::query(
         conn,
         "select * from edges where source_node_id = ?1",
         rusqlite::params![node_id],
     );
-    let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id, None);
+    let path_edges = PathEdge::edges_for_path(conn, &path.id, None);
     let incoming_edge = match &region.start_anchors {
         Some(anchors) => path_edges
             .iter()
@@ -245,7 +251,7 @@ fn reference_path_update_edges(
         None => None,
     }
     .ok_or_else(|| {
-        gen_models::errors::QueryError::ResultsNotFound(format!(
+        ResultsNotFound(format!(
             "reference-path edge entering update node {node_id}"
         ))
     })?;
@@ -268,11 +274,7 @@ fn reference_path_update_edges(
         None if outgoing_edges.len() == 1 => outgoing_edges.first(),
         None => None,
     }
-    .ok_or_else(|| {
-        gen_models::errors::QueryError::ResultsNotFound(format!(
-            "reference-path edge leaving update node {node_id}"
-        ))
-    })?;
+    .ok_or_else(|| ResultsNotFound(format!("reference-path edge leaving update node {node_id}")))?;
     Ok((incoming_edge.clone(), outgoing_edge.clone()))
 }
 
@@ -280,10 +282,10 @@ fn update_reference_path(
     conn: &GraphConnection,
     path: &Path,
     region: &ResolvedGenRegion,
-    edge_to_new_node: &gen_models::edge::Edge,
-    edge_from_new_node: &gen_models::edge::Edge,
-) -> Result<(), gen_models::errors::PathError> {
-    let path_edges = gen_models::path_edge::PathEdge::edges_for_path(conn, &path.id, None);
+    edge_to_new_node: &Edge,
+    edge_from_new_node: &Edge,
+) -> Result<(), PathError> {
+    let path_edges = PathEdge::edges_for_path(conn, &path.id, None);
     let boundary_indices = region
         .start_anchors
         .as_ref()
@@ -333,12 +335,12 @@ pub(crate) fn apply_sequence_updates<E>(
     sequences: impl IntoIterator<Item = String>,
 ) -> Result<usize, E>
 where
-    E: From<gen_models::errors::BlockGroupError>
-        + From<gen_models::errors::NodeError>
-        + From<gen_models::errors::PathError>
-        + From<gen_models::errors::QueryError>
-        + From<gen_models::errors::SampleError>
-        + From<gen_models::errors::SequenceError>
+    E: From<BlockGroupError>
+        + From<NodeError>
+        + From<PathError>
+        + From<QueryError>
+        + From<SampleError>
+        + From<SequenceError>
         + From<GenRegionError>,
 {
     Sample::get_or_create_child(
@@ -415,9 +417,9 @@ where
                 path_end: update.region.end,
                 strand: Strand::Forward,
             };
-            let mut target_region =
+            let target_region =
                 target_update_region(conn, update.region, target_block_group.id, path.as_ref())?;
-            prepare_path_update_region(conn, &mut target_region)?;
+            let target_region = prepare_path_update_region(conn, &target_region)?;
             let reference_region = target_region.clone();
             insert_update_change(conn, target_region, InsertChangeData::new(block))?;
 
