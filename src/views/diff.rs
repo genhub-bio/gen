@@ -286,9 +286,8 @@ pub fn view_diff_graph(
             render_status_bar(frame, areas[1], "*←→↑↓* pan | *+/-* zoom | *q/esc* quit");
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
+        wait_for_event(std::time::Duration::from_millis(100))?;
+        if let Some(Event::Key(key)) = poll_immediate_event()? {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
                 break;
             }
