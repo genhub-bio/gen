@@ -501,6 +501,22 @@ pub fn branch_rows(conn: &GraphConnection) -> SqlResult<Vec<DoltBranchRow>> {
     rows.collect()
 }
 
+/// Searches materialized branch names, ranking exact and prefix matches first.
+pub fn search_branch_names(conn: &GraphConnection, search_term: &str) -> SqlResult<Vec<String>> {
+    let zero_hash = "0000000000000000000000000000000000000000";
+    let mut statement = conn.prepare(
+        "SELECT name FROM dolt_branches \
+         WHERE hash <> ?1 AND LOWER(name) LIKE '%' || LOWER(?2) || '%' \
+         ORDER BY CASE \
+           WHEN LOWER(name) = LOWER(?2) THEN 0 \
+           WHEN LOWER(name) LIKE LOWER(?2) || '%' THEN 1 \
+           ELSE 2 \
+         END, LOWER(name), name",
+    )?;
+    let rows = statement.query_map([zero_hash, search_term], |row| row.get(0))?;
+    rows.collect()
+}
+
 pub fn branch_exists(conn: &GraphConnection, branch_name: &str) -> SqlResult<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM dolt_branches WHERE name = ?1)",
@@ -872,7 +888,7 @@ mod tests {
         checkout, commit_all, commit_staged_all, connect_branch, create_branch, diff_row_count,
         hash_of, is_current_branch_dirty, log_entries, log_entries_for_hashes,
         log_entries_for_revision, merge, merge_base, remote_rows, remove_remote, reset_hard,
-        set_commit_author_email, set_commit_author_name, status_rows,
+        search_branch_names, set_commit_author_email, set_commit_author_name, status_rows,
     };
     use crate::{
         annotations::add_annotation_file,
@@ -953,6 +969,18 @@ mod tests {
             branch_hash(&conn, "missing").expect("missing branch should be optional"),
             None
         );
+    }
+
+    #[test]
+    fn search_branch_names_ranks_exact_then_prefix_matches() {
+        let conn = get_connection(None).expect("should create graph database");
+        for name in ["feature", "feature-next", "my-feature"] {
+            create_branch(&conn, name).expect("should create branch");
+        }
+
+        let branches = search_branch_names(&conn, "feature").expect("should search branches");
+
+        assert_eq!(branches, vec!["feature", "feature-next", "my-feature"]);
     }
 
     #[test]

@@ -830,7 +830,7 @@ impl BlockGroup {
             let edge_ids = Edge::bulk_create(conn, &unique_new_edges);
             let edge_id_by_data = unique_new_edges
                 .into_iter()
-                .zip(edge_ids.into_iter())
+                .zip(edge_ids)
                 .collect::<HashMap<_, _>>();
             let mut new_block_group_edges = new_augmented_edges
                 .iter()

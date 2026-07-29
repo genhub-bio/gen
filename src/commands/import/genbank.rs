@@ -45,7 +45,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Genbank import called");
 
     let context = cli_context.context;
-    let operation_conn = context.config().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
@@ -53,7 +53,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
     let mut reader: Box<dyn std::io::Read> = if cmd.path.ends_with(".gz") {
         let file = File::open(cmd.path.clone()).unwrap();
         Box::new(flate2::read::GzDecoder::new(file))
@@ -90,17 +90,20 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         },
         options,
     ) {
-        Ok(operation_summary) => match commit_operation(context, &operation_summary) {
-            Ok(_) => {
-                println!("GenBank imported.");
-                Ok(())
+        Ok(operation_summary) => {
+            conn.execute("END TRANSACTION", [])?;
+            match commit_operation(context, &operation_summary) {
+                Ok(_) => {
+                    println!("GenBank imported.");
+                    Ok(())
+                }
+                Err(OperationError::NoChanges) => {
+                    println!("GenBank already exists.");
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
             }
-            Err(OperationError::NoChanges) => {
-                println!("GenBank already exists.");
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        },
+        }
         Err(err) => {
             conn.execute("ROLLBACK TRANSACTION;", [])?;
             println!("Import failed: {err:?}");

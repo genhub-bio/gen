@@ -28,7 +28,7 @@ pub struct Command {
 pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("GFA export called");
     let context = cli_context.context;
-    let operation_conn = context.config().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
     // initialize the selected database if needed.
@@ -38,7 +38,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
     export_gfa(
         conn,
         name,

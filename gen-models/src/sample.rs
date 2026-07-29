@@ -320,14 +320,22 @@ impl Sample {
         )
     }
 
-    pub fn search_name(conn: &GraphConnection, name: &str) -> Vec<Sample> {
-        Sample::query(
-            conn,
-            "select * from samples
-             where instr(lower(name), lower(?1)) > 0
+    pub fn search_name(
+        conn: &GraphConnection,
+        name: &str,
+        history_ref: Option<&str>,
+    ) -> Vec<Sample> {
+        let query = format!(
+            "select * from {}
+             where instr(lower(name), lower(:name)) > 0
              order by name;",
-            rusqlite::params!(name),
-        )
+            Sample::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":name", &name)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        Sample::query(conn, &query, &params[..])
     }
 }
 
@@ -339,6 +347,7 @@ mod tests {
     use crate::{
         collection::Collection,
         errors::SampleError,
+        history::dolt::commit_staged_all,
         test_helpers::{create_bg, get_connection},
     };
 
@@ -402,12 +411,43 @@ mod tests {
             .unwrap();
         }
 
-        let matches = Sample::search_name(conn, "FoO")
+        let matches = Sample::search_name(conn, "FoO", None)
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
 
         assert_eq!(matches, vec!["BarFooBaz", "QuxFood", "foo"]);
+    }
+
+    #[test]
+    fn test_search_name_returns_matches_at_history_ref() {
+        let conn = &get_connection(None).unwrap();
+        Sample::create(
+            conn,
+            NewSample {
+                name: "historical-foo",
+                is_reference: false,
+            },
+        )
+        .expect("should create historical sample");
+        let historical_commit =
+            commit_staged_all(conn, "add historical sample").expect("should commit sample");
+        let historical_ref = historical_commit.to_string();
+        Sample::create(
+            conn,
+            NewSample {
+                name: "current-foo",
+                is_reference: false,
+            },
+        )
+        .expect("should create current sample");
+
+        let matches = Sample::search_name(conn, "foo", Some(&historical_ref))
+            .into_iter()
+            .map(|sample| sample.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(matches, vec!["historical-foo"]);
     }
 
     #[test]

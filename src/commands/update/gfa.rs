@@ -32,7 +32,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with GFA called");
 
     let context = cli_context.context;
-    let operation_conn = context.config().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
     conn.execute("BEGIN TRANSACTION", [])?;
@@ -40,7 +40,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
 
     match update_with_gfa(
         context,
@@ -49,10 +49,13 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.new_sample,
         &cmd.path,
     ) {
-        Ok(operation_summary) => match commit_operation(context, &operation_summary) {
-            Ok(_) | Err(OperationError::NoChanges) => {}
-            Err(e) => return Err(e.into()),
-        },
+        Ok(operation_summary) => {
+            conn.execute("END TRANSACTION", [])?;
+            match commit_operation(context, &operation_summary) {
+                Ok(_) | Err(OperationError::NoChanges) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         Err(e) => {
             conn.execute("ROLLBACK TRANSACTION;", [])?;
             return Err(e.into());

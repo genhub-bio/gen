@@ -62,8 +62,8 @@ repo <- Repository(NULL)
 ```
 
 `Repository()` discovers the `.gen/` directory from the current working
-directory (or from the `path` argument) and opens the graph and
-operations databases. All subsequent operations go through this object.
+directory (or from the `path` argument) and opens the graph and config
+databases. All subsequent operations go through this object.
 
 ## Import an annotated vector
 

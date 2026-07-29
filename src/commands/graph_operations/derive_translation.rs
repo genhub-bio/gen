@@ -28,12 +28,12 @@ pub fn derive_translation_operation(
     db_context: &DbContext,
     args: DeriveTranslationArgs,
 ) -> Result<(), Error> {
-    let operation_conn = db_context.config().conn();
+    let config_conn = db_context.config().conn();
     let graph_conn = db_context.graph().conn();
 
     let collection_name = match args.collection {
         Some(c) => c,
-        None => get_default_collection(operation_conn),
+        None => get_default_collection(config_conn),
     };
 
     let resolved_strand = match args.strand.as_deref() {
@@ -102,6 +102,7 @@ pub fn derive_translation_operation(
             protein_bg.name
         ),
     );
+    graph_conn.execute("END TRANSACTION", [])?;
     match commit_operation(db_context, &operation_summary) {
         Ok(_) => {}
         Err(OperationError::NoChanges) => {

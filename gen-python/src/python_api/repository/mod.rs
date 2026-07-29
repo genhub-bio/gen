@@ -204,8 +204,8 @@ impl PyRepository {
         };
 
         let gen_dir = workspace.ensure_gen_dir();
-        let ops_path = gen_dir.join("gen.db");
-        let ops_conn = get_config_connection(Some(ops_path))
+        let config_path = gen_dir.join("gen.db");
+        let config_conn = get_config_connection(Some(config_path))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let db_path = gen_dir.join("default.db");
@@ -218,7 +218,7 @@ impl PyRepository {
         })?;
 
         Ok(PyRepository {
-            context: DbContext::new(workspace, graph_conn, ops_conn)
+            context: DbContext::new(workspace, graph_conn, config_conn)
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
             in_transaction: false,
             pending_operation_summaries: RefCell::new(Vec::new()),
