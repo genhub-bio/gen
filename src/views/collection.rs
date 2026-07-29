@@ -461,11 +461,23 @@ impl CollectionExplorer {
             .find(|entry| entry.id == id)
     }
 
-    /// Force the widget to reload by resetting its state
+    /// Force the widget to reload by resetting its state. Keeps the cursor on the
+    /// currently selected block group if it's still present, instead of jumping to the
+    /// top of the list, since reload is commonly triggered by selecting a block group.
     pub fn force_reload(&self, state: &mut CollectionExplorerState) {
+        let selected_block_group_id = state.selected_block_group_id;
         state.list_state = ListState::default();
-        // Find first selectable item to maintain a valid selection
-        state.list_state.selected = self.find_next_selectable(state, 0);
+        state.list_state.selected = selected_block_group_id
+            .and_then(|id| {
+                self.get_display_items(state)
+                    .iter()
+                    .enumerate()
+                    .find(
+                        |(_, item)| matches!(item, ExplorerItem::BlockGroup { id: item_id, .. } if *item_id == id),
+                    )
+                    .map(|(i, _)| i)
+            })
+            .or_else(|| self.find_next_selectable(state, 0));
     }
 
     /// Find the next selectable item after the given index, wrapping around to the start if needed
