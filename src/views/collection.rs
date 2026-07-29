@@ -3,13 +3,15 @@ use std::{
     fmt,
 };
 
-use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::HashId;
 use gen_models::{
     block_group::BlockGroup, collection::Collection, db::GraphConnection, file_types::FileTypes,
     sample::Sample, sample_lineage::SampleLineage,
 };
-use gen_tui::theme::current_theme;
+use gen_tui::{
+    key_event::{KeyCode, KeyEvent},
+    theme::current_theme,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
