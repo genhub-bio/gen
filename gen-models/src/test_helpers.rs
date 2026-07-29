@@ -14,7 +14,7 @@ use crate::{
     collection::Collection,
     db::{ConfigConnection, DbContext, GraphConnection},
     edge::Edge,
-    migrations::{run_migrations, run_operation_migrations},
+    migrations::{run_config_migrations, run_migrations},
     node::Node,
     path::Path,
     sample::{NewSample, Sample},
@@ -79,7 +79,7 @@ pub fn get_config_connection<'a>(
         conn = Connection::open_in_memory().map_err(ConnectionError::OpenFailed)?;
     }
     rusqlite::vtab::array::load_module(&conn)?;
-    run_operation_migrations(&mut conn);
+    run_config_migrations(&mut conn);
     Ok(ConfigConnection(conn))
 }
 
@@ -88,8 +88,8 @@ pub fn setup_gen() -> DbContext {
     let workspace = Workspace::new(tmp_dir);
     workspace.ensure_gen_dir();
     let graph_conn = get_connection(None).unwrap();
-    let operation_conn = get_config_connection(None).unwrap();
-    DbContext::new(workspace, graph_conn, operation_conn).unwrap()
+    let config_conn = get_config_connection(None).unwrap();
+    DbContext::new(workspace, graph_conn, config_conn).unwrap()
 }
 
 pub fn setup_gen_on_disk() -> DbContext {
@@ -97,8 +97,8 @@ pub fn setup_gen_on_disk() -> DbContext {
     let workspace = Workspace::new(tmp_dir);
     workspace.ensure_gen_dir();
     let graph_conn = get_connection(workspace.graph_db_path().unwrap().to_str().unwrap()).unwrap();
-    let operation_conn = get_config_connection(workspace.gen_db_path().unwrap().to_str()).unwrap();
-    DbContext::new(workspace, graph_conn, operation_conn).unwrap()
+    let config_conn = get_config_connection(workspace.gen_db_path().unwrap().to_str()).unwrap();
+    DbContext::new(workspace, graph_conn, config_conn).unwrap()
 }
 
 pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {

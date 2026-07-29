@@ -46,6 +46,12 @@ These are extremely important details about data models.
 
 - Nodes represent a sequence stored in the Database. A GraphNode represents all or part of a Node. `sequence_start` and `sequence_end` are python-indexed slices of the Sequence a node points at. For example, the sequence "AAATTT", the `GraphNode { ..., sequence_start: 3, sequence_end: 5}` would represent "TT". Thus, `sequence_start` and `sequence_end` are NOT coordinates in graph space. `sequence_end` - `sequence_start` can be used to derive the length of a node however.
 
+## Coding Conventions
+
+- Write comments that explain the workflow intent and non-obvious rationale: what this code enables, who uses it, and why the approach is necessary. Keep them concise; don’t restate the code. For complex, multi-function workflows, explain how these pieces fit together and the overall goal.
+- No banner comments (lines of `---`, `===`, or similar dividers). No double blank lines.
+- Do not have an Arguments and Errors section for docstrings unless explicitly requested. It's redundant when parameter names are clear and typed.
+
 ## Rust Conventions
 
 - Follow `.rules/rust-coding-style.mdc`. The workspace manifests currently use Rust edition 2024; prefer the manifest when it differs from older rule text.
@@ -59,14 +65,13 @@ These are extremely important details about data models.
 - Use explicit `pub use` re-exports in module roots when shaping public APIs.
 - Use `#[expect(lint, reason = "...")]` rather than `#[allow(...)]`.
 - `expect` messages for `Result` and `Option` should start with `should`.
-- Keep comments sparse and useful. Place comments on their own line above the code they explain.
 - Avoid shorthand identifiers (`bg`, `gn`, `vid`, `ci`, `src`/`tgt`, `nid`, `succ`, `deg`, `rem`, `aa`). Spell out the full word (`block_group`, `graph_node`, `virtual_id`, `chromosome_index`, `source`/`target`, `node_id`, `successor`, `degree`, `remaining`, `amino_acid`) even when it makes a line longer; match the fuller naming already used elsewhere in the same module rather than introducing a new abbreviation.
-- No banner comments (lines of `---`, `===`, or similar dividers). No double blank lines.
+- Put tests at the end of the source file they are testing, unless it's an integration test. Group related tests and fixtures together under mod headings. Do not make test-only code or imports outside of mod tests.
 
 ## Persistence And Migrations
 
 - `gen-models/migrations/core/` stores graph model migrations.
-- `gen-models/migrations/operations/` stores operation tracking migrations.
+- `gen-models/migrations/config/` stores config migrations.
 - During active development, amend the migration where a table or column was introduced unless the task explicitly asks for an additive migration.
 - Keep `up.sql` and `down.sql` paired and reversible when possible.
 - Treat stored graph coordinates, path identifiers, sample names, and collection names as domain data. Preserve existing semantics and naming unless the task is explicitly a schema redesign.

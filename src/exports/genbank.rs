@@ -594,7 +594,7 @@ mod tests {
     fn test_import_then_export_insertion() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/insertion.gb");
@@ -623,7 +623,7 @@ mod tests {
     fn test_import_then_export_replacement() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/deletion_and_insertion.gb");
@@ -652,7 +652,7 @@ mod tests {
     fn test_import_then_export_multiple_operations() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/geneious_genbank/multiple_insertions_deletions.gb");
@@ -681,7 +681,7 @@ mod tests {
     fn test_import_then_export_annotations() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/puc19.gb");
         let file = File::open(&path).unwrap();

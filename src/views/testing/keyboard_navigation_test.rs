@@ -28,7 +28,7 @@ mod tests {
         // Setup environment and database
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         // Load Anderson GFA file as specified by user
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");
@@ -302,7 +302,7 @@ mod tests {
         // Setup environment and database
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         // Use anderson_promoters as specified
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");
@@ -373,7 +373,7 @@ mod tests {
         // Setup environment and database
         let context = setup_gen();
         let conn = context.graph().conn();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         // Use anderson_promoters for boundary testing as requested
         let gfa_path = PathBuf::from("fixtures/anderson_promoters.gfa");

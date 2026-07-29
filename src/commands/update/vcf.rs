@@ -39,7 +39,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     println!("Update with VCF called");
 
     let context = cli_context.context;
-    let operation_conn = context.config().conn();
+    let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
     if cmd.sample.is_none() && cmd.parent_samples.is_empty() {
@@ -53,7 +53,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let name = &cmd
         .name
         .clone()
-        .unwrap_or_else(|| get_default_collection(operation_conn));
+        .unwrap_or_else(|| get_default_collection(config_conn));
 
     match update_with_vcf(
         context,
@@ -65,6 +65,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         cmd.in_place,
     ) {
         Ok((operation_summary, _output_samples)) => {
+            conn.execute("END TRANSACTION", [])?;
             if let Err(err) = commit_operation(context, &operation_summary) {
                 match err {
                     OperationError::NoChanges => {

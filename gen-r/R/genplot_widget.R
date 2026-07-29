@@ -6,6 +6,7 @@
 }
 
 .genplot_widget <- function(frame_json) {
+  # This optional install lets us test R functions without having to install the jupyter widget
   if (!requireNamespace("anyhtmlwidget", quietly = TRUE)) {
     stop(
       "Interactive widget rendering requires the optional 'anyhtmlwidget' package. ",

@@ -93,11 +93,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         branch,
     }) = &cli.command
     {
-        let operation_conn = get_config_connection(Some(workspace.gen_db_path()?))?;
-        let intended_branch = Defaults::get_current_branch(&operation_conn);
+        let config_conn = get_config_connection(Some(workspace.gen_db_path()?))?;
+        let intended_branch = Defaults::get_current_branch(&config_conn);
         let graph_connection =
             get_connection_for_branch(workspace.graph_db_path()?, intended_branch.as_deref())?;
-        let context = DbContext::new(workspace.clone(), graph_connection, operation_conn)?;
+        let context = DbContext::new(workspace.clone(), graph_connection, config_conn)?;
         let history_store = DoltHistoryStore::new(context.graph().conn());
         let (branch_name, history_entries) =
             operations_history_entries(&history_store, branch.as_deref())?;
@@ -126,19 +126,19 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let operation_conn = get_config_connection(Some(workspace.gen_db_path()?))?;
+    let config_conn = get_config_connection(Some(workspace.gen_db_path()?))?;
     if let Some(Commands::Checkout { branch, hash }) = &cli.command {
         let graph_connection = get_raw_connection(workspace.graph_db_path()?)
             .map_err(|error| format!("Failed to open graph for checkout: {error}"))?;
         return r#gen::commands::checkout::execute(
             &graph_connection,
-            &operation_conn,
+            &config_conn,
             branch.as_deref(),
             hash.as_deref(),
         );
     }
     if let Some(Commands::Remote(cmd)) = &cli.command {
-        return handle_remote_command(&operation_conn, cmd);
+        return handle_remote_command(&config_conn, cmd);
     }
     if let Some(Commands::Push {
         remote,
@@ -167,18 +167,18 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
     }) = &cli.command
     {
         if let Some(name) = collection {
-            operation_conn.execute(
+            config_conn.execute(
                 "update defaults set collection_name=?1 where id = 1",
                 (name,),
             )?;
             println!("Default collection set to {name}");
         }
         if let Some(name) = committer_name {
-            Defaults::set_default_committer_name(&operation_conn, name)?;
+            Defaults::set_default_committer_name(&config_conn, name)?;
             println!("Default committer name set to {name}");
         }
         if let Some(email) = committer_email {
-            Defaults::set_default_committer_email(&operation_conn, email)?;
+            Defaults::set_default_committer_email(&config_conn, email)?;
             println!("Default committer email set to {email}");
         }
         return Ok(());
@@ -205,10 +205,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Invalid path encoding")?
         .to_string();
     let db = binding.as_str();
-    let intended_branch = Defaults::get_current_branch(&operation_conn);
+    let intended_branch = Defaults::get_current_branch(&config_conn);
     let graph_connection = get_connection_for_branch(db, intended_branch.as_deref())?;
-    let mut db_context = DbContext::new(workspace.clone(), graph_connection, operation_conn)?;
-    let operation_conn = db_context.config().conn();
+    let mut db_context = DbContext::new(workspace.clone(), graph_connection, config_conn)?;
+    let config_conn = db_context.config().conn();
     let graph_conn = db_context.graph().conn();
     let cli_context = CliContext {
         context: &db_context,
@@ -243,7 +243,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(r#gen::commands::export::execute(&export_cli_context, cmd)?)
         }
         Some(Commands::Derive(cmd)) => Ok(r#gen::commands::derive::execute(&cli_context, cmd)?),
-        Some(Commands::Remote(cmd)) => Ok(handle_remote_command(operation_conn, &cmd)?),
+        Some(Commands::Remote(cmd)) => Ok(handle_remote_command(config_conn, &cmd)?),
         Some(Commands::View {
             graph,
             history_ref,
@@ -255,7 +255,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match collection {
                 Some(collection) => collection,
-                None => get_default_collection(operation_conn)?,
+                None => get_default_collection(config_conn)?,
             });
 
             if !full && let (Some(name), Some(sample_name)) = (graph.as_ref(), sample.as_ref()) {
@@ -286,7 +286,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                 // User requested upgrade to full TUI
                                 view_block_group(
                                     graph_conn,
-                                    operation_conn,
+                                    config_conn,
                                     &workspace,
                                     graph,
                                     sample,
@@ -312,7 +312,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 // Use the full-screen viewer if --full is specified or no graph is provided
                 view_block_group(
                     graph_conn,
-                    operation_conn,
+                    config_conn,
                     &workspace,
                     graph,
                     sample,
@@ -347,7 +347,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match collection {
                 Some(collection) => collection,
-                None => get_default_collection(operation_conn)?,
+                None => get_default_collection(config_conn)?,
             });
 
             if let Some(bed) = bed {
@@ -440,7 +440,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     .clone()
                     .ok_or("Must provide a branch name to checkout.")?;
                 history_store.checkout_branch(&BranchName(branch_name.clone()))?;
-                Defaults::set_current_branch(operation_conn, Some(&branch_name))?;
+                Defaults::set_current_branch(config_conn, Some(&branch_name))?;
             } else if list {
                 let current_branch = history_store.current_branch()?;
                 println!(
@@ -458,7 +458,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                             ""
                         };
                     let remote_display = if branch.remote.is_empty() {
-                        RemoteBranch::get_remote(operation_conn, &branch.name)
+                        RemoteBranch::get_remote(config_conn, &branch.name)
                             .unwrap_or_else(|| "none".to_string())
                     } else {
                         branch.remote.clone()
@@ -485,7 +485,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 RemoteBranch::set_remote_validated(
-                    operation_conn,
+                    config_conn,
                     &current_branch_name.0,
                     remote_to_set,
                 )?;
@@ -586,7 +586,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(operation_conn)?,
+                None => get_default_collection(config_conn)?,
             });
             graph_conn.execute("BEGIN TRANSACTION", [])?;
 
@@ -608,7 +608,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             sample,
             region,
         }) => {
-            let collection_name = get_default_collection(operation_conn)?;
+            let collection_name = get_default_collection(config_conn)?;
             graph_conn.execute("BEGIN TRANSACTION", [])?;
             let operation_summary = match add_annotation(
                 &db_context,
@@ -624,6 +624,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(err);
                 }
             };
+            graph_conn.execute("END TRANSACTION", [])?;
             match commit_operation(&db_context, &operation_summary) {
                 Ok(commit_hash) => {
                     println!("Annotation {name} added in operation {commit_hash}");
@@ -665,7 +666,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = match collection {
                 Some(c) => c,
-                None => get_default_collection(operation_conn)?,
+                None => get_default_collection(config_conn)?,
             };
             let block_groups = match sample {
                 Some(ref s) => Sample::get_block_groups(graph_conn, &collection_name, s, None),
@@ -687,7 +688,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::ClearIndex { collection, sample }) => {
             let collection_name = match collection {
                 Some(c) => c,
-                None => get_default_collection(operation_conn)?,
+                None => get_default_collection(config_conn)?,
             };
             let block_groups = match sample {
                 Some(ref s) => Sample::get_block_groups(graph_conn, &collection_name, s, None),
@@ -777,7 +778,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(operation_conn)?,
+                None => get_default_collection(config_conn)?,
             });
             let block_groups = Sample::get_block_groups(
                 graph_conn,
@@ -801,7 +802,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(operation_conn)?,
+                None => get_default_collection(config_conn)?,
             });
             let block_groups = Sample::get_block_groups(
                 graph_conn,
@@ -858,7 +859,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = &(match name {
                 Some(collection) => collection,
-                None => get_default_collection(operation_conn)?,
+                None => get_default_collection(config_conn)?,
             });
             gfa_sample_diff(
                 graph_conn,

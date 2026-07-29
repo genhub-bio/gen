@@ -72,7 +72,7 @@ impl RepositoryRemote {
             }
         };
         let namespace = repository_segments.0.to_string();
-        let slug = repository_segments.1.trim_end_matches(".git").to_string();
+        let slug = repository_segments.1.to_string();
         if namespace.is_empty() || slug.is_empty() {
             return Err(RemoteClientError::InvalidRepositoryUrl(
                 remote_url.to_string(),

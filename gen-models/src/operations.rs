@@ -796,59 +796,59 @@ mod tests {
         #[test]
         fn test_default_remote_functionality() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Create test remotes
-            Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
-            Remote::create(op_conn, "upstream", "https://upstream.com/repo.gen").unwrap();
+            Remote::create(config_conn, "origin", "https://example.com/repo.gen").unwrap();
+            Remote::create(config_conn, "upstream", "https://upstream.com/repo.gen").unwrap();
 
             // Test getting default remote when none is set
-            assert_eq!(Defaults::get_default_remote(op_conn), None);
-            assert_eq!(Defaults::get_default_remote_url(op_conn), None);
+            assert_eq!(Defaults::get_default_remote(config_conn), None);
+            assert_eq!(Defaults::get_default_remote_url(config_conn), None);
 
             // Test setting default remote
-            Defaults::set_default_remote(op_conn, Some("origin")).unwrap();
+            Defaults::set_default_remote(config_conn, Some("origin")).unwrap();
             assert_eq!(
-                Defaults::get_default_remote(op_conn),
+                Defaults::get_default_remote(config_conn),
                 Some("origin".to_string())
             );
             assert_eq!(
-                Defaults::get_default_remote_url(op_conn),
+                Defaults::get_default_remote_url(config_conn),
                 Some("https://example.com/repo.gen".to_string())
             );
 
             // Test changing default remote
-            Defaults::set_default_remote(op_conn, Some("upstream")).unwrap();
+            Defaults::set_default_remote(config_conn, Some("upstream")).unwrap();
             assert_eq!(
-                Defaults::get_default_remote(op_conn),
+                Defaults::get_default_remote(config_conn),
                 Some("upstream".to_string())
             );
             assert_eq!(
-                Defaults::get_default_remote_url(op_conn),
+                Defaults::get_default_remote_url(config_conn),
                 Some("https://upstream.com/repo.gen".to_string())
             );
 
             // Test clearing default remote
-            Defaults::set_default_remote(op_conn, None).unwrap();
-            assert_eq!(Defaults::get_default_remote(op_conn), None);
-            assert_eq!(Defaults::get_default_remote_url(op_conn), None);
+            Defaults::set_default_remote(config_conn, None).unwrap();
+            assert_eq!(Defaults::get_default_remote(config_conn), None);
+            assert_eq!(Defaults::get_default_remote_url(config_conn), None);
 
             // Test getting URL for non-existent remote (using the compat method to bypass validation)
-            Defaults::set_default_remote_compat(op_conn, Some("nonexistent")).unwrap();
+            Defaults::set_default_remote_compat(config_conn, Some("nonexistent")).unwrap();
             assert_eq!(
-                Defaults::get_default_remote(op_conn),
+                Defaults::get_default_remote(config_conn),
                 Some("nonexistent".to_string())
             );
-            assert_eq!(Defaults::get_default_remote_url(op_conn), None);
+            assert_eq!(Defaults::get_default_remote_url(config_conn), None);
         }
 
         #[test]
         fn test_defaults_get() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             // Test getting defaults record
-            let defaults = Defaults::get(op_conn).unwrap();
+            let defaults = Defaults::get(config_conn).unwrap();
             assert_eq!(defaults.id, 1);
             assert_eq!(defaults.collection_name, None);
             assert_eq!(defaults.remote_name, None);
@@ -857,54 +857,54 @@ mod tests {
             assert_eq!(defaults.default_committer_email, DEFAULT_COMMITTER_EMAIL);
 
             // Set a default remote and test again (using compat method to bypass validation)
-            Defaults::set_default_remote_compat(op_conn, Some("test-remote")).unwrap();
-            let defaults = Defaults::get(op_conn).unwrap();
+            Defaults::set_default_remote_compat(config_conn, Some("test-remote")).unwrap();
+            let defaults = Defaults::get(config_conn).unwrap();
             assert_eq!(defaults.remote_name, Some("test-remote".to_string()));
         }
 
         #[test]
         fn test_current_branch_round_trip() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
-            assert_eq!(Defaults::get_current_branch(op_conn), None);
+            assert_eq!(Defaults::get_current_branch(config_conn), None);
 
-            Defaults::set_current_branch(op_conn, Some("feature")).unwrap();
+            Defaults::set_current_branch(config_conn, Some("feature")).unwrap();
             assert_eq!(
-                Defaults::get_current_branch(op_conn),
+                Defaults::get_current_branch(config_conn),
                 Some("feature".to_string())
             );
 
-            Defaults::set_current_branch(op_conn, None).unwrap();
-            assert_eq!(Defaults::get_current_branch(op_conn), None);
+            Defaults::set_current_branch(config_conn, None).unwrap();
+            assert_eq!(Defaults::get_current_branch(config_conn), None);
         }
 
         #[test]
         fn test_default_committer_round_trip() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             assert_eq!(
-                Defaults::get_default_committer_name(op_conn),
+                Defaults::get_default_committer_name(config_conn),
                 GEN_DEFAULT_COMMITTER_NAME
             );
             assert_eq!(
-                Defaults::get_default_committer_email(op_conn),
+                Defaults::get_default_committer_email(config_conn),
                 DEFAULT_COMMITTER_EMAIL
             );
 
-            Defaults::set_default_committer_name(op_conn, "Test User").unwrap();
-            Defaults::set_default_committer_email(op_conn, "test@example.com").unwrap();
+            Defaults::set_default_committer_name(config_conn, "Test User").unwrap();
+            Defaults::set_default_committer_email(config_conn, "test@example.com").unwrap();
 
             assert_eq!(
-                Defaults::get_default_committer_name(op_conn),
+                Defaults::get_default_committer_name(config_conn),
                 "Test User".to_string()
             );
             assert_eq!(
-                Defaults::get_default_committer_email(op_conn),
+                Defaults::get_default_committer_email(config_conn),
                 "test@example.com".to_string()
             );
-            let defaults = Defaults::get(op_conn).expect("should load defaults");
+            let defaults = Defaults::get(config_conn).expect("should load defaults");
             assert_eq!(defaults.default_committer_name, "Test User");
             assert_eq!(defaults.default_committer_email, "test@example.com");
         }
@@ -952,13 +952,14 @@ mod tests {
         #[test]
         fn test_remote_branch_set_remote_valid() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
-            Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
-            let result = RemoteBranch::set_remote_validated(op_conn, "test_branch", Some("origin"));
+            Remote::create(config_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
+            let result =
+                RemoteBranch::set_remote_validated(config_conn, "test_branch", Some("origin"));
             assert!(result.is_ok());
             assert_eq!(
-                RemoteBranch::get_remote(op_conn, "test_branch"),
+                RemoteBranch::get_remote(config_conn, "test_branch"),
                 Some("origin".to_string())
             );
         }
@@ -966,48 +967,48 @@ mod tests {
         #[test]
         fn test_remote_branch_set_remote_nonexistent() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
             let result =
-                RemoteBranch::set_remote_validated(op_conn, "test_branch", Some("nonexistent"));
+                RemoteBranch::set_remote_validated(config_conn, "test_branch", Some("nonexistent"));
             assert_eq!(
                 result,
                 Err(RemoteError::RemoteNotFound("nonexistent".to_string()))
             );
-            assert_eq!(RemoteBranch::get_remote(op_conn, "test_branch"), None);
+            assert_eq!(RemoteBranch::get_remote(config_conn, "test_branch"), None);
         }
 
         #[test]
         fn test_remote_branch_clear_remote() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
-            Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
-            RemoteBranch::set_remote_validated(op_conn, "test_branch", Some("origin")).unwrap();
+            Remote::create(config_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
+            RemoteBranch::set_remote_validated(config_conn, "test_branch", Some("origin")).unwrap();
             assert_eq!(
-                RemoteBranch::get_remote(op_conn, "test_branch"),
+                RemoteBranch::get_remote(config_conn, "test_branch"),
                 Some("origin".to_string())
             );
-            RemoteBranch::set_remote_validated(op_conn, "test_branch", None).unwrap();
-            assert_eq!(RemoteBranch::get_remote(op_conn, "test_branch"), None);
+            RemoteBranch::set_remote_validated(config_conn, "test_branch", None).unwrap();
+            assert_eq!(RemoteBranch::get_remote(config_conn, "test_branch"), None);
         }
 
         #[test]
         fn test_remote_branch_clears_on_remote_delete() {
             let context = setup_gen();
-            let op_conn = context.config().conn();
+            let config_conn = context.config().conn();
 
-            Remote::create(op_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
-            RemoteBranch::set_remote_validated(op_conn, "test_branch_cascade", Some("origin"))
+            Remote::create(config_conn, "origin", "https://genhub.bio/user/repo.gen").unwrap();
+            RemoteBranch::set_remote_validated(config_conn, "test_branch_cascade", Some("origin"))
                 .unwrap();
             assert_eq!(
-                RemoteBranch::get_remote(op_conn, "test_branch_cascade"),
+                RemoteBranch::get_remote(config_conn, "test_branch_cascade"),
                 Some("origin".to_string())
             );
 
-            Remote::delete(op_conn, "origin").unwrap();
+            Remote::delete(config_conn, "origin").unwrap();
             assert_eq!(
-                RemoteBranch::get_remote(op_conn, "test_branch_cascade"),
+                RemoteBranch::get_remote(config_conn, "test_branch_cascade"),
                 None
             );
         }
@@ -1016,30 +1017,30 @@ mod tests {
     #[test]
     fn test_remote_create() {
         let context = setup_gen();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         // Test successful remote creation
-        let remote = Remote::create(op_conn, "origin", "https://example.com/repo.gen").unwrap();
+        let remote = Remote::create(config_conn, "origin", "https://example.com/repo.gen").unwrap();
         assert_eq!(remote.name, "origin");
         assert_eq!(remote.url, "https://example.com/repo.gen");
 
         // Test duplicate name constraint violation
-        let result = Remote::create(op_conn, "origin", "https://different.com/repo.gen");
+        let result = Remote::create(config_conn, "origin", "https://different.com/repo.gen");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_remote_get_by_name() {
         let context = setup_gen();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         // Test getting non-existent remote
-        let result = Remote::get_by_name_optional(op_conn, "nonexistent");
+        let result = Remote::get_by_name_optional(config_conn, "nonexistent");
         assert!(result.is_none());
 
         // Create a remote and test retrieval
-        Remote::create(op_conn, "upstream", "https://upstream.com/repo.gen").unwrap();
-        let result = Remote::get_by_name_optional(op_conn, "upstream");
+        Remote::create(config_conn, "upstream", "https://upstream.com/repo.gen").unwrap();
+        let result = Remote::get_by_name_optional(config_conn, "upstream");
         assert!(result.is_some());
         let remote = result.unwrap();
         assert_eq!(remote.name, "upstream");
@@ -1049,19 +1050,19 @@ mod tests {
     #[test]
     fn test_remote_list_all() {
         let context = setup_gen();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         // Test empty list
-        let remotes = Remote::list_all(op_conn);
+        let remotes = Remote::list_all(config_conn);
         assert!(remotes.is_empty());
 
         // Create multiple remotes
-        Remote::create(op_conn, "origin", "https://origin.com/repo.gen").unwrap();
-        Remote::create(op_conn, "upstream", "https://upstream.com/repo.gen").unwrap();
-        Remote::create(op_conn, "fork", "https://fork.com/repo.gen").unwrap();
+        Remote::create(config_conn, "origin", "https://origin.com/repo.gen").unwrap();
+        Remote::create(config_conn, "upstream", "https://upstream.com/repo.gen").unwrap();
+        Remote::create(config_conn, "fork", "https://fork.com/repo.gen").unwrap();
 
         // Test list returns all remotes in alphabetical order
-        let remotes = Remote::list_all(op_conn);
+        let remotes = Remote::list_all(config_conn);
         assert_eq!(remotes.len(), 3);
         assert_eq!(remotes[0].name, "fork");
         assert_eq!(remotes[1].name, "origin");
@@ -1071,44 +1072,45 @@ mod tests {
     #[test]
     fn test_remote_delete() {
         let context = setup_gen();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         // Create a remote
-        Remote::create(op_conn, "temp", "https://temp.com/repo.gen").unwrap();
+        Remote::create(config_conn, "temp", "https://temp.com/repo.gen").unwrap();
 
         // Verify it exists
-        let remote = Remote::get_by_name_optional(op_conn, "temp");
+        let remote = Remote::get_by_name_optional(config_conn, "temp");
         assert!(remote.is_some());
 
         // Delete the remote
-        let result = Remote::delete(op_conn, "temp");
+        let result = Remote::delete(config_conn, "temp");
         assert!(result.is_ok());
 
         // Verify it's gone
-        let remote = Remote::get_by_name_optional(op_conn, "temp");
+        let remote = Remote::get_by_name_optional(config_conn, "temp");
         assert!(remote.is_none());
 
         // Test deleting non-existent remote (should return error)
-        let result = Remote::delete(op_conn, "nonexistent");
+        let result = Remote::delete(config_conn, "nonexistent");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_remote_delete_with_remote_branch_associations() {
         let context = setup_gen();
-        let op_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
-        Remote::create(op_conn, "test_remote", "https://test.com/repo.gen").unwrap();
-        RemoteBranch::set_remote_validated(op_conn, "test_branch", Some("test_remote")).unwrap();
+        Remote::create(config_conn, "test_remote", "https://test.com/repo.gen").unwrap();
+        RemoteBranch::set_remote_validated(config_conn, "test_branch", Some("test_remote"))
+            .unwrap();
         assert_eq!(
-            RemoteBranch::get_remote(op_conn, "test_branch"),
+            RemoteBranch::get_remote(config_conn, "test_branch"),
             Some("test_remote".to_string())
         );
 
-        let result = Remote::delete(op_conn, "test_remote");
+        let result = Remote::delete(config_conn, "test_remote");
         assert!(result.is_ok());
-        assert_eq!(RemoteBranch::get_remote(op_conn, "test_branch"), None);
-        let remote = Remote::get_by_name_optional(op_conn, "test_remote");
+        assert_eq!(RemoteBranch::get_remote(config_conn, "test_branch"), None);
+        let remote = Remote::get_by_name_optional(config_conn, "test_remote");
         assert!(remote.is_none());
     }
 
@@ -1492,7 +1494,7 @@ mod tests {
     fn test_add_files_operation_records_history_without_config_db_rows() {
         let context = setup_gen();
         let graph_conn = context.graph().conn();
-        let operation_conn = context.config().conn();
+        let config_conn = context.config().conn();
 
         let repo_root = context.workspace().repo_root().unwrap();
         fs::write(repo_root.join("alpha.fa"), "AAAA").unwrap();
@@ -1510,7 +1512,7 @@ mod tests {
             Some(operation_hash),
             "add-file should commit through Dolt history"
         );
-        let operation_count: i64 = operation_conn
+        let operation_count: i64 = config_conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'operations'",
                 [],

@@ -1,3 +1,62 @@
+//! Resolves history ranges and coordinates construction of operation graph diffs.
+//!
+//! [`collect_operation_diff`] is the public entry point used by
+//! `gen view-diff`, operation history, patch previews, and GenHub. This module
+//! determines which revisions and operations a request represents, asks Dolt
+//! which database rows changed, groups those rows by block group, and delegates
+//! graph construction to [`crate::graph`]. It does not perform a merge or
+//! mutate either revision.
+//!
+//! # Comparison endpoints
+//!
+//! In merge terminology, the **source** branch supplies incoming changes and
+//! the **target** branch receives them. The `source_hash` and `target_hash`
+//! parameter names here predate that convention and instead describe the
+//! direction of the graph comparison: `source_hash` is the baseline/left state
+//! and `target_hash` is the changed/right state that will be rendered. A
+//! merge-oriented caller therefore passes the receiving merge target as
+//! `source_hash` and the incoming merge source as `target_hash`.
+//!
+//! [`DiffRange::TwoDot`] compares those two materialized endpoint states
+//! directly. [`DiffRange::ThreeDot`] replaces the graph baseline with their
+//! merge base and still displays the changes leading to `target_hash`. This is
+//! why a three-dot call returns target-side operations even though the two
+//! named branches may have diverged. A missing `source_hash` represents the
+//! parent of a first/root operation and allows that operation to be shown
+//! against an empty prior state.
+//!
+//! # Overall approach
+//!
+//! The pipeline deliberately uses table diffs and endpoint graphs for different
+//! purposes:
+//!
+//! 1. Resolve the requested commits, merge base when needed, and the operation
+//!    hashes represented by the comparison.
+//! 2. Query `dolt_diff_block_groups`, `dolt_diff_block_group_edges`, and
+//!    `dolt_diff_nodes`. These rows identify affected block-group IDs and carry
+//!    old/new keys plus operation attribution without scanning every graph.
+//! 3. Group those changes in `BlockGroupChanges` and build each affected block
+//!    group once through `crate::graph::build_block_group_diff`.
+//! 4. Return one [`OperationDiff`] containing history metadata and unified
+//!    [`BlockGroupDiff`] graphs for rendering.
+//!
+//! Table rows alone are awkward display objects: they omit unchanged path
+//! context, shared sequence-slice boundaries, and the connected terminal nodes
+//! required by graph layout. Conversely, comparing every complete graph would
+//! find structural changes but lose Dolt's efficient affected-row discovery and
+//! operation attribution. Combining the two lets table diffs answer “what
+//! changed and in which operation?” while endpoint snapshots answer “what
+//! connected biological graph should be shown?”
+//!
+//! A viable alternative is to reconstruct the changed endpoint by applying
+//! `block_group_edges` diff rows to the baseline graph. New child block groups
+//! have complete copied membership rows, so this does not require a fallback
+//! query. The current graph module loads both selected endpoint graphs instead,
+//! primarily to keep real path membership and edit-site marker filtering
+//! explicit. The lineage-parent selection used for a child block group is a
+//! separate presentation decision explained in [`crate::graph`], not a claim
+//! that the child's stored rows are incomplete.
+
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{CommitRef, DoltHashId, HashId, errors::ConfigError};
@@ -42,10 +101,25 @@ pub struct OperationDiff {
     pub diff_graph: Vec<BlockGroupDiff>,
 }
 
-/// Selects the revision range semantics used to build a diff.
+/// Selects the Git-style revision range semantics used to build a diff.
+///
+/// Given `source` and `target`, two-dot syntax (`source..target`) compares the
+/// materialized source snapshot directly with the materialized target snapshot.
+/// If the refs diverged, the result therefore reflects how both endpoint states
+/// differ from one another.
+///
+/// Three-dot syntax (`source...target`) first finds the merge base, meaning the
+/// best common ancestor commit from which both refs descended. It then uses
+/// that common snapshot as the graph baseline and compares it with `target`.
+/// This isolates the target-side changes made since the refs diverged, which is
+/// what merge previews and branch-focused reviews generally need.
+///
+/// `collect_operation_diff` resolves these semantics before asking Dolt for
+/// table changes and building the block-group graphs consumed by CLI, TUI,
+/// patch-preview, and GenHub callers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiffRange {
-    /// Compare the source and target endpoint states (`source..target`).
+    /// Compare the source and target endpoint snapshots directly (`source..target`).
     TwoDot,
     /// Compare the source/target merge base with the target (`source...target`).
     ThreeDot,

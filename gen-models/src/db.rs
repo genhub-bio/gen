@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::{
     history::dolt::{active_branch, checkout, connect_branch},
-    migrations::{run_migrations, run_operation_migrations},
+    migrations::{run_config_migrations, run_migrations},
     operations::Defaults,
 };
 
@@ -42,7 +42,7 @@ impl Deref for ConfigConnection {
 pub fn get_config_connection(path: impl AsRef<Path>) -> Result<ConfigConnection, rusqlite::Error> {
     let mut conn = Connection::open(path)?;
     rusqlite::vtab::array::load_module(&conn)?;
-    run_operation_migrations(&mut conn);
+    run_config_migrations(&mut conn);
     Ok(ConfigConnection(conn))
 }
 
