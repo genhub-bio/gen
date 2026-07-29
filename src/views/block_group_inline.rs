@@ -1,22 +1,20 @@
 use std::{
     collections::HashSet,
     io::{Error, Result},
-    panic,
     time::{Duration, Instant},
 };
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_core::HashId;
 use gen_graph::GenGraph;
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_controller::GraphController,
+    key_event::{Event, KeyCode, KeyEvent, KeyEventKind},
     layout::VisualDetail,
     plotter::{LineStyle, PathStyle},
     theme::current_theme,
 };
 use ratatui::{
-    TerminalOptions, Viewport,
     prelude::*,
     style::Color,
     widgets::{Block, Borders},
@@ -25,14 +23,15 @@ use ratatui::{
 use crate::views::{
     annotation_groups::load_annotation_group_entries,
     annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
-    block_group::extract_viewport_node_ids,
     gen_graph_widget::{
-        GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
+        GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels,
+        extract_viewport_node_ids, reapply_overlays,
     },
     graph_overlay::{
         AnnotationColorCache, GraphOverlay, group_track_key, has_path_overlay,
         project_path_overlay_nodes, remove_path_overlay, replace_track_overlays, set_path_overlay,
     },
+    tui_runtime,
 };
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
@@ -58,12 +57,12 @@ fn get_path_nodes(
 #[derive(Debug)]
 pub enum AppEvent {
     Tick,
-    KeyPress(crossterm::event::KeyEvent),
+    KeyPress(KeyEvent),
     Resize(u16, u16),
 }
 
 pub trait EventSource {
-    fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent>;
+    fn poll_next(&mut self, timeout: Duration) -> Result<Option<AppEvent>>;
 }
 
 pub struct TickEventSource {
@@ -81,7 +80,7 @@ impl TickEventSource {
 }
 
 impl EventSource for TickEventSource {
-    fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent> {
+    fn poll_next(&mut self, timeout: Duration) -> Result<Option<AppEvent>> {
         let remaining = self
             .tick_rate
             .checked_sub(self.last_tick.elapsed())
@@ -89,13 +88,14 @@ impl EventSource for TickEventSource {
 
         let wait = remaining.min(timeout);
 
-        if event::poll(wait).unwrap_or(false) {
-            match event::read().unwrap() {
+        tui_runtime::wait_for_event(wait)?;
+        if let Some(event) = tui_runtime::poll_immediate_event()? {
+            match event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    return Some(AppEvent::KeyPress(k));
+                    return Ok(Some(AppEvent::KeyPress(k)));
                 }
                 Event::Resize(w, h) => {
-                    return Some(AppEvent::Resize(w, h));
+                    return Ok(Some(AppEvent::Resize(w, h)));
                 }
                 _ => {}
             }
@@ -103,10 +103,10 @@ impl EventSource for TickEventSource {
 
         if self.last_tick.elapsed() >= self.tick_rate {
             self.last_tick = Instant::now();
-            return Some(AppEvent::Tick);
+            return Ok(Some(AppEvent::Tick));
         }
 
-        None
+        Ok(None)
     }
 }
 
@@ -239,14 +239,9 @@ fn show_inline_widget(
     block_group_id: Option<HashId>,
     history_ref: Option<&str>,
 ) -> Result<bool> {
-    let terminal_result = panic::catch_unwind(|| {
-        ratatui::init_with_options(TerminalOptions {
-            viewport: Viewport::Inline(height),
-        })
-    });
-
-    match terminal_result {
-        Ok(mut terminal) => {
+    match tui_runtime::InlineTuiSession::enter(height) {
+        Ok(mut session) => {
+            let terminal = session.terminal_mut();
             let mut state = InlineGenGraphState::new(graph, conn, block_group_id, history_ref);
             for path in paths {
                 state.add_path(&path, conn)?;
@@ -259,7 +254,7 @@ fn show_inline_widget(
 
             loop {
                 // Process events with a reasonable timeout
-                if let Some(event) = events.poll_next(Duration::from_millis(250)) {
+                if let Some(event) = events.poll_next(Duration::from_millis(250))? {
                     match event {
                         AppEvent::Tick => {
                             // Calculate time delta since last frame
@@ -345,24 +340,9 @@ fn show_inline_widget(
             }
 
             // Final render without border -> capture the viewport area
-            let viewport_area = terminal.get_frame().area();
-
             terminal.draw(|frame| render_final(frame, &mut state))?;
 
-            // For inline viewports, we need to manually restore terminal state
-            // (ratatui::restore() loses the cursor which resets cursor position incorrectly.
-
-            // Position cursor at the end of the viewport BEFORE restoring terminal mode
-            let target_line = viewport_area.y + viewport_area.height;
-            let _ =
-                crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, target_line));
-
-            // Now restore terminal modes manually (show cursor, disable raw mode)
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
-            let _ = crossterm::terminal::disable_raw_mode();
-
-            std::io::Write::flush(&mut std::io::stdout()).ok();
-
+            // `session` restores terminal state (cursor position, raw mode) on drop here.
             Ok(upgrade_requested)
         }
         Err(_) => {
