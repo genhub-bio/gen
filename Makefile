@@ -1,4 +1,4 @@
-.PHONY: python jupyter r r-test release-check-js clean build clippy-fix docker-build gif
+.PHONY: python jupyter r r-test release-check-js clean build clippy-fix docker-build gif wasm wasm-test
 python:
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
@@ -71,3 +71,39 @@ gif:
 		fi; \
 		(cd $$dir && vhs $$(basename $$tape)) || exit 1; \
 	done
+# Builds gen for wasm32-unknown-emscripten and bundles it into the self-contained wasm-cli/ page
+# (built on the published @jupyterlite/cockle npm package, no sibling checkout of the cockle repo
+# needed).
+#
+# Toolchain setup (one-time, both required):
+#   1. emsdk (emcc/em++/emar): https://emscripten.org/docs/getting_started/downloads.html
+#        git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
+#        ~/emsdk/emsdk install 4.0.9 && ~/emsdk/emsdk activate 4.0.9
+#   2. micromamba, used by cockle's own wasm-package fetch step for coreutils/grep/less/sed/
+#      cockle_fs (ships with miniforge: https://github.com/conda-forge/miniforge):
+#        curl -Ls https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-osx-arm64 \
+#          -o /usr/local/bin/micromamba && chmod +x /usr/local/bin/micromamba
+#      (or install via `brew install micromamba` / miniforge, whichever ships the binary you
+#      already point MICROMAMBA_DIR at)
+# Override EMSDK_DIR/MICROMAMBA_DIR below to match your machine. -sFETCH=1 links Emscripten's
+# Fetch API runtime (libfetch), which `gen remote`'s browser HTTP transport calls directly;
+# referencing emscripten_fetch() alone does not pull it in automatically.
+EMSDK_DIR ?= $(HOME)/emsdk
+MICROMAMBA_DIR ?= /opt/homebrew/Caskroom/miniforge/base
+wasm:
+	@test -f $(EMSDK_DIR)/emsdk_env.sh || (echo "emsdk not found at $(EMSDK_DIR); set EMSDK_DIR=/path/to/emsdk" && exit 1)
+	@test -x $(MICROMAMBA_DIR)/micromamba || (echo "micromamba not found in $(MICROMAMBA_DIR); set MICROMAMBA_DIR=/path/to/dir/containing/micromamba" && exit 1)
+	bash -lc '\
+		source $(EMSDK_DIR)/emsdk_env.sh && \
+		CC=emcc CXX=em++ AR=emar RUSTFLAGS="-C panic=unwind -C opt-level=1 -C link-arg=-sSTACK_SIZE=8388608 -C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_NAME=Module -C link-arg=-sEXPORTED_RUNTIME_METHODS=FS,TTY,ENV -C link-arg=-lproxyfs.js -C link-arg=-sFETCH=1" \
+		cargo build --release --bin gen --target wasm32-unknown-emscripten \
+	'
+	cd wasm-cli && npm install
+	mkdir -p wasm-cli/gen-wasm
+	cp target/wasm32-unknown-emscripten/release/gen.js target/wasm32-unknown-emscripten/release/gen.wasm wasm-cli/gen-wasm/
+	cd wasm-cli && PATH="$(MICROMAMBA_DIR):$$PATH" npm run build
+# Serves the page built by `make wasm` in a cockle/JupyterLite terminal. Does not open a browser
+# tab itself -- once "Server running..." appears, open the printed URL by hand.
+wasm-test: wasm
+	@echo "Serving wasm-cli/dist/ -- open http://localhost:4501 in your browser once the server below is ready."
+	cd wasm-cli && npm run serve
