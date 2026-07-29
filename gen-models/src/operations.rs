@@ -89,6 +89,10 @@ impl OperationFile {
         self
     }
 
+    /// Resolves the path stored in operation metadata without materializing remote assets.
+    ///
+    /// Local inputs use their content-addressed repository path and therefore require a checksum;
+    /// remote inputs keep their URI so they can be accessed lazily.
     pub fn storage_file_path(
         workspace: &Workspace,
         path_or_uri: &str,
@@ -265,6 +269,10 @@ pub(crate) fn track_operation_assets(
     all(debug_assertions, feature = "profiling"),
     tracing::instrument(skip(context, files, message))
 )]
+/// Records files used by an operation, retaining local content and preserving remote URIs.
+///
+/// Checksum overrides are propagated from callers that already streamed remote content, avoiding
+/// a credentials-dependent read whose only purpose would be hashing.
 pub fn add_files_operation(
     context: &DbContext,
     files: &[OperationFile],
@@ -405,6 +413,10 @@ impl FileAddition {
         feature = "profiling",
         tracing::instrument(skip(workspace, checksum_override))
     )]
+    /// Prepares an asset reference for operation storage without eagerly reading remote content.
+    ///
+    /// Local content is copied and hashed as part of retention. Remote content uses an optional
+    /// checksum supplied by a caller that performed useful streaming work.
     pub fn prepare(
         workspace: &Workspace,
         file_path: &str,
@@ -434,6 +446,10 @@ impl FileAddition {
         asset_uri.store_file(self, workspace)
     }
 
+    /// Returns the content-addressed filename when this asset has a verified checksum.
+    ///
+    /// Checksumless remote references do not live under `.gen/assets`, so they have no hashed
+    /// storage filename.
     pub fn hashed_filename(&self) -> Option<String> {
         self.checksum
             .as_ref()

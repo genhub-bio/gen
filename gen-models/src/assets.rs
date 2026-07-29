@@ -616,12 +616,20 @@ pub struct ChecksumHandle {
 }
 
 impl ChecksumHandle {
+    /// Returns the content checksum only after the associated reader reaches EOF.
+    ///
+    /// Consumers use this after useful streaming work, such as copying an asset into storage, so
+    /// an interrupted read cannot publish the checksum of only a prefix.
     pub fn checksum(&self) -> Option<Sha256Hash> {
         let state = self.state.lock().unwrap();
         if state.complete { state.checksum } else { None }
     }
 }
 
+/// A reader that makes the checksum of a fully consumed stream available through a shared handle.
+///
+/// The handle lets callers hash bytes as they pass them to their real destination rather than
+/// performing a checksum-only read of a potentially large asset.
 pub struct ChecksummedReader {
     inner: Box<dyn Read>,
     state: Arc<Mutex<ChecksumState>>,
@@ -645,6 +653,8 @@ impl ChecksummedReader {
         }
     }
 
+    // Publishing happens only at EOF so consumers never treat a partial stream hash as the asset's
+    // content identity.
     fn finish(&self) {
         let mut state = self.state.lock().unwrap();
         if state.checksum.is_none() {
@@ -760,7 +770,11 @@ pub trait AssetUri {
 
     fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError>;
 
-    /// Prepares any local storage needed for the asset and returns its known content checksum.
+    /// Performs the storage work required before recording an asset and returns a verified
+    /// checksum when one is available.
+    ///
+    /// Local assets are retained and hashed during that copy. Remote assets remain lazy unless a
+    /// caller already obtained a checksum while streaming them for another purpose.
     fn prepare_asset(
         &self,
         workspace: &Workspace,
@@ -806,6 +820,8 @@ pub trait AssetUri {
     where
         Self: Sized,
     {
+        // Checksumless remote assets still need stable database identity. The URI contributes only
+        // to that record ID and is never represented as a content checksum.
         let checksum = checksum.map(Sha256Hash::to_string).unwrap_or_default();
         let combined = format!("{checksum};{asset_uri}");
         HashId(calculate_hash(&combined))
@@ -865,6 +881,10 @@ impl dyn AssetUri {
     }
 }
 
+/// Chooses where an asset should be materialized without inventing a content identity.
+///
+/// Explicit logical paths are usable without a checksum. Content-addressed materialization under
+/// `.gen/assets` requires a verified checksum.
 pub fn materialization_destination_path(
     workspace: &Workspace,
     asset_uri: &str,
@@ -911,6 +931,8 @@ impl AssetUri for LocalAssetUri {
         workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
     ) -> Result<Option<Sha256Hash>, FileAdditionError> {
+        // Operation creation must retain local bytes, so this copy is also the useful point at
+        // which to verify or calculate their checksum.
         self.stage_asset_copy(workspace, checksum_override)
             .map(Some)
     }
@@ -1213,6 +1235,8 @@ impl LocalAssetUri {
         )))
     }
 
+    // Streams a local asset into content-addressed storage while computing its checksum. Combining
+    // those jobs keeps large files to a single pass and leaves no checksum-only temporary output.
     fn stage_asset_copy(
         &self,
         workspace: &Workspace,
@@ -1227,8 +1251,6 @@ impl LocalAssetUri {
             }
         }
 
-        // Local assets must be retained in the content-addressed store. Hashing this copy while
-        // it is streamed avoids a separate checksum-only read of large genomic files.
         let mut reader = self.reader(workspace)?;
         let checksum_handle = reader.checksum_handle();
         let mut staged_file = tempfile::NamedTempFile::new_in(&asset_dir)
@@ -1403,6 +1425,8 @@ impl AssetUri for RemoteAssetUri {
         _workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
     ) -> Result<Option<Sha256Hash>, FileAdditionError> {
+        // Recording a remote URI must not require network access or credentials. A caller can pass
+        // a checksum learned during useful streaming work; otherwise it remains unknown.
         Ok(checksum_override)
     }
 

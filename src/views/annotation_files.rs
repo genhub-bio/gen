@@ -21,6 +21,10 @@ impl AnnotationAssetEntry {
             .unwrap_or(&self.asset_uri)
     }
 
+    /// Returns the content-addressed local filename only when the asset has a checksum.
+    ///
+    /// Views keep checksumless remote annotations visible by using their URI directly instead of
+    /// requiring a `.gen/assets` filename.
     pub fn hashed_filename(&self) -> Option<String> {
         self.checksum
             .as_ref()
@@ -36,6 +40,8 @@ pub struct AnnotationFileEntry {
     pub display_name: String,
 }
 
+// Preserve optional checksums while translating persistence records so checksumless remote
+// annotations and indexes remain usable by collection and TUI views.
 fn asset_entry_from_ref(asset_ref: &AssetRef) -> AnnotationAssetEntry {
     AnnotationAssetEntry {
         id: asset_ref.id,

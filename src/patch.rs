@@ -63,6 +63,8 @@ impl PatchFile {
         format!("assets/{checksum}.{}", FileTypes::suffix(file_type))
     }
 
+    // Only local references can name bytes stored under `.gen/assets`. Remote URIs remain patch
+    // metadata even when a checksum is known.
     fn local_asset_filename(file: &OperationFileInfo) -> Option<String> {
         if !LocalAssetUri::is_file_uri(&file.asset_uri) {
             return None;
@@ -76,6 +78,8 @@ impl PatchFile {
         context: &DbContext,
         file: OperationFileInfo,
     ) -> Result<Self, CreatePatchError> {
+        // A local reference without a checksum cannot identify bytes to archive and must fail
+        // rather than producing an incomplete patch. A remote reference needs no archive entry.
         let Some(checksum) = file.checksum else {
             if LocalAssetUri::is_file_uri(&file.asset_uri) {
                 return Err(CreatePatchError::MissingAssetChecksum(file.id));

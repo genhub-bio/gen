@@ -751,6 +751,11 @@ pub struct AnnotationFileChecksumOverrides {
     pub index: Option<Sha256Hash>,
 }
 
+/// Adds an annotation asset and optional index to operation history.
+///
+/// Callers pass checksums only when the corresponding remote streams were already consumed for
+/// annotation work. This keeps operation creation independent of remote credentials while local
+/// assets are retained and hashed during preparation.
 pub fn add_annotation_file(
     context: &DbContext,
     path: &str,
