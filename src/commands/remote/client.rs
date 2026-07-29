@@ -27,6 +27,7 @@ use std::{env, io};
 use ::http::StatusCode;
 use gen_core::HashId;
 use serde::{Deserialize, Serialize};
+use serde_json::{from_slice as json_from_slice, to_vec as json_to_vec};
 use thiserror::Error;
 use url::Url;
 
@@ -234,9 +235,9 @@ fn send_capability(
     request: &CapabilityRequest<'_>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
-    let body = serde_json::to_vec(request)?;
+    let body = json_to_vec(request)?;
     let response = send_json(&repository.capability_url(), &body, authorization)?;
-    Ok(serde_json::from_slice(&response.body)?)
+    Ok(json_from_slice(&response.body)?)
 }
 
 fn send_asset_transfers(
@@ -244,16 +245,16 @@ fn send_asset_transfers(
     request: &AssetTransferRequest<'_>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<AssetTransferResponse, RemoteClientError> {
-    let body = serde_json::to_vec(request)?;
+    let body = json_to_vec(request)?;
     let response = send_json(&repository.asset_transfers_url(), &body, authorization)?;
-    Ok(serde_json::from_slice(&response.body)?)
+    Ok(json_from_slice(&response.body)?)
 }
 
 fn refresh_tokens(
     repository: &RepositoryRemote,
     tokens: &AuthTokens,
 ) -> Result<AuthTokens, RemoteClientError> {
-    let body = serde_json::to_vec(&serde_json::json!({
+    let body = json_to_vec(&serde_json::json!({
         "refresh_token": tokens.refresh_token,
         "client_id": "cli"
     }))?;
@@ -262,7 +263,7 @@ fn refresh_tokens(
         &body,
         RequestAuthorization::Anonymous,
     )?;
-    let refreshed: RefreshResponse = serde_json::from_slice(&response.body)?;
+    let refreshed: RefreshResponse = json_from_slice(&response.body)?;
     Ok(AuthTokens {
         jwt: refreshed.access_token,
         refresh_token: refreshed.refresh_token,

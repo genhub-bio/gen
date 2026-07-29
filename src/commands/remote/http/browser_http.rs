@@ -210,7 +210,7 @@ mod tests {
 
         #[test]
         fn test_method_buffer_encodes_short_method() {
-            let buffer = method_buffer("POST").expect("POST should fit");
+            let buffer = method_buffer("POST").expect("should fit POST in the method buffer");
             let text: String = buffer
                 .iter()
                 .take_while(|byte| **byte != 0)
@@ -281,7 +281,7 @@ mod tests {
         fn test_header_pointer_array_alternates_and_terminates_with_null() {
             let strings =
                 header_c_strings(&[("Authorization", "Bearer token"), ("X-Test", "1")]).unwrap();
-            let pointers = header_pointer_array(&strings).expect("headers should be present");
+            let pointers = header_pointer_array(&strings).expect("should have headers present");
 
             // 2 headers -> 4 key/value pointers + 1 null terminator.
             assert_eq!(pointers.len(), 5);
