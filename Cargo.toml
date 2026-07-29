@@ -76,6 +76,7 @@ crc32c = "0.6.8"
 md-5 = "0.10.6"
 getrandom = "0.3.3"
 directories = "6.0.0"
+http = "1.4.0"
 httparse = "1.10.1"
 capnp = "0.24"
 indexmap = "2.11.3"
@@ -125,6 +126,7 @@ codegen-units = 1
 panic = "abort"
 
 [patch.crates-io]
-# Includes fixes to make the emscripten build work, plus the emscripten Fetch
-# HTTP transport for the DoltLite remote client (patches/0002 on the fork).
-rusqdoltlite = { git = "https://github.com/bobvh/rusqdoltlite", rev = "91dc809018144a57a7ff942af82733e7ca689eb7" }
+# Carries a DriveFS stat-lag workaround for the emscripten build (patches/0003 on
+# the fork); the fcntl.h build fix and Emscripten HTTP transport this fork used to
+# carry are now upstream.
+rusqdoltlite = { git = "https://github.com/bobvh/rusqdoltlite", rev = "e5ae83c772e14276f35f1a7e428c04b881b4ea7f" }

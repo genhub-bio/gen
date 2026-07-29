@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::commands::remote::server::AuthTokens;
 
 pub mod client;
+pub mod http;
 pub mod operations;
 pub mod server;
 pub mod utils;

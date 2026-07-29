@@ -1776,6 +1776,7 @@ dependencies = [
  "gen-tui",
  "getrandom 0.3.4",
  "html-escape",
+ "http",
  "httparse",
  "include_dir",
  "indexmap",
@@ -1844,7 +1845,6 @@ version = "0.2.1"
 dependencies = [
  "capnp",
  "gen-capnp-schemas",
- "getrandom 0.4.2",
  "hex",
  "itertools",
  "noodles",
@@ -1958,7 +1958,6 @@ dependencies = [
  "env_logger 0.10.2",
  "ftree",
  "gen-sugiyama",
- "getrandom 0.4.2",
  "insta",
  "itertools",
  "log",
@@ -2019,13 +2018,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasip2",
  "wasip3",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2853,8 +2850,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdoltlite-sys"
-version = "0.38.14"
-source = "git+https://github.com/bobvh/rusqdoltlite?rev=91dc809018144a57a7ff942af82733e7ca689eb7#91dc809018144a57a7ff942af82733e7ca689eb7"
+version = "0.38.20"
+source = "git+https://github.com/bobvh/rusqdoltlite?rev=e5ae83c772e14276f35f1a7e428c04b881b4ea7f#e5ae83c772e14276f35f1a7e428c04b881b4ea7f"
 dependencies = [
  "cc",
  "pkg-config",
@@ -3143,6 +3140,7 @@ dependencies = [
  "noodles-bed",
  "noodles-bgzf",
  "noodles-core",
+ "noodles-csi",
  "noodles-fasta",
  "noodles-gff",
  "noodles-gtf",
@@ -4767,8 +4765,8 @@ dependencies = [
 
 [[package]]
 name = "rusqdoltlite"
-version = "0.40.14"
-source = "git+https://github.com/bobvh/rusqdoltlite?rev=91dc809018144a57a7ff942af82733e7ca689eb7#91dc809018144a57a7ff942af82733e7ca689eb7"
+version = "0.40.20"
+source = "git+https://github.com/bobvh/rusqdoltlite?rev=e5ae83c772e14276f35f1a7e428c04b881b4ea7f#e5ae83c772e14276f35f1a7e428c04b881b4ea7f"
 dependencies = [
  "bitflags 2.13.0",
  "fallible-iterator",
@@ -6142,17 +6140,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
- "uuid-rng-internal",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "uuid-rng-internal"
-version = "1.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dff7387287837acf196f2596a6216f94c555d947d5331e1cc48393131020119"
-dependencies = [
- "getrandom 0.4.2",
 ]
 
 [[package]]
