@@ -32,6 +32,7 @@ use core::error::Error;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use serde_json::from_str as json_from_str;
 use url::Url;
 
 use crate::commands::remote::server::AuthTokens;
@@ -143,7 +144,7 @@ pub enum BrowserLoginError {
 /// native flow. A callback is never accepted on the strength of a valid-looking JWT alone.
 #[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
 fn parse_bridge_message(json: &str, expected_state: &str) -> Result<AuthTokens, BrowserLoginError> {
-    let outcome: BridgeOutcome = serde_json::from_str(json)
+    let outcome: BridgeOutcome = json_from_str(json)
         .map_err(|error| BrowserLoginError::MalformedResult(error.to_string()))?;
     match outcome {
         BridgeOutcome::Success {
@@ -216,7 +217,7 @@ fn callback_url(terminal_origin: &str) -> String {
 /// Logs in via the browser flow described at the top of this module.
 #[cfg(target_os = "emscripten")]
 pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn Error>> {
-    let state = utils::generate_state().expect("Unable to generate random nonce.");
+    let state = utils::generate_state().expect("should generate random nonce");
     let terminal_origin = terminal_origin()?;
     let callback_url = callback_url(&terminal_origin);
     let login_url = build_login_url(origin, &state, &callback_url)?;

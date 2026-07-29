@@ -3,6 +3,8 @@ use gen_models::{
     db::ConfigConnection,
     operations::{Defaults, Remote},
 };
+#[cfg(not(target_os = "emscripten"))]
+use reqwest::{blocking::Client, redirect::Policy};
 use thiserror::Error;
 
 use crate::commands::remote::server::AuthTokens;
@@ -57,8 +59,6 @@ pub enum RemoteError {
 /// Emscripten (no TCP sockets, no system browser to open); see the Emscripten variant below.
 #[cfg(not(target_os = "emscripten"))]
 pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn std::error::Error>> {
-    use reqwest::{blocking::Client, redirect::Policy};
-
     println!("Logging in to remote: {origin}");
     let state = utils::generate_state().expect("Unable to generate random nonce.");
     let (local_addr, handle, rx) =

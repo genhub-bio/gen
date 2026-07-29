@@ -118,4 +118,6 @@ mod shim {
 }
 
 #[cfg(not(feature = "crossterm"))]
-pub use shim::*;
+pub use shim::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
