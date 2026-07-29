@@ -5,10 +5,11 @@
 //! Deliberately outside `remote::client` and does not touch a Gen repository or database, so it
 //! can run as `gen __emscripten-http-test <url> [...]` against any test server from the terminal.
 
-use std::error::Error;
+use core::error::Error;
 
 use clap::Args;
 use serde::Serialize;
+use serde_json::to_string as json_to_string;
 
 use crate::commands::remote::http::{self, HttpRequest};
 
@@ -77,6 +78,6 @@ pub fn execute(command: &Command) -> Result<(), Box<dyn Error>> {
         },
     };
 
-    println!("{}", serde_json::to_string(&report)?);
+    println!("{}", json_to_string(&report)?);
     Ok(())
 }

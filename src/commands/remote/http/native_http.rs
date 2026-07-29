@@ -57,8 +57,8 @@ mod tests {
             headers: &[],
             body: None,
         })
-        .expect("request should succeed");
-        handle.join().expect("server thread should finish");
+        .expect("should succeed");
+        handle.join().expect("should finish server thread");
 
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"hello");
