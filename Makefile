@@ -1,8 +1,17 @@
-.PHONY: python jupyter r r-test release-check-js clean build clippy-fix docker-build gif
+.PHONY: python python-wheel stage-python-client jupyter r r-test release-check-js clean build clippy-fix docker-build gif
 python:
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
-	.venv/bin/maturin develop --release --manifest-path gen-python/Cargo.toml --features extension-module
+	.venv/bin/maturin develop --release --manifest-path gen-python/Cargo.toml --features abi3,extension-module
+stage-python-client:
+	cargo build --release --locked --bin gen
+	mkdir -p gen.gen.data/scripts
+	cp target/release/gen gen.gen.data/scripts/gen
+	chmod +x gen.gen.data/scripts/gen
+python-wheel: stage-python-client
+	@[ -d .venv ] || python -m venv .venv
+	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
+	.venv/bin/maturin build --release --manifest-path gen-python/Cargo.toml --features abi3,extension-module
 # The jupyter widget requires a bundled JS file compiled from the TypeScript sources in gen-python/js/.
 # We check in the compiled jupyter_widget.js alongside the TS so npm is not required to build the widget.
 jupyter: python
@@ -13,7 +22,7 @@ jupyter: python
 		test -f gen-python/python/gen/static/jupyter_widget.js || \
 			(echo "Error: gen-python/python/gen/static/jupyter_widget.js missing. Install npm and run 'make jupyter'." && exit 1); \
 	fi
-	.venv/bin/maturin develop --release --manifest-path gen-python/Cargo.toml --features extension-module --extras jupyter
+	.venv/bin/maturin develop --release --manifest-path gen-python/Cargo.toml --features abi3,extension-module --extras jupyter
 r-test:
 	# CI only: builds and tests inside Linux Docker container
 	@if command -v npm >/dev/null 2>&1; then \

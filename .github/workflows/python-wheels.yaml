@@ -1,6 +1,10 @@
 name: Python API Wheels
 
 on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
   workflow_dispatch:
 
 jobs:
@@ -11,15 +15,19 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
+        include:
+          - os: ubuntu-latest
+            manylinux: quay.io/pypa/manylinux_2_28_x86_64:latest
+          - os: ubuntu-24.04-arm
+            manylinux: quay.io/pypa/manylinux_2_28_aarch64:latest
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         id: setup-python
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install capnp (macOS)
         if: runner.os == 'macOS'
@@ -27,15 +35,80 @@ jobs:
       - name: Install capnp (Windows)
         if: runner.os == 'Windows'
         run: choco install capnproto
+      - name: Stage bundled client (macOS)
+        if: runner.os == 'macOS'
+        run: make stage-python-client
+      - name: Sign bundled client (macOS)
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.PROD_MACOS_APP_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/gen-application-certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/gen-application-signing.keychain-db"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_CERTIFICATE_PWD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$MACOS_CI_KEYCHAIN_PWD" \
+            "$KEYCHAIN_PATH"
+          codesign \
+            --force \
+            --timestamp \
+            --options runtime \
+            --sign "$MACOS_CERTIFICATE_NAME" \
+            gen.gen.data/scripts/gen
+          codesign --verify --strict --verbose=2 gen.gen.data/scripts/gen
+          security delete-keychain "$KEYCHAIN_PATH"
+      - name: Notarize bundled client (macOS)
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
+        env:
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
+          PROD_MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_APPLE_ID }}
+          PROD_MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_TEAM_ID }}
+          PROD_MACOS_NOTARIZATION_PWD: ${{ secrets.PROD_MACOS_NOTARIZATION_PWD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/gen-notarization.keychain-db"
+          NOTARIZATION_ARCHIVE="$RUNNER_TEMP/gen-client.zip"
+          ditto -c -k --keepParent gen.gen.data/scripts/gen "$NOTARIZATION_ARCHIVE"
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          xcrun notarytool store-credentials "gen-notarytool-profile" \
+            --apple-id "$PROD_MACOS_NOTARIZATION_APPLE_ID" \
+            --team-id "$PROD_MACOS_NOTARIZATION_TEAM_ID" \
+            --password "$PROD_MACOS_NOTARIZATION_PWD" \
+            --keychain "$KEYCHAIN_PATH"
+          xcrun notarytool submit "$NOTARIZATION_ARCHIVE" \
+            --keychain-profile "gen-notarytool-profile" \
+            --wait
+          security delete-keychain "$KEYCHAIN_PATH"
+      - name: Stage bundled client (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --bin gen
+          New-Item -ItemType Directory -Force "gen.gen.data/scripts"
+          Copy-Item "target/release/gen.exe" "gen.gen.data/scripts/gen.exe"
       - name: Build wheels (Linux)
         if: runner.os == 'Linux'
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
-          sccache: true
+          args: --release --manifest-path gen-python/Cargo.toml --features abi3,extension-module --interpreter python3.11 --out gen-python/target/wheels
           manylinux: auto
-          container: quay.io/pypa/manylinux_2_28_x86_64:latest
+          container: ${{ matrix.manylinux }}
           before-script-linux: |
             yum install -y epel-release
             yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig mold
@@ -45,6 +118,7 @@ jobs:
             mkdir -p gen-capnp-schemas/src/generated
             (cd gen-capnp-schemas && capnp compile -I . -orust:src/generated gen-core.capnp gen-models.capnp gen-schema.capnp)
             ls -la gen-capnp-schemas/src/generated
+            make stage-python-client
           working-directory: .
         env:
           CAPNP: /usr/bin/capnp
@@ -55,35 +129,104 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
+          args: --release --manifest-path gen-python/Cargo.toml --features abi3,extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
           sccache: true
           working-directory: .
-      - name: Upload wheels to releases
+      - name: Verify wheel contents (macOS, Linux)
         if: runner.os != 'Windows'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          gh release upload "${TAG}" gen-python/target/wheels/*.whl
-      - name: Upload wheels to releases (Windows)
+        run: python gen-python/scripts/verify_wheel.py gen-python/target/wheels/*.whl
+      - name: Verify wheel contents (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          gh release upload "$env:TAG" "gen-python/target/wheels/*.whl"
+          $wheel = Get-ChildItem "gen-python/target/wheels/*.whl"
+          python gen-python/scripts/verify_wheel.py "$($wheel.FullName)"
+      - name: Verify bundled client signature (macOS)
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
+        run: |
+          CHECK_DIRECTORY="$RUNNER_TEMP/gen-wheel-check"
+          mkdir -p "$CHECK_DIRECTORY"
+          unzip -q gen-python/target/wheels/*.whl -d "$CHECK_DIRECTORY"
+          CLIENT_PATH=$(find "$CHECK_DIRECTORY" -type f -path "*/scripts/gen" -print -quit)
+          test -n "$CLIENT_PATH"
+          codesign --verify --strict --verbose=2 "$CLIENT_PATH"
+      - name: Smoke test wheel (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: |
+          python -m pip install --force-reinstall --no-deps gen-python/target/wheels/*.whl
+          python -c "import gen; print(gen.__version__)"
+          gen --version
+      - name: Smoke test wheel (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wheel = Get-ChildItem "gen-python/target/wheels/*.whl"
+          python -m pip install --force-reinstall --no-deps "$($wheel.FullName)"
+          python -c "import gen; print(gen.__version__)"
+          gen --version
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}
           path: gen-python/target/wheels/*.whl
           if-no-files-found: error
 
-  trigger-pypi-publish:
+  test-newer-python:
     needs: build-wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse
+      - name: Smoke test wheel (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: |
+          python -m pip install --force-reinstall --no-deps wheelhouse/*.whl
+          python -c "import gen; print(gen.__version__)"
+          gen --version
+      - name: Smoke test wheel (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wheel = Get-ChildItem "wheelhouse/*.whl"
+          python -m pip install --force-reinstall --no-deps "$($wheel.FullName)"
+          python -c "import gen; print(gen.__version__)"
+          gen --version
+
+  upload-release-wheels:
+    needs: [build-wheels, test-newer-python]
     runs-on: ubuntu-latest
-    if: ${{ needs.build-wheels.result == 'success' }}
+    if: ${{ needs.build-wheels.result == 'success' && needs.test-newer-python.result == 'success' && github.ref_type == 'tag' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheelhouse
+          merge-multiple: true
+      - name: Upload wheels to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" wheelhouse/*.whl --clobber
+
+  trigger-pypi-publish:
+    needs: upload-release-wheels
+    runs-on: ubuntu-latest
+    if: ${{ needs.upload-release-wheels.result == 'success' && github.ref_type == 'tag' }}
     permissions:
       actions: write
       contents: read
@@ -91,6 +234,7 @@ jobs:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
+      WHEEL_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Ensure tag is available
         run: |
@@ -100,4 +244,8 @@ jobs:
           fi
       - name: Trigger publish-pypi-tag workflow
         run: |
-          gh workflow run publish-pypi-tag.yaml --repo "$REPO" --ref "$TAG" -f tag="$TAG"
+          gh workflow run publish-pypi-tag.yaml \
+            --repo "$REPO" \
+            --ref "$TAG" \
+            -f tag="$TAG" \
+            -f wheel_run_id="$WHEEL_RUN_ID"
