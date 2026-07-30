@@ -8,7 +8,7 @@ Gen brings version control to genetic sequences. With it, you can track variants
 
 ## Install
 
-**Gen client**: prebuilt binaries and installers are on the [releases page](https://github.com/genhub-bio/gen/releases) for [macOS](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg) and Linux ([x64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip) / [arm64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip)). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
+**Gen client**: prebuilt binaries and installers are on the [releases page](https://github.com/genhub-bio/gen/releases) for [macOS](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), Linux ([x64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip) / [arm64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip)), and [Windows](https://github.com/genhub-bio/gen/releases/download/nightly/gen.windows-x86_64.zip).
 
 You can also install it with a package manager:
 
