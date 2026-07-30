@@ -126,15 +126,15 @@ pub fn span_is_single_node(span: &AnnotationSpan, graph: &GenGraph) -> bool {
 /// small annotations that lie within the truncated sequence, but still show
 /// the annotations that get interrupted by variants since those are relevant.
 pub fn span_should_hide_in_truncated(span: &AnnotationSpan, graph: &GenGraph) -> bool {
+    if !span_is_single_node(span, graph) {
+        return false;
+    }
     let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
         return false;
     };
     let Some(first) = locus.slices.first() else {
         return false;
     };
-    if !locus.slices.iter().all(|slice| slice.block == first.block) {
-        return false;
-    }
     !(first.start == 0 && first.end as i64 >= first.block.length())
 }
 
@@ -404,7 +404,7 @@ mod tests {
     /// Segments on different fragments of a split node must not count as single-node,
     /// even though they share a `node_id`.
     #[test]
-    fn span_is_single_node_false_for_split_fragments() {
+    fn test_span_is_single_node_false_for_split_fragments() {
         let node_id = HashId::convert_str("split-node");
         let left_fragment = GraphNode {
             node_id,
