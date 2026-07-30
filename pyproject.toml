@@ -27,6 +27,6 @@ Repository = "https://github.com/genhub-bio/gen"
 
 [tool.maturin]
 manifest-path = "gen-python/Cargo.toml"
-features = ["extension-module"]
+features = ["abi3", "extension-module"]
 python-source = "gen-python/python"
 module-name = "gen.gen"
