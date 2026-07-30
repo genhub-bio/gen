@@ -2,9 +2,10 @@
 
 Python bindings to the Gen version control system for genetic sequences.
 
-The bindings expose the full Gen data model — repositories, sequence graphs,
-import/export pipelines — from Python and Jupyter notebooks. An optional Jupyter
-widget provides interactive graph visualization.
+The package installs the `gen` command-line client and exposes the full Gen data
+model — repositories, sequence graphs, import/export pipelines — from Python and
+Jupyter notebooks. An optional Jupyter widget provides interactive graph
+visualization.
 
 ## Quick start
 
@@ -28,6 +29,12 @@ sample.plot()  # or sg.plot()
 ## Architecture
 
 The package is built from three layers:
+
+### Client (`src/main.rs`)
+
+The existing Rust command-line client is compiled separately and staged in
+maturin's wheel data `scripts` directory. Package installers place that executable
+on `PATH` as `gen` on macOS and Linux or `gen.exe` on Windows.
 
 ### Rust (`src/python_api/`)
 
@@ -72,6 +79,7 @@ Loaded by anywidget directly in the browser. Responsible for:
 
 ```sh
 make          # from the project root — builds the native extension via maturin
+make python-wheel  # builds a wheel containing the extension and client
 make jupyter  # also builds the JS widget bundle and installs the `jupyter` extras
 ```
 
