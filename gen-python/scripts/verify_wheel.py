@@ -13,6 +13,9 @@ def fail(message: str) -> None:
 def verify_wheel(wheel_path: Path) -> None:
     client_name = "gen.exe" if "-win" in wheel_path.name else "gen"
 
+    if "-abi3-" not in wheel_path.name:
+        fail(f"{wheel_path} should be tagged for the CPython stable ABI")
+
     with zipfile.ZipFile(wheel_path) as wheel:
         names = {entry.filename for entry in wheel.infolist()}
 

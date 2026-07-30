@@ -39,7 +39,9 @@ on `PATH` as `gen` on macOS and Linux or `gen.exe` on Windows.
 ### Rust (`src/python_api/`)
 
 The core of the package. [PyO3](https://pyo3.rs) + [maturin](https://www.maturin.rs)
-compile the Gen engine into a native extension module (`gen.so`). This layer owns:
+compile the Gen engine into a native extension module (`gen.so`). Release wheels
+use CPython's stable ABI with Python 3.11 as the minimum supported version. This
+layer owns:
 
 - **`Repository`** — opens a Gen workspace, drives all import/export operations
   (FASTA, GenBank, GFA, VCF, GAF, …), and exposes node/sample/sequence-graph
