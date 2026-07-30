@@ -1,13 +1,15 @@
 name: Publish PyPI Tag
 
 on:
-  push:
-    tags:
-      - "v*"
+  # Python wheels dispatch this workflow only after release gating succeeds.
   workflow_dispatch:
     inputs:
       tag:
         description: Git tag to publish (e.g. v0.4.0)
+        required: true
+        type: string
+      wheel_run_id:
+        description: GitHub Actions run containing the tested wheel artifacts
         required: true
         type: string
       repository:
@@ -20,7 +22,8 @@ on:
           - testpypi
 
 env:
-  PUBLISH_TAG: ${{ github.event.inputs.tag || github.ref_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
+  PUBLISH_TAG: ${{ inputs.tag }}
+  WHEEL_RUN_ID: ${{ inputs.wheel_run_id }}
 
 jobs:
   publish:
@@ -28,53 +31,108 @@ jobs:
     environment:
       name: pypi
     permissions:
+      actions: read
       id-token: write
       contents: read
     steps:
       - name: Ensure tag provided
         run: |
-          if [ -z "${{ env.PUBLISH_TAG }}" ]; then
-            echo "PUBLISH_TAG is required. Run on a tag or provide the workflow_dispatch input 'tag'." >&2
-            exit 1
-          fi
+          case "$PUBLISH_TAG" in
+            v*) ;;
+            *)
+              echo "PUBLISH_TAG must start with 'v'." >&2
+              exit 1
+              ;;
+          esac
 
-      - name: Locate wheel build run
-        id: wheels-run
+      - name: Validate wheel build run
         uses: actions/github-script@v7
         env:
-          WHEEL_SHA: ${{ github.sha }}
+          WHEEL_RUN_ID: ${{ env.WHEEL_RUN_ID }}
           WHEEL_TAG: ${{ env.PUBLISH_TAG }}
         with:
           script: |
-            const sha = process.env.WHEEL_SHA;
+            const runId = Number(process.env.WHEEL_RUN_ID);
             const tag = process.env.WHEEL_TAG;
-            const { data } = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: "python-wheels.yaml",
-              head_sha: sha,
-              per_page: 100,
-            });
-            const run = data.workflow_runs.find(
-              (r) =>
-                r.head_sha === sha &&
-                r.status === "completed" &&
-                r.conclusion === "success"
-            );
-            if (!run) {
+
+            if (!Number.isSafeInteger(runId) || runId <= 0) {
+              core.setFailed(`Invalid wheel run ID: ${process.env.WHEEL_RUN_ID}`);
+              return;
+            }
+
+            let run;
+            for (let attempt = 1; attempt <= 12; attempt += 1) {
+              const response = await github.rest.actions.getWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+              });
+              run = response.data;
+              if (run.status === "completed") {
+                break;
+              }
+              core.info(
+                `Wheel run ${runId} is ${run.status}; waiting for completion (${attempt}/12).`
+              );
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+            }
+
+            if (run.path !== ".github/workflows/python-wheels.yaml") {
               core.setFailed(
-                `No successful python-wheels run found for tag ${tag} (sha ${sha}). Trigger the wheel build for this tag first.`
+                `Run ${runId} belongs to ${run.path}, not python-wheels.yaml.`
               );
               return;
             }
-            core.setOutput("run_id", run.id.toString());
+            if (run.status !== "completed" || run.conclusion !== "success") {
+              core.setFailed(
+                `Wheel run ${runId} for tag ${tag} did not complete successfully (status: ${run.status}, conclusion: ${run.conclusion}).`
+              );
+              return;
+            }
+
+            const jobsResponse =
+              await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+              });
+            const uploadJob = jobsResponse.data.jobs.find(
+              (job) => job.name === "upload-release-wheels"
+            );
+            if (!uploadJob || uploadJob.conclusion !== "success") {
+              core.setFailed(
+                `Wheel run ${runId} did not successfully upload its tested release wheels.`
+              );
+              return;
+            }
+
+            const tagResponse = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `tags/${tag}`,
+            });
+            let tagTarget = tagResponse.data.object;
+            for (let depth = 0; tagTarget.type === "tag" && depth < 5; depth += 1) {
+              const annotatedTag = await github.rest.git.getTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_sha: tagTarget.sha,
+              });
+              tagTarget = annotatedTag.data.object;
+            }
+            if (tagTarget.type !== "commit" || tagTarget.sha !== run.head_sha) {
+              core.setFailed(
+                `Tag ${tag} does not point to wheel run ${runId} commit ${run.head_sha}.`
+              );
+            }
 
       - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           path: wheelhouse
-          run-id: ${{ steps.wheels-run.outputs.run_id }}
+          run-id: ${{ env.WHEEL_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Collect wheels

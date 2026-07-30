@@ -1,6 +1,10 @@
 name: Python API Wheels
 
 on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
   workflow_dispatch:
 
 jobs:
@@ -98,22 +102,6 @@ jobs:
           python -m pip install --force-reinstall --no-deps "$($wheel.FullName)"
           python -c "import gen; print(gen.__version__)"
           gen --version
-      - name: Upload wheels to releases
-        if: runner.os != 'Windows'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          gh release upload "${TAG}" gen-python/target/wheels/*.whl
-      - name: Upload wheels to releases (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          gh release upload "$env:TAG" "gen-python/target/wheels/*.whl"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
@@ -153,10 +141,28 @@ jobs:
           python -c "import gen; print(gen.__version__)"
           gen --version
 
-  trigger-pypi-publish:
-    needs: build-wheels
+  upload-release-wheels:
+    needs: [build-wheels, test-newer-python]
     runs-on: ubuntu-latest
-    if: ${{ needs.build-wheels.result == 'success' }}
+    if: ${{ needs.build-wheels.result == 'success' && needs.test-newer-python.result == 'success' && github.ref_type == 'tag' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheelhouse
+          merge-multiple: true
+      - name: Upload wheels to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" wheelhouse/*.whl --clobber
+
+  trigger-pypi-publish:
+    needs: upload-release-wheels
+    runs-on: ubuntu-latest
+    if: ${{ needs.upload-release-wheels.result == 'success' && github.ref_type == 'tag' }}
     permissions:
       actions: write
       contents: read
@@ -164,6 +170,7 @@ jobs:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
+      WHEEL_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Ensure tag is available
         run: |
@@ -173,4 +180,8 @@ jobs:
           fi
       - name: Trigger publish-pypi-tag workflow
         run: |
-          gh workflow run publish-pypi-tag.yaml --repo "$REPO" --ref "$TAG" -f tag="$TAG"
+          gh workflow run publish-pypi-tag.yaml \
+            --repo "$REPO" \
+            --ref "$TAG" \
+            -f tag="$TAG" \
+            -f wheel_run_id="$WHEEL_RUN_ID"
