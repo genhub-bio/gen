@@ -25,6 +25,11 @@ members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "g
 default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
 exclude = ["gen-python", "gen-r/src/rust"]
 
+[patch.crates-io]
+# TEMPORARY: verifying the Windows MSVC build fix in CI before it's published
+# to crates.io. Revert this patch before merging.
+rusqdoltlite = { git = "https://github.com/bobvh/rusqdoltlite", rev = "d1ef39b" }
+
 [features]
 benchmark = []
 default = ["models", "cli", "diff", "remote"]
