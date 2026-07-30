@@ -39,9 +39,7 @@ jobs:
         if: runner.os == 'macOS'
         run: make stage-python-client
       - name: Sign bundled client (macOS)
-        # TEMPORARY: dropped the `github.ref_type == 'tag'` gate to verify signing
-        # works in CI without cutting a release tag. Restore the gate before merging.
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
         env:
           MACOS_CERTIFICATE: ${{ secrets.PROD_MACOS_APP_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_PWD }}
@@ -72,8 +70,7 @@ jobs:
           codesign --verify --strict --verbose=2 gen.gen.data/scripts/gen
           security delete-keychain "$KEYCHAIN_PATH"
       - name: Notarize bundled client (macOS)
-        # TEMPORARY: see Sign bundled client (macOS) above. Restore the gate before merging.
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
         env:
           MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
           PROD_MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_APPLE_ID }}
@@ -146,8 +143,7 @@ jobs:
           $wheel = Get-ChildItem "gen-python/target/wheels/*.whl"
           python gen-python/scripts/verify_wheel.py "$($wheel.FullName)"
       - name: Verify bundled client signature (macOS)
-        # TEMPORARY: see Sign bundled client (macOS) above. Restore the gate before merging.
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
         run: |
           CHECK_DIRECTORY="$RUNNER_TEMP/gen-wheel-check"
           mkdir -p "$CHECK_DIRECTORY"
