@@ -26,7 +26,7 @@ It is also available from crates.io:
 cargo install gen
 ```
 
-Prebuilt binaries and installers are available on the [releases page](https://github.com/genhub-bio/gen/releases) for [macOS](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg) and Linux ([x64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip) / [arm64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip)). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
+Prebuilt binaries and installers are available on the [releases page](https://github.com/genhub-bio/gen/releases) for [macOS](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), Linux ([x64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip) / [arm64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip)), and [Windows](https://github.com/genhub-bio/gen/releases/download/nightly/gen.windows-x86_64.zip).
 
 **Python package**: Installing Gen with pip also installs the Python package. Install the `jupyter` extra to include an interactive graph widget for Jupyter and other anywidget-compatible notebooks:
 

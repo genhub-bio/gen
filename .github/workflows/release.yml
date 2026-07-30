@@ -138,9 +138,33 @@ jobs:
           gh release upload "$RELEASE_NAME" gen.linux-x86_64.zip --clobber
           gh release upload "$RELEASE_NAME" gen.linux-arm64.zip --clobber
 
+  release-windows:
+    runs-on: windows-latest
+    permissions:
+      actions: write
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Dependencies
+        run: choco install capnproto
+      - name: Build
+        run: cargo build --release --locked --bin gen
+      - name: Ensure release exists
+        shell: bash
+        run: |
+          gh release view "$RELEASE_NAME" >/dev/null 2>&1 || gh release create "$RELEASE_NAME" --notes "" || gh release view "$RELEASE_NAME"
+      - name: upload-binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive -Path target/release/gen.exe -DestinationPath gen.windows-x86_64.zip
+          gh release upload "$env:RELEASE_NAME" gen.windows-x86_64.zip --clobber
+
   update-release-source:
     runs-on: ubuntu-latest
-    needs: [release-macos, release-ubuntu]
+    needs: [release-macos, release-ubuntu, release-windows]
     permissions:
       actions: write
       contents: write
