@@ -9,7 +9,7 @@ use r#gen::profiling::{Profiler, SamplingProfiler};
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{
-        Cli, Commands, cli_context::CliContext, commit_operation,
+        Cli, Commands, cache, cli_context::CliContext, commit_operation,
         graph_operations::make_stitch::make_stitch_operation, parse_diff_revisions,
         remote::handle_remote_command,
     },
@@ -97,6 +97,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(Commands::Clone { url }) = &cli.command {
         return r#gen::commands::clone::execute(url, &workspace);
+    }
+    if let Some(Commands::CacheClear {}) = &cli.command {
+        if cache::clear(&workspace)? {
+            println!("Cache cleared.");
+        } else {
+            println!("No cache found.");
+        }
+        return Ok(());
     }
     #[cfg(feature = "profiling")]
     if let Some(Commands::Profile(cmd)) = &cli.command {
@@ -237,6 +245,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Clone { .. }) => {
             unreachable!("clone commands are handled before opening the workspace databases")
+        }
+        Some(Commands::CacheClear {}) => {
+            unreachable!("cache-clear is handled before opening the workspace databases")
         }
         #[cfg(feature = "profiling")]
         Some(Commands::Profile(cmd)) => r#gen::commands::profile::execute(cmd.clone()),

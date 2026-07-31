@@ -1,11 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    fs::File,
-    io::{BufRead, BufReader, Cursor},
+    fs::{self, File},
+    io::{self, BufRead, BufReader, Cursor, Read, Seek, Write},
     path::{Path as FsPath, PathBuf},
 };
 
+use flate2::read::MultiGzDecoder;
 use gen_annotations::{
     projection as annotation_projection,
     translate::{bed::translate_bed, gff::translate_gff},
@@ -15,14 +16,16 @@ use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     accession::Accession,
     annotations::{Annotation, AnnotationError},
+    assets::{AssetUri, ChecksummedReader, LocalAssetUri},
     block_group::BlockGroup,
     db::GraphConnection,
     file_types::FileTypes,
     reference_alias::ReferenceAlias,
     traits::Query,
 };
-use noodles::{bed, core::Region, gff, tabix};
+use noodles::{bed, core::Region, csi, gff, tabix};
 use petgraph::Direction;
+use tempfile::NamedTempFile;
 
 use crate::views::{
     annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
@@ -393,24 +396,97 @@ pub fn parse_translated_bed<R: BufRead>(
     build_annotation_spans(track_label, segments_by_name)
 }
 
-fn resolve_annotation_file_path(
+fn resolve_local_annotation_file_path(
     workspace: &Workspace,
     file_addition: &AnnotationAssetEntry,
 ) -> Option<PathBuf> {
+    if !LocalAssetUri::is_local_path_or_file_uri(&file_addition.asset_uri) {
+        return None;
+    }
     if let Ok(repo_root) = workspace.repo_root() {
         let repo_path = repo_root.join(file_addition.file_path());
         if repo_path.exists() {
             return Some(repo_path);
         }
     }
-    let asset_path = workspace
-        .asset_dir()
-        .ok()?
-        .join(file_addition.hashed_filename()?);
+    let hashed_filename = file_addition.hashed_filename()?;
+    let asset_path = workspace.asset_dir().ok()?.join(hashed_filename);
     if asset_path.exists() {
         return Some(asset_path);
     }
     None
+}
+
+fn remote_cache_filename(file_addition: &AnnotationAssetEntry) -> String {
+    let cache_key = file_addition
+        .checksum
+        .map(|checksum| checksum.to_string())
+        .unwrap_or_else(|| format!("uri-{}", HashId::convert_str(&file_addition.asset_uri)));
+    let suffix = <dyn AssetUri>::from_uri(&file_addition.asset_uri)
+        .suffix()
+        .unwrap_or_default();
+    if suffix.is_empty() {
+        cache_key
+    } else {
+        format!("{cache_key}.{suffix}")
+    }
+}
+
+fn remote_annotation_cache_path(
+    workspace: &Workspace,
+    file_addition: &AnnotationAssetEntry,
+    cache_subdirectory: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let cache_dir = workspace.ensure_cache_dir()?.join(cache_subdirectory);
+    fs::create_dir_all(&cache_dir)?;
+    Ok(cache_dir.join(remote_cache_filename(file_addition)))
+}
+
+fn cache_remote_annotation_asset(
+    workspace: &Workspace,
+    file_addition: &AnnotationAssetEntry,
+    cache_subdirectory: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    if LocalAssetUri::is_local_path_or_file_uri(&file_addition.asset_uri) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "local annotation assets must not be copied into the remote cache",
+        )
+        .into());
+    }
+
+    let cache_path = remote_annotation_cache_path(workspace, file_addition, cache_subdirectory)?;
+    if cache_path.exists() {
+        return Ok(cache_path);
+    }
+    let cache_dir = cache_path
+        .parent()
+        .expect("should have cache parent directory");
+
+    let asset_uri = <dyn AssetUri>::from_uri(&file_addition.asset_uri);
+    let mut reader = ChecksummedReader::new(asset_uri.reader(workspace)?);
+    let checksum_handle = reader.checksum_handle();
+    let mut cache_file = NamedTempFile::new_in(cache_dir)?;
+    io::copy(&mut reader, &mut cache_file)?;
+    cache_file.flush()?;
+    if let Some(expected_checksum) = file_addition.checksum
+        && checksum_handle.checksum() != Some(expected_checksum)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "remote annotation asset checksum mismatch: {}",
+                file_addition.asset_uri
+            ),
+        )
+        .into());
+    }
+
+    match cache_file.persist_noclobber(&cache_path) {
+        Ok(_) => Ok(cache_path),
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => Ok(cache_path),
+        Err(error) => Err(error.error.into()),
+    }
 }
 
 fn tabix_index_path(file_path: &FsPath) -> PathBuf {
@@ -435,41 +511,49 @@ fn annotation_index_is_tabix(entry: &AnnotationFileEntry) -> bool {
         .is_some_and(|index_file_addition| index_file_addition.file_type == FileTypes::Tabix)
 }
 
-fn resolve_annotation_index_file_path(
+fn load_annotation_index(
     workspace: &Workspace,
     entry: &AnnotationFileEntry,
-    file_path: &FsPath,
-) -> Option<PathBuf> {
-    if annotation_index_is_tabix(entry) {
+    annotation_path: Option<&FsPath>,
+) -> Result<Option<tabix::Index>, Box<dyn Error>> {
+    let index_path = if annotation_index_is_tabix(entry) {
         let index_file_addition = entry
             .index_file_addition
             .as_ref()
             .expect("should have index file addition when index type is tabix");
-        return resolve_annotation_file_path(workspace, index_file_addition);
-    }
-    let index_path = tabix_index_path(file_path);
-    if index_path.exists() {
-        Some(index_path)
+        if LocalAssetUri::is_local_path_or_file_uri(&index_file_addition.asset_uri) {
+            resolve_local_annotation_file_path(workspace, index_file_addition)
+                .ok_or("Annotation index file not found in repo or assets")?
+        } else {
+            cache_remote_annotation_asset(workspace, index_file_addition, "annotation-indexes")?
+        }
     } else {
-        None
-    }
+        let Some(annotation_path) = annotation_path else {
+            return Ok(None);
+        };
+        let index_path = tabix_index_path(annotation_path);
+        if !index_path.exists() {
+            return Ok(None);
+        }
+        index_path
+    };
+    Ok(Some(tabix::fs::read(index_path)?))
 }
 
-fn load_tabix_region_bytes(
-    file_path: &FsPath,
-    index_path: Option<&FsPath>,
+fn load_tabix_region_bytes<R>(
+    reader: R,
+    index: tabix::Index,
     reference_name: &str,
     window: (i64, i64),
-) -> Result<Vec<u8>, Box<dyn Error>> {
+) -> Result<Vec<u8>, Box<dyn Error>>
+where
+    R: Read + Seek,
+{
     let start = (window.0 + 1).max(1);
     let end = window.1.max(start);
     let region = format!("{reference_name}:{start}-{end}").parse::<Region>()?;
 
-    let mut builder = tabix::io::indexed_reader::Builder::default();
-    if let Some(index_path) = index_path {
-        builder = builder.set_index(tabix::fs::read(index_path)?);
-    }
-    let mut reader = builder.build_from_path(file_path)?;
+    let mut reader = csi::io::IndexedReader::new(reader, index);
     let query = reader.query(&region)?;
 
     let mut bytes = Vec::new();
@@ -480,6 +564,61 @@ fn load_tabix_region_bytes(
     }
 
     Ok(bytes)
+}
+
+fn load_indexed_annotation_bytes(
+    workspace: &Workspace,
+    file_addition: &AnnotationAssetEntry,
+    local_file_path: Option<&FsPath>,
+    index: tabix::Index,
+    reference_name: &str,
+    window: (i64, i64),
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    if let Some(path) = local_file_path {
+        return load_tabix_region_bytes(File::open(path)?, index, reference_name, window);
+    }
+    if LocalAssetUri::is_local_path_or_file_uri(&file_addition.asset_uri) {
+        return Err("Annotation file not found in repo or assets".into());
+    }
+
+    let cache_path = remote_annotation_cache_path(workspace, file_addition, "annotations")?;
+    if cache_path.exists() {
+        return load_tabix_region_bytes(File::open(cache_path)?, index, reference_name, window);
+    }
+
+    // The indexed query itself is the range-support check. This tests the actual read behavior
+    // instead of trusting an optional Accept-Ranges header.
+    let asset_uri = <dyn AssetUri>::from_uri(&file_addition.asset_uri);
+    let ranged_result = asset_uri
+        .reader(workspace)
+        .map_err(|error| Box::new(error) as Box<dyn Error>)
+        .and_then(|reader| load_tabix_region_bytes(reader, index.clone(), reference_name, window));
+    match ranged_result {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => {
+            let cache_path =
+                cache_remote_annotation_asset(workspace, file_addition, "annotations")?;
+            load_tabix_region_bytes(File::open(cache_path)?, index, reference_name, window)
+        }
+    }
+}
+
+fn annotation_reader<'a>(
+    file_path: Option<&FsPath>,
+    indexed_bytes: Option<&'a [u8]>,
+) -> Result<Box<dyn BufRead + 'a>, Box<dyn Error>> {
+    if let Some(bytes) = indexed_bytes {
+        return Ok(Box::new(BufReader::new(Cursor::new(bytes))));
+    }
+    let file_path = file_path.ok_or("Annotation file not found in repo or assets")?;
+    let file = File::open(file_path)?;
+    match file_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("gz" | "bgz") => Ok(Box::new(BufReader::new(MultiGzDecoder::new(file)))),
+        _ => Ok(Box::new(BufReader::new(file))),
+    }
 }
 
 pub struct AnnotationFileTrackLoadResult {
@@ -511,81 +650,77 @@ pub struct AnnotationFileTrackRequest<'a> {
     pub entry: &'a AnnotationFileEntry,
 }
 
+/// Loads an annotation track from the cheapest available local or remote representation.
+///
+/// A usable tabix index limits remote reads to the requested window. Without an index, the
+/// annotation is parsed directly and remote content is cached so later views do not redownload it.
 pub fn load_annotation_file_track(
     request: &AnnotationFileTrackRequest<'_>,
 ) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {
-    let file_path = resolve_annotation_file_path(request.workspace, &request.entry.file_addition)
-        .ok_or("Annotation file not found in repo or assets")?;
-    let index_path =
-        resolve_annotation_index_file_path(request.workspace, request.entry, &file_path);
-    let index_available = index_path.is_some();
-    let mut indexed_source_bytes = None;
-    let mut loaded_window = None;
+    let mut file_path =
+        resolve_local_annotation_file_path(request.workspace, &request.entry.file_addition);
+    let index = load_annotation_index(request.workspace, request.entry, file_path.as_deref())
+        .ok()
+        .flatten();
+    let index_available = index.is_some();
 
-    if index_available {
-        if let (Some(reference_name), Some(window)) =
-            (request.block_group_name, request.query_window)
-        {
-            indexed_source_bytes = Some(load_tabix_region_bytes(
-                &file_path,
-                index_path.as_deref(),
-                reference_name,
-                window,
-            )?);
-            loaded_window = Some(window);
-        } else {
-            return Ok(AnnotationFileTrackLoadResult {
-                track: AnnotationTrack::new(request.entry.display_name.clone(), Vec::new()),
-                index_available,
-                loaded_window: None,
-            });
-        }
+    if index_available && (request.block_group_name.is_none() || request.query_window.is_none()) {
+        return Ok(AnnotationFileTrackLoadResult {
+            track: AnnotationTrack::new(request.entry.display_name.clone(), Vec::new()),
+            index_available,
+            loaded_window: None,
+        });
     }
 
+    let (indexed_source_bytes, loaded_window) = if let Some(index) = index {
+        let reference_name = request
+            .block_group_name
+            .expect("indexed annotation should have a reference name");
+        let window = request
+            .query_window
+            .expect("indexed annotation should have a query window");
+        let bytes = load_indexed_annotation_bytes(
+            request.workspace,
+            &request.entry.file_addition,
+            file_path.as_deref(),
+            index,
+            reference_name,
+            window,
+        )?;
+        (Some(bytes), Some(window))
+    } else {
+        if file_path.is_none() {
+            if LocalAssetUri::is_local_path_or_file_uri(&request.entry.file_addition.asset_uri) {
+                return Err("Annotation file not found in repo or assets".into());
+            }
+            file_path = Some(cache_remote_annotation_asset(
+                request.workspace,
+                &request.entry.file_addition,
+                "annotations",
+            )?);
+        }
+        (None, None)
+    };
+
     let mut buffer = Vec::new();
+    let reader = annotation_reader(file_path.as_deref(), indexed_source_bytes.as_deref())?;
     match request.entry.file_addition.file_type {
-        FileTypes::Gff3 => {
-            if let Some(bytes) = indexed_source_bytes.as_deref() {
-                translate_gff(
-                    request.conn,
-                    request.collection_name,
-                    request.sample_name,
-                    request.history_ref,
-                    BufReader::new(Cursor::new(bytes)),
-                    &mut buffer,
-                )?;
-            } else {
-                translate_gff(
-                    request.conn,
-                    request.collection_name,
-                    request.sample_name,
-                    request.history_ref,
-                    BufReader::new(File::open(&file_path)?),
-                    &mut buffer,
-                )?;
-            }
-        }
-        FileTypes::Bed => {
-            if let Some(bytes) = indexed_source_bytes.as_deref() {
-                translate_bed(
-                    request.conn,
-                    request.collection_name,
-                    request.sample_name,
-                    request.history_ref,
-                    Cursor::new(bytes),
-                    &mut buffer,
-                )?;
-            } else {
-                translate_bed(
-                    request.conn,
-                    request.collection_name,
-                    request.sample_name,
-                    request.history_ref,
-                    File::open(&file_path)?,
-                    &mut buffer,
-                )?;
-            }
-        }
+        FileTypes::Gff3 => translate_gff(
+            request.conn,
+            request.collection_name,
+            request.sample_name,
+            request.history_ref,
+            reader,
+            &mut buffer,
+        )?,
+        FileTypes::Bed => translate_bed(
+            request.conn,
+            request.collection_name,
+            request.sample_name,
+            request.history_ref,
+            reader,
+            &mut buffer,
+        )?,
         other => {
             return Err(format!("Unsupported annotation file type: {other:?}").into());
         }
@@ -599,12 +734,8 @@ pub fn load_annotation_file_track(
     let spans = match request.entry.file_addition.file_type {
         FileTypes::Gff3 => {
             if buffer.is_empty() {
-                let reader: Box<dyn BufRead> = if let Some(bytes) = indexed_source_bytes.as_deref()
-                {
-                    Box::new(BufReader::new(Cursor::new(bytes)))
-                } else {
-                    Box::new(BufReader::new(File::open(&file_path)?))
-                };
+                let reader =
+                    annotation_reader(file_path.as_deref(), indexed_source_bytes.as_deref())?;
                 parse_translated_gff(
                     reader,
                     request.node_filter,
@@ -622,12 +753,8 @@ pub fn load_annotation_file_track(
         }
         FileTypes::Bed => {
             if buffer.is_empty() {
-                let reader: Box<dyn BufRead> = if let Some(bytes) = indexed_source_bytes.as_deref()
-                {
-                    Box::new(BufReader::new(Cursor::new(bytes)))
-                } else {
-                    Box::new(BufReader::new(File::open(&file_path)?))
-                };
+                let reader =
+                    annotation_reader(file_path.as_deref(), indexed_source_bytes.as_deref())?;
                 parse_translated_bed(
                     reader,
                     request.node_filter,
@@ -656,19 +783,27 @@ pub fn load_annotation_file_track(
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        io::Cursor,
+        fs,
+        io::{Cursor, Read as _, Write as _},
+        net::TcpListener,
         path::PathBuf,
+        thread,
+        time::{Duration, Instant},
     };
 
-    use gen_core::{HashId, Strand};
+    use flate2::{Compression, write::GzEncoder};
+    use gen_core::{HashId, Sha256Hash, Strand};
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
         annotations::add_annotation, block_group::BlockGroup, file_types::FileTypes, sample::Sample,
     };
+    use noodles::tabix;
 
     use super::{
-        AnnotationGroupTrackRequest, AnnotationSegment, annotation_index_is_tabix,
-        load_annotations_for_group, parse_translated_bed, spans_whole_block_group,
+        AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
+        annotation_index_is_tabix, load_annotation_file_track, load_annotations_for_group,
+        load_indexed_annotation_bytes, parse_translated_bed, remote_annotation_cache_path,
+        spans_whole_block_group,
     };
     use crate::{
         graphs::combinatorial_library::parse_library,
@@ -680,6 +815,54 @@ mod tests {
             annotation_groups::load_annotation_group_entries,
         },
     };
+
+    fn serve_http_content(
+        contents: &[u8],
+        expected_get_count: usize,
+    ) -> (String, thread::JoinHandle<()>) {
+        let contents = contents.to_vec();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should bind test HTTP listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should configure test HTTP listener");
+        let address = listener.local_addr().expect("should read listener address");
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut served_get_count = 0;
+            while served_get_count < expected_get_count
+                && started.elapsed() < Duration::from_secs(5)
+            {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 1024];
+                let length = stream.read(&mut request).expect("should read request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                if request.starts_with("GET ") {
+                    served_get_count += 1;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        contents.len()
+                    )
+                    .expect("should write response headers");
+                    stream
+                        .write_all(&contents)
+                        .expect("should write response body");
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        contents.len()
+                    )
+                    .expect("should write metadata response");
+                }
+            }
+            assert_eq!(served_get_count, expected_get_count);
+        });
+        (format!("http://{address}/asset"), handle)
+    }
 
     #[test]
     fn parse_translated_bed_preserves_strand() {
@@ -1035,13 +1218,13 @@ mod tests {
                 id: HashId::convert_str("annotation"),
                 asset_uri: "file:///tmp/annotation.gff3".to_string(),
                 file_type: FileTypes::Gff3,
-                checksum: Some(gen_core::Sha256Hash::convert_str("annotation-checksum")),
+                checksum: Some(Sha256Hash::convert_str("annotation-checksum")),
             },
             index_file_addition: Some(AnnotationAssetEntry {
                 id: HashId::convert_str("index"),
                 asset_uri: "file:///tmp/annotation.csi".to_string(),
                 file_type: FileTypes::None,
-                checksum: Some(gen_core::Sha256Hash::convert_str("index-checksum")),
+                checksum: Some(Sha256Hash::convert_str("index-checksum")),
             }),
             name: None,
             display_name: "annotation".to_string(),
@@ -1059,5 +1242,219 @@ mod tests {
             ..annotation_entry
         };
         assert!(annotation_index_is_tabix(&tabix_entry));
+    }
+
+    #[test]
+    fn test_indexed_remote_annotation_downloads_index_without_query_window() {
+        let context = setup_gen();
+        let index_contents = include_bytes!("../../fixtures/chr22_100k_no_samples.vcf.gz.tbi");
+        let (index_uri, server) = serve_http_content(index_contents, 1);
+        let index_file_addition = AnnotationAssetEntry {
+            id: HashId::convert_str("remote-index"),
+            asset_uri: index_uri,
+            file_type: FileTypes::Tabix,
+            checksum: None,
+        };
+        let entry = AnnotationFileEntry {
+            file_addition: AnnotationAssetEntry {
+                id: HashId::convert_str("remote-annotation"),
+                asset_uri: "http://127.0.0.1:1/annotation.gff3.gz".to_string(),
+                file_type: FileTypes::Gff3,
+                checksum: None,
+            },
+            index_file_addition: Some(index_file_addition.clone()),
+            name: Some("remote-track".to_string()),
+            display_name: "remote-track".to_string(),
+        };
+        let node_filter = HashSet::new();
+        let request = AnnotationFileTrackRequest {
+            conn: context.graph().conn(),
+            history_ref: None,
+            workspace: context.workspace(),
+            collection_name: "collection",
+            sample_name: "sample",
+            block_group_name: None,
+            query_window: None,
+            node_filter: &node_filter,
+            entry: &entry,
+        };
+
+        let result = load_annotation_file_track(&request)
+            .expect("metadata-only indexed track load should cache the index");
+        server.join().expect("should finish HTTP server");
+        let cached_result =
+            load_annotation_file_track(&request).expect("should reuse the cached index");
+
+        assert!(result.index_available);
+        assert!(cached_result.index_available);
+        assert!(result.track.annotations.is_empty());
+        assert_eq!(result.loaded_window, None);
+        let cache_path = remote_annotation_cache_path(
+            context.workspace(),
+            &index_file_addition,
+            "annotation-indexes",
+        )
+        .expect("should resolve annotation index cache path");
+        assert_eq!(
+            fs::read(cache_path).expect("should read cached annotation index"),
+            index_contents
+        );
+    }
+
+    #[test]
+    fn test_unindexed_remote_annotation_is_cached_and_reused() {
+        let context = setup_gen();
+        let contents = b"##gff-version 3\n";
+        let (asset_uri, server) = serve_http_content(contents, 1);
+        let entry = AnnotationFileEntry {
+            file_addition: AnnotationAssetEntry {
+                id: HashId::convert_str("unindexed-remote-annotation"),
+                asset_uri,
+                file_type: FileTypes::Gff3,
+                checksum: None,
+            },
+            index_file_addition: None,
+            name: None,
+            display_name: "remote-track".to_string(),
+        };
+        let node_filter = HashSet::new();
+        let request = AnnotationFileTrackRequest {
+            conn: context.graph().conn(),
+            history_ref: None,
+            workspace: context.workspace(),
+            collection_name: "collection",
+            sample_name: "sample",
+            block_group_name: None,
+            query_window: None,
+            node_filter: &node_filter,
+            entry: &entry,
+        };
+
+        let first_result =
+            load_annotation_file_track(&request).expect("should load remote annotation");
+        server.join().expect("should finish HTTP server");
+        let second_result =
+            load_annotation_file_track(&request).expect("should reuse cached remote annotation");
+
+        assert!(!first_result.index_available);
+        assert!(first_result.track.annotations.is_empty());
+        assert!(second_result.track.annotations.is_empty());
+        let cache_dir = context
+            .workspace()
+            .ensure_cache_dir()
+            .expect("should resolve cache directory")
+            .join("annotations");
+        let cached_paths = fs::read_dir(&cache_dir)
+            .expect("should read annotation cache")
+            .map(|entry| entry.expect("should read cached entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(cached_paths.len(), 1);
+        assert_eq!(
+            fs::read(&cached_paths[0]).expect("should read cached annotation"),
+            contents
+        );
+    }
+
+    #[test]
+    fn test_unindexed_remote_gzip_annotation_is_decompressed_from_cache() {
+        let context = setup_gen();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(b"##gff-version 3\n")
+            .expect("should compress annotation");
+        let compressed = encoder
+            .finish()
+            .expect("should finish compressed annotation");
+        let (asset_uri, server) = serve_http_content(&compressed, 1);
+        let file_addition = AnnotationAssetEntry {
+            id: HashId::convert_str("unindexed-remote-gzip-annotation"),
+            asset_uri: format!("{asset_uri}.gff3.gz"),
+            file_type: FileTypes::Gff3,
+            checksum: None,
+        };
+        let entry = AnnotationFileEntry {
+            file_addition: file_addition.clone(),
+            index_file_addition: None,
+            name: None,
+            display_name: "remote-gzip-track".to_string(),
+        };
+        let node_filter = HashSet::new();
+        let request = AnnotationFileTrackRequest {
+            conn: context.graph().conn(),
+            history_ref: None,
+            workspace: context.workspace(),
+            collection_name: "collection",
+            sample_name: "sample",
+            block_group_name: None,
+            query_window: None,
+            node_filter: &node_filter,
+            entry: &entry,
+        };
+
+        let result =
+            load_annotation_file_track(&request).expect("should decode remote gzip annotation");
+        server.join().expect("should finish HTTP server");
+        let cached_result =
+            load_annotation_file_track(&request).expect("should decode cached gzip annotation");
+
+        assert!(result.track.annotations.is_empty());
+        assert!(cached_result.track.annotations.is_empty());
+        let cache_path =
+            remote_annotation_cache_path(context.workspace(), &file_addition, "annotations")
+                .expect("should resolve annotation cache path");
+        assert_eq!(
+            fs::read(cache_path).expect("should read compressed annotation cache"),
+            compressed
+        );
+    }
+
+    #[test]
+    fn test_indexed_remote_annotation_without_range_support_uses_cache_fallback() {
+        let context = setup_gen();
+        let contents = include_bytes!("../../fixtures/chr22_100k_no_samples.vcf.gz");
+        let (asset_uri, server) = serve_http_content(contents, 3);
+        let file_addition = AnnotationAssetEntry {
+            id: HashId::convert_str("remote-indexed-annotation"),
+            asset_uri,
+            file_type: FileTypes::Gff3,
+            checksum: None,
+        };
+        let index_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join("chr22_100k_no_samples.vcf.gz.tbi");
+
+        let bytes = load_indexed_annotation_bytes(
+            context.workspace(),
+            &file_addition,
+            None,
+            tabix::fs::read(&index_path).expect("should read tabix index"),
+            "chr22",
+            (16_050_074, 16_050_120),
+        )
+        .expect("should retry the indexed query from a cached file");
+        server.join().expect("should finish HTTP server");
+
+        let records = String::from_utf8(bytes).expect("should return text records");
+        assert!(records.contains("chr22\t16050075"));
+        assert!(records.contains("chr22\t16050115"));
+
+        let cache_path =
+            remote_annotation_cache_path(context.workspace(), &file_addition, "annotations")
+                .expect("should resolve annotation cache path");
+        assert_eq!(
+            fs::read(&cache_path).expect("should read cached annotation"),
+            contents
+        );
+
+        let cached_bytes = load_indexed_annotation_bytes(
+            context.workspace(),
+            &file_addition,
+            None,
+            tabix::fs::read(index_path).expect("should reread tabix index"),
+            "chr22",
+            (16_050_074, 16_050_120),
+        )
+        .expect("should reuse the cached file");
+        assert!(!cached_bytes.is_empty());
     }
 }
