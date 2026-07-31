@@ -8,7 +8,7 @@ use std::{
 use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
-    assets::AssetUri,
+    assets::{AssetUri, ChecksummedReader},
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -44,7 +44,7 @@ pub fn import_fasta(
     let path = PathBuf::from(fasta);
 
     let asset_uri = <dyn AssetUri>::new(context.workspace(), fasta);
-    let file = asset_uri.reader(context.workspace())?;
+    let file = ChecksummedReader::new(asset_uri.reader(context.workspace())?);
     let checksum_handle = file.checksum_handle();
 
     let reader_stream: Box<dyn BufRead> = match path.extension().and_then(|ext| ext.to_str()) {

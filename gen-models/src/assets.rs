@@ -14,6 +14,7 @@ use rusqlite::{
     types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 use url::{Position, Url};
 
 use crate::{
@@ -636,9 +637,10 @@ pub struct ChecksummedReader {
 }
 
 impl ChecksummedReader {
-    fn new(inner: Box<dyn Read>) -> Self {
+    /// Wraps a reader whose complete sequential contents need to be checksummed.
+    pub fn new(inner: impl Read + 'static) -> Self {
         Self {
-            inner,
+            inner: Box::new(inner),
             state: Arc::new(Mutex::new(ChecksumState {
                 hasher: Sha256::new(),
                 checksum: None,
@@ -718,57 +720,61 @@ impl OpenDalLocation {
         Self::new_fs(Path::new("/"), path)
     }
 
-    fn from_remote_uri(asset_uri: &str) -> Result<Self, FileAdditionError> {
+    fn from_remote_uri(asset_uri: &str) -> Result<blocking::StdReader, FileAdditionError> {
         let url = Url::parse(asset_uri)
             .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
-
-        if url.scheme().eq_ignore_ascii_case("s3") {
-            let bucket = url.host_str().ok_or_else(|| {
-                FileAdditionError::FileReadError(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("s3 uri is missing bucket: {asset_uri}"),
-                ))
-            })?;
-
-            let operator = with_opendal_runtime(|| {
-                let builder = services::S3::default().bucket(bucket).allow_anonymous();
-                let op = opendal::Operator::new(builder)?.finish();
-                blocking::Operator::new(op)
-            })
-            .map_err(opendal_file_addition_error)?;
-
-            return Ok(Self {
-                operator,
-                path: url.path().trim_start_matches('/').to_string(),
-            });
-        }
-
-        let operator_uri = url[..Position::BeforePath].to_string();
+        // An OpenDAL operator identifies the storage backend, while its reader identifies an
+        // object within that backend. Keep the object path out of the operator configuration.
+        let backend_uri = &url[..Position::BeforePath];
+        let object_path = url.path().trim_start_matches('/').to_string();
+        let anonymous_access_configured = url
+            .query_pairs()
+            .any(|(key, _)| key.eq_ignore_ascii_case("allow_anonymous"));
         opendal::init_default_registry();
-        let operator = with_opendal_runtime(|| blocking::Operator::from_uri(operator_uri.as_str()))
-            .map_err(opendal_file_addition_error)?;
 
-        Ok(Self {
-            operator,
-            path: url.path().trim_start_matches('/').to_string(),
-        })
+        let open_reader = |allow_anonymous: Option<&str>| {
+            // Query parameters are OpenDAL backend options, not part of the remote object key.
+            let mut options = url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<HashMap<_, _>>();
+            if let Some(value) = allow_anonymous {
+                options.insert("allow_anonymous".to_string(), value.to_string());
+            }
+            let operator =
+                with_opendal_runtime(|| blocking::Operator::from_uri((backend_uri, options)))
+                    .map_err(opendal_file_addition_error)?;
+            Self {
+                operator,
+                path: object_path.clone(),
+            }
+            .reader()
+        };
+
+        // Credentials for another AWS account can reject an otherwise public object. Retry the
+        // actual OpenDAL read anonymously instead of using request signing as a credential probe.
+        match open_reader(None) {
+            Ok(reader) => Ok(reader),
+            Err(_) if url.scheme().eq_ignore_ascii_case("s3") && !anonymous_access_configured => {
+                open_reader(Some("true"))
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    fn reader(self) -> Result<ChecksummedReader, FileAdditionError> {
-        let reader = self
-            .operator
+    fn reader(self) -> Result<blocking::StdReader, FileAdditionError> {
+        self.operator
             .reader(&self.path)
             .map_err(opendal_file_addition_error)?
             .into_std_read(..)
-            .map_err(opendal_file_addition_error)?;
-        Ok(ChecksummedReader::new(Box::new(reader)))
+            .map_err(opendal_file_addition_error)
     }
 }
 
 pub trait AssetUri {
     fn uri(&self) -> &str;
 
-    fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError>;
+    fn reader(&self, workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError>;
 
     /// Performs the storage work required before recording an asset and returns a verified
     /// checksum when one is available.
@@ -910,7 +916,7 @@ pub struct LocalAssetUri {
     asset_uri: String,
     source_path: Option<PathBuf>,
     workspace_root: Option<PathBuf>,
-    read_file: Option<ChecksummedReader>,
+    read_file: Option<blocking::StdReader>,
     write_file: Option<opendal::blocking::StdWriter>,
 }
 
@@ -919,7 +925,7 @@ impl AssetUri for LocalAssetUri {
         &self.asset_uri
     }
 
-    fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError> {
+    fn reader(&self, workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
         OpenDalLocation::from_workspace_path(workspace, &source_file_path)
             .map_err(opendal_file_addition_error)?
@@ -1251,10 +1257,10 @@ impl LocalAssetUri {
             }
         }
 
-        let mut reader = self.reader(workspace)?;
+        let mut reader = ChecksummedReader::new(self.reader(workspace)?);
         let checksum_handle = reader.checksum_handle();
-        let mut staged_file = tempfile::NamedTempFile::new_in(&asset_dir)
-            .map_err(FileAdditionError::FileReadError)?;
+        let mut staged_file =
+            NamedTempFile::new_in(&asset_dir).map_err(FileAdditionError::FileReadError)?;
         io::copy(&mut reader, &mut staged_file).map_err(FileAdditionError::FileReadError)?;
         staged_file
             .flush()
@@ -1416,8 +1422,8 @@ impl AssetUri for RemoteAssetUri {
         &self.asset_uri
     }
 
-    fn reader(&self, _workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError> {
-        OpenDalLocation::from_remote_uri(&self.asset_uri)?.reader()
+    fn reader(&self, _workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError> {
+        OpenDalLocation::from_remote_uri(&self.asset_uri)
     }
 
     fn prepare_asset(
@@ -1459,7 +1465,7 @@ impl RemoteAssetUri {
 mod tests {
     use std::{
         fs,
-        io::{Read, Write},
+        io::{Read, Seek, SeekFrom, Write},
         net::TcpListener,
         path::PathBuf,
         thread,
@@ -2394,7 +2400,7 @@ mod tests {
             asset_uri.prepare_asset(context.workspace(), None).unwrap(),
             None
         );
-        let mut reader = asset_uri.reader(context.workspace()).unwrap();
+        let mut reader = ChecksummedReader::new(asset_uri.reader(context.workspace()).unwrap());
         let checksum_handle = reader.checksum_handle();
         let mut contents = String::new();
         reader.read_to_string(&mut contents).unwrap();
@@ -2403,5 +2409,215 @@ mod tests {
         let expected_checksum = calculate_reader_checksum(contents.as_bytes()).unwrap();
         assert_eq!(checksum_handle.checksum(), Some(expected_checksum));
         assert_ne!(expected_checksum, Sha256Hash::convert_str(&uri));
+    }
+
+    #[test]
+    fn test_remote_asset_uri_reader_uses_range_request() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should bind test HTTP listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should configure test HTTP listener");
+        let address = listener.local_addr().expect("should read listener address");
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut served_range = false;
+            while !served_range && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 1024];
+                let length = stream.read(&mut request).expect("should read request");
+                let request = String::from_utf8_lossy(&request[..length]).to_lowercase();
+                if request.starts_with("get ") {
+                    assert!(
+                        request.contains("\r\nrange: bytes=2-6\r\n"),
+                        "remote reader should resume at the seek position: {request}"
+                    );
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\nContent-Range: bytes 2-6/7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\nitial",
+                        )
+                        .expect("should write ranged response");
+                    served_range = true;
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("should write metadata response");
+                }
+            }
+            assert!(served_range, "should serve a ranged GET request");
+        });
+
+        let mut reader = OpenDalLocation::from_remote_uri(&format!("http://{address}/asset.fa"))
+            .expect("should open seekable remote reader");
+        reader
+            .seek(SeekFrom::Start(2))
+            .expect("should seek within remote asset");
+        let mut bytes = [0; 3];
+        let bytes_read = reader
+            .read(&mut bytes)
+            .expect("should read requested remote range");
+        handle.join().expect("should finish HTTP server");
+
+        assert_eq!(bytes_read, bytes.len());
+        assert_eq!(&bytes, b"iti");
+    }
+
+    #[test]
+    fn test_remote_s3_uri_retries_anonymously_after_authenticated_read_fails() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should bind test HTTP listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should configure test HTTP listener");
+        let address = listener.local_addr().expect("should read listener address");
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut saw_signed_request = false;
+            let mut saw_anonymous_request = false;
+            let mut served_content = false;
+            while !served_content && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("should read request");
+                let request = String::from_utf8_lossy(&request[..length]).to_lowercase();
+                if request.contains("\r\nauthorization:") {
+                    saw_signed_request = true;
+                    let body = "<Error><Code>AccessDenied</Code><Message>signed request rejected</Message></Error>";
+                    write!(
+                        stream,
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("should reject signed request");
+                } else if request.starts_with("head ") {
+                    saw_anonymous_request = true;
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("should accept anonymous metadata request");
+                } else if request.starts_with("get ") {
+                    saw_anonymous_request = true;
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 7\r\nContent-Range: bytes 0-6/7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\ninitial",
+                        )
+                        .expect("should serve anonymous content request");
+                    served_content = true;
+                }
+            }
+            (saw_signed_request, saw_anonymous_request, served_content)
+        });
+
+        let mut url = Url::parse("s3://public-bucket/annotations/genes.gff3")
+            .expect("should parse test S3 URI");
+        url.query_pairs_mut()
+            .append_pair("endpoint", &format!("http://{address}"))
+            .append_pair("region", "us-east-1")
+            .append_pair("access_key_id", "other-account-key")
+            .append_pair("secret_access_key", "other-account-secret")
+            .append_pair("disable_config_load", "true")
+            .append_pair("disable_ec2_metadata", "true");
+
+        let mut reader =
+            OpenDalLocation::from_remote_uri(url.as_str()).expect("should retry anonymously");
+        let mut contents = String::new();
+        reader
+            .read_to_string(&mut contents)
+            .expect("should read public S3 content anonymously");
+        let (saw_signed_request, saw_anonymous_request, served_content) =
+            handle.join().expect("should finish HTTP server");
+
+        assert!(
+            saw_signed_request,
+            "should try configured credentials first"
+        );
+        assert!(
+            saw_anonymous_request,
+            "should retry without credentials after the signed read fails"
+        );
+        assert!(
+            served_content,
+            "should serve the anonymously readable object"
+        );
+        assert_eq!(contents, "initial");
+    }
+
+    #[test]
+    fn test_remote_s3_uri_respects_explicit_signed_only_access() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should bind test HTTP listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should configure test HTTP listener");
+        let address = listener.local_addr().expect("should read listener address");
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut signed_request_at = None;
+            let mut saw_signed_request = false;
+            let mut saw_anonymous_request = false;
+            while started.elapsed() < Duration::from_secs(5)
+                && signed_request_at
+                    .is_none_or(|time: Instant| time.elapsed() < Duration::from_millis(200))
+            {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("should read request");
+                let request = String::from_utf8_lossy(&request[..length]).to_lowercase();
+                if request.contains("\r\nauthorization:") {
+                    saw_signed_request = true;
+                    signed_request_at = Some(Instant::now());
+                    let body = "<Error><Code>AccessDenied</Code><Message>signed request rejected</Message></Error>";
+                    write!(
+                        stream,
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("should reject signed request");
+                } else {
+                    saw_anonymous_request = true;
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("should accept anonymous metadata request");
+                    break;
+                }
+            }
+            (saw_signed_request, saw_anonymous_request)
+        });
+
+        let mut url = Url::parse("s3://public-bucket/annotations/genes.gff3")
+            .expect("should parse test S3 URI");
+        url.query_pairs_mut()
+            .append_pair("endpoint", &format!("http://{address}"))
+            .append_pair("region", "us-east-1")
+            .append_pair("access_key_id", "other-account-key")
+            .append_pair("secret_access_key", "other-account-secret")
+            .append_pair("allow_anonymous", "false")
+            .append_pair("disable_config_load", "true")
+            .append_pair("disable_ec2_metadata", "true");
+
+        let result = OpenDalLocation::from_remote_uri(url.as_str());
+        let (saw_signed_request, saw_anonymous_request) =
+            handle.join().expect("should finish HTTP server");
+
+        assert!(
+            result.is_err(),
+            "should return the authenticated read error"
+        );
+        assert!(saw_signed_request, "should try configured credentials");
+        assert!(
+            !saw_anonymous_request,
+            "should not override an explicit signed-only policy"
+        );
     }
 }

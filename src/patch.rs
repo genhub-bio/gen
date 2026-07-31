@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::{Read, Seek, Write},
+    path::PathBuf,
 };
 
 use gen_core::{
@@ -106,10 +107,7 @@ impl PatchFile {
         Ok(Self { file, archive_path })
     }
 
-    fn source_asset_path(
-        &self,
-        context: &DbContext,
-    ) -> Result<std::path::PathBuf, CreatePatchError> {
+    fn source_asset_path(&self, context: &DbContext) -> Result<PathBuf, CreatePatchError> {
         let asset_filename = Self::local_asset_filename(&self.file)
             .ok_or(CreatePatchError::MissingAssetChecksum(self.file.id))?;
         Ok(context.workspace().asset_dir()?.join(asset_filename))

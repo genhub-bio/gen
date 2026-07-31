@@ -802,6 +802,7 @@ mod tests {
         fs,
         io::{Cursor, Write},
         path::PathBuf,
+        slice::from_ref,
     };
 
     use tempfile::NamedTempFile;
@@ -1422,7 +1423,7 @@ mod tests {
 
         add_files_operation(
             &context,
-            std::slice::from_ref(&operation_file),
+            from_ref(&operation_file),
             Some("track remote reference"),
         )
         .expect("should track remote asset");
@@ -1442,7 +1443,7 @@ mod tests {
 
         add_files_operation(
             &context,
-            std::slice::from_ref(&operation_file),
+            from_ref(&operation_file),
             Some("track checksummed remote reference"),
         )
         .expect("should track remote asset without reading it");
