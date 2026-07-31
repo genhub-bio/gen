@@ -1605,6 +1605,11 @@ mod tests {
             test_helpers::setup_gen,
         };
 
+        /// Builds a linear history where `alpha.fa` gains a replacement, its superseded reference
+        /// is later deleted, and `beta.fa` is added at `HEAD`. A persistent `zeta.fa` exercises
+        /// unchanged assets, while an external URI verifies that only local files are returned.
+        /// The saved commit hashes let each test isolate materialized, cumulative, and bounded
+        /// history behavior without repeating the setup.
         struct AssetHistoryFixture {
             context: DbContext,
             first_alpha: AssetRef,

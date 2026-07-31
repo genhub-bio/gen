@@ -431,6 +431,12 @@ fn download_asset(
     result
 }
 
+/// Transfers the asset versions needed to move from `previous_hash` to the selected branch state.
+///
+/// GenHub may advertise the branch's complete asset history, so this function filters those URLs
+/// to versions absent from the previous state. The cumulative view supplies that transfer delta
+/// and the checksums used for conflict detection, while the materialized view decides which of the
+/// selected versions belongs at its logical workspace path instead of under `.gen/assets`.
 fn transfer_assets(
     graph: &GraphConnection,
     workspace: &Workspace,
@@ -448,9 +454,7 @@ fn transfer_assets(
         &AssetTransferRequest { operation, branch },
         login_origin,
     )?;
-    // GenHub can return URLs for the entire asset history. Limit byte transfers to asset versions
-    // introduced between the previous and destination states, while retaining the previous history
-    // for dirty-file detection and the full destination view for materialization decisions.
+
     let commit_hash = hash_of(graph, branch)?;
     let current_assets: HashMap<_, _> =
         AssetRef::get_cumulative_assets_at(graph, previous_hash, Some(&commit_hash))?
@@ -470,6 +474,7 @@ fn transfer_assets(
     } else {
         HashMap::new()
     };
+    // These are assets we expect to be in the current batch of transfers
     let mut assets: HashMap<_, _> = current_assets
         .iter()
         .filter(|(id, _)| !previous_assets.contains_key(id))
