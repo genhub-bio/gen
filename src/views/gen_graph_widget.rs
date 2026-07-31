@@ -37,6 +37,14 @@ pub mod label {
     pub const END: &str = "╢";
 }
 
+const ZERO_WIDTH_GLYPH: char = '─';
+
+fn is_zero_width_junction(node: &GraphNode) -> bool {
+    !is_start_node(node.node_id)
+        && !is_end_node(node.node_id)
+        && node.sequence_start == node.sequence_end
+}
+
 /// Domain-specific node sizer for GenGraph that calculates visual dimensions
 /// based on genomic sequence length.
 #[derive(Clone)]
@@ -52,6 +60,9 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
         if is_end_node(node.node_id) {
             return (label::END.chars().count() as u64, 1u64);
         }
+        if is_zero_width_junction(node) {
+            return (1, 1);
+        }
 
         let sequence_length = (node.sequence_end - node.sequence_start) as u64;
         match detail_level {
@@ -59,6 +70,10 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
             VisualDetail::Truncated => (sequence_length.min(13), 1u64), // 13 = 5 border + 3 mid + 5 border
             VisualDetail::Full => (sequence_length, 1u64),              // Full sequence length
         }
+    }
+
+    fn is_selectable(&self, node: &GraphNode) -> bool {
+        !is_zero_width_junction(node)
     }
 
     /// Map a raw sequence column to the visual cell it occupies for `detail_level`.
@@ -136,6 +151,12 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
         detail_level: VisualDetail,
     ) {
         let theme = current_theme();
+        if is_zero_width_junction(node_id) {
+            let edge_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
+            buffer.set_char_styled(area.left_center(), ZERO_WIDTH_GLYPH, edge_style);
+            return;
+        }
+
         let background_style = Style::default().bg(theme[0x05]);
         let text_style = Style::default().bg(theme[0x05]).fg(theme[0x00]);
 
@@ -744,7 +765,7 @@ pub fn locus_midpoint(locus: &GraphLocus) -> Option<(GraphNodeSlice, usize)> {
 mod tests {
     use std::path::PathBuf;
 
-    use gen_core::{HashId, Strand};
+    use gen_core::{HashId, PATH_START_NODE_ID, Strand};
     use gen_models::sample::Sample;
     use gen_tui::{
         geometry::WorldPos,
@@ -752,7 +773,9 @@ mod tests {
         testing::create_test_terminal,
         viewport_state::{ViewportState, WorldBuffer},
     };
-    use ratatui::{backend::TestBackend, widgets::StatefulWidget as _};
+    use ratatui::{
+        backend::TestBackend, buffer::Buffer, layout::Rect, widgets::StatefulWidget as _,
+    };
 
     use super::*;
     use crate::{
@@ -840,6 +863,60 @@ mod tests {
         let s = "hello world";
         let truncated = inner_truncation(s, 3);
         assert_eq!(truncated, NODE_GLYPH.to_string());
+    }
+
+    #[test]
+    fn test_zero_width_junction_is_line_sized_and_not_selectable() {
+        let junction = GraphNode {
+            node_id: HashId::convert_str("zero-width-junction"),
+            sequence_start: 3,
+            sequence_end: 3,
+        };
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+
+        for detail_level in [
+            VisualDetail::Minimal,
+            VisualDetail::Truncated,
+            VisualDetail::Full,
+        ] {
+            assert_eq!(
+                GenGraphNodeSizer.get_node_size(&junction, detail_level),
+                (1, 1)
+            );
+        }
+        assert!(!GenGraphNodeSizer.is_selectable(&junction));
+        assert!(GenGraphNodeSizer.is_selectable(&start));
+    }
+
+    #[test]
+    fn test_zero_width_junction_renders_as_line() {
+        let context = setup_gen_on_disk();
+        let junction = GraphNode {
+            node_id: HashId::convert_str("zero-width-junction"),
+            sequence_start: 3,
+            sequence_end: 3,
+        };
+        let mut viewport_state = ViewportState::new();
+        viewport_state.viewport_bounds = Rect::new(0, 0, 5, 5);
+        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn());
+
+        renderer.render_node(
+            &mut world_buffer,
+            WorldRect::from_center_and_size(WorldPos::ZERO, (1, 1)),
+            &junction,
+            VisualDetail::Full,
+        );
+
+        assert_eq!(
+            world_buffer.get_char(WorldPos::ZERO),
+            Some(ZERO_WIDTH_GLYPH)
+        );
     }
 
     #[test]
