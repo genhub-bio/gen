@@ -778,7 +778,9 @@ where
             .node_indices()
             .filter_map(|layout_node_idx| {
                 let node = layout.graph.node_weight(layout_node_idx)?;
-                if let NodeRole::Data(domain_idx) = &node.role {
+                if let NodeRole::Data(domain_idx) = &node.role
+                    && self.is_node_selectable(*domain_idx)
+                {
                     // Calculate distance from local origin (0, 0) using Manhattan distance
                     let distance = node.pos.x.abs() + node.pos.y.abs();
                     Some((*domain_idx, distance))
@@ -795,14 +797,50 @@ where
         candidates.first().map(|(idx, _)| *idx)
     }
 
+    fn is_node_selectable(&self, domain_idx: NodeIndex) -> bool {
+        let node_id =
+            NodeIndexable::from_index(&self.partition_controller.graph, domain_idx.index());
+        self.partition_controller.node_sizer.is_selectable(&node_id)
+    }
+
+    fn cursor_is_on_selectable_node(&self) -> bool {
+        self.cursor
+            .node_idx()
+            .is_some_and(|node_idx| self.is_node_selectable(node_idx))
+    }
+
     /// Move the cursor horizontally by `delta` world units.
     pub fn navigate_horizontal(&mut self, delta: i64) -> Result<(), String> {
-        self.cursor.move_horizontal(delta, &self.viewport_graph)
+        let original_cursor = self.cursor.clone();
+        for _ in 0..self.partition_controller.graph.node_count().max(1) {
+            if let Err(error) = self.cursor.move_horizontal(delta, &self.viewport_graph) {
+                self.cursor = original_cursor;
+                return Err(error);
+            }
+            if self.cursor_is_on_selectable_node() {
+                return Ok(());
+            }
+        }
+
+        self.cursor = original_cursor;
+        Err("No selectable node in that direction".to_string())
     }
 
     /// Move the cursor vertically by `delta` world units.
     pub fn navigate_vertical(&mut self, delta: i64) -> Result<(), String> {
-        self.cursor.move_vertical(delta, &self.viewport_graph)
+        let original_cursor = self.cursor.clone();
+        for _ in 0..self.partition_controller.graph.node_count().max(1) {
+            if let Err(error) = self.cursor.move_vertical(delta, &self.viewport_graph) {
+                self.cursor = original_cursor;
+                return Err(error);
+            }
+            if self.cursor_is_on_selectable_node() {
+                return Ok(());
+            }
+        }
+
+        self.cursor = original_cursor;
+        Err("No selectable node in that direction".to_string())
     }
 
     /// Handle keyboard events for graph navigation and control
@@ -823,7 +861,7 @@ where
                 } else {
                     -1
                 };
-                self.cursor.move_horizontal(delta, &self.viewport_graph)?;
+                self.navigate_horizontal(delta)?;
                 self.trigger_rebuild();
             }
             KeyCode::Right | KeyCode::Char('l') => {
@@ -833,7 +871,7 @@ where
                 } else {
                     1
                 };
-                self.cursor.move_horizontal(delta, &self.viewport_graph)?;
+                self.navigate_horizontal(delta)?;
                 self.trigger_rebuild();
             }
             // Note: In world coordinates, Y increases upward
@@ -844,7 +882,7 @@ where
                 } else {
                     1
                 };
-                self.cursor.move_vertical(delta, &self.viewport_graph)?;
+                self.navigate_vertical(delta)?;
                 self.trigger_rebuild();
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -854,7 +892,7 @@ where
                 } else {
                     -1
                 };
-                self.cursor.move_vertical(delta, &self.viewport_graph)?; // Move down = negative Y
+                self.navigate_vertical(delta)?; // Move down = negative Y
                 self.trigger_rebuild();
             }
 
@@ -1227,8 +1265,11 @@ where
     /// hide it later via `hide_cursor`.
     ///
     /// The caller is responsible for ensuring the relevant partition is loaded
-    /// and set as anchor before calling this.
+    /// and set as anchor before calling this. Non-selectable nodes are ignored.
     pub fn go_to_node(&mut self, domain_idx: NodeIndex, offset: (f64, f64)) {
+        if !self.is_node_selectable(domain_idx) {
+            return;
+        }
         self.cursor.set_node(domain_idx, offset);
         self.cursor.set_coarse_mode(false);
         self.show_cursor();
@@ -1280,23 +1321,24 @@ where
         };
 
         // Collect the hit result before any mutable borrow to satisfy the borrow checker.
-        let hit =
-            self.viewport_graph
-                .data_nodes()
-                .find_map(|(node_center, domain_idx, layout_node)| {
-                    let rect = BigRect::from_center_and_size(node_center, layout_node.size);
-                    if rect.contains(click_world) {
-                        let frac_x = ((click_world.x - rect.left()) as f64
-                            / layout_node.size.0.max(1) as f64)
-                            .clamp(0.0, 1.0);
-                        let frac_y = ((click_world.y - rect.bottom()) as f64
-                            / layout_node.size.1.max(1) as f64)
-                            .clamp(0.0, 1.0);
-                        Some((domain_idx, (frac_x, frac_y)))
-                    } else {
-                        None
-                    }
-                });
+        let hit = self
+            .viewport_graph
+            .data_nodes()
+            .filter(|(_, domain_idx, _)| self.is_node_selectable(*domain_idx))
+            .find_map(|(node_center, domain_idx, layout_node)| {
+                let rect = BigRect::from_center_and_size(node_center, layout_node.size);
+                if rect.contains(click_world) {
+                    let frac_x = ((click_world.x - rect.left()) as f64
+                        / layout_node.size.0.max(1) as f64)
+                        .clamp(0.0, 1.0);
+                    let frac_y = ((click_world.y - rect.bottom()) as f64
+                        / layout_node.size.1.max(1) as f64)
+                        .clamp(0.0, 1.0);
+                    Some((domain_idx, (frac_x, frac_y)))
+                } else {
+                    None
+                }
+            });
 
         if let Some((domain_idx, frac)) = hit {
             self.cursor.set_node(domain_idx, frac);
@@ -1321,6 +1363,7 @@ where
         let best = self
             .viewport_graph
             .data_nodes()
+            .filter(|(_, domain_idx, _)| self.is_node_selectable(*domain_idx))
             .min_by_key(|(pos, _, layout_node)| {
                 let rect = BigRect::from_center_and_size(*pos, layout_node.size);
                 let closest_x = center.x.clamp(rect.left(), rect.right());
@@ -1360,10 +1403,15 @@ where
 mod tests {
     use std::time::Duration;
 
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use petgraph::graph::NodeIndex;
     use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
     use super::*;
-    use crate::geometry::WorldRect;
+    use crate::{
+        geometry::WorldRect, layout::VisualDetail, plotter::NodeSizer,
+        testing::mocks::MockDomainGraph,
+    };
 
     #[test]
     fn test_coordinate_conversions() {
@@ -1550,12 +1598,6 @@ mod tests {
 
     #[test]
     fn test_disperse_functionality() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use petgraph::graph::NodeIndex;
-        use ratatui::layout::Rect;
-
-        use crate::{layout::VisualDetail, plotter::NodeSizer, testing::mocks::MockDomainGraph};
-
         // Create a simple NodeSizer for our domain graph
         #[derive(Clone)]
         struct TestNodeSizer;
@@ -1602,5 +1644,52 @@ mod tests {
 
         // If we get here without panicking, the test passes
         println!("Test completed successfully");
+    }
+
+    #[test]
+    fn test_selection_ignores_and_navigates_past_non_selectable_nodes() {
+        #[derive(Clone)]
+        struct SelectiveNodeSizer {
+            non_selectable: NodeIndex,
+        }
+
+        impl NodeSizer<MockDomainGraph> for SelectiveNodeSizer {
+            fn get_node_size(&self, _node: &NodeIndex, _scale: VisualDetail) -> (u64, u64) {
+                (1, 1)
+            }
+
+            fn is_selectable(&self, node: &NodeIndex) -> bool {
+                *node != self.non_selectable
+            }
+        }
+
+        let mut graph = MockDomainGraph::new();
+        let selectable = graph.add_node(());
+        let non_selectable = graph.add_node(());
+        let next_selectable = graph.add_node(());
+        graph.add_edge(selectable, non_selectable, ());
+        graph.add_edge(non_selectable, next_selectable, ());
+        let mut controller = GraphController::new(graph, SelectiveNodeSizer { non_selectable });
+
+        controller.go_to_node(non_selectable, (0.5, 0.5));
+        assert_eq!(controller.cursor.node_idx(), None);
+
+        controller.go_to_node(selectable, (1.0, 0.5));
+        assert_eq!(controller.cursor.node_idx(), Some(selectable));
+
+        controller.viewport_state.viewport_bounds = Rect::new(0, 0, 80, 20);
+        controller.ensure_camera_coverage().unwrap();
+        controller.rebuild_viewport_graph().unwrap();
+        let non_selectable_position = controller.viewport_graph.node_positions[&non_selectable];
+        let (terminal_x, terminal_y) = controller
+            .viewport_state
+            .world_to_terminal(non_selectable_position)
+            .expect("should show the non-selectable node in the viewport");
+
+        assert!(!controller.handle_click(terminal_x, terminal_y));
+        assert_eq!(controller.cursor.node_idx(), Some(selectable));
+
+        controller.navigate_horizontal(1).unwrap();
+        assert_eq!(controller.cursor.node_idx(), Some(next_selectable));
     }
 }

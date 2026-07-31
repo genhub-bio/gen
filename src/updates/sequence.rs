@@ -186,6 +186,7 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use gen_core::NO_CHROMOSOME_INDEX;
+    use gen_graph::GraphNode;
     use gen_models::{
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
@@ -196,11 +197,14 @@ mod tests {
         region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
     };
+    use petgraph::Direction;
 
     use super::*;
     use crate::{
+        graphs::combinatorial_library::parse_library,
         imports::fasta::import_fasta,
         test_helpers::{get_sample_bg, setup_block_group, setup_gen},
+        updates::library::update_with_library,
     };
 
     fn insertion_block(
@@ -806,5 +810,91 @@ mod tests {
             latest_path.sequence(conn, None).unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
+    }
+
+    #[test]
+    fn test_deletion_at_combinatorial_part_start_adds_bypass_paths() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let library_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
+        let fasta_path = fasta_path.to_str().unwrap().to_string();
+        let parts_path = parts_path.to_str().unwrap().to_string();
+        let library_path = library_path.to_str().unwrap().to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        add_annotation(
+            &context,
+            &collection,
+            "SITE",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:7-20",
+        )
+        .unwrap();
+        update_with_library(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "design",
+            "SITE",
+            parse_library(&parts_path, &library_path).unwrap(),
+            Some(&parts_path),
+            Some(&library_path),
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            "design",
+            "deleted",
+            "cds1:0-1",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let block_group = get_sample_bg(conn, &collection, "deleted");
+        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
+        let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
+        let sequences = Node::get_sequences_by_node_ids(conn, &node_ids, None);
+        let rendered_sequence = |node: GraphNode| {
+            sequences[&node.node_id]
+                .get_sequence(node.sequence_start, node.sequence_end)
+                .unwrap()
+        };
+        let deleted_target = graph
+            .nodes()
+            .find(|node| rendered_sequence(*node) == "TGATAA")
+            .expect("should contain the remainder of cds1");
+        let original_first_base = graph
+            .nodes()
+            .find(|node| node.node_id == deleted_target.node_id && rendered_sequence(*node) == "A")
+            .expect("should contain the deleted first base of cds1");
+        let deletion_boundary = graph
+            .nodes()
+            .find(|node| {
+                node.node_id == deleted_target.node_id
+                    && node.sequence_start == 0
+                    && node.sequence_end == 0
+            })
+            .expect("should contain a zero-width block at the deletion boundary");
+        let upstream_parts = graph
+            .neighbors_directed(deletion_boundary, Direction::Incoming)
+            .collect::<Vec<_>>();
+
+        assert_eq!(upstream_parts.len(), 3);
+        assert!(graph.contains_edge(deletion_boundary, original_first_base));
+        assert!(graph.contains_edge(deletion_boundary, deleted_target));
     }
 }

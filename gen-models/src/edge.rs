@@ -426,7 +426,24 @@ impl Edge {
             return Ok(vec![(coordinates[0], coordinates[0])]);
         }
 
-        Ok(coordinates.into_iter().tuple_windows().collect())
+        let mut intervals = coordinates
+            .iter()
+            .copied()
+            .tuple_windows()
+            .collect::<Vec<_>>();
+        // An edge can both enter and leave at an outer coordinate, even though no sequence
+        // interval exists on one side. A zero-width block represents that boundary as a graph
+        // junction so every stored edge can attach to a concrete block.
+        let first_coordinate = coordinates[0];
+        if ends.contains(&first_coordinate) {
+            intervals.insert(0, (first_coordinate, first_coordinate));
+        }
+        let last_coordinate = coordinates[coordinates.len() - 1];
+        if starts.contains(&last_coordinate) {
+            intervals.push((last_coordinate, last_coordinate));
+        }
+
+        Ok(intervals)
     }
 
     pub fn blocks_from_edges(
@@ -586,7 +603,7 @@ impl Edge {
                     block,
                 )
             })
-            .collect::<HashMap<BlockKey, &GroupBlock>>();
+            .into_group_map();
         let blocks_by_end = blocks
             .iter()
             .map(|block| {
@@ -598,7 +615,7 @@ impl Edge {
                     block,
                 )
             })
-            .collect::<HashMap<BlockKey, &GroupBlock>>();
+            .into_group_map();
 
         let mut graph = GenGraph::new();
         let mut edges_by_node_pair = HashMap::new();
@@ -611,32 +628,72 @@ impl Edge {
                 node_id: edge.source_node_id,
                 coordinate: edge.source_coordinate,
             };
-            let source_id = blocks_by_end.get(&source_key);
+            let source_blocks = blocks_by_end.get(&source_key);
             let target_key = BlockKey {
                 node_id: edge.target_node_id,
                 coordinate: edge.target_coordinate,
             };
-            let target_id = blocks_by_start.get(&target_key);
+            let target_blocks = blocks_by_start.get(&target_key);
 
-            if let Some(source_block) = source_id
-                && let Some(target_block) = target_id
+            if let Some(source_blocks) = source_blocks
+                && let Some(target_blocks) = target_blocks
             {
-                let source_node = graph_node_for_block(source_block);
-                let target_node = graph_node_for_block(target_block);
-                let graph_edge = GraphEdge {
-                    edge_id: edge.id,
-                    source_strand: edge.source_strand,
-                    target_strand: edge.target_strand,
-                    chromosome_index: augmented_edge.chromosome_index,
-                    phased: augmented_edge.phased,
-                    created_on: augmented_edge.created_on,
-                };
-                if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
-                    existing_edges.push(graph_edge);
-                } else {
-                    graph.add_edge(source_node, target_node, vec![graph_edge]);
+                // Ordinary edges attach to a zero-width boundary block when one exists. The
+                // same-coordinate edge then connects that junction to the adjacent sequence
+                // block, preserving both the original route and routes that skip sequence.
+                let is_boundary_continuation = edge.source_node_id == edge.target_node_id
+                    && edge.source_coordinate == edge.target_coordinate;
+                let source_has_zero_width_block =
+                    source_blocks.iter().any(|block| block.start == block.end);
+                let target_has_zero_width_block =
+                    target_blocks.iter().any(|block| block.start == block.end);
+                let has_distinct_block_pair = source_blocks.iter().any(|source_block| {
+                    target_blocks
+                        .iter()
+                        .any(|target_block| source_block.id != target_block.id)
+                });
+
+                for source_block in source_blocks {
+                    if !is_boundary_continuation
+                        && source_has_zero_width_block
+                        && source_block.start != source_block.end
+                    {
+                        continue;
+                    }
+                    for target_block in target_blocks {
+                        if !is_boundary_continuation
+                            && target_has_zero_width_block
+                            && target_block.start != target_block.end
+                        {
+                            continue;
+                        }
+                        if is_boundary_continuation
+                            && has_distinct_block_pair
+                            && source_block.id == target_block.id
+                        {
+                            continue;
+                        }
+
+                        let source_node = graph_node_for_block(source_block);
+                        let target_node = graph_node_for_block(target_block);
+                        let graph_edge = GraphEdge {
+                            edge_id: edge.id,
+                            source_strand: edge.source_strand,
+                            target_strand: edge.target_strand,
+                            chromosome_index: augmented_edge.chromosome_index,
+                            phased: augmented_edge.phased,
+                            created_on: augmented_edge.created_on,
+                        };
+                        if let Some(existing_edges) =
+                            graph.edge_weight_mut(source_node, target_node)
+                        {
+                            existing_edges.push(graph_edge);
+                        } else {
+                            graph.add_edge(source_node, target_node, vec![graph_edge]);
+                        }
+                        edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
+                    }
                 }
-                edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
             }
         }
 
@@ -707,6 +764,16 @@ mod tests {
         let intervals = Edge::get_block_intervals(&starts, &ends).unwrap();
 
         assert_eq!(intervals, vec![(3, 3)]);
+    }
+
+    #[test]
+    fn test_get_block_intervals_adds_zero_width_blocks_at_outer_boundaries() {
+        let starts = HashSet::from([0, 2, 4]);
+        let ends = HashSet::from([0, 2, 4]);
+
+        let intervals = Edge::get_block_intervals(&starts, &ends).unwrap();
+
+        assert_eq!(intervals, vec![(0, 0), (0, 2), (2, 4), (4, 4)]);
     }
 
     #[test]

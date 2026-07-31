@@ -182,6 +182,11 @@ where
     /// Get the dimensions (width, height) for a node at a specific level of detail
     fn get_node_size(&self, node: &G::NodeId, detail_level: VisualDetail) -> (u64, u64);
 
+    /// Return whether the cursor may select this node.
+    fn is_selectable(&self, _node: &G::NodeId) -> bool {
+        true
+    }
+
     /// Get default dimensions for dummy/routing nodes
     fn get_dummy_size(&self) -> (u64, u64) {
         (1, 1)
@@ -219,6 +224,10 @@ where
 
     fn get_dummy_size(&self) -> (u64, u64) {
         (**self).get_dummy_size()
+    }
+
+    fn is_selectable(&self, node: &G::NodeId) -> bool {
+        (**self).is_selectable(node)
     }
 
     fn map_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
