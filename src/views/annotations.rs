@@ -1,3 +1,12 @@
+//! Annotation track loading resolves local files first and materializes remote indexes and data
+//! only when the selected workflow requires them. A remote tabix index is downloaded in full,
+//! cached under `.gen/cache/annotation-indexes`, and parsed before the annotation is queried. With
+//! an index and viewport, the annotation is read through OpenDAL range requests; if ranged access
+//! fails, the complete file is cached and the query is retried locally. Remote annotations without
+//! a usable index are cached in full before parsing. Cached compressed bytes remain compressed and
+//! are decoded only at the parser boundary, while downloads are streamed through checksum
+//! verification and atomically published for later reuse.
+
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -396,6 +405,11 @@ pub fn parse_translated_bed<R: BufRead>(
     build_annotation_spans(track_label, segments_by_name)
 }
 
+/// Finds an annotation or explicit index sidecar that should already exist in the workspace.
+///
+/// Track loading calls this first for the annotation itself, and index loading reuses it for a
+/// configured local index. Remote URIs deliberately return `None` so the caller can choose between
+/// ranged access and the remote cache instead of treating the URI as a filesystem path.
 fn resolve_local_annotation_file_path(
     workspace: &Workspace,
     file_addition: &AnnotationAssetEntry,
@@ -417,6 +431,11 @@ fn resolve_local_annotation_file_path(
     None
 }
 
+/// Builds the stable filename used when a remote annotation or index is materialized locally.
+///
+/// Cache path construction calls this for both data and index files. A known content checksum is
+/// the preferred identity; checksumless assets use the URI for stable reuse, and retaining the
+/// suffix lets the parser recognize compressed annotation files after they are cached.
 fn remote_cache_filename(file_addition: &AnnotationAssetEntry) -> String {
     let cache_key = file_addition
         .checksum
@@ -432,6 +451,11 @@ fn remote_cache_filename(file_addition: &AnnotationAssetEntry) -> String {
     }
 }
 
+/// Resolves the cache destination before reading or downloading a remote annotation asset.
+///
+/// Index loading uses the `annotation-indexes` subdirectory, while annotation loading uses
+/// `annotations`. Keeping those namespaces separate lets both files retain their original suffix
+/// and prevents an index from being mistaken for annotation data.
 fn remote_annotation_cache_path(
     workspace: &Workspace,
     file_addition: &AnnotationAssetEntry,
@@ -442,6 +466,12 @@ fn remote_annotation_cache_path(
     Ok(cache_dir.join(remote_cache_filename(file_addition)))
 }
 
+/// Materializes an entire remote annotation or index when the workflow needs a local file.
+///
+/// This is called unconditionally for remote indexes, for unindexed remote annotations, and as the
+/// fallback when an indexed remote annotation cannot satisfy ranged reads. Existing cache entries
+/// are reused; new downloads are checksummed while streaming and published atomically only after
+/// the complete file has arrived.
 fn cache_remote_annotation_asset(
     workspace: &Workspace,
     file_addition: &AnnotationAssetEntry,
@@ -489,6 +519,10 @@ fn cache_remote_annotation_asset(
     }
 }
 
+/// Finds the conventional sibling index for a local annotation without an explicit index asset.
+///
+/// Index loading calls this only after the primary annotation has resolved to a local path. An
+/// explicit index entry, including a remote index URI, takes the other branch of that workflow.
 fn tabix_index_path(file_path: &FsPath) -> PathBuf {
     let mut index_path = file_path.to_path_buf();
     index_path.set_extension(format!(
@@ -504,6 +538,10 @@ fn tabix_index_path(file_path: &FsPath) -> PathBuf {
     PathBuf::from(format!("{}.tbi", file_path.display()))
 }
 
+/// Reports whether track loading should use the explicitly recorded index as a tabix index.
+///
+/// Other index file types do not enter the tabix query workflow and leave local sibling discovery
+/// to `load_annotation_index`.
 fn annotation_index_is_tabix(entry: &AnnotationFileEntry) -> bool {
     entry
         .index_file_addition
@@ -511,6 +549,12 @@ fn annotation_index_is_tabix(entry: &AnnotationFileEntry) -> bool {
         .is_some_and(|index_file_addition| index_file_addition.file_type == FileTypes::Tabix)
 }
 
+/// Loads the tabix index before track loading decides how to access the annotation data.
+///
+/// A configured remote index is downloaded in full and cached, while a configured local index is
+/// resolved from the workspace. Without an explicit tabix asset, local annotations are checked for
+/// a conventional sibling index. The resulting BGZF-compressed index is parsed into memory before
+/// any local or remote annotation query begins.
 fn load_annotation_index(
     workspace: &Workspace,
     entry: &AnnotationFileEntry,
@@ -540,6 +584,11 @@ fn load_annotation_index(
     Ok(Some(tabix::fs::read(index_path)?))
 }
 
+/// Executes a tabix query after the workflow has selected a seekable annotation source.
+///
+/// Local files, cached files, and OpenDAL remote readers all enter here as raw BGZF streams. The
+/// noodles indexed reader applies the parsed index's virtual offsets and decompresses only the
+/// blocks needed to return records intersecting the requested window.
 fn load_tabix_region_bytes<R>(
     reader: R,
     index: tabix::Index,
@@ -566,6 +615,11 @@ where
     Ok(bytes)
 }
 
+/// Chooses how to obtain annotation records once an index and query window are available.
+///
+/// Local and previously cached files are queried directly. A remote uncached annotation is first
+/// queried through its seekable OpenDAL reader so range-capable storage transfers only the needed
+/// blocks; if that query fails, the complete file is cached and the same query is retried locally.
 fn load_indexed_annotation_bytes(
     workspace: &Workspace,
     file_addition: &AnnotationAssetEntry,
@@ -603,6 +657,11 @@ fn load_indexed_annotation_bytes(
     }
 }
 
+/// Adapts the selected annotation representation for translation and parsing.
+///
+/// Track loading calls this after indexed access has produced in-memory record bytes or after a
+/// complete local/cached file has been selected. Indexed bytes are already decompressed text;
+/// complete `.gz` and `.bgz` files are decompressed here at the parser boundary.
 fn annotation_reader<'a>(
     file_path: Option<&FsPath>,
     indexed_bytes: Option<&'a [u8]>,
@@ -652,8 +711,11 @@ pub struct AnnotationFileTrackRequest<'a> {
 
 /// Loads an annotation track from the cheapest available local or remote representation.
 ///
-/// A usable tabix index limits remote reads to the requested window. Without an index, the
-/// annotation is parsed directly and remote content is cached so later views do not redownload it.
+/// The workflow first resolves local data and loads any tabix index, caching a remote index when
+/// necessary. An indexed track without a reference or viewport stops after index discovery. With
+/// a complete query window, the loader attempts an indexed local, cached, or ranged remote read;
+/// without an index it materializes remote data before parsing. Both paths finish by adapting the
+/// selected bytes or file into the same translation and graph-projection pipeline.
 pub fn load_annotation_file_track(
     request: &AnnotationFileTrackRequest<'_>,
 ) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {
