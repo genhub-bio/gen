@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-use gen_core::{HashId, Sha256Hash, Workspace, calculate_hash};
+use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use opendal::{blocking, services};
 use rusqlite::{
     Row, ToSql, named_params, params,
@@ -19,6 +19,7 @@ use url::{Position, Url};
 use crate::{
     db::GraphConnection,
     errors::{FileAdditionError, FileStoreError, QueryError},
+    history::dolt::hash_of,
     operations::{FileAddition, calculate_reader_checksum},
     traits::Query,
 };
@@ -161,6 +162,11 @@ impl FromSql for AssetRole {
     }
 }
 
+/// An immutable reference to an asset recorded in repository history.
+///
+/// Several references can have the same logical path because Gen retains every committed version.
+/// Use [`Self::get_cumulative_assets_at`] when that provenance is needed and
+/// [`Self::get_materialized_assets_at`] when constructing the one-file-per-path workspace view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssetRef {
     pub id: HashId,
@@ -175,6 +181,11 @@ pub struct AssetRef {
 }
 
 pub struct Assets;
+
+enum AssetView {
+    Cumulative,
+    Materialized,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationFileAssets {
@@ -289,23 +300,131 @@ impl AssetRef {
         )?;
         Ok(())
     }
+
+    fn get_assets_at(
+        conn: &GraphConnection,
+        from_hash: Option<&DoltHashId>,
+        to_hash: Option<&DoltHashId>,
+        view: AssetView,
+    ) -> Result<Vec<Self>, QueryError> {
+        let query = "WITH RECURSIVE ancestry(commit_hash, depth) AS ( \
+                         SELECT COALESCE(:to_hash, dolt_hashof('HEAD')), 0 \
+                         UNION ALL \
+                         SELECT parents.parent_hash, ancestry.depth + 1 \
+                         FROM ancestry \
+                         JOIN dolt_commit_ancestors AS parents \
+                           ON parents.commit_hash = ancestry.commit_hash \
+                          AND parents.parent_index = 0 \
+                         WHERE parents.parent_hash IS NOT NULL \
+                           AND (:from_hash IS NULL OR ancestry.commit_hash <> :from_hash) \
+                     ), \
+                     bounded_ancestry AS ( \
+                         SELECT commit_hash, depth \
+                         FROM ancestry \
+                         WHERE :from_hash IS NULL \
+                            OR EXISTS ( \
+                                SELECT 1 FROM ancestry \
+                                WHERE commit_hash = :from_hash \
+                            ) \
+                     ), \
+                     asset_versions AS ( \
+                         SELECT historical_assets.*, \
+                                ROW_NUMBER() OVER ( \
+                                    PARTITION BY historical_assets.id \
+                                    ORDER BY bounded_ancestry.depth \
+                                ) AS history_rank, \
+                                MAX(bounded_ancestry.depth) OVER ( \
+                                    PARTITION BY historical_assets.id \
+                                ) AS age \
+                         FROM bounded_ancestry \
+                         JOIN dolt_history_gen_asset_refs AS historical_assets \
+                           ON historical_assets.commit_hash = bounded_ancestry.commit_hash \
+                         WHERE historical_assets.uri LIKE 'file://%' \
+                     ), \
+                     selected_assets AS ( \
+                         SELECT asset_versions.*, \
+                                ROW_NUMBER() OVER ( \
+                                    PARTITION BY asset_versions.logical_path, \
+                                                 CASE \
+                                                     WHEN asset_versions.logical_path IS NULL \
+                                                     THEN asset_versions.id \
+                                                 END \
+                                    ORDER BY asset_versions.age, \
+                                             asset_versions.created_on DESC, \
+                                             asset_versions.id \
+                                ) AS materialized_rank \
+                         FROM asset_versions \
+                         LEFT JOIN dolt_at_gen_asset_refs( \
+                             COALESCE(:to_hash, dolt_hashof('HEAD')) \
+                         ) AS current_assets \
+                           ON current_assets.id = asset_versions.id \
+                         WHERE asset_versions.history_rank = 1 \
+                           AND (NOT :materialized OR current_assets.id IS NOT NULL) \
+                     ) \
+                     SELECT id, uri, file_type, checksum, size, role, logical_path, name, created_on \
+                     FROM selected_assets \
+                     WHERE NOT :materialized OR materialized_rank = 1 \
+                     ORDER BY logical_path, id";
+        Self::try_query(
+            conn,
+            query,
+            named_params! {
+                ":from_hash": from_hash,
+                ":to_hash": to_hash,
+                ":materialized": matches!(view, AssetView::Materialized),
+            },
+        )
+    }
+
+    /// Returns every local asset reference present in an inclusive commit range.
+    ///
+    /// This cumulative view retains superseded or subsequently deleted references.
+    /// Synchronization code needs those versions to recognize previously managed file contents,
+    /// distinguish an intended update from a user edit, and report conflicts correctly. Omitting
+    /// `to_hash` uses `HEAD`; omitting `from_hash` walks through the root commit, so omitting both
+    /// bounds returns the complete history reachable from `HEAD`.
+    pub fn get_cumulative_assets_at(
+        conn: &GraphConnection,
+        from_hash: Option<&DoltHashId>,
+        to_hash: Option<&DoltHashId>,
+    ) -> Result<Vec<Self>, QueryError> {
+        Self::get_assets_at(conn, from_hash, to_hash, AssetView::Cumulative)
+    }
+
+    /// Returns the one-file-per-logical-path workspace view for an inclusive commit range.
+    ///
+    /// When multiple committed assets share a logical path, the asset introduced by the most
+    /// recent commit in the selected history represents that path at the upper bound. This
+    /// collapsed view is for deciding which files should be materialized, not for history-aware
+    /// conflict detection. Omitting `to_hash` uses `HEAD`; omitting `from_hash` walks through the
+    /// root commit, so omitting both bounds uses the complete history reachable from `HEAD`.
+    pub fn get_materialized_assets_at(
+        conn: &GraphConnection,
+        from_hash: Option<&DoltHashId>,
+        to_hash: Option<&DoltHashId>,
+    ) -> Result<Vec<Self>, QueryError> {
+        Self::get_assets_at(conn, from_hash, to_hash, AssetView::Materialized)
+    }
 }
 
 impl Assets {
+    /// Returns the materialized asset view at the commit currently named by a branch or ref.
+    ///
+    /// Resolving the ref before querying gives [`AssetRef::get_materialized_assets_at`] a stable
+    /// commit boundary even if the branch later advances. Call
+    /// [`AssetRef::get_cumulative_assets_at`] directly when superseded versions are needed for
+    /// conflict or update detection.
     pub fn get_branch_assets(
         conn: &GraphConnection,
         branch: &str,
     ) -> Result<HashMap<HashId, AssetRef>, QueryError> {
-        let query = format!(
-            "SELECT * FROM {} ORDER BY id",
-            AssetRef::table_name_with_history_ref(Some(branch))
-        );
-        let assets = AssetRef::try_query(conn, &query, named_params! { ":history_ref": branch })?;
-        Ok(assets
-            .into_iter()
-            .filter(|asset| LocalAssetUri::is_file_uri(&asset.uri))
-            .map(|asset| (asset.id, asset))
-            .collect())
+        let commit_hash = hash_of(conn, branch)?;
+        Ok(
+            AssetRef::get_materialized_assets_at(conn, None, Some(&commit_hash))?
+                .into_iter()
+                .map(|asset| (asset.id, asset))
+                .collect(),
+        )
     }
 
     pub fn get_annotation_files(
@@ -1476,34 +1595,272 @@ mod tests {
         );
     }
 
+    mod asset_history {
+        use gen_core::{DoltHashId, HashId, Sha256Hash};
+
+        use super::{AssetRef, AssetRole};
+        use crate::{
+            db::{DbContext, GraphConnection},
+            history::dolt::commit_all,
+            test_helpers::setup_gen,
+        };
+
+        struct AssetHistoryFixture {
+            context: DbContext,
+            first_alpha: AssetRef,
+            second_alpha: AssetRef,
+            beta: AssetRef,
+            zeta: AssetRef,
+            second_commit: DoltHashId,
+            deletion_commit: DoltHashId,
+            latest_commit: DoltHashId,
+        }
+
+        impl AssetHistoryFixture {
+            fn new() -> Self {
+                let context = setup_gen();
+                let conn = context.graph().conn();
+                let first_alpha = AssetRef {
+                    id: HashId::convert_str("first-alpha"),
+                    uri: "file://assets/first-alpha.fa".to_string(),
+                    file_type: "fasta".to_string(),
+                    checksum: Some(Sha256Hash::convert_str("first-alpha-checksum")),
+                    size: Some(4),
+                    role: AssetRole::Input,
+                    logical_path: Some("alpha.fa".to_string()),
+                    name: Some("alpha.fa".to_string()),
+                    created_on: 1,
+                };
+                let zeta = AssetRef {
+                    id: HashId::convert_str("zeta"),
+                    uri: "file://assets/zeta.fa".to_string(),
+                    checksum: Some(Sha256Hash::convert_str("zeta-checksum")),
+                    logical_path: Some("zeta.fa".to_string()),
+                    name: Some("zeta.fa".to_string()),
+                    ..first_alpha.clone()
+                };
+                let remote_asset = AssetRef {
+                    id: HashId::convert_str("remote-asset"),
+                    uri: "https://example.com/reference.fa".to_string(),
+                    logical_path: Some("remote.fa".to_string()),
+                    name: Some("remote.fa".to_string()),
+                    ..first_alpha.clone()
+                };
+                AssetRef::create(conn, &zeta).expect("should insert zeta asset");
+                AssetRef::create(conn, &first_alpha).expect("should insert first alpha asset");
+                AssetRef::create(conn, &remote_asset).expect("should insert remote asset");
+                commit_all(conn, "add first assets").expect("should commit first assets");
+
+                let second_alpha = AssetRef {
+                    id: HashId::convert_str("second-alpha"),
+                    uri: "file://assets/second-alpha.fa".to_string(),
+                    checksum: Some(Sha256Hash::convert_str("second-alpha-checksum")),
+                    created_on: 2,
+                    ..first_alpha.clone()
+                };
+                AssetRef::create(conn, &second_alpha).expect("should insert second alpha asset");
+                let second_commit = commit_all(conn, "replace alpha asset")
+                    .expect("should commit replacement asset");
+
+                conn.execute("DELETE FROM gen_asset_refs WHERE id = ?1", [first_alpha.id])
+                    .expect("should delete superseded alpha asset");
+                let deletion_commit = commit_all(conn, "delete superseded asset")
+                    .expect("should commit asset deletion");
+
+                let beta = AssetRef {
+                    id: HashId::convert_str("beta"),
+                    uri: "file://assets/beta.fa".to_string(),
+                    checksum: Some(Sha256Hash::convert_str("beta-checksum")),
+                    logical_path: Some("beta.fa".to_string()),
+                    name: Some("beta.fa".to_string()),
+                    created_on: 3,
+                    ..first_alpha.clone()
+                };
+                AssetRef::create(conn, &beta).expect("should insert beta asset");
+                let latest_commit =
+                    commit_all(conn, "add later beta asset").expect("should commit later asset");
+
+                Self {
+                    context,
+                    first_alpha,
+                    second_alpha,
+                    beta,
+                    zeta,
+                    second_commit,
+                    deletion_commit,
+                    latest_commit,
+                }
+            }
+
+            fn conn(&self) -> &GraphConnection {
+                self.context.graph().conn()
+            }
+        }
+
+        fn sorted_assets(mut assets: Vec<AssetRef>) -> Vec<AssetRef> {
+            assets.sort_by(|left, right| {
+                left.logical_path
+                    .cmp(&right.logical_path)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            assets
+        }
+
+        #[test]
+        fn test_materialized_assets_at_selects_latest_version_per_path() {
+            let fixture = AssetHistoryFixture::new();
+
+            assert_eq!(
+                AssetRef::get_materialized_assets_at(
+                    fixture.conn(),
+                    None,
+                    Some(&fixture.second_commit),
+                )
+                .expect("should materialize second commit"),
+                vec![fixture.second_alpha.clone(), fixture.zeta.clone()]
+            );
+        }
+
+        #[test]
+        fn test_materialized_assets_at_excludes_deleted_versions() {
+            let fixture = AssetHistoryFixture::new();
+
+            assert_eq!(
+                AssetRef::get_materialized_assets_at(
+                    fixture.conn(),
+                    None,
+                    Some(&fixture.deletion_commit),
+                )
+                .expect("should materialize deletion commit"),
+                vec![fixture.second_alpha.clone(), fixture.zeta.clone()]
+            );
+        }
+
+        #[test]
+        fn test_cumulative_assets_at_retains_superseded_and_deleted_versions() {
+            let fixture = AssetHistoryFixture::new();
+            let expected = sorted_assets(vec![
+                fixture.first_alpha.clone(),
+                fixture.second_alpha.clone(),
+                fixture.zeta.clone(),
+            ]);
+
+            assert_eq!(
+                AssetRef::get_cumulative_assets_at(
+                    fixture.conn(),
+                    None,
+                    Some(&fixture.deletion_commit),
+                )
+                .expect("should read cumulative assets at deletion commit"),
+                expected
+            );
+        }
+
+        #[test]
+        fn test_asset_queries_respect_commit_range() {
+            let fixture = AssetHistoryFixture::new();
+            let expected = vec![
+                fixture.second_alpha.clone(),
+                fixture.beta.clone(),
+                fixture.zeta.clone(),
+            ];
+
+            assert_eq!(
+                AssetRef::get_materialized_assets_at(
+                    fixture.conn(),
+                    Some(&fixture.deletion_commit),
+                    Some(&fixture.latest_commit),
+                )
+                .expect("should materialize bounded range"),
+                expected
+            );
+            assert_eq!(
+                AssetRef::get_cumulative_assets_at(
+                    fixture.conn(),
+                    Some(&fixture.deletion_commit),
+                    Some(&fixture.latest_commit),
+                )
+                .expect("should accumulate bounded range"),
+                sorted_assets(vec![
+                    fixture.second_alpha.clone(),
+                    fixture.beta.clone(),
+                    fixture.zeta.clone(),
+                ])
+            );
+        }
+
+        #[test]
+        fn test_asset_queries_default_missing_upper_bound_to_head() {
+            let fixture = AssetHistoryFixture::new();
+
+            assert_eq!(
+                AssetRef::get_materialized_assets_at(
+                    fixture.conn(),
+                    Some(&fixture.deletion_commit),
+                    None,
+                )
+                .expect("should materialize through HEAD"),
+                vec![
+                    fixture.second_alpha.clone(),
+                    fixture.beta.clone(),
+                    fixture.zeta.clone(),
+                ]
+            );
+        }
+
+        #[test]
+        fn test_cumulative_assets_without_bounds_reads_full_head_history() {
+            let fixture = AssetHistoryFixture::new();
+            let expected = sorted_assets(vec![
+                fixture.first_alpha.clone(),
+                fixture.second_alpha.clone(),
+                fixture.beta.clone(),
+                fixture.zeta.clone(),
+            ]);
+
+            assert_eq!(
+                AssetRef::get_cumulative_assets_at(fixture.conn(), None, None)
+                    .expect("should read full history through HEAD"),
+                expected
+            );
+        }
+    }
+
     #[test]
-    fn test_get_branch_assets_returns_local_assets_from_the_requested_commit() {
+    fn test_get_branch_assets_uses_materialized_assets_at_branch_head() {
         let context = setup_gen();
         let conn = context.graph().conn();
-        let local_asset = AssetRef {
-            id: HashId::convert_str("local-asset"),
-            uri: "file://inputs/reference.fa".to_string(),
+        let first_asset = AssetRef {
+            id: HashId::convert_str("first-asset"),
+            uri: "file://assets/first.fa".to_string(),
             file_type: "fasta".to_string(),
-            checksum: Some(Sha256Hash::convert_str("local-checksum")),
+            checksum: Some(Sha256Hash::convert_str("first-checksum")),
             size: Some(4),
             role: AssetRole::Input,
-            logical_path: Some("inputs/reference.fa".to_string()),
+            logical_path: Some("reference.fa".to_string()),
             name: Some("reference.fa".to_string()),
             created_on: 1,
         };
-        let remote_asset = AssetRef {
-            id: HashId::convert_str("remote-asset"),
-            uri: "https://example.com/reference.fa".to_string(),
-            ..local_asset.clone()
+        AssetRef::create(conn, &first_asset).expect("should insert first asset");
+        commit_all(conn, "add first asset").expect("should commit first asset");
+
+        let replacement_asset = AssetRef {
+            id: HashId::convert_str("replacement-asset"),
+            uri: "file://assets/replacement.fa".to_string(),
+            checksum: Some(Sha256Hash::convert_str("replacement-checksum")),
+            created_on: 2,
+            ..first_asset
         };
-        AssetRef::create(conn, &local_asset).expect("should insert local asset");
-        AssetRef::create(conn, &remote_asset).expect("should insert remote asset");
-        let commit = commit_all(conn, "add assets").expect("should commit assets");
+        AssetRef::create(conn, &replacement_asset).expect("should insert replacement asset");
+        commit_all(conn, "replace asset").expect("should commit replacement asset");
 
-        let assets = Assets::get_branch_assets(conn, &commit.to_string())
-            .expect("should read assets at commit");
+        let assets =
+            Assets::get_branch_assets(conn, "main").expect("should read assets from branch head");
 
-        assert_eq!(assets, HashMap::from([(local_asset.id, local_asset)]));
+        assert_eq!(
+            assets,
+            HashMap::from([(replacement_asset.id, replacement_asset)])
+        );
     }
 
     #[test]
