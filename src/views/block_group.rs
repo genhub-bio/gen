@@ -1177,6 +1177,7 @@ pub fn view_block_group(
 
         // After the first draw the viewport is populated. Load (or reload) annotation groups
         // using the viewport node IDs so only on-screen segments are fetched.
+        let mut annotation_groups_loaded_after_draw = false;
         if !annotation_groups_loaded && let Some(block_group) = current_block_group.as_ref() {
             let node_ids = extract_viewport_node_ids(&graph_controller);
             if !node_ids.is_empty() {
@@ -1194,6 +1195,7 @@ pub fn view_block_group(
                     &mut messages,
                 );
                 annotation_groups_loaded = true;
+                annotation_groups_loaded_after_draw = true;
             }
         }
 
@@ -1276,6 +1278,12 @@ pub fn view_block_group(
             }
 
             is_loading = false;
+            continue;
+        }
+
+        // The overlays were populated after the frame was rendered. Draw them immediately
+        // instead of waiting for the next keyboard or mouse event to wake the idle viewer.
+        if annotation_groups_loaded_after_draw {
             continue;
         }
 

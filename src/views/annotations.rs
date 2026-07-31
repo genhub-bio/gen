@@ -150,10 +150,12 @@ fn load_group_annotations(
     node_ids: &HashSet<HashId>,
     history_ref: Option<&str>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
+    // The entry identifies the block group that owns the annotations. The current
+    // selection below is only the graph onto which those annotations are projected.
     let annotations = Annotation::query_by_group_and_block_group(
         conn,
         &entry.name,
-        &current_block_group.id,
+        &entry.source_block_group_id,
         history_ref,
     )?;
 
@@ -655,16 +657,29 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         io::Cursor,
+        path::PathBuf,
     };
 
     use gen_core::{HashId, Strand};
     use gen_graph::{GenGraph, GraphNode};
-    use gen_models::file_types::FileTypes;
+    use gen_models::{
+        annotations::add_annotation, block_group::BlockGroup, file_types::FileTypes, sample::Sample,
+    };
 
     use super::{
-        AnnotationSegment, annotation_index_is_tabix, parse_translated_bed, spans_whole_block_group,
+        AnnotationGroupTrackRequest, AnnotationSegment, annotation_index_is_tabix,
+        load_annotations_for_group, parse_translated_bed, spans_whole_block_group,
     };
-    use crate::views::annotation_files::{AnnotationAssetEntry, AnnotationFileEntry};
+    use crate::{
+        graphs::combinatorial_library::parse_library,
+        imports::fasta::import_fasta,
+        test_helpers::setup_gen,
+        updates::{library::update_with_library, sequence::update_with_sequence},
+        views::{
+            annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
+            annotation_groups::load_annotation_group_entries,
+        },
+    };
 
     #[test]
     fn parse_translated_bed_preserves_strand() {
@@ -885,6 +900,97 @@ mod tests {
             ["cds1", "cds2", "cds3", "p1", "p2", "p3"],
             "every combinatorial candidate's annotation should resolve, not just the one \
              on the current path"
+        );
+    }
+
+    #[test]
+    fn test_load_annotations_for_group_uses_entry_source_block_group_id() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let library_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
+        let fasta_path = fasta_path.to_str().unwrap().to_string();
+        let parts_path = parts_path.to_str().unwrap().to_string();
+        let library_path = library_path.to_str().unwrap().to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        add_annotation(
+            &context,
+            &collection,
+            "SITE",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:7-20",
+        )
+        .unwrap();
+        update_with_library(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "design",
+            "SITE",
+            parse_library(&parts_path, &library_path).unwrap(),
+            Some(&parts_path),
+            Some(&library_path),
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            "design",
+            "deleted",
+            "cds1:0-1",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let selected_block_group = Sample::get_block_groups(conn, &collection, "deleted", None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should contain the deleted m123 block group");
+        let entry = load_annotation_group_entries(conn, &selected_block_group, None)
+            .into_iter()
+            .find(|entry| entry.name == "design" && entry.sample_name == "design")
+            .expect("should list the design annotation group entry");
+        assert_ne!(
+            entry.source_block_group_id, selected_block_group.id,
+            "the entry source should differ from the currently selected block group"
+        );
+        let selected_graph = BlockGroup::get_graph(conn, &selected_block_group.id, None).unwrap();
+        let node_ids = selected_graph
+            .nodes()
+            .map(|node| node.node_id)
+            .collect::<HashSet<_>>();
+
+        let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
+            conn,
+            history_ref: None,
+            current_block_group: &selected_block_group,
+            entry: &entry,
+            node_ids: &node_ids,
+        })
+        .unwrap();
+        let mut names = spans
+            .iter()
+            .map(|span| span.name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+
+        assert_eq!(
+            names,
+            ["cds1", "cds2", "cds3", "p1", "p2", "p3"],
+            "annotations should be queried with the entry source ID and projected onto the selected graph"
         );
     }
 
