@@ -54,6 +54,24 @@ fn get_default_collection(conn: &ConfigConnection) -> Result<String, rusqlite::E
         .unwrap_or("default".to_string()))
 }
 
+fn resolve_initial_collection(
+    graph_conn: &GraphConnection,
+    config_conn: &ConfigConnection,
+    requested_collection: Option<String>,
+    history_ref: Option<&str>,
+) -> Result<String, rusqlite::Error> {
+    if let Some(collection) = requested_collection {
+        return Ok(collection);
+    }
+
+    let collections = Collection::all(graph_conn, history_ref);
+    if let [collection] = collections.as_slice() {
+        return Ok(collection.name.clone());
+    }
+
+    get_default_collection(config_conn)
+}
+
 /// Clamp a requested inline view height to a usable range: at least enough rows for the
 /// top/bottom border, the graph, and the footer, and no taller than the terminal itself.
 fn clamp_inline_view_height(requested_height: u16) -> u16 {
@@ -243,10 +261,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             full,
             height,
         }) => {
-            let collection_name = &(match collection {
-                Some(collection) => collection,
-                None => get_default_collection(config_conn)?,
-            });
+            let collection_name = &resolve_initial_collection(
+                graph_conn,
+                config_conn,
+                collection,
+                history_ref.as_deref(),
+            )?;
 
             if !full && let (Some(name), Some(sample_name)) = (graph.as_ref(), sample.as_ref()) {
                 // Use the inline widget by default if a graph is specified
@@ -925,5 +945,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match result {
         Ok(_) => Ok(()),
         Err(e) => Err(anyhow!("{e}").into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use r#gen::test_helpers::setup_gen;
+    use gen_models::collection::Collection;
+
+    use super::resolve_initial_collection;
+
+    #[test]
+    fn test_view_opens_only_collection_by_default() {
+        let context = setup_gen();
+        Collection::create(context.graph().conn(), "only-collection")
+            .expect("should create only collection");
+
+        let collection =
+            resolve_initial_collection(context.graph().conn(), context.config().conn(), None, None)
+                .expect("should resolve initial collection");
+
+        assert_eq!(collection, "only-collection");
     }
 }

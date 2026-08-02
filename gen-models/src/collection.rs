@@ -49,6 +49,19 @@ impl Query for Collection {
 }
 
 impl Collection {
+    /// Returns collections visible at the requested history state, ordered by name.
+    pub fn all(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<Collection> {
+        let query = format!(
+            "select * from {} order by name;",
+            Collection::table_name_with_history_ref(history_ref)
+        );
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        Collection::query(conn, &query, &params[..])
+    }
+
     pub fn exists(conn: &GraphConnection, name: &str) -> bool {
         let mut stmt = conn
             .prepare("select name from collections where name = ?1")

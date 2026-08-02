@@ -191,7 +191,7 @@ mod tests {
         let conn = get_connection(None).expect("Failed to get connection");
 
         // Test with empty table
-        let empty_results = Collection::all(&conn);
+        let empty_results = Collection::all(&conn, None);
         assert!(empty_results.is_empty());
 
         // Create test collections
@@ -204,7 +204,7 @@ mod tests {
             Collection::create(&conn, name).unwrap();
         }
 
-        let all_results = Collection::all(&conn);
+        let all_results = Collection::all(&conn, None);
         assert_eq!(all_results.len(), collection_names.len());
 
         let returned_names: Vec<String> = all_results.iter().map(|c| c.name.clone()).collect();
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(limited_results.len(), 5);
 
         // Test limit larger than available records
-        let all_results = Collection::all(&conn);
+        let all_results = Collection::all(&conn, None);
         let large_limit_results = Collection::all_with_limit(&conn, all_results.len() + 20);
         assert_eq!(large_limit_results.len(), all_results.len());
 

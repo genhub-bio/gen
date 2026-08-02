@@ -212,6 +212,7 @@ pub fn view_block_group(
     position: Option<String>, // Node ID and offset
     history_ref: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    let mut current_collection_name = collection_name.to_string();
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Loading block group");
@@ -241,15 +242,20 @@ pub fn view_block_group(
     }
 
     if let (Some(name), Some(sample_name)) = (name, sample_name.as_ref()) {
-        let block_group =
-            BlockGroup::get_by_name(conn, collection_name, sample_name, &name, history_ref);
+        let block_group = BlockGroup::get_by_name(
+            conn,
+            &current_collection_name,
+            sample_name,
+            &name,
+            history_ref,
+        );
 
         if block_group.is_err() {
             panic!(
                 "No block group found with name {:?} and sample {:?} in collection {} ",
                 name,
                 sample_name.clone(),
-                collection_name
+                current_collection_name
             );
         }
 
@@ -290,7 +296,7 @@ pub fn view_block_group(
         config_conn,
         sample_name.as_deref(),
         current_block_group.as_ref(),
-        collection_name,
+        &current_collection_name,
         history_ref,
     );
 
@@ -492,7 +498,7 @@ pub fn view_block_group(
                                             conn,
                                             history_ref,
                                             workspace,
-                                            collection_name,
+                                            collection_name: &current_collection_name,
                                             sample_name: bg.sample_name.as_str(),
                                             block_group_name: Some(&bg.name),
                                             query_window,
@@ -619,7 +625,7 @@ pub fn view_block_group(
                                     conn,
                                     history_ref,
                                     workspace,
-                                    collection_name,
+                                    collection_name: &current_collection_name,
                                     sample_name: bg.sample_name.as_str(),
                                     block_group_name: Some(&bg.name),
                                     query_window,
@@ -733,6 +739,34 @@ pub fn view_block_group(
             break;
         }
 
+        if let Some(selected_collection) = explorer_state.collection_change_requested.take() {
+            current_collection_name = selected_collection;
+            explorer_state.selected_block_group_id = None;
+            last_selected_block_group_id = None;
+            current_block_group = None;
+            block_graph = get_empty_graph();
+            graph_controller = create_gen_graph_controller(block_graph.clone());
+            explorer.refresh(
+                conn,
+                config_conn,
+                None,
+                None,
+                &current_collection_name,
+                history_ref,
+            );
+            explorer.force_reload(&mut explorer_state);
+            explorer_state.list_state.select(Some(0));
+            explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+            explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
+            overlays.clear();
+            annotation_file_index_available.clear();
+            annotation_file_loaded_windows.clear();
+            explorer_state.active_annotation_groups.clear();
+            annotation_groups_loaded = false;
+            is_loading = false;
+            last_refresh = Instant::now();
+        }
+
         // Trigger reload if selection changed to a new block group
         if explorer_state.selected_block_group_id != last_selected_block_group_id {
             is_loading = true;
@@ -752,7 +786,7 @@ pub fn view_block_group(
                 config_conn,
                 selected_sample,
                 current_block_group.as_ref(),
-                collection_name,
+                &current_collection_name,
                 history_ref,
             ) {
                 explorer.force_reload(&mut explorer_state);
@@ -823,7 +857,7 @@ pub fn view_block_group(
                     conn,
                     history_ref,
                     workspace,
-                    collection_name,
+                    collection_name: &current_collection_name,
                     sample_name: bg.sample_name.as_str(),
                     block_group_name: Some(&bg.name),
                     query_window: Some(query_window),
@@ -1222,7 +1256,7 @@ pub fn view_block_group(
                 config_conn,
                 selected_sample,
                 current_block_group.as_ref(),
-                collection_name,
+                &current_collection_name,
                 history_ref,
             ) {
                 explorer.force_reload(&mut explorer_state);
@@ -1248,7 +1282,7 @@ pub fn view_block_group(
                         conn,
                         history_ref,
                         workspace,
-                        collection_name,
+                        collection_name: &current_collection_name,
                         sample_name: bg.sample_name.as_str(),
                         block_group_name: Some(&bg.name),
                         query_window,

@@ -109,6 +109,8 @@ pub struct CollectionExplorerData {
     /// The final segment of the current collection name. For example,
     /// if the full collection is "/foo/bar", this would be "bar".
     pub current_collection: String,
+    /// Other collections available in the selected history state.
+    pub other_collections: Vec<String>,
     /// Reference samples in the current collection.
     pub reference_samples: Vec<String>,
     /// The samples in the entire collection
@@ -137,6 +139,12 @@ pub fn gather_collection_explorer_data(
 ) -> CollectionExplorerData {
     let current_collection = collection_basename(full_collection_name).to_string();
     let _parent = parent_collection(full_collection_name);
+    let current_collection_name = normalize_collection_name(full_collection_name);
+    let other_collections = Collection::all(conn, history_ref)
+        .into_iter()
+        .map(|collection| collection.name)
+        .filter(|name| normalize_collection_name(name) != current_collection_name)
+        .collect();
 
     let reference_samples = Sample::get_reference_samples(conn, history_ref)
         .into_iter()
@@ -202,6 +210,7 @@ pub fn gather_collection_explorer_data(
 
     CollectionExplorerData {
         current_collection,
+        other_collections,
         reference_samples,
         collection_samples,
         sample_roots,
@@ -278,6 +287,8 @@ pub struct CollectionExplorerState {
     sample_expansion_overrides: HashMap<String, bool>,
     /// Indicates which focus zone should receive focus (if any)
     pub focus_change_requested: Option<FocusZone>,
+    /// Collection selected for opening in the explorer.
+    pub collection_change_requested: Option<String>,
     /// Active annotation files
     pub active_annotation_files: HashSet<HashId>,
     /// Active annotation groups
@@ -303,6 +314,7 @@ impl CollectionExplorerState {
             selected_block_group_id: block_group_id,
             sample_expansion_overrides: HashMap::new(),
             focus_change_requested: None,
+            collection_change_requested: None,
             active_annotation_files: HashSet::new(),
             active_annotation_groups: HashSet::new(),
             annotation_file_toggle_requested: None,
@@ -434,6 +446,9 @@ impl CollectionExplorer {
             history_ref,
         );
         let changed = self.data.reference_samples != new_data.reference_samples
+            || self.data.current_collection != new_data.current_collection
+            || self.data.other_collections != new_data.other_collections
+            || self.data.collection_samples != new_data.collection_samples
             || self.data.sample_block_groups != new_data.sample_block_groups
             || self.data.sample_roots != new_data.sample_roots
             || self.data.sample_children != new_data.sample_children
@@ -589,6 +604,12 @@ impl CollectionExplorer {
                 if let Some(selected_idx) = state.list_state.selected {
                     let items = self.get_display_items(state);
                     match &items[selected_idx] {
+                        ExplorerItem::Collection {
+                            name,
+                            is_current: false,
+                        } => {
+                            state.collection_change_requested = Some(name.clone());
+                        }
                         ExplorerItem::BlockGroup { id, .. } => {
                             state.selected_block_group_id = Some(*id);
                             state.focus_change_requested = Some(FocusZone::Canvas);
@@ -618,6 +639,12 @@ impl CollectionExplorer {
             state.list_state.select(Some(index));
             let items = self.get_display_items(state);
             match &items[index] {
+                ExplorerItem::Collection {
+                    name,
+                    is_current: false,
+                } => {
+                    state.collection_change_requested = Some(name.clone());
+                }
                 ExplorerItem::BlockGroup { id, .. } => {
                     state.selected_block_group_id = Some(*id);
                     state.focus_change_requested = Some(FocusZone::Canvas);
@@ -654,6 +681,13 @@ impl CollectionExplorer {
             name: self.data.current_collection.clone(),
             is_current: true,
         });
+
+        for collection in &self.data.other_collections {
+            items.push(ExplorerItem::Collection {
+                name: collection.clone(),
+                is_current: false,
+            });
+        }
 
         // Blank line
         items.push(ExplorerItem::Header {
@@ -987,6 +1021,7 @@ impl StatefulWidget for &CollectionExplorer {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyModifiers;
     use gen_models::{
         block_group::{BlockGroup, NewBlockGroup},
         history::dolt::commit_all,
@@ -1001,6 +1036,7 @@ mod tests {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         Collection::create(conn, "history-collection").expect("should create collection");
+        Collection::create(conn, "historical-peer").expect("should create peer collection");
         Sample::get_or_create(
             conn,
             NewSample {
@@ -1029,6 +1065,7 @@ mod tests {
             "removed-graph",
         )
         .expect("should delete current block group");
+        Collection::create(conn, "current-only").expect("should create current collection");
         commit_all(conn, "remove historical graph").expect("should commit graph removal");
 
         assert!(
@@ -1061,6 +1098,14 @@ mod tests {
             Some(&historical_ref),
         );
         assert!(current.collection_samples.is_empty());
+        assert_eq!(
+            historical.other_collections,
+            vec!["historical-peer".to_string()]
+        );
+        assert_eq!(
+            current.other_collections,
+            vec!["current-only".to_string(), "historical-peer".to_string()]
+        );
         assert_eq!(
             historical.sample_block_groups["history-sample"],
             vec![(historical_block_group.id, "removed-graph".to_string())]
@@ -1156,6 +1201,15 @@ mod tests {
         // Verify results
         // (A) The final path component is "bar"
         assert_eq!(explorer_data.current_collection, "bar");
+        assert_eq!(
+            explorer_data.other_collections,
+            vec![
+                "/foo/bar/a".to_string(),
+                "/foo/bar/a/b".to_string(),
+                "/foo/bar2".to_string(),
+                "/foo/baz".to_string(),
+            ]
+        );
 
         // (B) Reference samples are populated and their block groups are available by sample
         assert_eq!(
@@ -1204,6 +1258,39 @@ mod tests {
         let beta_bg = explorer_data.sample_block_groups.get("SampleBeta").unwrap();
         let beta_bg_names: Vec<_> = beta_bg.iter().map(|(_, n)| n.clone()).collect();
         assert_eq!(beta_bg_names, vec!["BG_Beta1".to_string()]);
+    }
+
+    #[test]
+    fn test_collection_selection_requests_sidebar_change() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        Collection::create(conn, "first").expect("should create first collection");
+        Collection::create(conn, "second").expect("should create second collection");
+
+        let explorer =
+            CollectionExplorer::new(conn, context.config().conn(), None, None, "first", None);
+        let mut state = CollectionExplorerState::new();
+        let second_collection_index = explorer
+            .get_display_items(&state)
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    ExplorerItem::Collection {
+                        name,
+                        is_current: false,
+                    } if name == "second"
+                )
+            })
+            .expect("should show second collection in sidebar");
+        state.list_state.select(Some(second_collection_index));
+
+        explorer.handle_input(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert_eq!(state.collection_change_requested.as_deref(), Some("second"));
     }
 
     #[test]
