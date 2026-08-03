@@ -15,7 +15,7 @@ use gen_tui::{
     plotter::{NodeRenderer, NodeSizer, PathStyle},
     theme::current_theme,
 };
-use petgraph::visit::NodeIndexable;
+use petgraph::{Direction, visit::NodeIndexable};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -152,8 +152,20 @@ impl NodeRenderer<GenGraph> for GenGraphNodeRenderer<'_> {
     ) {
         let theme = current_theme();
         if is_zero_width_junction(node_id) {
-            let edge_style = Style::default().bg(theme[0x00]).fg(theme[0x05]);
-            buffer.set_char_styled(area.left_center(), ZERO_WIDTH_GLYPH, edge_style);
+            let position = area.left_center();
+            let (glyph, color) = buffer
+                .get_char_styled(position)
+                .map(|(glyph, style)| {
+                    let glyph = if glyph == ' ' {
+                        ZERO_WIDTH_GLYPH
+                    } else {
+                        glyph
+                    };
+                    (glyph, style.fg.unwrap_or(theme[0x05]))
+                })
+                .unwrap_or((ZERO_WIDTH_GLYPH, theme[0x05]));
+            let edge_style = Style::default().bg(theme[0x00]).fg(color);
+            buffer.set_char_styled(position, glyph, edge_style);
             return;
         }
 
@@ -457,6 +469,8 @@ fn map_truncated_col(value: i64, block_seq_len: i64) -> i64 {
 /// - Start node: tinted from `start_offset` to its right edge.
 /// - Middle nodes: fully tinted.
 /// - End node: tinted from its left edge to `end_offset` (exclusive).
+/// - Consecutive annotated nodes: their real edge route is tinted, including any
+///   zero-width junctions introduced at deletion boundaries.
 ///
 /// The stored columns are raw sequence offsets; the controller maps them to visual
 /// cells for the current detail level on every rebuild via `NodeSizer::map_column`,
@@ -472,9 +486,56 @@ pub fn highlight_locus<S: NodeSizer<GenGraph>>(
         controller.set_cell_highlight(s.block, (col_start, 0), (col_end, 0), style);
     }
 
-    for (s, t) in m.slices.iter().zip(m.slices.iter().skip(1)) {
-        controller.set_edge_highlight((s.block, t.block), style);
+    for (source, target) in m.slices.iter().zip(m.slices.iter().skip(1)) {
+        let Some(path) =
+            edge_path_across_zero_width_junctions(controller.graph(), source.block, target.block)
+        else {
+            continue;
+        };
+        for edge in path.windows(2) {
+            controller.set_edge_highlight((edge[0], edge[1]), style);
+        }
     }
+}
+
+/// Find the edge route between two annotation blocks when every intermediate block is a
+/// zero-width junction. Junctions are rendering topology rather than annotation content,
+/// so they do not appear in the locus itself but their edges still need the span's color.
+fn edge_path_across_zero_width_junctions(
+    graph: &GenGraph,
+    source: GraphNode,
+    target: GraphNode,
+) -> Option<Vec<GraphNode>> {
+    let mut queue = VecDeque::from([source]);
+    let mut visited = HashSet::from([source]);
+    let mut predecessor = HashMap::new();
+
+    while let Some(current) = queue.pop_front() {
+        let neighbors = graph
+            .neighbors_directed(current, Direction::Outgoing)
+            .chain(graph.neighbors_directed(current, Direction::Incoming));
+        for neighbor in neighbors {
+            if !visited.insert(neighbor) {
+                continue;
+            }
+            predecessor.insert(neighbor, current);
+            if neighbor == target {
+                let mut path = vec![target];
+                let mut cursor = target;
+                while cursor != source {
+                    cursor = *predecessor.get(&cursor)?;
+                    path.push(cursor);
+                }
+                path.reverse();
+                return Some(path);
+            }
+            if is_zero_width_junction(&neighbor) {
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    None
 }
 
 /// A mapped cell rectangle: the node it's on, and its top-left/bottom-right columns.
@@ -916,6 +977,98 @@ mod tests {
         assert_eq!(
             world_buffer.get_char(WorldPos::ZERO),
             Some(ZERO_WIDTH_GLYPH)
+        );
+    }
+
+    #[test]
+    fn test_zero_width_junction_preserves_edge_highlight_glyph_and_color() {
+        let context = setup_gen_on_disk();
+        let junction = GraphNode {
+            node_id: HashId::convert_str("zero-width-junction"),
+            sequence_start: 3,
+            sequence_end: 3,
+        };
+        let mut viewport_state = ViewportState::new();
+        viewport_state.viewport_bounds = Rect::new(0, 0, 5, 5);
+        let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
+        let position = WorldPos::ZERO;
+        world_buffer.set_char_styled(position, '━', Style::default().fg(Color::Yellow));
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn());
+
+        renderer.render_node(
+            &mut world_buffer,
+            WorldRect::from_center_and_size(position, (1, 1)),
+            &junction,
+            VisualDetail::Full,
+        );
+
+        let (character, style) = world_buffer
+            .get_char_styled(position)
+            .expect("should render the zero-width junction");
+        assert_eq!(character, '━');
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_highlight_locus_colors_edges_across_zero_width_junctions() {
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("a"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let first_junction = GraphNode {
+            node_id: HashId::convert_str("first-junction"),
+            sequence_start: 1,
+            sequence_end: 1,
+        };
+        let node_t = GraphNode {
+            node_id: HashId::convert_str("t"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let second_junction = GraphNode {
+            node_id: HashId::convert_str("second-junction"),
+            sequence_start: 1,
+            sequence_end: 1,
+        };
+        let node_gataa = GraphNode {
+            node_id: HashId::convert_str("gataa"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(node_a, first_junction, Vec::new());
+        graph.add_edge(first_junction, node_t, Vec::new());
+        graph.add_edge(node_t, second_junction, Vec::new());
+        graph.add_edge(second_junction, node_gataa, Vec::new());
+        let mut controller = create_gen_graph_controller(graph);
+        let locus = GraphLocus {
+            slices: vec![
+                GraphNodeSlice::full(node_a, Strand::Forward),
+                GraphNodeSlice::full(node_t, Strand::Forward),
+                GraphNodeSlice::full(node_gataa, Strand::Forward),
+            ],
+        };
+
+        highlight_locus(&mut controller, &locus, PathStyle::new(Color::Yellow));
+
+        let highlighted_edges: Vec<(GraphNode, GraphNode)> = controller
+            .highlights
+            .iter()
+            .filter_map(|(kind, _)| match kind {
+                HighlightKind::Edge(source, target) => Some((*source, *target)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            highlighted_edges,
+            vec![
+                (node_a, first_junction),
+                (first_junction, node_t),
+                (node_t, second_junction),
+                (second_junction, node_gataa),
+            ]
         );
     }
 
