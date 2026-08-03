@@ -165,6 +165,14 @@ impl FromSql for AssetRole {
 /// An immutable reference to an asset recorded in repository history.
 ///
 /// Several references can have the same logical path because Gen retains every committed version.
+/// We have two ways to query for assets -- cumulative and materialized. The cumulative query
+/// returns an array of every known version of the asset, including older versions whose local
+/// path has been updated (for example a generic ./input.fa the user keeps updating for operations).
+///
+/// The materialized query returns the latest asset for a given logical path up to a provided ref.
+/// For example if a user imports a genome with a generically named `reference.fa` and does it again,
+/// the materialized query would return the last one.
+///
 /// Use [`Self::get_cumulative_assets_at`] when that provenance is needed and
 /// [`Self::get_materialized_assets_at`] when constructing the one-file-per-path workspace view.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,6 +183,7 @@ pub struct AssetRef {
     pub checksum: Option<Sha256Hash>,
     pub size: Option<i64>,
     pub role: AssetRole,
+    // The local path to the asset. This is something like input.fa, data/reference.fa, etc.
     pub logical_path: Option<String>,
     pub name: Option<String>,
     pub created_on: i64,

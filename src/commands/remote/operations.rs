@@ -336,8 +336,8 @@ fn conflict_destination_path(
 }
 
 /// On downloading an asset, if it is a file we compare the hash on disk to the hashes of the
-/// asset from previous updates. If it matches, we replace it assuming it's a natural evolution
-/// of the file. If the hash is unknown, we download the file and mark it as a conflict via a
+/// asset from previous updates. If it matches the remote hash, we replace it locally assuming it's
+/// a natural evolution. If the hash is unknown, we download the file and mark it as a conflict via a
 /// .conflict extension. Historical assets that are not materialized at the destination commit are
 /// stored in `.gen/assets` so they cannot replace the current workspace file.
 fn download_asset(
@@ -366,18 +366,11 @@ fn download_asset(
         .exists()
         .then(|| calculate_file_checksum(&destination_path))
         .transpose()?;
-    let intended_change = existing_checksum
-        .as_ref()
-        .map(|checksum| {
-            destination_matches_previous_asset(
-                workspace,
-                &destination_path,
-                checksum,
-                previous_assets,
-            )
-        })
-        .transpose()?
-        .unwrap_or(false);
+    let intended_change = if let Some(checksum) = existing_checksum.as_ref() {
+        destination_matches_previous_asset(workspace, &destination_path, checksum, previous_assets)?
+    } else {
+        false
+    };
     let has_conflict = existing_checksum.is_some() && !intended_change;
     if let Some(parent) = destination_path.parent() {
         fs::create_dir_all(parent)?;
