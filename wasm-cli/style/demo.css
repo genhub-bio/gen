@@ -1,0 +1,194 @@
+@import '~@xterm/xterm/css/xterm.css';
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./fonts/JetBrainsMono-SemiBold.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+/*
+ * Catppuccin base00/base01/base02/base05 duplicated from src/theme.ts so the page has the
+ * right background painted before JS runs (avoiding a black/white flash). `selectThemeMode()`
+ * picks between these with the same `prefers-color-scheme` query, so the two never disagree.
+ */
+:root {
+  --gen-base00: #1e1e2e;
+  --gen-base01: #181825;
+  --gen-base02: #313244;
+  --gen-base05: #cdd6f4;
+  --gen-base0d: #89b4fa;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --gen-base00: #eff1f5;
+    --gen-base01: #e6e9ef;
+    --gen-base02: #ccd0da;
+    --gen-base05: #4c4f69;
+    --gen-base0d: #1e66f5;
+  }
+}
+
+/*
+ * `html`/`body` are sized to exactly the viewport and laid out as a column so `#terminal-wrap`
+ * (via `flex: 1 1 auto` below) gets a real, viewport-bounded height to measure and scroll within.
+ * Without this, `#terminal-wrap` has no height of its own -- it just grows to whatever height the
+ * terminal's content computes to, so once that exceeds the viewport the *page* scrolls instead of
+ * the terminal's own scrollback, carrying `#intro-bar`/`#upload-bar` out of view with it.
+ */
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background-color: var(--gen-base00);
+  color: var(--gen-base05);
+}
+
+#intro-bar {
+  flex: none;
+  padding: 0.6em 0.8em;
+  font-family: sans-serif;
+  font-size: 0.9em;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1em;
+  background-color: var(--gen-base01);
+  color: var(--gen-base05);
+}
+
+#intro-bar p {
+  margin: 0;
+}
+
+#intro-bar code {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+#intro-bar a {
+  color: var(--gen-base0d);
+}
+
+.theme-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  cursor: pointer;
+}
+
+.theme-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.theme-toggle-track {
+  position: relative;
+  width: 2.4em;
+  height: 1.3em;
+  border-radius: 999px;
+  background-color: var(--gen-base02);
+  transition: background-color 0.15s ease-in-out;
+}
+
+.theme-toggle-thumb {
+  position: absolute;
+  top: 0.15em;
+  left: 0.15em;
+  width: 1em;
+  height: 1em;
+  border-radius: 50%;
+  background-color: var(--gen-base0d);
+  transition: transform 0.15s ease-in-out;
+}
+
+.theme-toggle input:checked + .theme-toggle-track .theme-toggle-thumb {
+  transform: translateX(1.1em);
+}
+
+.theme-toggle input:focus-visible + .theme-toggle-track {
+  outline: 2px solid var(--gen-base0d);
+  outline-offset: 2px;
+}
+
+#upload-bar {
+  flex: none;
+  padding: 0.6em 0.8em;
+  font-family: sans-serif;
+  font-size: 0.9em;
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  background-color: var(--gen-base01);
+  color: var(--gen-base05);
+}
+
+#upload-bar input[type='file'] {
+  color: inherit;
+}
+
+#upload-status {
+  opacity: 0.8;
+}
+
+/*
+ * `#targetdiv` is exactly the element xterm.js attaches to and the one `FitAddon` measures as
+ * `term.element.parentElement`; it must stay padding-free; `FitAddon.proposeDimensions()` reads
+ * this element's height as-is and only ever subtracts the *inner* `.xterm` element's own padding,
+ * never this one's, so any padding placed directly here feeds back into the row count on every
+ * `ResizeObserver` tick and grows the terminal without bound. `#terminal-wrap` carries the visual
+ * padding instead.
+ *
+ * `flex: 1 1 auto` + `min-height: 0` give this element the remaining viewport height as a real,
+ * bounded size (flex items default to a content-based min-height, which would otherwise refuse to
+ * shrink below the terminal's natural content height, defeating the point). Without a bounded
+ * height here, the terminal's own scrollback never kicks in -- the *page* scrolls once content
+ * exceeds the viewport instead, taking `#intro-bar`/`#upload-bar` out of view with it.
+ */
+#terminal-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  overflow: hidden;
+  background-color: var(--gen-base00);
+}
+
+#targetdiv {
+  height: 100%;
+  background-color: var(--gen-base00);
+}
+
+#targetdiv .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--gen-base02) transparent;
+}
+
+#targetdiv .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+
+#targetdiv .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#targetdiv .xterm-viewport::-webkit-scrollbar-thumb {
+  background-color: var(--gen-base02);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}

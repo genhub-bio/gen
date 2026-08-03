@@ -4,13 +4,15 @@ use std::{
     time::Instant,
 };
 
-use crossterm::event::{self, Event, KeyCode};
 use gen_diff::{
     graph::DiffGenGraph,
     operations::{BlockGroupChangeKind, BlockGroupDiff, OperationDiff},
 };
 use gen_models::db::GraphConnection;
-use gen_tui::theme::current_theme;
+use gen_tui::{
+    key_event::{Event, KeyCode},
+    theme::current_theme,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -24,7 +26,7 @@ use crate::views::{
     },
     gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
-    tui_runtime::TuiSession,
+    tui_runtime::{TuiSession, poll_immediate_event, wait_for_event},
 };
 
 struct DiffComponent {
@@ -176,9 +178,8 @@ pub fn view_diff(conn: &GraphConnection, diff: &OperationDiff) -> Result<(), io:
             render_status_bar(f, outer[1], panel_messages);
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
+        wait_for_event(std::time::Duration::from_millis(100))?;
+        if let Some(Event::Key(key)) = poll_immediate_event()? {
             if panel_focus.is_navigation() {
                 match key.code {
                     KeyCode::Tab | KeyCode::Left | KeyCode::Right => {

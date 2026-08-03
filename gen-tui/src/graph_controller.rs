@@ -1,7 +1,5 @@
 use std::hash::Hash;
 
-#[cfg(feature = "crossterm")]
-use crossterm::event::{KeyCode, KeyEvent};
 use gen_sugiyama::{self, VERTEX_SPACING_DEFAULT};
 use log::trace;
 use petgraph::{
@@ -18,6 +16,7 @@ pub use crate::viewport_state::{ViewportState, WorldBuffer};
 use crate::{
     cursor::Cursor,
     geometry::{BigRect, ViewportPos, WorldPos},
+    key_event::{KeyCode, KeyEvent, KeyModifiers},
     layout::{NodeRole, PartitionLayout, VisualDetail},
     partition_controller::{ControllerConfig, PartitionController},
     partition_table::PartitionConfig,
@@ -808,7 +807,6 @@ where
     /// Handle keyboard events for graph navigation and control
     ///
     /// Returns Some(true) for normal exit, Some(false) for abort, None to continue
-    #[cfg(feature = "crossterm")]
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<(), String> {
         match key.code {
             KeyCode::Char('r') => {
@@ -860,10 +858,7 @@ where
 
             // Zoom/Scale controls
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::SHIFT)
-                {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+'+': Direct disperse
                     self.disperse();
                 } else {
@@ -872,10 +867,7 @@ where
                 }
             }
             KeyCode::Char('-') => {
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::SHIFT)
-                {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+'-': Direct contract
                     self.contract();
                 } else {
@@ -1550,7 +1542,6 @@ mod tests {
 
     #[test]
     fn test_disperse_functionality() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use petgraph::graph::NodeIndex;
         use ratatui::layout::Rect;
 
