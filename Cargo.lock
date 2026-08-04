@@ -1783,6 +1783,7 @@ dependencies = [
  "hex",
  "itertools",
  "noodles",
+ "petgraph 0.6.5",
  "pyo3",
  "pyo3-macros",
  "rand 0.10.1",

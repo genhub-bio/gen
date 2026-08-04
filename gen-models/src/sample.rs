@@ -1,7 +1,6 @@
 use std::{collections::HashSet, rc::Rc};
 
-use gen_core::traits::Capnp;
-use gen_graph::GenGraph;
+use gen_core::{GenGraph, traits::Capnp};
 use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

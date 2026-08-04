@@ -20,7 +20,7 @@ pub use change::BlockGroupChange;
 pub use config::Workspace;
 use errors::HashError;
 pub use generated::gen_core_capnp;
-pub use graph::{GraphNode, GraphNodePosition, GraphNodeSlice};
+pub use graph::{GenGraph, GraphEdge, GraphNode, GraphNodePosition, GraphNodeSlice};
 pub use path::PathBlock;
 #[cfg(feature = "python-bindings")]
 use pyo3::pyclass;

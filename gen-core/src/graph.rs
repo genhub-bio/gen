@@ -1,8 +1,21 @@
 use core::fmt;
 
+use petgraph::graphmap::DiGraphMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{HashId, Strand};
+
+pub type GenGraph = DiGraphMap<GraphNode, Vec<GraphEdge>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
+pub struct GraphEdge {
+    pub edge_id: HashId,
+    pub source_strand: Strand,
+    pub target_strand: Strand,
+    pub chromosome_index: i64,
+    pub phased: i64,
+    pub created_on: i64,
+}
 
 /// A contiguous slice of a stored sequence represented as a node in graph space.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
