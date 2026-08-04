@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use gen_core::{
     GraphNodePosition, HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
-    PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_end_node,
-    is_start_node,
+    NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+    Strand, is_end_node, is_start_node, is_terminal,
 };
+use intervaltree::IntervalTree;
 use itertools::Itertools;
 use petgraph::Direction;
 
@@ -60,6 +61,99 @@ pub fn find_offset(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Resolves a linear coordinate to a graph position, expanding beyond the loaded interval when
+/// necessary.
+///
+/// Persistence stays outside this function: callers provide node lengths and graph fragments
+/// through callbacks.
+pub fn resolve_anchor(
+    graph: &GenGraph,
+    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
+    coordinate: i64,
+    mut node_length: impl FnMut(HashId) -> Option<i64>,
+    mut expand: impl FnMut(&mut GenGraph, HashId) -> bool,
+) -> Result<GraphNodePosition, GraphError> {
+    let block = interval_tree
+        .query_point(coordinate)
+        .map(|item| item.value)
+        .find(|block| !is_terminal(block.node_id));
+    if let Some(block) = block {
+        return Ok(GraphNodePosition {
+            graph_node: GraphNode {
+                node_id: block.node_id,
+                sequence_start: block.sequence_start,
+                sequence_end: block.sequence_end,
+            },
+            offset: coordinate - block.start,
+        });
+    }
+
+    let last_block = interval_tree
+        .iter()
+        .map(|item| item.value)
+        .filter(|block| !is_terminal(block.node_id))
+        .max_by_key(|block| block.end);
+    let before_tree = coordinate < 0;
+    let after_tree = last_block
+        .map(|block| coordinate >= block.end)
+        .unwrap_or(false);
+    let boundary = if before_tree {
+        interval_tree
+            .iter()
+            .map(|item| item.value)
+            .filter(|block| !is_terminal(block.node_id))
+            .min_by_key(|block| block.start)
+    } else if after_tree {
+        last_block
+    } else {
+        None
+    }
+    .ok_or(GraphError::NoPath)?;
+
+    let boundary_node = GraphNode {
+        node_id: boundary.node_id,
+        sequence_start: boundary.sequence_start,
+        sequence_end: boundary.sequence_end,
+    };
+    let boundary_anchor = GraphNodePosition {
+        graph_node: boundary_node,
+        offset: if before_tree {
+            0
+        } else {
+            boundary_node.length()
+        },
+    };
+    let boundary_distance = if before_tree {
+        coordinate - boundary.start
+    } else {
+        coordinate - boundary.end
+    };
+    let same_node_coordinate = if before_tree {
+        boundary.sequence_start + boundary_distance
+    } else {
+        boundary.sequence_end + boundary_distance
+    };
+    if same_node_coordinate >= 0
+        && node_length(boundary.node_id).is_some_and(|length| same_node_coordinate <= length)
+    {
+        return Ok(GraphNodePosition {
+            graph_node: boundary_node,
+            offset: boundary_anchor.offset + boundary_distance,
+        });
+    }
+
+    let mut expanded_graph = graph.clone();
+    expand(&mut expanded_graph, boundary_node.node_id);
+    let anchors = find_offset(
+        &mut expanded_graph,
+        &boundary_anchor,
+        boundary_distance,
+        expand,
+    )?;
+
+    anchors.into_iter().next().ok_or(GraphError::NoPath)
 }
 
 fn find_offset_with_optional_expansion(

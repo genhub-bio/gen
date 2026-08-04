@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use gen_core::{GraphNode, GraphNodePosition, HashId, NodeIntervalBlock, is_terminal};
+use gen_core::{GraphNodePosition, HashId, NodeIntervalBlock};
 use gen_graph::{GenGraph, GraphError, MergeGraph};
 use intervaltree::IntervalTree;
 
@@ -92,104 +92,17 @@ impl ResolvedGraph {
         coord: i64,
         conn: &GraphConnection,
     ) -> Result<GraphNodePosition, GraphError> {
-        let mut block = None;
-        for item in self.interval_tree.query_point(coord) {
-            let b = &item.value;
-            if !is_terminal(b.node_id) {
-                block = Some(*b);
-                break;
-            }
-        }
-
-        if let Some(b) = block {
-            let offset = coord - b.start;
-            return Ok(GraphNodePosition {
-                graph_node: GraphNode {
-                    node_id: b.node_id,
-                    sequence_start: b.sequence_start,
-                    sequence_end: b.sequence_end,
-                },
-                offset,
-            });
-        }
-
-        let last_block = self
-            .interval_tree
-            .iter()
-            .map(|item| &item.value)
-            .filter(|b| !is_terminal(b.node_id))
-            .max_by_key(|b| b.end)
-            .copied();
-
-        let before_tree = coord < 0;
-        let after_tree = last_block.map(|b| coord >= b.end).unwrap_or(false);
-
-        let boundary_block = if before_tree {
-            self.interval_tree
-                .iter()
-                .map(|item| &item.value)
-                .filter(|b| !is_terminal(b.node_id))
-                .min_by_key(|b| b.start)
-                .copied()
-        } else if after_tree {
-            last_block
-        } else {
-            None
-        };
-
-        let boundary = boundary_block.ok_or(GraphError::NoPath)?;
-        let boundary_node = GraphNode {
-            node_id: boundary.node_id,
-            sequence_start: boundary.sequence_start,
-            sequence_end: boundary.sequence_end,
-        };
-
-        let boundary_anchor = GraphNodePosition {
-            graph_node: boundary_node,
-            offset: if before_tree {
-                0
-            } else {
-                boundary.sequence_end - boundary.sequence_start
+        gen_graph::graph_loader::resolve_anchor(
+            &self.graph,
+            &self.interval_tree,
+            coord,
+            |node_id| {
+                Node::query_nodes_length(conn, &[node_id])
+                    .ok()
+                    .and_then(|lengths| lengths.get(&node_id).copied())
             },
-        };
-
-        let boundary_distance = if before_tree {
-            coord - boundary.start
-        } else {
-            coord - boundary.end
-        };
-
-        let same_node_coordinate = if before_tree {
-            boundary.sequence_start + boundary_distance
-        } else {
-            boundary.sequence_end + boundary_distance
-        };
-        if same_node_coordinate >= 0
-            && let Ok(node_lengths) = Node::query_nodes_length(conn, &[boundary.node_id])
-            && same_node_coordinate <= *node_lengths.get(&boundary.node_id).unwrap_or(&0)
-        {
-            return Ok(GraphNodePosition {
-                graph_node: boundary_node,
-                offset: boundary_anchor.offset + boundary_distance,
-            });
-        }
-
-        let mut expanded_graph = self.graph.clone();
-        expand(
-            conn,
-            &mut expanded_graph,
-            &self.block_group_id,
-            boundary_node.node_id,
-        );
-
-        let anchors = find_offset(
-            &mut expanded_graph,
-            &boundary_anchor,
-            boundary_distance,
-            |g, nid| expand(conn, g, &self.block_group_id, nid),
-        )?;
-
-        anchors.into_iter().next().ok_or(GraphError::NoPath)
+            |graph, node_id| expand(conn, graph, &self.block_group_id, node_id),
+        )
     }
 }
 
@@ -197,7 +110,7 @@ impl ResolvedGraph {
 mod tests {
     use std::collections::HashSet;
 
-    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use gen_core::{GraphNode, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_graph::{GraphEdge, graph_from_interval_tree};
 
     use super::*;
