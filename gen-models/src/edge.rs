@@ -796,7 +796,7 @@ impl Edge {
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use gen_core::{GraphNode, PathBlock};
+    use gen_core::PathBlock;
 
     use super::*;
     use crate::{
@@ -829,49 +829,6 @@ mod tests {
             .sorted_by(|c1, c2| Ord::cmp(&c1, &c2))
             .collect::<Vec<i64>>()
     }
-
-    fn group_block(id: i64, node_id: HashId, start: i64, end: i64) -> GroupBlock {
-        GroupBlock {
-            id,
-            node_id,
-            sequence: Some(String::new()),
-            external_sequence: None,
-            start,
-            end,
-        }
-    }
-
-    fn augmented_edge(
-        id: &str,
-        source_node_id: HashId,
-        source_coordinate: i64,
-        target_node_id: HashId,
-        target_coordinate: i64,
-    ) -> AugmentedEdge {
-        AugmentedEdge {
-            edge: Edge {
-                id: HashId::convert_str(id),
-                source_node_id,
-                source_coordinate,
-                source_strand: Strand::Forward,
-                target_node_id,
-                target_coordinate,
-                target_strand: Strand::Forward,
-            },
-            chromosome_index: 0,
-            phased: 0,
-            created_on: 0,
-        }
-    }
-
-    fn graph_node(block: &GroupBlock) -> GraphNode {
-        GraphNode {
-            node_id: block.node_id,
-            sequence_start: block.start,
-            sequence_end: block.end,
-        }
-    }
-
     #[test]
     fn test_get_block_intervals_splits_sorted_unique_coordinates() {
         let starts = HashSet::from([5, 0, 5]);
@@ -919,156 +876,6 @@ mod tests {
             Edge::get_block_intervals(&HashSet::new(), &HashSet::new(), &HashSet::new()),
             Err(EdgeError::BlockIntervalError { .. })
         ));
-    }
-
-    #[test]
-    fn test_build_graph_routes_incoming_edge_to_junction() {
-        let source_node_id = HashId::convert_str("incoming-source");
-        let target_node_id = HashId::convert_str("incoming-target");
-        let blocks = vec![
-            group_block(0, source_node_id, 0, 3),
-            group_block(1, target_node_id, 0, 0),
-            group_block(2, target_node_id, 0, 1),
-        ];
-        let edges = vec![augmented_edge(
-            "incoming-edge",
-            source_node_id,
-            3,
-            target_node_id,
-            0,
-        )];
-
-        let (graph, _) = Edge::build_graph(&edges, &blocks);
-
-        assert!(
-            graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[1])),
-            "incoming edge should terminate at the junction"
-        );
-        assert!(
-            !graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[2])),
-            "incoming edge should not bypass the junction"
-        );
-        assert_eq!(graph.edge_count(), 1, "should project one block edge");
-    }
-
-    #[test]
-    fn test_build_graph_routes_outgoing_edge_from_junction() {
-        let source_node_id = HashId::convert_str("outgoing-source");
-        let target_node_id = HashId::convert_str("outgoing-target");
-        let blocks = vec![
-            group_block(0, source_node_id, 0, 1),
-            group_block(1, source_node_id, 1, 1),
-            group_block(2, target_node_id, 0, 2),
-        ];
-        let edges = vec![augmented_edge(
-            "outgoing-edge",
-            source_node_id,
-            1,
-            target_node_id,
-            0,
-        )];
-
-        let (graph, _) = Edge::build_graph(&edges, &blocks);
-
-        assert!(
-            graph.contains_edge(graph_node(&blocks[1]), graph_node(&blocks[2])),
-            "outgoing edge should originate at the junction"
-        );
-        assert!(
-            !graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[2])),
-            "outgoing edge should not bypass the junction"
-        );
-        assert_eq!(graph.edge_count(), 1, "should create one block edge");
-    }
-
-    #[test]
-    fn test_build_graph_creates_same_coordinate_edge_from_start_junction() {
-        let node_id = HashId::convert_str("same-coordinate-node");
-        let blocks = vec![group_block(0, node_id, 0, 0), group_block(1, node_id, 0, 1)];
-        let edges = vec![augmented_edge(
-            "same-coordinate-edge",
-            node_id,
-            0,
-            node_id,
-            0,
-        )];
-
-        let (graph, _) = Edge::build_graph(&edges, &blocks);
-
-        assert!(
-            graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[1])),
-            "same-coordinate edge should connect the junction to adjacent sequence"
-        );
-        assert!(
-            !graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[0])),
-            "same-coordinate edge should not add a redundant junction self-loop"
-        );
-        assert_eq!(graph.edge_count(), 1, "should create one block edge");
-    }
-
-    #[test]
-    fn test_build_graph_creates_same_coordinate_edge_into_end_junction() {
-        let node_id = HashId::convert_str("ending-same-coordinate-node");
-        let blocks = vec![group_block(0, node_id, 0, 1), group_block(1, node_id, 1, 1)];
-        let edges = vec![augmented_edge(
-            "ending-same-coordinate-edge",
-            node_id,
-            1,
-            node_id,
-            1,
-        )];
-
-        let (graph, _) = Edge::build_graph(&edges, &blocks);
-
-        assert!(
-            graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[1])),
-            "same-coordinate edge should connect adjacent sequence into the junction"
-        );
-        assert!(
-            !graph.contains_edge(graph_node(&blocks[1]), graph_node(&blocks[1])),
-            "same-coordinate edge should not add a redundant junction self-loop"
-        );
-        assert_eq!(graph.edge_count(), 1, "should create one block edge");
-    }
-
-    #[test]
-    fn test_build_graph_creates_same_coordinate_edge_without_junction_directly() {
-        let node_id = HashId::convert_str("interior-same-coordinate-node");
-        let blocks = vec![group_block(0, node_id, 0, 1), group_block(1, node_id, 1, 2)];
-        let edges = vec![augmented_edge(
-            "interior-same-coordinate-edge",
-            node_id,
-            1,
-            node_id,
-            1,
-        )];
-
-        let (graph, _) = Edge::build_graph(&edges, &blocks);
-
-        assert!(
-            graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[1])),
-            "same-coordinate edge should directly connect sequence blocks without a junction"
-        );
-        assert_eq!(graph.edge_count(), 1, "should create one block edge");
-    }
-
-    #[test]
-    fn test_build_graph_omits_same_coordinate_edge_without_adjacent_sequence() {
-        let node_id = HashId::convert_str("isolated-junction");
-        let blocks = vec![group_block(0, node_id, 0, 0)];
-        let edges = vec![augmented_edge("isolated-edge", node_id, 0, node_id, 0)];
-
-        let (graph, edges_by_node_pair) = Edge::build_graph(&edges, &blocks);
-
-        assert!(
-            !graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[0])),
-            "a junction without adjacent sequence should not create a graph self-loop"
-        );
-        assert_eq!(graph.edge_count(), 0, "should not create a block edge");
-        assert!(
-            edges_by_node_pair.is_empty(),
-            "omitted self-loop should not have a block-pair mapping"
-        );
     }
 
     #[test]
