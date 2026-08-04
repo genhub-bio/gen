@@ -1,9 +1,9 @@
 pub use gen_core::region::Region;
 use gen_core::{
-    HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
+    GraphNode, GraphNodePosition, HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+    Strand, is_terminal,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
-use gen_graph::{GraphNode, GraphNodePosition};
 use intervaltree::IntervalTree;
 use thiserror::Error;
 
@@ -515,13 +515,7 @@ impl ResolvedGenRegion {
         conn: &GraphConnection,
         start_offset: i64,
         end_offset: i64,
-    ) -> Result<
-        (
-            Vec<gen_graph::GraphNodePosition>,
-            Vec<gen_graph::GraphNodePosition>,
-        ),
-        gen_graph::GraphError,
-    > {
+    ) -> Result<(Vec<GraphNodePosition>, Vec<GraphNodePosition>), gen_graph::GraphError> {
         let interval_tree = self
             .intervaltree(conn)
             .map_err(|_| gen_graph::GraphError::NoPath)?;
@@ -1453,7 +1447,7 @@ mod tests {
             }
         }
 
-        fn position_set(positions: &[gen_graph::GraphNodePosition]) -> HashSet<(HashId, i64)> {
+        fn position_set(positions: &[GraphNodePosition]) -> HashSet<(HashId, i64)> {
             positions
                 .iter()
                 .map(|pos| (pos.graph_node.node_id, pos.offset))

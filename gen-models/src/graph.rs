@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_core::{HashId, NodeIntervalBlock, is_terminal};
-use gen_graph::{GenGraph, GraphError, GraphNode, GraphNodePosition, MergeGraph};
+use gen_core::{GraphNode, GraphNodePosition, HashId, NodeIntervalBlock, is_terminal};
+use gen_graph::{GenGraph, GraphError, MergeGraph};
 use intervaltree::IntervalTree;
 use petgraph::Direction;
 
