@@ -21,26 +21,14 @@ use petgraph::{
         NodeCount, Reversed,
     },
 };
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod graph_loader;
 pub mod traits;
-pub use gen_core::{GraphNode, GraphNodePosition, GraphNodeSlice};
+pub use gen_core::{GenGraph, GraphEdge, GraphNode, GraphNodePosition, GraphNodeSlice};
 pub use traits::MergeGraph;
 
-pub type GenGraph = DiGraphMap<GraphNode, Vec<GraphEdge>>;
 pub type OperationGraph = DiGraphMap<HashId, ()>;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
-pub struct GraphEdge {
-    pub edge_id: HashId,
-    pub source_strand: Strand,
-    pub target_strand: Strand,
-    pub chromosome_index: i64,
-    pub phased: i64,
-    pub created_on: i64,
-}
 
 #[derive(Debug, Error)]
 pub enum GraphError {
