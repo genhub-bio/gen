@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+pub use gen_core::{GraphLoadBlock, GraphLoadEdge};
 use gen_core::{
     GraphNodePosition, HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
     NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
@@ -12,28 +13,6 @@ use petgraph::Direction;
 use crate::{
     GenGraph, GraphEdge, GraphError, GraphNode, MergeGraph, all_reachable_nodes, all_simple_paths,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GraphLoadBlock {
-    pub id: i64,
-    pub node_id: HashId,
-    pub start: i64,
-    pub end: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GraphLoadEdge {
-    pub edge_id: HashId,
-    pub source_node_id: HashId,
-    pub source_coordinate: i64,
-    pub source_strand: Strand,
-    pub target_node_id: HashId,
-    pub target_coordinate: i64,
-    pub target_strand: Strand,
-    pub chromosome_index: i64,
-    pub phased: i64,
-    pub created_on: i64,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegionPositionQuery {

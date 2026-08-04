@@ -89,7 +89,9 @@ pub fn export_gfa(
 
     blocks.sort_by_key(|a| a.node_id);
 
-    let (gen_graph, _edges_by_node_pair) = Edge::build_graph(&edges, &blocks);
+    let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
+    let (gen_graph, _edges_by_node_pair) =
+        gen_graph::graph_loader::build_graph(&load_edges, &load_blocks);
 
     // Create GenGraph from the built graph
     let mut graph = GenGraph::new();

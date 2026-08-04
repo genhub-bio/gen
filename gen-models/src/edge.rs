@@ -5,12 +5,8 @@ use std::{
 };
 
 use gen_core::{
-    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash, is_terminal,
-    traits::Capnp,
-};
-use gen_graph::{
-    GenGraph,
-    graph_loader::{GraphLoadBlock, GraphLoadEdge, build_graph},
+    GraphLoadBlock, GraphLoadEdge, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand,
+    calculate_hash, is_terminal, traits::Capnp,
 };
 use indexmap::IndexSet;
 use itertools::Itertools;
@@ -512,10 +508,10 @@ impl Edge {
     /// Computes the backing-node slices from the stored block group edges.
     ///
     /// Graph construction, sequence enumeration, GFA export, and diff reconstruction use this as
-    /// the first half of the edge-to-`GenGraph` pipeline, the second half being the build_graph
-    /// method below. This method gathers coordinates, expands incomplete node descriptions from
-    /// the block group, and calls `get_block_intervals` to construct both blocks with sequences
-    /// and zero-width junction blocks.
+    /// the first half of the edge-to-`GenGraph` pipeline, followed by conversion to graph load
+    /// records and construction in `gen-graph`. This method gathers coordinates, expands
+    /// incomplete node descriptions from the block group, and calls `get_block_intervals` to
+    /// construct both blocks with sequences and zero-width junction blocks.
     ///
     /// For example, two adjacent deletions retain each original base while also exposing the path
     /// that skips both. Parenthesized nodes are zero-width junctions and bracketed nodes contain
@@ -718,11 +714,10 @@ impl Edge {
         Ok(blocks)
     }
 
-    /// Computes a `GenGraph` from augmented edges and their computed blocks.
+    /// Converts persisted edges and computed blocks into graph construction records.
     ///
     /// `BlockGroup::get_graph`, sequence enumeration, and graph export call this after
-    /// `blocks_from_edges`. The returned node-pair map retains the input `Edge` responsible for
-    /// each projected graph edge so downstream consumers can recover edge provenance.
+    /// `blocks_from_edges`, then pass the records to the graph layer for construction.
     ///
     /// Junctions and `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` have independent jobs:
     ///
@@ -743,10 +738,10 @@ impl Edge {
     ///
     /// The junction is the generated node. The two labels represent copied chromosome-index
     /// metadata on the projected connections; neither connection is added to the database.
-    pub fn build_graph(
+    pub fn graph_load_data(
         edges: &[AugmentedEdge],
         blocks: &[GroupBlock],
-    ) -> (GenGraph, HashMap<(i64, i64), Edge>) {
+    ) -> (Vec<GraphLoadEdge>, Vec<GraphLoadBlock>) {
         let load_edges = edges
             .iter()
             .map(|augmented_edge| GraphLoadEdge {
@@ -771,17 +766,7 @@ impl Edge {
                 end: block.end,
             })
             .collect::<Vec<_>>();
-        let edges_by_id = edges
-            .iter()
-            .map(|augmented_edge| (augmented_edge.edge.id, &augmented_edge.edge))
-            .collect::<HashMap<_, _>>();
-        let (graph, edge_ids_by_node_pair) = build_graph(&load_edges, &load_blocks);
-        let edges_by_node_pair = edge_ids_by_node_pair
-            .into_iter()
-            .map(|(node_pair, edge_id)| (node_pair, edges_by_id[&edge_id].clone()))
-            .collect();
-
-        (graph, edges_by_node_pair)
+        (load_edges, load_blocks)
     }
 
     pub fn is_start_edge(&self) -> bool {

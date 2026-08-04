@@ -36,7 +36,8 @@ pub fn expand(
         Ok(blocks) => blocks,
         Err(_) => return false,
     };
-    let (fragment, _) = Edge::build_graph(&unloaded_edges, &blocks);
+    let (load_edges, load_blocks) = Edge::graph_load_data(&unloaded_edges, &blocks);
+    let (fragment, _) = graph_loader::build_graph(&load_edges, &load_blocks);
     graph_loader::merge_fragment(graph, &fragment);
     true
 }

@@ -547,7 +547,8 @@ impl BlockGroup {
     ) -> Result<GenGraph, BlockGroupError> {
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, history_ref);
         let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, history_ref)?;
-        let (graph, _) = Edge::build_graph(&edges, &blocks);
+        let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
+        let (graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
         Ok(graph)
     }
 
@@ -566,7 +567,8 @@ impl BlockGroup {
             .collect::<Vec<_>>();
         let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, None)?;
 
-        let (mut graph, _) = Edge::build_graph(&edges, &blocks);
+        let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
+        let (mut graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
         BlockGroup::prune_graph(&mut graph);
 
         let sequences_by_node = blocks
