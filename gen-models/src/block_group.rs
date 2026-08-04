@@ -5,16 +5,14 @@ use std::{
 };
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    GraphNode, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
     PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand, calculate_hash, is_end_node,
     is_start_node, is_terminal,
     range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
-use gen_graph::{
-    GenGraph, GraphNode, all_intermediate_edges, flatten_to_interval_tree, graph_loader,
-};
+use gen_graph::{GenGraph, all_intermediate_edges, flatten_to_interval_tree, graph_loader};
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value as SQLValue};

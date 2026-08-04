@@ -757,8 +757,7 @@ impl Edge {
 #[cfg(test)]
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use gen_core::PathBlock;
-    use gen_graph::GraphNode;
+    use gen_core::{GraphNode, PathBlock};
 
     use super::*;
     use crate::{
