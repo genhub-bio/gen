@@ -26,6 +26,7 @@ use thiserror::Error;
 
 pub mod traits;
 pub use traits::MergeGraph;
+pub mod graph_loader;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct GraphNode {
