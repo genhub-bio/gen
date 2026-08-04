@@ -8,7 +8,10 @@ use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash, is_terminal,
     traits::Capnp,
 };
-use gen_graph::{GenGraph, GraphEdge, GraphNode};
+use gen_graph::{
+    GenGraph,
+    graph_loader::{GraphLoadBlock, GraphLoadEdge, build_graph},
+};
 use indexmap::IndexSet;
 use itertools::Itertools;
 use rusqlite::{Row, ToSql, params, types::Value};
@@ -124,12 +127,6 @@ impl From<&Edge> for EdgeData {
             target_strand: item.target_strand,
         }
     }
-}
-
-#[derive(Eq, Hash, PartialEq)]
-pub struct BlockKey {
-    pub node_id: HashId,
-    pub coordinate: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -687,117 +684,6 @@ impl Edge {
         Ok(blocks)
     }
 
-    /// Checks whether both endpoints use the same node and coordinate.
-    ///
-    /// `block_connections` uses this structural property when connecting blocks around a junction.
-    /// Whether the edge is a real path choice or a reference-healing edit-site marker remains
-    /// separate chromosome-index metadata on `AugmentedEdge`.
-    fn is_same_coordinate_edge(&self) -> bool {
-        self.source_node_id == self.target_node_id
-            && self.source_coordinate == self.target_coordinate
-    }
-
-    /// Selects the blocks that an edge endpoint should connect to.
-    ///
-    /// `block_connections` calls this when an input edge enters or leaves a coordinate. If a
-    /// junction exists, the edge connects to it and traversal continues from there. Otherwise the
-    /// edge connects directly to the sequence block.
-    fn select_junction_or_sequence_blocks<'a>(blocks: &[&'a GroupBlock]) -> Vec<&'a GroupBlock> {
-        let junctions = blocks
-            .iter()
-            .copied()
-            .filter(|block| block.start == block.end)
-            .collect::<Vec<_>>();
-        if junctions.is_empty() {
-            blocks.to_vec()
-        } else {
-            junctions
-        }
-    }
-
-    /// Builds connections for a same-coordinate edge.
-    ///
-    /// At a junction, the source lookup contains the sequence block ending at the coordinate and
-    /// the junction, while the target lookup contains the junction and the sequence block starting
-    /// there. `block_connections` calls this to produce the deliberate `sequence -> junction` and
-    /// `junction -> sequence` connections without adding a junction self-loop. With no junction,
-    /// the Cartesian product keeps the direct connection between sequence blocks.
-    ///
-    /// ```text
-    /// without a junction:  [sequence ending at k] ---> [sequence starting at k]
-    ///
-    /// with a junction:     [sequence ending at k] ---> (k,k) ---> [sequence starting at k]
-    /// ```
-    ///
-    /// The same-coordinate edge therefore preserves the same route after the junction is
-    /// introduced without creating `(k,k) -> (k,k)`.
-    fn same_coordinate_block_connections<'a>(
-        source_blocks: &[&'a GroupBlock],
-        target_blocks: &[&'a GroupBlock],
-    ) -> Vec<(&'a GroupBlock, &'a GroupBlock)> {
-        let source_junctions = source_blocks
-            .iter()
-            .copied()
-            .filter(|block| block.start == block.end)
-            .collect::<Vec<_>>();
-        let target_junctions = target_blocks
-            .iter()
-            .copied()
-            .filter(|block| block.start == block.end)
-            .collect::<Vec<_>>();
-
-        if source_junctions.is_empty() && target_junctions.is_empty() {
-            return source_blocks
-                .iter()
-                .copied()
-                .cartesian_product(target_blocks.iter().copied())
-                .collect();
-        }
-
-        let source_sequence_blocks = source_blocks
-            .iter()
-            .copied()
-            .filter(|block| block.start != block.end);
-        let target_sequence_blocks = target_blocks
-            .iter()
-            .copied()
-            .filter(|block| block.start != block.end);
-
-        // Sequence ending at the coordinate enters the junction, and sequence starting there
-        // leaves it. If neither side has real sequence, there is no connection to add.
-        source_sequence_blocks
-            .cartesian_product(target_junctions)
-            .chain(
-                source_junctions
-                    .into_iter()
-                    .cartesian_product(target_sequence_blocks),
-            )
-            .collect()
-    }
-
-    /// Returns the in-memory block connections represented by one input edge.
-    ///
-    /// `build_graph` calls this after coordinate lookup may have returned both a sequence block and
-    /// a junction. Same-coordinate edges connect the surrounding sequence through that junction;
-    /// all other edges connect to the junction and let the next input edge continue from it. These
-    /// returned connections are a graph projection and are not additional database edges.
-    fn block_connections<'a>(
-        &self,
-        source_blocks: &[&'a GroupBlock],
-        target_blocks: &[&'a GroupBlock],
-    ) -> Vec<(&'a GroupBlock, &'a GroupBlock)> {
-        if self.is_same_coordinate_edge() {
-            return Self::same_coordinate_block_connections(source_blocks, target_blocks);
-        }
-
-        let source_blocks = Self::select_junction_or_sequence_blocks(source_blocks);
-        let target_blocks = Self::select_junction_or_sequence_blocks(target_blocks);
-        source_blocks
-            .into_iter()
-            .cartesian_product(target_blocks)
-            .collect()
-    }
-
     /// Computes a `GenGraph` from augmented edges and their computed blocks.
     ///
     /// `BlockGroup::get_graph`, sequence enumeration, and graph export call this after
@@ -827,85 +713,39 @@ impl Edge {
         edges: &[AugmentedEdge],
         blocks: &[GroupBlock],
     ) -> (GenGraph, HashMap<(i64, i64), Edge>) {
-        let graph_node_for_block = |block: &GroupBlock| GraphNode {
-            node_id: block.node_id,
-            sequence_start: block.start,
-            sequence_end: block.end,
-        };
-        // Input edge sources resolve to blocks ending at their coordinate, and targets resolve to
-        // blocks starting there. A junction belongs to both indexes, which lets one edge arrive at
-        // it and the next edge leave from it.
-        let blocks_by_start = blocks
+        let load_edges = edges
             .iter()
-            .map(|block| {
-                (
-                    BlockKey {
-                        node_id: block.node_id,
-                        coordinate: block.start,
-                    },
-                    block,
-                )
+            .map(|augmented_edge| GraphLoadEdge {
+                edge_id: augmented_edge.edge.id,
+                source_node_id: augmented_edge.edge.source_node_id,
+                source_coordinate: augmented_edge.edge.source_coordinate,
+                source_strand: augmented_edge.edge.source_strand,
+                target_node_id: augmented_edge.edge.target_node_id,
+                target_coordinate: augmented_edge.edge.target_coordinate,
+                target_strand: augmented_edge.edge.target_strand,
+                chromosome_index: augmented_edge.chromosome_index,
+                phased: augmented_edge.phased,
+                created_on: augmented_edge.created_on,
             })
-            .into_group_map();
-        let blocks_by_end = blocks
+            .collect::<Vec<_>>();
+        let load_blocks = blocks
             .iter()
-            .map(|block| {
-                (
-                    BlockKey {
-                        node_id: block.node_id,
-                        coordinate: block.end,
-                    },
-                    block,
-                )
+            .map(|block| GraphLoadBlock {
+                id: block.id,
+                node_id: block.node_id,
+                start: block.start,
+                end: block.end,
             })
-            .into_group_map();
-
-        let mut graph = GenGraph::new();
-        let mut edges_by_node_pair = HashMap::new();
-        for block in blocks {
-            graph.add_node(graph_node_for_block(block));
-        }
-        for augmented_edge in edges {
-            let edge = &augmented_edge.edge;
-            let source_key = BlockKey {
-                node_id: edge.source_node_id,
-                coordinate: edge.source_coordinate,
-            };
-            let source_blocks = blocks_by_end.get(&source_key);
-            let target_key = BlockKey {
-                node_id: edge.target_node_id,
-                coordinate: edge.target_coordinate,
-            };
-            let target_blocks = blocks_by_start.get(&target_key);
-
-            if let Some(source_blocks) = source_blocks
-                && let Some(target_blocks) = target_blocks
-            {
-                // A coordinate may match both a sequence block and a junction. When connecting
-                // to junctions, multiple edges may be needed to fully represent the graph.
-                // `block_connections` orchestrates this.
-                for (source_block, target_block) in
-                    edge.block_connections(source_blocks, target_blocks)
-                {
-                    let source_node = graph_node_for_block(source_block);
-                    let target_node = graph_node_for_block(target_block);
-                    let graph_edge = GraphEdge {
-                        edge_id: edge.id,
-                        source_strand: edge.source_strand,
-                        target_strand: edge.target_strand,
-                        chromosome_index: augmented_edge.chromosome_index,
-                        phased: augmented_edge.phased,
-                        created_on: augmented_edge.created_on,
-                    };
-                    if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
-                        existing_edges.push(graph_edge);
-                    } else {
-                        graph.add_edge(source_node, target_node, vec![graph_edge]);
-                    }
-                    edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
-                }
-            }
-        }
+            .collect::<Vec<_>>();
+        let edges_by_id = edges
+            .iter()
+            .map(|augmented_edge| (augmented_edge.edge.id, &augmented_edge.edge))
+            .collect::<HashMap<_, _>>();
+        let (graph, edge_ids_by_node_pair) = build_graph(&load_edges, &load_blocks);
+        let edges_by_node_pair = edge_ids_by_node_pair
+            .into_iter()
+            .map(|(node_pair, edge_id)| (node_pair, edges_by_id[&edge_id].clone()))
+            .collect();
 
         (graph, edges_by_node_pair)
     }
@@ -923,6 +763,7 @@ impl Edge {
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use gen_core::PathBlock;
+    use gen_graph::GraphNode;
 
     use super::*;
     use crate::{

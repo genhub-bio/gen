@@ -1816,6 +1816,7 @@ dependencies = [
  "gen-core",
  "interavl",
  "intervaltree",
+ "itertools",
  "petgraph 0.6.5",
  "serde",
  "thiserror 2.0.18",

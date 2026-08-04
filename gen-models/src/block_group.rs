@@ -5,16 +5,15 @@ use std::{
 };
 
 use gen_core::{
-    HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
-    PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand,
-    calculate_hash, is_end_node, is_start_node, is_terminal,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand, calculate_hash, is_end_node,
+    is_start_node, is_terminal,
     range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
 use gen_graph::{
-    GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
-    flatten_to_interval_tree,
+    GenGraph, GraphNode, all_intermediate_edges, flatten_to_interval_tree, graph_loader,
 };
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
@@ -27,7 +26,7 @@ use crate::{
     annotations::AnnotationError,
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
-    edge::{Edge, EdgeData, GroupBlock},
+    edge::{Edge, EdgeData},
     errors::{
         AccessionError, AccessionNodeError, EdgeError, NodeError, PathError, QueryError,
         SequenceError,
@@ -576,58 +575,7 @@ impl BlockGroup {
     }
 
     pub fn prune_graph(graph: &mut GenGraph) {
-        // Prunes a graph by removing edges on the same chromosome_index. This means if 2 edges are
-        // both "chromosome index 0", we keep the newer one.
-        let mut root_nodes = HashSet::new();
-        let mut edges_to_remove: Vec<(GraphNode, GraphNode)> = vec![];
-        for node in graph.nodes() {
-            if node.node_id == PATH_START_NODE_ID {
-                root_nodes.insert(node);
-            }
-            let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
-            for (source_node, target_node, edge_weights) in graph.edges(node) {
-                for edge_weight in edge_weights {
-                    if edge_weight.chromosome_index == NO_CHROMOSOME_INDEX {
-                        continue;
-                    }
-                    if edge_weight.chromosome_index == INDETERMINATE_CHROMOSOME_INDEX {
-                        continue;
-                    }
-                    if edge_weight.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
-                        edges_to_remove.push((source_node, target_node));
-                        continue;
-                    }
-                    edges_by_ci
-                        .entry(edge_weight.chromosome_index)
-                        .and_modify(|(source, target, created_on)| {
-                            if edge_weight.created_on > *created_on {
-                                edges_to_remove.push((*source, *target));
-                                *source = source_node;
-                                *target = target_node;
-                                *created_on = edge_weight.created_on;
-                            } else {
-                                edges_to_remove.push((source_node, target_node));
-                            }
-                        })
-                        .or_insert((source_node, target_node, edge_weight.created_on));
-                }
-            }
-        }
-
-        for (source, target) in edges_to_remove.iter() {
-            graph.remove_edge(*source, *target);
-        }
-
-        let reachable_nodes = all_reachable_nodes(&*graph, &Vec::from_iter(root_nodes));
-        let mut to_remove = vec![];
-        for node in graph.nodes() {
-            if !reachable_nodes.contains(&node) {
-                to_remove.push(node);
-            }
-        }
-        for node in to_remove {
-            graph.remove_node(node);
-        }
+        graph_loader::prune_graph(graph);
     }
 
     pub fn get_all_sequences(
@@ -644,16 +592,7 @@ impl BlockGroup {
         let (mut graph, _) = Edge::build_graph(&edges, &blocks);
         BlockGroup::prune_graph(&mut graph);
 
-        let mut start_nodes = vec![];
-        let mut end_nodes = vec![];
-        for node in graph.nodes() {
-            if is_start_node(node.node_id) {
-                start_nodes.push(node);
-            } else if is_end_node(node.node_id) {
-                end_nodes.push(node);
-            }
-        }
-        let blocks_by_node = blocks
+        let sequences_by_node = blocks
             .iter()
             .map(|block| {
                 (
@@ -662,35 +601,12 @@ impl BlockGroup {
                         sequence_start: block.start,
                         sequence_end: block.end,
                     },
-                    block,
+                    block.sequence(),
                 )
             })
-            .collect::<HashMap<GraphNode, &GroupBlock>>();
-        let mut sequences = HashSet::<String>::new();
+            .collect::<HashMap<GraphNode, String>>();
 
-        for start_node in start_nodes {
-            for end_node in &end_nodes {
-                // TODO: maybe make all_simple_paths return a single path id where start == end
-                if start_node == *end_node {
-                    let block = blocks_by_node.get(&start_node).unwrap();
-                    if block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID {
-                        sequences.insert(block.sequence());
-                    }
-                } else {
-                    for path in all_simple_paths(&graph, start_node, *end_node) {
-                        let mut current_sequence = "".to_string();
-                        for node in path {
-                            let block = blocks_by_node.get(&node).unwrap();
-                            let block_sequence = block.sequence();
-                            current_sequence.push_str(&block_sequence);
-                        }
-                        sequences.insert(current_sequence);
-                    }
-                }
-            }
-        }
-
-        Ok(sequences)
+        Ok(graph_loader::get_all_sequences(&graph, &sequences_by_node))
     }
 
     pub fn add_accession(
