@@ -1,12 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use gen_core::{
-    HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID,
-    PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_end_node, is_start_node,
+    GraphNodePosition, HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
+    PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_end_node,
+    is_start_node,
 };
 use itertools::Itertools;
+use petgraph::Direction;
 
-use crate::{GenGraph, GraphEdge, GraphNode, all_reachable_nodes, all_simple_paths};
+use crate::{GenGraph, GraphEdge, GraphError, GraphNode, all_reachable_nodes, all_simple_paths};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphLoadBlock {
@@ -34,6 +36,135 @@ pub struct GraphLoadEdge {
 struct BlockKey {
     node_id: HashId,
     coordinate: i64,
+}
+
+/// Finds every graph position a signed sequence distance from an anchor.
+///
+/// The callback can add neighboring nodes when traversal reaches the boundary of the currently
+/// loaded graph. It is first used at dead ends and then along existing paths if no result was
+/// found.
+pub fn find_offset(
+    graph: &mut GenGraph,
+    anchor: &GraphNodePosition,
+    distance: i64,
+    mut expand: impl FnMut(&mut GenGraph, HashId) -> bool,
+) -> Result<Vec<GraphNodePosition>, GraphError> {
+    if distance == 0 {
+        return Ok(vec![*anchor]);
+    }
+
+    match find_offset_with_optional_expansion(graph, anchor, distance, false, &mut expand) {
+        Ok(results) => Ok(results),
+        Err(GraphError::OutOfBounds(_)) => {
+            find_offset_with_optional_expansion(graph, anchor, distance, true, &mut expand)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn find_offset_with_optional_expansion(
+    graph: &mut GenGraph,
+    anchor: &GraphNodePosition,
+    distance: i64,
+    expand_through_existing_paths: bool,
+    expand: &mut impl FnMut(&mut GenGraph, HashId) -> bool,
+) -> Result<Vec<GraphNodePosition>, GraphError> {
+    let forward = distance > 0;
+    let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
+    let mut results = Vec::new();
+    let mut result_seen = HashSet::new();
+
+    queue.push_back((*anchor, distance));
+    visited.insert((*anchor, distance));
+
+    while let Some((position, remaining)) = queue.pop_front() {
+        let node = position.graph_node;
+        let node_length = node.length();
+
+        if remaining == 0 {
+            if result_seen.insert(position) {
+                results.push(position);
+            }
+            continue;
+        }
+
+        if forward {
+            let remaining_in_node = node_length - position.offset;
+            if remaining <= remaining_in_node {
+                let result = GraphNodePosition {
+                    graph_node: node,
+                    offset: position.offset + remaining,
+                };
+                if result_seen.insert(result) {
+                    results.push(result);
+                }
+                continue;
+            }
+
+            let mut neighbors = graph
+                .neighbors_directed(node, Direction::Outgoing)
+                .collect::<Vec<_>>();
+            if (neighbors.is_empty() || expand_through_existing_paths)
+                && expand(graph, node.node_id)
+            {
+                neighbors = graph
+                    .neighbors_directed(node, Direction::Outgoing)
+                    .collect();
+            }
+
+            for neighbor in neighbors {
+                let next_position = GraphNodePosition {
+                    graph_node: neighbor,
+                    offset: 0,
+                };
+                let next_remaining = remaining - remaining_in_node;
+                if visited.insert((next_position, next_remaining)) {
+                    queue.push_back((next_position, next_remaining));
+                }
+            }
+        } else {
+            let remaining_in_node = position.offset;
+            if -remaining <= remaining_in_node {
+                let result = GraphNodePosition {
+                    graph_node: node,
+                    offset: position.offset + remaining,
+                };
+                if result_seen.insert(result) {
+                    results.push(result);
+                }
+                continue;
+            }
+
+            let mut neighbors = graph
+                .neighbors_directed(node, Direction::Incoming)
+                .collect::<Vec<_>>();
+            if (neighbors.is_empty() || expand_through_existing_paths)
+                && expand(graph, node.node_id)
+            {
+                neighbors = graph
+                    .neighbors_directed(node, Direction::Incoming)
+                    .collect();
+            }
+
+            for neighbor in neighbors {
+                let next_position = GraphNodePosition {
+                    graph_node: neighbor,
+                    offset: neighbor.length(),
+                };
+                let next_remaining = remaining + remaining_in_node;
+                if visited.insert((next_position, next_remaining)) {
+                    queue.push_back((next_position, next_remaining));
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Err(GraphError::OutOfBounds(distance));
+    }
+
+    Ok(results)
 }
 
 fn graph_node(block: &GraphLoadBlock) -> GraphNode {

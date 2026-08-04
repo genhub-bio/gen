@@ -1,9 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use gen_core::{GraphNode, GraphNodePosition, HashId, NodeIntervalBlock, is_terminal};
 use gen_graph::{GenGraph, GraphError, MergeGraph};
 use intervaltree::IntervalTree;
-use petgraph::Direction;
 
 use crate::{
     block_group::BlockGroup, block_group_edge::AugmentedEdge, db::GraphConnection, edge::Edge,
@@ -82,129 +81,7 @@ pub fn find_offset(
     distance: i64,
     mut expand: impl FnMut(&mut GenGraph, HashId) -> bool,
 ) -> Result<Vec<GraphNodePosition>, GraphError> {
-    if distance == 0 {
-        return Ok(vec![*anchor]);
-    }
-
-    match find_offset_with_optional_expansion(graph, anchor, distance, false, &mut expand) {
-        Ok(results) => Ok(results),
-        Err(GraphError::OutOfBounds(_)) => {
-            find_offset_with_optional_expansion(graph, anchor, distance, true, &mut expand)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// The actual function doing the work from `find_offset`. See docs in `find_offset` for explanation.
-fn find_offset_with_optional_expansion(
-    graph: &mut GenGraph,
-    anchor: &GraphNodePosition,
-    distance: i64,
-    // If true, expand the graph if search leads to the end of a graph.
-    expand_through_existing_paths: bool,
-    expand: &mut impl FnMut(&mut GenGraph, HashId) -> bool,
-) -> Result<Vec<GraphNodePosition>, GraphError> {
-    let forward = distance > 0;
-    let mut queue = VecDeque::new();
-    let mut visited = HashSet::new();
-    let mut results = Vec::new();
-    let mut result_seen = HashSet::new();
-
-    queue.push_back((*anchor, distance));
-    visited.insert((*anchor, distance));
-
-    while let Some((pos, remaining)) = queue.pop_front() {
-        let node = pos.graph_node;
-        let node_len = node.length();
-
-        if remaining == 0 {
-            if result_seen.insert(pos) {
-                results.push(pos);
-            }
-            continue;
-        }
-
-        if forward {
-            let in_node = node_len - pos.offset;
-            if remaining <= in_node {
-                let result = GraphNodePosition {
-                    graph_node: node,
-                    offset: pos.offset + remaining,
-                };
-                if result_seen.insert(result) {
-                    results.push(result);
-                }
-                continue;
-            }
-
-            // Outgoing nodes means downstream nodes to search for.
-            let mut neighbors: Vec<GraphNode> = graph
-                .neighbors_directed(node, Direction::Outgoing)
-                .collect();
-
-            if (neighbors.is_empty() || expand_through_existing_paths)
-                && expand(graph, node.node_id)
-            {
-                neighbors = graph
-                    .neighbors_directed(node, Direction::Outgoing)
-                    .collect();
-            }
-
-            for neighbor in neighbors {
-                let next_pos = GraphNodePosition {
-                    graph_node: neighbor,
-                    offset: 0,
-                };
-                let next_remaining = remaining - in_node;
-                if visited.insert((next_pos, next_remaining)) {
-                    queue.push_back((next_pos, next_remaining));
-                }
-            }
-        } else {
-            let in_node = pos.offset;
-            let abs_remaining = -remaining;
-            if abs_remaining <= in_node {
-                let result = GraphNodePosition {
-                    graph_node: node,
-                    offset: pos.offset + remaining,
-                };
-                if result_seen.insert(result) {
-                    results.push(result);
-                }
-                continue;
-            }
-
-            // Incoming edges means upstream nodes to traverse
-            let mut neighbors: Vec<GraphNode> = graph
-                .neighbors_directed(node, Direction::Incoming)
-                .collect();
-
-            if (neighbors.is_empty() || expand_through_existing_paths)
-                && expand(graph, node.node_id)
-            {
-                neighbors = graph
-                    .neighbors_directed(node, Direction::Incoming)
-                    .collect();
-            }
-
-            for neighbor in neighbors {
-                let next_pos = GraphNodePosition {
-                    graph_node: neighbor,
-                    offset: neighbor.length(),
-                };
-                let next_remaining = remaining + in_node;
-                if visited.insert((next_pos, next_remaining)) {
-                    queue.push_back((next_pos, next_remaining));
-                }
-            }
-        }
-    }
-
-    if results.is_empty() {
-        return Err(GraphError::OutOfBounds(distance));
-    }
-
-    Ok(results)
+    gen_graph::graph_loader::find_offset(graph, anchor, distance, &mut expand)
 }
 
 impl ResolvedGraph {
