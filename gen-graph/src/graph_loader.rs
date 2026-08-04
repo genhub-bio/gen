@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use gen_core::{
     GraphNodePosition, HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
     NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
-    Strand, is_end_node, is_start_node, is_terminal,
+    PathBlock, Strand, is_end_node, is_start_node, is_terminal,
 };
 use intervaltree::IntervalTree;
 use itertools::Itertools;
@@ -33,6 +33,161 @@ pub struct GraphLoadEdge {
     pub chromosome_index: i64,
     pub phased: i64,
     pub created_on: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegionPositionQuery {
+    pub start: i64,
+    pub end: i64,
+    pub start_offset: i64,
+    pub end_offset: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlannedEdge {
+    pub source_node_id: HashId,
+    pub source_coordinate: i64,
+    pub source_strand: Strand,
+    pub target_node_id: HashId,
+    pub target_coordinate: i64,
+    pub target_strand: Strand,
+    pub chromosome_index: i64,
+    pub phased: i64,
+}
+
+/// Resolves a linear region and its offsets to positions in an expandable graph.
+///
+/// Callers retain responsibility for persistence by supplying node lengths and graph expansion.
+pub fn resolve_region_positions(
+    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
+    query: RegionPositionQuery,
+    mut node_length: impl FnMut(HashId) -> Option<i64>,
+    mut expand: impl FnMut(&mut GenGraph, HashId) -> bool,
+) -> Result<(Vec<GraphNodePosition>, Vec<GraphNodePosition>), GraphError> {
+    let filtered_tree = interval_tree
+        .iter()
+        .filter(|item| !is_terminal(item.value.node_id))
+        .map(|item| (item.range.clone(), item.value))
+        .collect::<IntervalTree<_, _>>();
+    let mut graph = crate::graph_from_interval_tree(&filtered_tree);
+    let start_anchor = resolve_anchor(
+        &graph,
+        &filtered_tree,
+        query.start,
+        &mut node_length,
+        &mut expand,
+    )?;
+    let end_anchor = resolve_anchor(
+        &graph,
+        &filtered_tree,
+        query.end,
+        &mut node_length,
+        &mut expand,
+    )?;
+    let start_positions = find_offset(&mut graph, &start_anchor, query.start_offset, &mut expand)?;
+    let end_positions = find_offset(&mut graph, &end_anchor, query.end_offset, &mut expand)?;
+    Ok((start_positions, end_positions))
+}
+
+/// Returns every non-terminal graph position covering a linear coordinate.
+pub fn positions_at_coordinate(
+    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
+    coordinate: i64,
+) -> Vec<GraphNodePosition> {
+    let mut positions = interval_tree
+        .query_point(coordinate)
+        .map(|entry| entry.value)
+        .filter(|block| !is_terminal(block.node_id))
+        .map(|block| GraphNodePosition {
+            graph_node: GraphNode {
+                node_id: block.node_id,
+                sequence_start: block.sequence_start,
+                sequence_end: block.sequence_end,
+            },
+            offset: coordinate - block.start,
+        })
+        .collect::<Vec<_>>();
+    positions.sort();
+    positions.dedup();
+    positions
+}
+
+/// Plans graph edges that preserve an edit site and connect a replacement block.
+pub fn plan_region_edges(
+    start_positions: &[GraphNodePosition],
+    end_positions: &[GraphNodePosition],
+    block: &PathBlock,
+    preserve_edge: bool,
+    chromosome_index: i64,
+    phased: i64,
+) -> Vec<PlannedEdge> {
+    let preserve_chromosome_index = if preserve_edge {
+        0
+    } else {
+        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+    };
+    let mut edges = Vec::new();
+
+    for position in start_positions.iter().chain(end_positions) {
+        if is_terminal(position.graph_node.node_id) {
+            continue;
+        }
+        let coordinate = position.coordinate();
+        edges.push(PlannedEdge {
+            source_node_id: position.graph_node.node_id,
+            source_coordinate: coordinate,
+            source_strand: Strand::Forward,
+            target_node_id: position.graph_node.node_id,
+            target_coordinate: coordinate,
+            target_strand: Strand::Forward,
+            chromosome_index: preserve_chromosome_index,
+            phased: 0,
+        });
+    }
+
+    if block.sequence_start == block.sequence_end {
+        for start_position in start_positions {
+            for end_position in end_positions {
+                edges.push(PlannedEdge {
+                    source_node_id: start_position.graph_node.node_id,
+                    source_coordinate: start_position.coordinate(),
+                    source_strand: Strand::Forward,
+                    target_node_id: end_position.graph_node.node_id,
+                    target_coordinate: end_position.coordinate(),
+                    target_strand: Strand::Forward,
+                    chromosome_index,
+                    phased,
+                });
+            }
+        }
+    } else {
+        for start_position in start_positions {
+            edges.push(PlannedEdge {
+                source_node_id: start_position.graph_node.node_id,
+                source_coordinate: start_position.coordinate(),
+                source_strand: Strand::Forward,
+                target_node_id: block.node_id,
+                target_coordinate: block.sequence_start,
+                target_strand: Strand::Forward,
+                chromosome_index,
+                phased,
+            });
+        }
+        for end_position in end_positions {
+            edges.push(PlannedEdge {
+                source_node_id: block.node_id,
+                source_coordinate: block.sequence_end,
+                source_strand: Strand::Forward,
+                target_node_id: end_position.graph_node.node_id,
+                target_coordinate: end_position.coordinate(),
+                target_strand: Strand::Forward,
+                chromosome_index,
+                phased,
+            });
+        }
+    }
+
+    edges
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
