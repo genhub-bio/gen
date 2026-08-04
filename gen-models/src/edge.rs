@@ -408,6 +408,40 @@ impl Edge {
         Ok(edges)
     }
 
+    /// Loads the edges touching a node and the edges touching those immediate neighbors.
+    ///
+    /// Graph expansion uses this two-hop record set to add complete local connections without
+    /// putting database queries in the graph traversal layer.
+    pub fn edges_for_block_group_node_neighborhood(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_id: HashId,
+        history_ref: Option<&str>,
+    ) -> Result<Vec<AugmentedEdge>, EdgeError> {
+        let immediate_edges =
+            Self::edges_for_block_group_nodes(conn, block_group_id, &[node_id], history_ref)?;
+        let mut neighbor_ids = immediate_edges
+            .iter()
+            .flat_map(|edge| [edge.edge.source_node_id, edge.edge.target_node_id])
+            .filter(|neighbor_id| *neighbor_id != node_id)
+            .collect::<Vec<_>>();
+        neighbor_ids.sort();
+        neighbor_ids.dedup();
+
+        let mut edges_by_id = immediate_edges
+            .into_iter()
+            .map(|edge| (edge.edge.id, edge))
+            .collect::<HashMap<_, _>>();
+        for edge in
+            Self::edges_for_block_group_nodes(conn, block_group_id, &neighbor_ids, history_ref)
+                .unwrap_or_default()
+        {
+            edges_by_id.entry(edge.edge.id).or_insert(edge);
+        }
+
+        Ok(edges_by_id.into_values().collect())
+    }
+
     /// Converts input edge coordinates for one backing node into the sequence slices represented
     /// by `GroupBlock`s.
     ///

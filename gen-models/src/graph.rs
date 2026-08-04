@@ -1,13 +1,8 @@
-use std::collections::{HashMap, HashSet};
-
 use gen_core::{GraphNodePosition, HashId, NodeIntervalBlock};
-use gen_graph::{GenGraph, GraphError, MergeGraph};
+use gen_graph::{GenGraph, GraphError, graph_loader};
 use intervaltree::IntervalTree;
 
-use crate::{
-    block_group::BlockGroup, block_group_edge::AugmentedEdge, db::GraphConnection, edge::Edge,
-    node::Node,
-};
+use crate::{db::GraphConnection, edge::Edge, node::Node};
 
 pub struct ResolvedGraph {
     pub graph: GenGraph,
@@ -23,47 +18,26 @@ pub fn expand(
     block_group_id: &HashId,
     node_id: HashId,
 ) -> bool {
-    let edges_1hop = Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id], None)
-        .unwrap_or_default();
-
-    let mut neighbor_ids: Vec<HashId> = edges_1hop
-        .iter()
-        .flat_map(|ae| [ae.edge.source_node_id, ae.edge.target_node_id])
-        .filter(|id| *id != node_id)
-        .collect();
-    neighbor_ids.sort();
-    neighbor_ids.dedup();
-
-    let mut all_edges: HashMap<HashId, AugmentedEdge> =
-        edges_1hop.into_iter().map(|ae| (ae.edge.id, ae)).collect();
-    if !neighbor_ids.is_empty() {
-        let neighbor_edges =
-            Edge::edges_for_block_group_nodes(conn, block_group_id, &neighbor_ids, None)
-                .unwrap_or_default();
-        for ae in neighbor_edges {
-            all_edges.entry(ae.edge.id).or_insert(ae);
-        }
-    }
-
-    let existing_edge_ids: HashSet<HashId> = graph
-        .all_edges()
-        .flat_map(|(_, _, edges)| edges.iter().map(|e| e.edge_id))
-        .collect();
-
-    let new_edges: Vec<AugmentedEdge> = all_edges
-        .into_values()
-        .filter(|ae| !existing_edge_ids.contains(&ae.edge.id))
-        .collect();
-
-    if new_edges.is_empty() {
+    let candidate_edges =
+        match Edge::edges_for_block_group_node_neighborhood(conn, block_group_id, node_id, None) {
+            Ok(edges) => edges,
+            Err(_) => return false,
+        };
+    let unloaded_edge_ids =
+        graph_loader::unloaded_edge_ids(graph, candidate_edges.iter().map(|edge| edge.edge.id));
+    let unloaded_edges = candidate_edges
+        .into_iter()
+        .filter(|edge| unloaded_edge_ids.contains(&edge.edge.id))
+        .collect::<Vec<_>>();
+    if unloaded_edges.is_empty() {
         return false;
     }
-
-    let fragment = match BlockGroup::get_graph_from_edges(conn, block_group_id, &new_edges) {
-        Ok(g) => g,
+    let blocks = match Edge::blocks_from_edges(conn, block_group_id, &unloaded_edges, None) {
+        Ok(blocks) => blocks,
         Err(_) => return false,
     };
-    graph.merge_graph(&fragment);
+    let (fragment, _) = Edge::build_graph(&unloaded_edges, &blocks);
+    graph_loader::merge_fragment(graph, &fragment);
     true
 }
 

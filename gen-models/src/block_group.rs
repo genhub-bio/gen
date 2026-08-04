@@ -22,7 +22,7 @@ use thiserror::Error;
 use crate::{
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::AnnotationError,
-    block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
+    block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::{Edge, EdgeData},
     errors::{
@@ -556,19 +556,6 @@ impl BlockGroup {
         let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, history_ref);
         let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, history_ref)?;
         let (graph, _) = Edge::build_graph(&edges, &blocks);
-        Ok(graph)
-    }
-
-    /// Build a graph from a set of known edges. If a source or target node is unknown, the graph
-    /// will expand out automatically to cover it.
-    pub fn get_graph_from_edges(
-        conn: &GraphConnection,
-        block_group_id: &HashId,
-        edges: &[AugmentedEdge],
-    ) -> Result<GenGraph, BlockGroupError> {
-        let blocks = Edge::blocks_from_edges(conn, block_group_id, edges, None)?;
-        let edges_vec = edges.to_vec();
-        let (graph, _) = Edge::build_graph(&edges_vec, &blocks);
         Ok(graph)
     }
 
