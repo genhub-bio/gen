@@ -9,7 +9,9 @@ use intervaltree::IntervalTree;
 use itertools::Itertools;
 use petgraph::Direction;
 
-use crate::{GenGraph, GraphEdge, GraphError, GraphNode, all_reachable_nodes, all_simple_paths};
+use crate::{
+    GenGraph, GraphEdge, GraphError, GraphNode, MergeGraph, all_reachable_nodes, all_simple_paths,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphLoadBlock {
@@ -154,6 +156,26 @@ pub fn resolve_anchor(
     )?;
 
     anchors.into_iter().next().ok_or(GraphError::NoPath)
+}
+
+/// Returns candidate edge identifiers that are not already present in the loaded graph.
+pub fn unloaded_edge_ids(
+    graph: &GenGraph,
+    candidate_edge_ids: impl IntoIterator<Item = HashId>,
+) -> HashSet<HashId> {
+    let loaded_edge_ids = graph
+        .all_edges()
+        .flat_map(|(_, _, edges)| edges.iter().map(|edge| edge.edge_id))
+        .collect::<HashSet<_>>();
+    candidate_edge_ids
+        .into_iter()
+        .filter(|edge_id| !loaded_edge_ids.contains(edge_id))
+        .collect()
+}
+
+/// Merges a newly constructed local fragment into a loaded graph.
+pub fn merge_fragment(graph: &mut GenGraph, fragment: &GenGraph) {
+    graph.merge_graph(fragment);
 }
 
 fn find_offset_with_optional_expansion(
