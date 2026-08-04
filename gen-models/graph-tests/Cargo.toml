@@ -1,0 +1,12 @@
+[package]
+name = "gen-models-graph-tests"
+description = "Graph-backed integration tests for gen-models workflows."
+version = "0.2.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+gen-core = { path = "../../gen-core", version = "0.2.1" }
+gen-graph = { path = "../../gen-graph", version = "0.2.1" }
+gen-models = { path = "..", version = "0.2.1" }
+rusqlite = { package = "rusqdoltlite", version = "0.40.14", features = ["bundled", "array", "limits", "fallible_uint", "backup"] }
