@@ -1,9 +1,9 @@
 pub use gen_core::region::Region;
 use gen_core::{
-    GraphNode, GraphNodePosition, HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
-    Strand, is_terminal,
+    GraphNodePosition, HashId, NodeIntervalBlock,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
+use gen_graph::graph_loader::{self, RegionPositionQuery};
 use intervaltree::IntervalTree;
 use thiserror::Error;
 
@@ -519,34 +519,21 @@ impl ResolvedGenRegion {
         let interval_tree = self
             .intervaltree(conn)
             .map_err(|_| gen_graph::GraphError::NoPath)?;
-        let filtered: Vec<(std::ops::Range<i64>, gen_core::NodeIntervalBlock)> = interval_tree
-            .iter()
-            .filter(|item| !gen_core::is_terminal(item.value.node_id))
-            .map(|item| (item.range.clone(), item.value))
-            .collect();
-        let tree: intervaltree::IntervalTree<i64, gen_core::NodeIntervalBlock> =
-            filtered.into_iter().collect();
-
-        let mut graph = gen_graph::graph_from_interval_tree(&tree);
-
-        let resolved = crate::graph::ResolvedGraph {
-            graph: graph.clone(),
-            interval_tree: tree,
-            block_group_id: self.block_group.id,
-        };
-        let start_anchor = resolved.resolve_anchor(self.start, conn)?;
-        let end_anchor = resolved.resolve_anchor(self.end, conn)?;
-
-        let start_positions =
-            crate::graph::find_offset(&mut graph, &start_anchor, start_offset, |g, nid| {
-                crate::graph::expand(conn, g, &self.block_group.id, nid)
-            })?;
-        let end_positions =
-            crate::graph::find_offset(&mut graph, &end_anchor, end_offset, |g, nid| {
-                crate::graph::expand(conn, g, &self.block_group.id, nid)
-            })?;
-
-        Ok((start_positions, end_positions))
+        graph_loader::resolve_region_positions(
+            &interval_tree,
+            RegionPositionQuery {
+                start: self.start,
+                end: self.end,
+                start_offset,
+                end_offset,
+            },
+            |node_id| {
+                crate::node::Node::query_nodes_length(conn, &[node_id])
+                    .ok()
+                    .and_then(|lengths| lengths.get(&node_id).copied())
+            },
+            |graph, node_id| crate::graph::expand(conn, graph, &self.block_group.id, node_id),
+        )
     }
 
     #[cfg_attr(
@@ -575,27 +562,8 @@ impl ResolvedGenRegion {
         };
 
         let graph_positions_from_tree = |coordinate| {
-            let mut positions = tree?
-                .query_point(coordinate)
-                .map(|entry| entry.value)
-                .filter(|block| !is_terminal(block.node_id))
-                .map(|block| GraphNodePosition {
-                    graph_node: GraphNode {
-                        node_id: block.node_id,
-                        sequence_start: block.sequence_start,
-                        sequence_end: block.sequence_end,
-                    },
-                    offset: coordinate - block.start,
-                })
-                .collect::<Vec<_>>();
-
-            if positions.is_empty() {
-                return None;
-            }
-
-            positions.sort();
-            positions.dedup();
-            Some(positions)
+            let positions = graph_loader::positions_at_coordinate(tree?, coordinate);
+            (!positions.is_empty()).then_some(positions)
         };
 
         let (start_positions, end_positions) =
@@ -614,80 +582,28 @@ impl ResolvedGenRegion {
                     resolved.end_anchors.expect("should have end anchors"),
                 )
             };
-        let preserve_chromosome_index = if change.preserve_edge {
-            0
-        } else {
-            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-        };
-        let mut new_edges = vec![];
-
-        for position in start_positions.iter().chain(end_positions.iter()) {
-            if !is_terminal(position.graph_node.node_id) {
-                let coordinate = position.coordinate();
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: position.graph_node.node_id,
-                        source_coordinate: coordinate,
-                        source_strand: Strand::Forward,
-                        target_node_id: position.graph_node.node_id,
-                        target_coordinate: coordinate,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: preserve_chromosome_index,
-                    phased: 0,
-                });
-            }
-        }
-
-        if change.block.sequence_start == change.block.sequence_end {
-            for start_position in &start_positions {
-                for end_position in &end_positions {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: start_position.graph_node.node_id,
-                            source_coordinate: start_position.coordinate(),
-                            source_strand: Strand::Forward,
-                            target_node_id: end_position.graph_node.node_id,
-                            target_coordinate: end_position.coordinate(),
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: change.chromosome_index,
-                        phased: change.phased,
-                    });
-                }
-            }
-        } else {
-            for start_position in &start_positions {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: start_position.graph_node.node_id,
-                        source_coordinate: start_position.coordinate(),
-                        source_strand: Strand::Forward,
-                        target_node_id: change.block.node_id,
-                        target_coordinate: change.block.sequence_start,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-            }
-            for end_position in &end_positions {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: change.block.node_id,
-                        source_coordinate: change.block.sequence_end,
-                        source_strand: Strand::Forward,
-                        target_node_id: end_position.graph_node.node_id,
-                        target_coordinate: end_position.coordinate(),
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-            }
-        }
-
-        Ok(new_edges)
+        Ok(graph_loader::plan_region_edges(
+            &start_positions,
+            &end_positions,
+            &change.block,
+            change.preserve_edge,
+            change.chromosome_index,
+            change.phased,
+        )
+        .into_iter()
+        .map(|edge| AugmentedEdgeData {
+            edge_data: EdgeData {
+                source_node_id: edge.source_node_id,
+                source_coordinate: edge.source_coordinate,
+                source_strand: edge.source_strand,
+                target_node_id: edge.target_node_id,
+                target_coordinate: edge.target_coordinate,
+                target_strand: edge.target_strand,
+            },
+            chromosome_index: edge.chromosome_index,
+            phased: edge.phased,
+        })
+        .collect())
     }
 }
 

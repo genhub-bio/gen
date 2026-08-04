@@ -6,8 +6,8 @@ use std::{
 
 use gen_core::{
     GraphNode, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand, calculate_hash, is_end_node,
-    is_start_node, is_terminal,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, calculate_hash, is_end_node, is_start_node,
+    is_terminal,
     range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -158,15 +158,7 @@ pub struct NewBlockGroup<'a> {
     pub is_default: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct BlockGroupChange {
-    pub region: ResolvedGenRegion,
-    pub path_accession: Option<String>,
-    pub block: PathBlock,
-    pub chromosome_index: i64,
-    pub phased: i64,
-    pub preserve_edge: bool,
-}
+pub type BlockGroupChange = gen_core::BlockGroupChange<ResolvedGenRegion>;
 
 pub trait IntervalTreeSource {
     fn intervaltree(
@@ -1241,7 +1233,7 @@ impl Query for BlockGroup {
 mod tests {
     use capnp::message::TypedBuilder;
     use chrono::Utc;
-    use gen_core::region::RegionResolutionError;
+    use gen_core::{PathBlock, region::RegionResolutionError};
 
     use super::*;
     use crate::{
