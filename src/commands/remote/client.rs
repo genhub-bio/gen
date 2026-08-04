@@ -13,7 +13,9 @@
 //! runs the native Dolt operation, and then restores the canonical GenHub URL. If Dolt
 //! rejects an expired capability, the operation requests a fresh capability and retries.
 //! After the graph transfer, [`acquire_asset_transfers`] obtains the per-asset upload or
-//! download URLs used to transfer files referenced by the selected branch.
+//! download URLs used to transfer files referenced by the selected branch. A push then
+//! calls [`complete_asset_transfers`] with GCS-validated upload receipts so GenHub can
+//! verify the stored objects before finalizing a new repository.
 //!
 //! Both acquisition functions use the same authentication sequence. Public clone and
 //! pull requests may first be attempted anonymously; otherwise the client tries
@@ -114,6 +116,13 @@ impl RepositoryRemote {
             self.origin, self.namespace, self.slug
         )
     }
+
+    fn asset_transfer_completion_url(&self) -> String {
+        format!(
+            "{}/api/repos/{}/{}/asset-transfers/complete",
+            self.origin, self.namespace, self.slug
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -153,6 +162,24 @@ pub struct AssetTransfer {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct AssetTransferResponse {
     pub assets: Vec<AssetTransfer>,
+}
+
+/// Identifies one pushed asset and the CRC32C expected from object storage.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AssetUploadReceipt {
+    /// The uploaded branch asset's stable ID.
+    pub id: HashId,
+    /// The base64-encoded CRC32C calculated alongside the asset's SHA-256.
+    pub crc32c: String,
+}
+
+/// Signals that all uploads for a pushed branch have completed.
+#[derive(Clone, Debug, Serialize)]
+pub struct AssetTransferCompletionRequest<'request> {
+    /// The branch whose expected asset set should be verified.
+    pub branch: &'request str,
+    /// Provider-checksum receipts for every uploaded or reused object.
+    pub assets: &'request [AssetUploadReceipt],
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,6 +271,25 @@ fn send_asset_transfers(
         return Err(response_error(response));
     }
     Ok(response.json()?)
+}
+
+fn send_asset_transfer_completion(
+    client: &Client,
+    repository: &RepositoryRemote,
+    request: &AssetTransferCompletionRequest<'_>,
+    authorization: RequestAuthorization<'_>,
+) -> Result<(), RemoteClientError> {
+    let response = authorize_request(
+        client
+            .post(repository.asset_transfer_completion_url())
+            .json(request),
+        authorization,
+    )
+    .send()?;
+    if !response.status().is_success() {
+        return Err(response_error(response));
+    }
+    Ok(())
 }
 
 fn refresh_tokens(
@@ -417,6 +463,26 @@ pub fn acquire_asset_transfers(
         },
         interactive_login,
         |authorization| send_asset_transfers(&client, repository, request, authorization),
+    )
+}
+
+pub fn complete_asset_transfers(
+    repository: &RepositoryRemote,
+    request: &AssetTransferCompletionRequest<'_>,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<(), RemoteClientError> {
+    let client = Client::new();
+    let api_key = env::var("GENHUB_API_KEY").ok();
+    acquire_request_with_store(
+        &client,
+        repository,
+        AuthenticationOptions {
+            api_key: api_key.as_deref(),
+            allow_anonymous: false,
+            token_store: &FileTokenStore,
+        },
+        interactive_login,
+        |authorization| send_asset_transfer_completion(&client, repository, request, authorization),
     )
 }
 
