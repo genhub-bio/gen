@@ -281,7 +281,7 @@ enum DownloadAssetOutcome {
 }
 
 /// This is effectively a dirty file check. On clones/pulls we want to update
-/// files if they match expected checksums. The previous asset set is cumulative
+/// files if they match previously known checksums. The previous asset set is cumulative
 /// so a workspace that still contains any committed version
 /// is safe to advance. Unknown contents remain a conflict and are never overwritten.
 fn destination_matches_previous_asset(
