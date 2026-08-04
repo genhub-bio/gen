@@ -411,9 +411,17 @@ impl Edge {
         Ok(edges)
     }
 
+    /// Converts input edge coordinates for one backing node into the sequence slices represented
+    /// by `GroupBlock`s.
+    ///
+    /// `blocks_from_edges` calls this after it has collected every coordinate needed by the block
+    /// group. Non-zero intervals carry sequence, while requested zero-width intervals act as
+    /// junctions between adjacent coordinate jumps. Outer junctions cover edge endpoints that have
+    /// no sequence interval on one side, so every input edge still has a concrete graph endpoint.
     fn get_block_intervals(
         starts: &HashSet<i64>,
         ends: &HashSet<i64>,
+        junction_coordinates: &HashSet<i64>,
     ) -> Result<Vec<(i64, i64)>, EdgeError> {
         let coordinates = starts.union(ends).sorted().copied().collect::<Vec<_>>();
         if coordinates.is_empty() {
@@ -426,9 +434,84 @@ impl Edge {
             return Ok(vec![(coordinates[0], coordinates[0])]);
         }
 
-        Ok(coordinates.into_iter().tuple_windows().collect())
+        let mut intervals = Vec::new();
+        for (index, coordinate) in coordinates.iter().copied().enumerate() {
+            let is_first_coordinate = index == 0;
+            let is_last_coordinate = index == coordinates.len() - 1;
+            let needs_outer_junction = (is_first_coordinate && ends.contains(&coordinate))
+                || (is_last_coordinate && starts.contains(&coordinate));
+
+            if junction_coordinates.contains(&coordinate) || needs_outer_junction {
+                intervals.push((coordinate, coordinate));
+            }
+            if let Some(next_coordinate) = coordinates.get(index + 1) {
+                intervals.push((coordinate, *next_coordinate));
+            }
+        }
+
+        Ok(intervals)
     }
 
+    /// Records a coordinate jump whose endpoints belong to the same backing node.
+    ///
+    /// `blocks_from_edges` calls this for both its initial edges and any edges fetched while
+    /// completing partially described nodes. The source is an outgoing jump coordinate and the
+    /// target is an incoming jump coordinate. Keeping those sets separate lets block generation
+    /// identify coordinates where one jump arrives and another leaves; those coordinates need
+    /// junctions.
+    fn record_same_node_jump_coordinates(
+        edge: &Edge,
+        outgoing_coordinates_by_node_id: &mut HashMap<HashId, HashSet<i64>>,
+        incoming_coordinates_by_node_id: &mut HashMap<HashId, HashSet<i64>>,
+    ) {
+        if edge.source_node_id == edge.target_node_id
+            && edge.source_coordinate != edge.target_coordinate
+        {
+            outgoing_coordinates_by_node_id
+                .entry(edge.source_node_id)
+                .or_default()
+                .insert(edge.source_coordinate);
+            incoming_coordinates_by_node_id
+                .entry(edge.target_node_id)
+                .or_default()
+                .insert(edge.target_coordinate);
+        }
+    }
+
+    /// Computes the backing-node slices from the stored block group edges.
+    ///
+    /// Graph construction, sequence enumeration, GFA export, and diff reconstruction use this as
+    /// the first half of the edge-to-`GenGraph` pipeline, the second half being the build_graph
+    /// method below. This method gathers coordinates, expands incomplete node descriptions from
+    /// the block group, and calls `get_block_intervals` to construct both blocks with sequences
+    /// and zero-width junction blocks.
+    ///
+    /// For example, two adjacent deletions retain each original base while also exposing the path
+    /// that skips both. Parenthesized nodes are zero-width junctions and bracketed nodes contain
+    /// real sequence:
+    ///
+    /// ```text
+    ///                  +----> [A] ----+
+    ///                  |              |
+    /// [TAAT] -> (0,0) -+------------> (1,1) -+----> [T] ----+
+    ///                                           |             |
+    ///                                           +-----------> [GATAA]
+    /// ```
+    ///
+    /// The path `(0,0) -> (1,1)` deletes `A`; `(1,1) -> [GATAA]` deletes `T`. Following both
+    /// edges gives the iterative-deletion route from `[TAAT]` to `[GATAA]` without adding a
+    /// reconstructed bypass edge.
+    ///
+    /// More generally, graph construction can produce a chain of junctions between sequence
+    /// blocks:
+    ///
+    /// ```text
+    /// [real sequence] -> (junction) -> (junction) -> [real sequence]
+    ///                       0 bases       0 bases
+    /// ```
+    ///
+    /// Traversal passes through any number of junctions, consuming zero sequence, until it reaches
+    /// another real block.
     pub fn blocks_from_edges(
         conn: &GraphConnection,
         block_group_id: &HashId,
@@ -438,7 +521,19 @@ impl Edge {
         let mut node_ids = IndexSet::new();
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
+        // A same-node coordinate jump connects two positions without consuming the intervening
+        // sequence. Track where jumps leave and arrive so their intersections can become
+        // junctions.
+        let mut outgoing_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
+            HashMap::new();
+        let mut incoming_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
+            HashMap::new();
         for edge in edges.iter().map(|edge| &edge.edge) {
+            Self::record_same_node_jump_coordinates(
+                edge,
+                &mut outgoing_jump_coordinates_by_node_id,
+                &mut incoming_jump_coordinates_by_node_id,
+            );
             if !is_terminal(edge.source_node_id) {
                 node_ids.insert(edge.source_node_id);
             }
@@ -475,6 +570,9 @@ impl Edge {
             .filter(|node_id| is_incomplete(node_id, &starts_by_node_id, &ends_by_node_id))
             .collect::<Vec<_>>();
 
+        // A caller may provide a graph fragment whose edges mention only one side of a backing
+        // node. Pulling neighboring input edges supplies the missing endpoint coordinates so the
+        // resulting blocks use the same slices as a graph built from the complete block group.
         while !incomplete_node_ids.is_empty() {
             queried_node_ids.extend(incomplete_node_ids.iter().copied());
             let mut next_incomplete_node_ids = HashSet::new();
@@ -488,6 +586,11 @@ impl Edge {
             .iter()
             .map(|augmented_edge| &augmented_edge.edge)
             {
+                Self::record_same_node_jump_coordinates(
+                    edge,
+                    &mut outgoing_jump_coordinates_by_node_id,
+                    &mut incoming_jump_coordinates_by_node_id,
+                );
                 if !is_terminal(edge.source_node_id) {
                     node_ids.insert(edge.source_node_id);
                 }
@@ -535,7 +638,25 @@ impl Edge {
             let empty_ends = HashSet::new();
             let starts = starts_by_node_id.get(node_id).unwrap_or(&empty_starts);
             let ends = ends_by_node_id.get(node_id).unwrap_or(&empty_ends);
-            let block_intervals = Edge::get_block_intervals(starts, ends)?;
+            // Adjacent same-node jumps share a coordinate: one jump arrives at k and the next
+            // leaves from k. Add k as a junction so the graph connects both jumps:
+            //
+            //     [real sequence] -> (k,k) -> [real sequence]
+            //                           0 bases
+            //
+            // Only coordinates in both sets become junctions. A lone jump has no shared coordinate
+            // and connects real sequence blocks directly.
+            let outgoing_jump_coordinates = outgoing_jump_coordinates_by_node_id
+                .get(node_id)
+                .unwrap_or(&empty_starts);
+            let incoming_jump_coordinates = incoming_jump_coordinates_by_node_id
+                .get(node_id)
+                .unwrap_or(&empty_ends);
+            let junction_coordinates = outgoing_jump_coordinates
+                .intersection(incoming_jump_coordinates)
+                .copied()
+                .collect::<HashSet<_>>();
+            let block_intervals = Edge::get_block_intervals(starts, ends, &junction_coordinates)?;
 
             for (start, end) in block_intervals {
                 blocks.push(GroupBlock::new(block_index, *node_id, sequence, start, end));
@@ -566,15 +687,154 @@ impl Edge {
         Ok(blocks)
     }
 
+    /// Checks whether both endpoints use the same node and coordinate.
+    ///
+    /// `block_connections` uses this structural property when connecting blocks around a junction.
+    /// Whether the edge is a real path choice or a reference-healing edit-site marker remains
+    /// separate chromosome-index metadata on `AugmentedEdge`.
+    fn is_same_coordinate_edge(&self) -> bool {
+        self.source_node_id == self.target_node_id
+            && self.source_coordinate == self.target_coordinate
+    }
+
+    /// Selects the blocks that an edge endpoint should connect to.
+    ///
+    /// `block_connections` calls this when an input edge enters or leaves a coordinate. If a
+    /// junction exists, the edge connects to it and traversal continues from there. Otherwise the
+    /// edge connects directly to the sequence block.
+    fn select_junction_or_sequence_blocks<'a>(blocks: &[&'a GroupBlock]) -> Vec<&'a GroupBlock> {
+        let junctions = blocks
+            .iter()
+            .copied()
+            .filter(|block| block.start == block.end)
+            .collect::<Vec<_>>();
+        if junctions.is_empty() {
+            blocks.to_vec()
+        } else {
+            junctions
+        }
+    }
+
+    /// Builds connections for a same-coordinate edge.
+    ///
+    /// At a junction, the source lookup contains the sequence block ending at the coordinate and
+    /// the junction, while the target lookup contains the junction and the sequence block starting
+    /// there. `block_connections` calls this to produce the deliberate `sequence -> junction` and
+    /// `junction -> sequence` connections without adding a junction self-loop. With no junction,
+    /// the Cartesian product keeps the direct connection between sequence blocks.
+    ///
+    /// ```text
+    /// without a junction:  [sequence ending at k] ---> [sequence starting at k]
+    ///
+    /// with a junction:     [sequence ending at k] ---> (k,k) ---> [sequence starting at k]
+    /// ```
+    ///
+    /// The same-coordinate edge therefore preserves the same route after the junction is
+    /// introduced without creating `(k,k) -> (k,k)`.
+    fn same_coordinate_block_connections<'a>(
+        source_blocks: &[&'a GroupBlock],
+        target_blocks: &[&'a GroupBlock],
+    ) -> Vec<(&'a GroupBlock, &'a GroupBlock)> {
+        let source_junctions = source_blocks
+            .iter()
+            .copied()
+            .filter(|block| block.start == block.end)
+            .collect::<Vec<_>>();
+        let target_junctions = target_blocks
+            .iter()
+            .copied()
+            .filter(|block| block.start == block.end)
+            .collect::<Vec<_>>();
+
+        if source_junctions.is_empty() && target_junctions.is_empty() {
+            return source_blocks
+                .iter()
+                .copied()
+                .cartesian_product(target_blocks.iter().copied())
+                .collect();
+        }
+
+        let source_sequence_blocks = source_blocks
+            .iter()
+            .copied()
+            .filter(|block| block.start != block.end);
+        let target_sequence_blocks = target_blocks
+            .iter()
+            .copied()
+            .filter(|block| block.start != block.end);
+
+        // Sequence ending at the coordinate enters the junction, and sequence starting there
+        // leaves it. If neither side has real sequence, there is no connection to add.
+        source_sequence_blocks
+            .cartesian_product(target_junctions)
+            .chain(
+                source_junctions
+                    .into_iter()
+                    .cartesian_product(target_sequence_blocks),
+            )
+            .collect()
+    }
+
+    /// Returns the in-memory block connections represented by one input edge.
+    ///
+    /// `build_graph` calls this after coordinate lookup may have returned both a sequence block and
+    /// a junction. Same-coordinate edges connect the surrounding sequence through that junction;
+    /// all other edges connect to the junction and let the next input edge continue from it. These
+    /// returned connections are a graph projection and are not additional database edges.
+    fn block_connections<'a>(
+        &self,
+        source_blocks: &[&'a GroupBlock],
+        target_blocks: &[&'a GroupBlock],
+    ) -> Vec<(&'a GroupBlock, &'a GroupBlock)> {
+        if self.is_same_coordinate_edge() {
+            return Self::same_coordinate_block_connections(source_blocks, target_blocks);
+        }
+
+        let source_blocks = Self::select_junction_or_sequence_blocks(source_blocks);
+        let target_blocks = Self::select_junction_or_sequence_blocks(target_blocks);
+        source_blocks
+            .into_iter()
+            .cartesian_product(target_blocks)
+            .collect()
+    }
+
+    /// Computes a `GenGraph` from augmented edges and their computed blocks.
+    ///
+    /// `BlockGroup::get_graph`, sequence enumeration, and graph export call this after
+    /// `blocks_from_edges`. The returned node-pair map retains the input `Edge` responsible for
+    /// each projected graph edge so downstream consumers can recover edge provenance.
+    ///
+    /// Junctions and `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` have independent jobs:
+    ///
+    /// - A junction is a generated zero-width graph node. It gives adjacent edges a shared endpoint
+    ///   so edges can link to the site of an edit instead of requiring a sequence to link to.
+    ///   This occurs in places such as deleting the first base of a node, or adjacent deletions.
+    /// - `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` is metadata on an `AugmentedEdge`. It identifies a
+    ///   reference-healing connection. Importantly, these are in the database whereas junctions
+    ///   are in the built graph only.
+    ///
+    /// When a marked same-coordinate edge meets a junction, one input edge can produce two
+    /// in-memory graph connections:
+    ///
+    /// ```text
+    /// [real sequence] -- preserve marker --> (junction) -- preserve marker --> [real sequence]
+    ///                                          0 bases
+    /// ```
+    ///
+    /// The junction is the generated node. The two labels represent copied chromosome-index
+    /// metadata on the projected connections; neither connection is added to the database.
     pub fn build_graph(
-        edges: &Vec<AugmentedEdge>,
-        blocks: &Vec<GroupBlock>,
+        edges: &[AugmentedEdge],
+        blocks: &[GroupBlock],
     ) -> (GenGraph, HashMap<(i64, i64), Edge>) {
         let graph_node_for_block = |block: &GroupBlock| GraphNode {
             node_id: block.node_id,
             sequence_start: block.start,
             sequence_end: block.end,
         };
+        // Input edge sources resolve to blocks ending at their coordinate, and targets resolve to
+        // blocks starting there. A junction belongs to both indexes, which lets one edge arrive at
+        // it and the next edge leave from it.
         let blocks_by_start = blocks
             .iter()
             .map(|block| {
@@ -586,7 +846,7 @@ impl Edge {
                     block,
                 )
             })
-            .collect::<HashMap<BlockKey, &GroupBlock>>();
+            .into_group_map();
         let blocks_by_end = blocks
             .iter()
             .map(|block| {
@@ -598,7 +858,7 @@ impl Edge {
                     block,
                 )
             })
-            .collect::<HashMap<BlockKey, &GroupBlock>>();
+            .into_group_map();
 
         let mut graph = GenGraph::new();
         let mut edges_by_node_pair = HashMap::new();
@@ -611,32 +871,39 @@ impl Edge {
                 node_id: edge.source_node_id,
                 coordinate: edge.source_coordinate,
             };
-            let source_id = blocks_by_end.get(&source_key);
+            let source_blocks = blocks_by_end.get(&source_key);
             let target_key = BlockKey {
                 node_id: edge.target_node_id,
                 coordinate: edge.target_coordinate,
             };
-            let target_id = blocks_by_start.get(&target_key);
+            let target_blocks = blocks_by_start.get(&target_key);
 
-            if let Some(source_block) = source_id
-                && let Some(target_block) = target_id
+            if let Some(source_blocks) = source_blocks
+                && let Some(target_blocks) = target_blocks
             {
-                let source_node = graph_node_for_block(source_block);
-                let target_node = graph_node_for_block(target_block);
-                let graph_edge = GraphEdge {
-                    edge_id: edge.id,
-                    source_strand: edge.source_strand,
-                    target_strand: edge.target_strand,
-                    chromosome_index: augmented_edge.chromosome_index,
-                    phased: augmented_edge.phased,
-                    created_on: augmented_edge.created_on,
-                };
-                if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
-                    existing_edges.push(graph_edge);
-                } else {
-                    graph.add_edge(source_node, target_node, vec![graph_edge]);
+                // A coordinate may match both a sequence block and a junction. When connecting
+                // to junctions, multiple edges may be needed to fully represent the graph.
+                // `block_connections` orchestrates this.
+                for (source_block, target_block) in
+                    edge.block_connections(source_blocks, target_blocks)
+                {
+                    let source_node = graph_node_for_block(source_block);
+                    let target_node = graph_node_for_block(target_block);
+                    let graph_edge = GraphEdge {
+                        edge_id: edge.id,
+                        source_strand: edge.source_strand,
+                        target_strand: edge.target_strand,
+                        chromosome_index: augmented_edge.chromosome_index,
+                        phased: augmented_edge.phased,
+                        created_on: augmented_edge.created_on,
+                    };
+                    if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
+                        existing_edges.push(graph_edge);
+                    } else {
+                        graph.add_edge(source_node, target_node, vec![graph_edge]);
+                    }
+                    edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
                 }
-                edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
             }
         }
 
@@ -689,12 +956,54 @@ mod tests {
             .collect::<Vec<i64>>()
     }
 
+    fn group_block(id: i64, node_id: HashId, start: i64, end: i64) -> GroupBlock {
+        GroupBlock {
+            id,
+            node_id,
+            sequence: Some(String::new()),
+            external_sequence: None,
+            start,
+            end,
+        }
+    }
+
+    fn augmented_edge(
+        id: &str,
+        source_node_id: HashId,
+        source_coordinate: i64,
+        target_node_id: HashId,
+        target_coordinate: i64,
+    ) -> AugmentedEdge {
+        AugmentedEdge {
+            edge: Edge {
+                id: HashId::convert_str(id),
+                source_node_id,
+                source_coordinate,
+                source_strand: Strand::Forward,
+                target_node_id,
+                target_coordinate,
+                target_strand: Strand::Forward,
+            },
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 0,
+        }
+    }
+
+    fn graph_node(block: &GroupBlock) -> GraphNode {
+        GraphNode {
+            node_id: block.node_id,
+            sequence_start: block.start,
+            sequence_end: block.end,
+        }
+    }
+
     #[test]
     fn test_get_block_intervals_splits_sorted_unique_coordinates() {
         let starts = HashSet::from([5, 0, 5]);
         let ends = HashSet::from([10, 3]);
 
-        let intervals = Edge::get_block_intervals(&starts, &ends).unwrap();
+        let intervals = Edge::get_block_intervals(&starts, &ends, &HashSet::new()).unwrap();
 
         assert_eq!(intervals, vec![(0, 3), (3, 5), (5, 10)]);
     }
@@ -704,17 +1013,188 @@ mod tests {
         let starts = HashSet::from([3]);
         let ends = HashSet::new();
 
-        let intervals = Edge::get_block_intervals(&starts, &ends).unwrap();
+        let intervals = Edge::get_block_intervals(&starts, &ends, &HashSet::new()).unwrap();
 
         assert_eq!(intervals, vec![(3, 3)]);
     }
 
     #[test]
+    fn test_get_block_intervals_adds_outer_junctions() {
+        let starts = HashSet::from([0, 2, 4]);
+        let ends = HashSet::from([0, 2, 4]);
+
+        let intervals = Edge::get_block_intervals(&starts, &ends, &HashSet::new()).unwrap();
+
+        assert_eq!(intervals, vec![(0, 0), (0, 2), (2, 4), (4, 4)]);
+    }
+
+    #[test]
+    fn test_get_block_intervals_adds_requested_interior_junction() {
+        let starts = HashSet::from([0, 2, 4]);
+        let ends = HashSet::from([0, 2, 4]);
+        let junction_coordinates = HashSet::from([2]);
+
+        let intervals = Edge::get_block_intervals(&starts, &ends, &junction_coordinates).unwrap();
+
+        assert_eq!(intervals, vec![(0, 0), (0, 2), (2, 2), (2, 4), (4, 4)]);
+    }
+
+    #[test]
     fn test_get_block_intervals_errors_without_coordinates() {
         assert!(matches!(
-            Edge::get_block_intervals(&HashSet::new(), &HashSet::new()),
+            Edge::get_block_intervals(&HashSet::new(), &HashSet::new(), &HashSet::new()),
             Err(EdgeError::BlockIntervalError { .. })
         ));
+    }
+
+    #[test]
+    fn test_build_graph_routes_incoming_edge_to_junction() {
+        let source_node_id = HashId::convert_str("incoming-source");
+        let target_node_id = HashId::convert_str("incoming-target");
+        let blocks = vec![
+            group_block(0, source_node_id, 0, 3),
+            group_block(1, target_node_id, 0, 0),
+            group_block(2, target_node_id, 0, 1),
+        ];
+        let edges = vec![augmented_edge(
+            "incoming-edge",
+            source_node_id,
+            3,
+            target_node_id,
+            0,
+        )];
+
+        let (graph, _) = Edge::build_graph(&edges, &blocks);
+
+        assert!(
+            graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[1])),
+            "incoming edge should terminate at the junction"
+        );
+        assert!(
+            !graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[2])),
+            "incoming edge should not bypass the junction"
+        );
+        assert_eq!(graph.edge_count(), 1, "should project one block edge");
+    }
+
+    #[test]
+    fn test_build_graph_routes_outgoing_edge_from_junction() {
+        let source_node_id = HashId::convert_str("outgoing-source");
+        let target_node_id = HashId::convert_str("outgoing-target");
+        let blocks = vec![
+            group_block(0, source_node_id, 0, 1),
+            group_block(1, source_node_id, 1, 1),
+            group_block(2, target_node_id, 0, 2),
+        ];
+        let edges = vec![augmented_edge(
+            "outgoing-edge",
+            source_node_id,
+            1,
+            target_node_id,
+            0,
+        )];
+
+        let (graph, _) = Edge::build_graph(&edges, &blocks);
+
+        assert!(
+            graph.contains_edge(graph_node(&blocks[1]), graph_node(&blocks[2])),
+            "outgoing edge should originate at the junction"
+        );
+        assert!(
+            !graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[2])),
+            "outgoing edge should not bypass the junction"
+        );
+        assert_eq!(graph.edge_count(), 1, "should create one block edge");
+    }
+
+    #[test]
+    fn test_build_graph_creates_same_coordinate_edge_from_start_junction() {
+        let node_id = HashId::convert_str("same-coordinate-node");
+        let blocks = vec![group_block(0, node_id, 0, 0), group_block(1, node_id, 0, 1)];
+        let edges = vec![augmented_edge(
+            "same-coordinate-edge",
+            node_id,
+            0,
+            node_id,
+            0,
+        )];
+
+        let (graph, _) = Edge::build_graph(&edges, &blocks);
+
+        assert!(
+            graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[1])),
+            "same-coordinate edge should connect the junction to adjacent sequence"
+        );
+        assert!(
+            !graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[0])),
+            "same-coordinate edge should not add a redundant junction self-loop"
+        );
+        assert_eq!(graph.edge_count(), 1, "should create one block edge");
+    }
+
+    #[test]
+    fn test_build_graph_creates_same_coordinate_edge_into_end_junction() {
+        let node_id = HashId::convert_str("ending-same-coordinate-node");
+        let blocks = vec![group_block(0, node_id, 0, 1), group_block(1, node_id, 1, 1)];
+        let edges = vec![augmented_edge(
+            "ending-same-coordinate-edge",
+            node_id,
+            1,
+            node_id,
+            1,
+        )];
+
+        let (graph, _) = Edge::build_graph(&edges, &blocks);
+
+        assert!(
+            graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[1])),
+            "same-coordinate edge should connect adjacent sequence into the junction"
+        );
+        assert!(
+            !graph.contains_edge(graph_node(&blocks[1]), graph_node(&blocks[1])),
+            "same-coordinate edge should not add a redundant junction self-loop"
+        );
+        assert_eq!(graph.edge_count(), 1, "should create one block edge");
+    }
+
+    #[test]
+    fn test_build_graph_creates_same_coordinate_edge_without_junction_directly() {
+        let node_id = HashId::convert_str("interior-same-coordinate-node");
+        let blocks = vec![group_block(0, node_id, 0, 1), group_block(1, node_id, 1, 2)];
+        let edges = vec![augmented_edge(
+            "interior-same-coordinate-edge",
+            node_id,
+            1,
+            node_id,
+            1,
+        )];
+
+        let (graph, _) = Edge::build_graph(&edges, &blocks);
+
+        assert!(
+            graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[1])),
+            "same-coordinate edge should directly connect sequence blocks without a junction"
+        );
+        assert_eq!(graph.edge_count(), 1, "should create one block edge");
+    }
+
+    #[test]
+    fn test_build_graph_omits_same_coordinate_edge_without_adjacent_sequence() {
+        let node_id = HashId::convert_str("isolated-junction");
+        let blocks = vec![group_block(0, node_id, 0, 0)];
+        let edges = vec![augmented_edge("isolated-edge", node_id, 0, node_id, 0)];
+
+        let (graph, edges_by_node_pair) = Edge::build_graph(&edges, &blocks);
+
+        assert!(
+            !graph.contains_edge(graph_node(&blocks[0]), graph_node(&blocks[0])),
+            "a junction without adjacent sequence should not create a graph self-loop"
+        );
+        assert_eq!(graph.edge_count(), 0, "should not create a block edge");
+        assert!(
+            edges_by_node_pair.is_empty(),
+            "omitted self-loop should not have a block-pair mapping"
+        );
     }
 
     #[test]

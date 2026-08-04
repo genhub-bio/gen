@@ -332,9 +332,12 @@ fn write_paths(
 
 #[cfg(test)]
 mod tests {
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use std::fs;
+
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
+    use gen_graph::GraphNode;
     use gen_models::{
+        annotations::add_annotation,
         block_group::{BlockGroup, BlockGroupChange},
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
@@ -343,12 +346,15 @@ mod tests {
         sequence::Sequence,
         traits::Query,
     };
+    use petgraph::Direction;
     use tempfile::tempdir;
 
     use super::*;
     use crate::{
-        imports::gfa::import_gfa,
-        test_helpers::{setup_block_group, setup_gen},
+        graphs::combinatorial_library::parse_library,
+        imports::{fasta::import_fasta, gfa::import_gfa},
+        test_helpers::{get_sample_bg, setup_block_group, setup_gen},
+        updates::{library::update_with_library, sequence::update_with_sequence},
     };
 
     #[test]
@@ -529,6 +535,141 @@ mod tests {
         let paths = Path::query_for_collection(conn, "test collection 2");
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].sequence(conn, None).unwrap(), "AAAATTTTGGGGCCCC");
+    }
+
+    #[test]
+    fn test_front_deletion_in_combinatorial_library_exports_junction_routes() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
+        let library_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
+        let fasta_path = fasta_path
+            .to_str()
+            .expect("should have a UTF-8 FASTA path")
+            .to_string();
+        let parts_path = parts_path
+            .to_str()
+            .expect("should have a UTF-8 parts path")
+            .to_string();
+        let library_path = library_path
+            .to_str()
+            .expect("should have a UTF-8 library path")
+            .to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+        )
+        .unwrap();
+        add_annotation(
+            &context,
+            collection,
+            "SITE",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:7-20",
+        )
+        .unwrap();
+        update_with_library(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "design",
+            "SITE",
+            parse_library(&parts_path, &library_path).unwrap(),
+            Some(&parts_path),
+            Some(&library_path),
+        )
+        .unwrap();
+        update_with_sequence(
+            &context, collection, "design", "deleted", "cds1:0-1", "", false,
+        )
+        .unwrap();
+
+        let block_group = get_sample_bg(conn, collection, "deleted");
+        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
+        let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
+        let sequences = Node::get_sequences_by_node_ids(conn, &node_ids, None);
+        let rendered_sequence = |node: GraphNode| {
+            sequences[&node.node_id]
+                .get_sequence(node.sequence_start, node.sequence_end)
+                .unwrap()
+        };
+        let deleted_target = graph
+            .nodes()
+            .find(|node| rendered_sequence(*node) == "TGATAA")
+            .expect("should contain the remainder of cds1");
+        let original_first_base = graph
+            .nodes()
+            .find(|node| node.node_id == deleted_target.node_id && rendered_sequence(*node) == "A")
+            .expect("should contain the original first base of cds1");
+        let junction = graph
+            .nodes()
+            .find(|node| {
+                node.node_id == deleted_target.node_id
+                    && node.sequence_start == 0
+                    && node.sequence_end == 0
+            })
+            .expect("should contain the front-deletion junction");
+        let upstream_parts = graph
+            .neighbors_directed(junction, Direction::Incoming)
+            .collect::<Vec<_>>();
+        let upstream_sequences = upstream_parts
+            .iter()
+            .map(|node| rendered_sequence(*node))
+            .collect::<HashSet<_>>();
+
+        assert_eq!(
+            upstream_sequences,
+            HashSet::from(["AAAA".to_string(), "TAAT".to_string(), "CAAC".to_string()]),
+            "all combinatorial prefixes should enter the junction"
+        );
+        let temp_dir = tempdir().expect("should create a temporary directory");
+        let gfa_path = temp_dir.path().join("front-deletion.gfa");
+        export_gfa(conn, collection, &gfa_path, "deleted", None, None).unwrap();
+        let gfa_lines = fs::read_to_string(&gfa_path)
+            .expect("should read the exported GFA")
+            .lines()
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        let segment_id = |node: GraphNode| {
+            format!(
+                "{}.{}.{}",
+                node.node_id, node.sequence_start, node.sequence_end
+            )
+        };
+        let link_line = |source: GraphNode, target: GraphNode| {
+            format!(
+                "L\t{}\t+\t{}\t+\t0M",
+                segment_id(source),
+                segment_id(target)
+            )
+        };
+
+        assert!(
+            gfa_lines.contains(&format!("S\t{}\t", segment_id(junction))),
+            "the exported links should have a zero-width junction segment as their endpoint"
+        );
+        for upstream_part in upstream_parts {
+            assert!(
+                gfa_lines.contains(&link_line(upstream_part, junction)),
+                "each combinatorial prefix should link to the exported junction"
+            );
+        }
+        assert!(
+            gfa_lines.contains(&link_line(junction, original_first_base)),
+            "GFA export should retain the reference-healing route through the junction"
+        );
+        assert!(
+            gfa_lines.contains(&link_line(junction, deleted_target)),
+            "GFA export should retain the front-deletion route through the junction"
+        );
     }
 
     #[test]
