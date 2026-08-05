@@ -2013,6 +2013,7 @@ dependencies = [
  "gen-core",
  "gen-graph",
  "gen-models",
+ "intervaltree",
  "rusqdoltlite",
 ]
 
