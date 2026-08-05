@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
+use gen_graph::models::{get_all_sequences, get_sample_all_sequences};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -14,8 +15,7 @@ use gen_models::{
     traits::Query as _,
 };
 use gen_models_graph_tests::{
-    create_block_group, get_all_sequences, get_connection, get_sample_all_sequences,
-    get_single_block_group_id, setup_block_group,
+    create_block_group, get_connection, get_single_block_group_id, setup_block_group,
 };
 use rusqlite::{params, types::Value as SQLValue};
 

@@ -4,7 +4,6 @@ use rand::Rng;
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_128;
 
-pub mod change;
 pub mod config;
 pub mod errors;
 #[allow(clippy::all)]
@@ -16,7 +15,6 @@ pub mod region;
 pub mod strand;
 pub mod traits;
 
-pub use change::BlockGroupChange;
 pub use config::Workspace;
 use errors::HashError;
 pub use generated::gen_core_capnp;

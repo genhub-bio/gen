@@ -449,7 +449,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
@@ -480,7 +480,7 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
@@ -530,7 +530,7 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
@@ -555,7 +555,7 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", "new-sample", "m123", None);
         assert_eq!(
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
@@ -614,7 +614,7 @@ mod tests {
         fs::write(&gzip_index_path, "invalid logical-path gzip index\n").unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );

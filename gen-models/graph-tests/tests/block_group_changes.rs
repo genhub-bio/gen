@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use gen_core::{HashId, PathBlock, Strand};
+use gen_graph::models::get_all_sequences;
 use gen_models::{
     accession::Accession,
     annotations::Annotation as ModelAnnotation,
@@ -10,7 +11,7 @@ use gen_models::{
     sequence::Sequence,
     traits::Query as _,
 };
-use gen_models_graph_tests::{get_all_sequences, get_connection, setup_block_group};
+use gen_models_graph_tests::{get_connection, setup_block_group};
 
 #[test]
 fn test_insert_accession_change_get_all() {

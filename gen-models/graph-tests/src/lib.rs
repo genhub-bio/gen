@@ -1,15 +1,11 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-};
+use std::fs;
 
 use gen_core::{
-    GraphNode, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, config::Workspace, errors::ConnectionError,
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
+    errors::ConnectionError,
 };
-use gen_graph::{all_intermediate_edges, graph_loader};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupError, NewBlockGroup, SubgraphBoundary},
+    block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::{ConfigConnection, DbContext, GraphConnection},
@@ -17,112 +13,11 @@ use gen_models::{
     migrations::{run_config_migrations, run_migrations},
     node::Node,
     path::Path,
-    sample::{NewSample, Sample, SampleError},
+    sample::{NewSample, Sample},
     sequence::Sequence,
 };
 use rusqlite::Connection;
 use tempfile::tempdir;
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "test helper mirrors both graph boundaries"
-)]
-pub fn derive_subgraph(
-    conn: &GraphConnection,
-    source_block_group_id: &HashId,
-    start_block: &NodeIntervalBlock,
-    end_block: &NodeIntervalBlock,
-    start_node_coordinate: i64,
-    end_node_coordinate: i64,
-    target_block_group_id: &HashId,
-    create_terminal_edges: bool,
-) -> Result<(), BlockGroupError> {
-    let graph = gen_graph::models::load_block_group_graph(conn, source_block_group_id, None)?;
-    let start_node = graph
-        .nodes()
-        .find(|node| {
-            node.node_id == start_block.node_id
-                && node.sequence_start <= start_node_coordinate
-                && node.sequence_end >= start_node_coordinate
-        })
-        .expect("should find the start boundary in the source graph");
-    let end_node = graph
-        .nodes()
-        .find(|node| {
-            node.node_id == end_block.node_id
-                && node.sequence_start <= end_node_coordinate
-                && node.sequence_end >= end_node_coordinate
-        })
-        .expect("should find the end boundary in the source graph");
-    let edge_ids = all_intermediate_edges(&graph, start_node, end_node)
-        .iter()
-        .map(|(_source, _target, edge_info)| edge_info[0].edge_id)
-        .collect::<Vec<_>>();
-    BlockGroup::persist_subgraph(
-        conn,
-        source_block_group_id,
-        &edge_ids,
-        &SubgraphBoundary {
-            block: *start_block,
-            node_coordinate: start_node_coordinate,
-        },
-        &SubgraphBoundary {
-            block: *end_block,
-            node_coordinate: end_node_coordinate,
-        },
-        target_block_group_id,
-        create_terminal_edges,
-    )
-}
-
-pub fn get_all_sequences(
-    conn: &GraphConnection,
-    block_group_id: &HashId,
-) -> Result<HashSet<String>, BlockGroupError> {
-    let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
-        .into_iter()
-        .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
-        .collect::<Vec<_>>();
-    let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, None)?;
-    let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
-    let (mut graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
-    graph_loader::prune_graph(&mut graph);
-    let sequences_by_node = blocks
-        .iter()
-        .map(|block| {
-            (
-                GraphNode {
-                    node_id: block.node_id,
-                    sequence_start: block.start,
-                    sequence_end: block.end,
-                },
-                block.sequence(),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    Ok(graph_loader::get_all_sequences(&graph, &sequences_by_node))
-}
-
-pub fn get_all_sequences_with_pruning(
-    conn: &GraphConnection,
-    block_group_id: &HashId,
-    _prune: bool,
-) -> Result<HashSet<String>, BlockGroupError> {
-    get_all_sequences(conn, block_group_id)
-}
-
-pub fn get_sample_all_sequences(
-    conn: &GraphConnection,
-    collection_name: &str,
-    sample_name: &str,
-    history_ref: Option<&str>,
-) -> Result<HashSet<String>, SampleError> {
-    let mut sequences = HashSet::new();
-    for block_group in Sample::get_block_groups(conn, collection_name, sample_name, history_ref) {
-        sequences.extend(get_all_sequences(conn, &block_group.id)?);
-    }
-    Ok(sequences)
-}
 
 pub fn get_connection<'a>(
     database_path: impl Into<Option<&'a str>>,

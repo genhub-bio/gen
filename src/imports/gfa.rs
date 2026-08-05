@@ -531,7 +531,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -686,7 +686,7 @@ mod tests {
             }
         }
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(all_sequences.len(), 1024);
         assert_eq!(all_sequences, expected_sequences);
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(result.unwrap(), "AA");
 
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(all_sequences, HashSet::from_iter(vec!["AA".to_string()]));
 
@@ -736,7 +736,7 @@ mod tests {
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
 
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -758,7 +758,7 @@ mod tests {
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
 
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,

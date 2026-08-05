@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
 use gen_core::{HashId, PathBlock, Strand};
+use gen_graph::models::get_all_sequences;
 use gen_models::{
     block_group::BlockGroupChange, node::Node, region::ResolvedGenRegion, sequence::Sequence,
 };
-use gen_models_graph_tests::{get_all_sequences, get_connection, setup_block_group};
+use gen_models_graph_tests::{get_connection, setup_block_group};
 
 #[test]
 fn test_insert_and_deletion_sequences() {
