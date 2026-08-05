@@ -29,14 +29,15 @@
 //! Only asset records whose URI uses the `file://` scheme represent file bytes managed by
 //! this transfer protocol. Asset URIs with other schemes, such as HTTP or S3, remain
 //! external references in the graph database and are not uploaded to or downloaded from
-//! GenHub. For an HTTP(S) repository remote, GenHub returns a presigned URL for every
-//! branch-local file asset. Push verifies each local file against its recorded checksum
-//! before uploading it with an HTTP PUT. Clone and pull download each file to a temporary
-//! path, verify its checksum, and only then move it to its materialized destination. A
-//! logical path places the file at that safe workspace-relative path; otherwise it is
-//! stored under `.gen/assets` using a checksum-derived name. Stored `file://` paths are
-//! also resolved as safe workspace-relative paths, including `.gen/outside_root` paths
-//! used to represent inputs that originally came from outside the workspace.
+//! GenHub. For an HTTP(S) repository remote, GenHub can return presigned URLs for the complete
+//! branch asset history. Gen uses the previous and destination commits to transfer only newly
+//! required versions. Push verifies each selected local file against its recorded checksum before
+//! uploading it with an HTTP PUT. Clone and pull download each selected file to a temporary path
+//! and verify its checksum. Only the asset version selected by the destination commit's
+//! materialized view is moved to its logical workspace path. Superseded versions are retained
+//! under `.gen/assets` using checksum-derived names. Stored `file://` paths are also resolved as
+//! safe workspace-relative paths, including `.gen/outside_root` paths used to represent inputs
+//! that originally came from outside the workspace.
 //!
 //! Pull records the branch commit from before the Dolt operation so downloads can
 //! distinguish a clean old version from a local modification. If the destination still
@@ -48,21 +49,22 @@
 //! leaves choosing the correct file to them.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    error::Error,
     fs,
-    io::Write as _,
+    io::{self, Write as _},
     path::{Path, PathBuf},
 };
 
 use gen_core::{
-    HashId, Sha256Hash,
+    DoltHashId, HashId, Sha256Hash,
     config::{DEFAULT_GRAPH_DB_NAME, Workspace},
 };
 use gen_models::{
-    assets::{AssetRef, Assets, LocalAssetUri, materialization_destination_path},
+    assets::{AssetRef, LocalAssetUri, materialization_destination_path},
     db::{ConfigConnection, GraphConnection},
     history::dolt::{
-        active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, pull, push,
+        active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull, push,
         push_force, remote_rows, set_remote_url,
     },
     operations::{Defaults, Remote, RemoteBranch, calculate_file_checksum},
@@ -82,7 +84,7 @@ use crate::{
     get_config_connection, get_connection_for_branch, get_raw_connection,
 };
 
-fn file_graph_url(remote_url: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn file_graph_url(remote_url: &str) -> Result<String, Box<dyn Error>> {
     let parsed = Url::parse(remote_url)?;
     let mut path = parsed
         .to_file_path()
@@ -100,7 +102,7 @@ fn transfer_url(
     operation: RemoteOperation,
     branch: Option<&str>,
     force: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
         return file_graph_url(&remote.url);
     }
@@ -149,7 +151,7 @@ fn resolve_remote(
     config: &ConfigConnection,
     explicit_remote: Option<&str>,
     branch: &str,
-) -> Result<Remote, Box<dyn std::error::Error>> {
+) -> Result<Remote, Box<dyn Error>> {
     let remote_name = explicit_remote
         .map(str::to_string)
         .or_else(|| RemoteBranch::get_remote(config, branch))
@@ -178,7 +180,7 @@ fn run_graph_transfer(
     branch: &str,
     force: bool,
     mut transfer: impl FnMut() -> Result<(), SqlError>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     if remote.url.starts_with("file://") {
         let remote_url = transfer_url(remote, operation, Some(branch), force)?;
         ensure_graph_remote(graph, &remote.name, &remote_url)?;
@@ -211,7 +213,7 @@ fn run_graph_transfer(
         .into())
 }
 
-fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn std::error::Error>> {
+fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
     asset
         .checksum
         .ok_or_else(|| format!("Local asset {} has no checksum", asset.id).into())
@@ -222,7 +224,7 @@ fn upload_asset(
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     let relative_path = LocalAssetUri::path_from_uri(&asset.uri)
         .ok_or_else(|| format!("Invalid local asset URI: {}", asset.uri))?;
     let expected_checksum = asset_checksum(asset)?;
@@ -278,39 +280,39 @@ enum DownloadAssetOutcome {
     Conflict(PathBuf),
 }
 
-/// This is effectively a dirty file check. On clones/pulls we want to update files if they
-/// match expected checksums. This gives the asset that was previously in a path so we can
-/// compare it
-fn previous_asset_for_destination<'asset>(
+/// This is effectively a dirty file check. On clones/pulls we want to update
+/// files if they match previously known checksums. The previous asset set is cumulative
+/// so a workspace that still contains any committed version
+/// is safe to advance. Unknown contents remain a conflict and are never overwritten.
+fn destination_matches_previous_asset(
     workspace: &Workspace,
     destination_path: &Path,
-    previous_assets: &'asset HashMap<HashId, AssetRef>,
-) -> Result<Option<&'asset AssetRef>, Box<dyn std::error::Error>> {
-    let mut previous_asset: Option<&AssetRef> = None;
+    existing_checksum: &Sha256Hash,
+    previous_assets: &HashMap<HashId, AssetRef>,
+) -> Result<bool, Box<dyn Error>> {
     for asset in previous_assets.values() {
         let checksum = asset_checksum(asset)?;
+        if checksum != *existing_checksum {
+            continue;
+        }
         let asset_path = materialization_destination_path(
             workspace,
             &asset.uri,
             Some(&checksum),
             asset.logical_path.as_deref(),
         )?;
-        if asset_path == destination_path
-            && previous_asset.is_none_or(|current| {
-                (asset.created_on, asset.id) > (current.created_on, current.id)
-            })
-        {
-            previous_asset = Some(asset);
+        if asset_path == destination_path {
+            return Ok(true);
         }
     }
-    Ok(previous_asset)
+    Ok(false)
 }
 
 /// If a conflict exists for a file we are pulling/cloning, rename it as .conflict for user resolution
 fn conflict_destination_path(
     destination_path: &Path,
     expected_checksum: &Sha256Hash,
-) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
+) -> Result<(PathBuf, bool), Box<dyn Error>> {
     let file_name = destination_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -334,22 +336,25 @@ fn conflict_destination_path(
 }
 
 /// On downloading an asset, if it is a file we compare the hash on disk to the hashes of the
-/// asset from previous updates. If it matches, we replace it assuming it's a natural evolution
-/// of the file. If the hash is unknown, we download the file and mark it as a conflict via a
-/// .conflict extension
+/// asset from previous updates. If it matches the remote hash, we replace it locally assuming it's
+/// a natural evolution. If the hash is unknown, we download the file and mark it as a conflict via a
+/// .conflict extension. Historical assets that are not materialized at the destination commit are
+/// stored in `.gen/assets` so they cannot replace the current workspace file.
 fn download_asset(
     client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     previous_assets: &HashMap<HashId, AssetRef>,
+    // `None` stores a historical version under `.gen/assets` instead of its recorded logical path.
+    destination_logical_path: Option<&str>,
     url: &str,
-) -> Result<DownloadAssetOutcome, Box<dyn std::error::Error>> {
+) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
     let expected_checksum = asset_checksum(asset)?;
     let destination_path = materialization_destination_path(
         workspace,
         &asset.uri,
         Some(&expected_checksum),
-        asset.logical_path.as_deref(),
+        destination_logical_path,
     )?;
     if destination_path.exists()
         && calculate_file_checksum(&destination_path)
@@ -361,15 +366,11 @@ fn download_asset(
         .exists()
         .then(|| calculate_file_checksum(&destination_path))
         .transpose()?;
-    let previous_asset =
-        previous_asset_for_destination(workspace, &destination_path, previous_assets)?;
-    let intended_change =
-        previous_asset
-            .and_then(|asset| asset.checksum)
-            .is_some_and(|previous_checksum| {
-                previous_checksum != expected_checksum
-                    && existing_checksum == Some(previous_checksum)
-            });
+    let intended_change = if let Some(checksum) = existing_checksum.as_ref() {
+        destination_matches_previous_asset(workspace, &destination_path, checksum, previous_assets)?
+    } else {
+        false
+    };
     let has_conflict = existing_checksum.is_some() && !intended_change;
     if let Some(parent) = destination_path.parent() {
         fs::create_dir_all(parent)?;
@@ -393,7 +394,7 @@ fn download_asset(
             .into());
         }
         let mut file = fs::File::create(&temporary_path)?;
-        std::io::copy(&mut response, &mut file)?;
+        io::copy(&mut response, &mut file)?;
         file.flush()?;
         drop(file);
         if calculate_file_checksum(&temporary_path)? != expected_checksum {
@@ -415,7 +416,7 @@ fn download_asset(
             fs::remove_file(&destination_path)?;
         }
         fs::rename(&temporary_path, &destination_path)?;
-        Ok::<DownloadAssetOutcome, Box<dyn std::error::Error>>(DownloadAssetOutcome::Downloaded)
+        Ok::<DownloadAssetOutcome, Box<dyn Error>>(DownloadAssetOutcome::Downloaded)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);
@@ -423,14 +424,20 @@ fn download_asset(
     result
 }
 
+/// Transfers the asset versions needed to move from `previous_hash` to the selected branch state.
+///
+/// GenHub may advertise the branch's complete asset history, so this function filters those URLs
+/// to versions absent from the previous state. The cumulative view supplies that transfer delta
+/// and the checksums used for conflict detection, while the materialized view decides which of the
+/// selected versions belongs at its logical workspace path instead of under `.gen/assets`.
 fn transfer_assets(
     graph: &GraphConnection,
     workspace: &Workspace,
     remote: &Remote,
     operation: RemoteOperation,
     branch: &str,
-    previous_ref: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    previous_hash: Option<&DoltHashId>,
+) -> Result<(), Box<dyn Error>> {
     if remote.url.starts_with("file://") {
         return Ok(());
     }
@@ -440,30 +447,67 @@ fn transfer_assets(
         &AssetTransferRequest { operation, branch },
         login_origin,
     )?;
-    let mut assets = Assets::get_branch_assets(graph, branch)?;
-    let previous_assets = previous_ref
-        .map(|history_ref| Assets::get_branch_assets(graph, history_ref))
-        .transpose()?
-        .unwrap_or_default();
+
+    let commit_hash = hash_of(graph, branch)?;
+    let current_assets: HashMap<_, _> =
+        AssetRef::get_cumulative_assets_at(graph, previous_hash, Some(&commit_hash))?
+            .into_iter()
+            .map(|asset| (asset.id, asset))
+            .collect();
+    let materialized_asset_ids: HashSet<_> =
+        AssetRef::get_materialized_assets_at(graph, None, Some(&commit_hash))?
+            .into_iter()
+            .map(|asset| asset.id)
+            .collect();
+    let previous_assets = if let Some(previous_hash) = previous_hash {
+        AssetRef::get_cumulative_assets_at(graph, None, Some(previous_hash))?
+            .into_iter()
+            .map(|asset| (asset.id, asset))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    // These are assets we expect to be in the current batch of transfers
+    let mut assets: HashMap<_, _> = current_assets
+        .iter()
+        .filter(|(id, _)| !previous_assets.contains_key(id))
+        .map(|(id, asset)| (*id, asset.clone()))
+        .collect();
     let client = Client::new();
     for transfer in response.assets {
-        let asset = assets.remove(&transfer.id).ok_or_else(|| {
-            format!(
+        let Some(asset) = assets.remove(&transfer.id) else {
+            if current_assets.contains_key(&transfer.id)
+                || previous_assets.contains_key(&transfer.id)
+            {
+                continue;
+            }
+            return Err(format!(
                 "GenHub returned an asset transfer not present on branch '{branch}': {}",
                 transfer.id
             )
-        })?;
+            .into());
+        };
         match operation {
             RemoteOperation::Push => upload_asset(&client, workspace, &asset, &transfer.url)?,
             RemoteOperation::Clone | RemoteOperation::Pull => {
-                if let DownloadAssetOutcome::Conflict(conflict_path) =
-                    download_asset(&client, workspace, &asset, &previous_assets, &transfer.url)?
-                {
+                let destination_logical_path = if materialized_asset_ids.contains(&asset.id) {
+                    asset.logical_path.as_deref()
+                } else {
+                    None
+                };
+                if let DownloadAssetOutcome::Conflict(conflict_path) = download_asset(
+                    &client,
+                    workspace,
+                    &asset,
+                    &previous_assets,
+                    destination_logical_path,
+                    &transfer.url,
+                )? {
                     let destination_path = materialization_destination_path(
                         workspace,
                         &asset.uri,
                         asset.checksum.as_ref(),
-                        asset.logical_path.as_deref(),
+                        destination_logical_path,
                     )?;
                     eprintln!(
                         "Warning: remote asset conflicts with the local file at {}. The local file was preserved and the remote version was written to {}. Choose the correct version before continuing.",
@@ -487,7 +531,7 @@ fn transfer_assets(
 pub fn clone_into_workspace(
     remote: &Remote,
     workspace: &Workspace,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn Error>> {
     workspace.ensure_gen_dir();
     let graph_path = workspace.graph_db_path()?;
     let graph = get_raw_connection(graph_path)?;
@@ -543,7 +587,7 @@ pub fn execute_push(
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
     force: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let intended_branch = Defaults::get_current_branch(&config);
     let graph = get_connection_for_branch(workspace.graph_db_path()?, intended_branch.as_deref())?;
@@ -553,6 +597,12 @@ pub fn execute_push(
         .or(persisted_branch)
         .unwrap_or(active_branch(&graph)?);
     let remote = resolve_remote(&config, explicit_remote, &branch)?;
+    // A missing or stale tracking ref only makes the transfer conservatively include more assets.
+    // Force pushes cannot use the tracking ref as a lower bound because they may replace history.
+    let tracking_ref = format!("{}/{branch}", remote.name);
+    let previous_hash = (!force)
+        .then(|| hash_of(&graph, &tracking_ref).ok())
+        .flatten();
     run_graph_transfer(
         &graph,
         &remote,
@@ -574,7 +624,7 @@ pub fn execute_push(
         &remote,
         RemoteOperation::Push,
         &branch,
-        None,
+        previous_hash.as_ref(),
     )?;
     if let Err(error) = run_graph_transfer(
         &graph,
@@ -598,7 +648,7 @@ pub fn execute_pull(
     workspace: &Workspace,
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let graph_path = workspace.graph_db_path()?;
     if !graph_path.exists() {
@@ -612,7 +662,7 @@ pub fn execute_pull(
         .or(persisted_branch)
         .unwrap_or(active_branch(&graph)?);
     let remote = resolve_remote(&config, explicit_remote, &branch)?;
-    let previous_ref = branch_hash(&graph, &branch)?.map(|hash| hash.to_string());
+    let previous_hash = branch_hash(&graph, &branch)?;
     run_graph_transfer(
         &graph,
         &remote,
@@ -627,14 +677,14 @@ pub fn execute_pull(
         &remote,
         RemoteOperation::Pull,
         &branch,
-        previous_ref.as_deref(),
+        previous_hash.as_ref(),
     )?;
     RemoteBranch::set_remote_validated(&config, &branch, Some(&remote.name))?;
     println!("Pulled branch '{branch}' from '{}'.", remote.name);
     Ok(())
 }
 
-pub fn clone_destination_name(remote_url: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub fn clone_destination_name(remote_url: &str) -> Result<String, Box<dyn Error>> {
     if remote_url.starts_with("http://") || remote_url.starts_with("https://") {
         return Ok(RepositoryRemote::parse(remote_url)?.slug().to_string());
     }
@@ -648,7 +698,7 @@ pub fn clone_destination_name(remote_url: &str) -> Result<String, Box<dyn std::e
         .ok_or_else(|| "Remote URL has no destination name".into())
 }
 
-pub fn canonical_remote_url(remote_url: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub fn canonical_remote_url(remote_url: &str) -> Result<String, Box<dyn Error>> {
     if remote_url.starts_with("http://") || remote_url.starts_with("https://") {
         Ok(RepositoryRemote::parse(remote_url)?
             .canonical_url()
@@ -661,7 +711,7 @@ pub fn canonical_remote_url(remote_url: &str) -> Result<String, Box<dyn std::err
 pub fn clone_destination_path(
     parent: &Workspace,
     remote_url: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> Result<PathBuf, Box<dyn Error>> {
     Ok(parent.base_dir().join(clone_destination_name(remote_url)?))
 }
 
@@ -688,11 +738,13 @@ mod tests {
     };
     use reqwest::blocking::Client;
     use rusqlite::{Connection, Error as SqlError};
+    use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
         DownloadAssetOutcome, RemoteOperation, canonical_remote_url, clone_destination_name,
         download_asset, execute_push, file_graph_url, resolve_remote, run_graph_transfer,
+        transfer_assets,
     };
     use crate::{get_config_connection, get_connection};
 
@@ -700,7 +752,7 @@ mod tests {
 
     mod clone {
         use std::{
-            io::{Read as _, Write as _},
+            io::{self, Read as _, Write as _},
             net::TcpListener,
             sync::{
                 Arc,
@@ -805,7 +857,7 @@ mod tests {
                 while requests.len() < 3 && !stop.load(Ordering::Acquire) {
                     let (mut stream, _) = match listener.accept() {
                         Ok(connection) => connection,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(10));
                             continue;
                         }
@@ -975,6 +1027,7 @@ mod tests {
             &workspace,
             &remote_asset,
             &HashMap::new(),
+            remote_asset.logical_path.as_deref(),
             &url,
         )
         .expect("should download conflicting asset");
@@ -1005,9 +1058,42 @@ mod tests {
             &workspace,
             &remote_asset,
             &previous_assets,
+            remote_asset.logical_path.as_deref(),
             &url,
         )
         .expect("should replace unchanged tracked file");
+        server.join().expect("asset server should finish");
+
+        assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
+        assert_eq!(fs::read(&destination).unwrap(), remote_contents);
+        assert!(!temp.path().join("reference.fa.conflict").exists());
+    }
+
+    #[test]
+    fn test_download_asset_replaces_any_known_previous_version() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let destination = temp.path().join("reference.fa");
+        let older_contents = b"older version\n";
+        fs::write(&destination, older_contents).expect("should write older managed file");
+        let older_asset = test_asset(older_contents, "reference.fa", 1);
+        let newer_asset = test_asset(b"newer version\n", "reference.fa", 2);
+        let previous_assets =
+            HashMap::from([(older_asset.id, older_asset), (newer_asset.id, newer_asset)]);
+        let remote_contents = b"remote version\n";
+        let remote_asset = test_asset(remote_contents, "reference.fa", 3);
+        let (url, server) = serve_asset(remote_contents);
+
+        let outcome = download_asset(
+            &Client::new(),
+            &workspace,
+            &remote_asset,
+            &previous_assets,
+            remote_asset.logical_path.as_deref(),
+            &url,
+        )
+        .expect("should replace any previously managed version");
         server.join().expect("asset server should finish");
 
         assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
@@ -1034,6 +1120,7 @@ mod tests {
             &workspace,
             &remote_asset,
             &previous_assets,
+            remote_asset.logical_path.as_deref(),
             &url,
         )
         .expect("should download conflicting asset");
@@ -1043,6 +1130,84 @@ mod tests {
         assert_eq!(outcome, DownloadAssetOutcome::Conflict(conflict.clone()));
         assert_eq!(fs::read(&destination).unwrap(), b"local edits\n");
         assert_eq!(fs::read(conflict).unwrap(), remote_contents);
+    }
+
+    #[test]
+    fn test_pull_transfers_only_assets_after_previous_hash() {
+        let temp = tempdir().expect("should create transfer workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let graph =
+            get_connection(workspace.graph_db_path().unwrap()).expect("should open graph database");
+        let previous_contents = b"previous version\n";
+        let previous_asset = test_asset(previous_contents, "reference.fa", 1);
+        AssetRef::create(&graph, &previous_asset).expect("should insert previous asset");
+        let previous_hash =
+            commit_all(&graph, "add previous asset").expect("should commit previous asset");
+        fs::write(temp.path().join("reference.fa"), previous_contents)
+            .expect("should materialize previous asset");
+
+        let current_contents = b"current version\n";
+        let current_asset = test_asset(current_contents, "reference.fa", 2);
+        AssetRef::create(&graph, &current_asset).expect("should insert current asset");
+        commit_all(&graph, "add current asset").expect("should commit current asset");
+
+        let (current_url, asset_server) = serve_asset(current_contents);
+        let transfer_listener =
+            TcpListener::bind("127.0.0.1:0").expect("should bind transfer server");
+        let transfer_address = transfer_listener
+            .local_addr()
+            .expect("should read transfer server address");
+        let response_body = json!({
+            "assets": [
+                {
+                    "id": previous_asset.id,
+                    "url": "http://127.0.0.1:1/should-not-transfer"
+                },
+                { "id": current_asset.id, "url": current_url }
+            ]
+        })
+        .to_string();
+        let transfer_server = thread::spawn(move || {
+            let (mut stream, _) = transfer_listener
+                .accept()
+                .expect("should accept transfer request");
+            let mut request = [0_u8; 8192];
+            let read = stream
+                .read(&mut request)
+                .expect("should read transfer request");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            )
+            .expect("should write transfer response");
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+        let remote = Remote {
+            name: "origin".to_string(),
+            url: format!("http://{transfer_address}/api/repos/alice/example"),
+        };
+
+        transfer_assets(
+            &graph,
+            &workspace,
+            &remote,
+            RemoteOperation::Pull,
+            "main",
+            Some(&previous_hash),
+        )
+        .expect("should transfer only the asset delta");
+        let transfer_request = transfer_server
+            .join()
+            .expect("transfer server should finish");
+        asset_server.join().expect("asset server should finish");
+
+        assert!(transfer_request.contains("\"operation\":\"pull\""));
+        assert_eq!(
+            fs::read(temp.path().join("reference.fa")).unwrap(),
+            current_contents
+        );
     }
 
     #[test]
