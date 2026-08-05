@@ -4,12 +4,12 @@ use std::{
 };
 
 use gen_core::{
-    GraphNode, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
-    Strand, errors::ConnectionError,
+    GraphNode, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, errors::ConnectionError,
 };
-use gen_graph::graph_loader;
+use gen_graph::{all_intermediate_edges, graph_loader};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupError, NewBlockGroup},
+    block_group::{BlockGroup, BlockGroupError, NewBlockGroup, SubgraphBoundary},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
@@ -21,6 +21,58 @@ use gen_models::{
     sequence::Sequence,
 };
 use rusqlite::Connection;
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper mirrors both graph boundaries"
+)]
+pub fn derive_subgraph(
+    conn: &GraphConnection,
+    source_block_group_id: &HashId,
+    start_block: &NodeIntervalBlock,
+    end_block: &NodeIntervalBlock,
+    start_node_coordinate: i64,
+    end_node_coordinate: i64,
+    target_block_group_id: &HashId,
+    create_terminal_edges: bool,
+) -> Result<(), BlockGroupError> {
+    let graph = BlockGroup::get_graph(conn, source_block_group_id, None)?;
+    let start_node = graph
+        .nodes()
+        .find(|node| {
+            node.node_id == start_block.node_id
+                && node.sequence_start <= start_node_coordinate
+                && node.sequence_end >= start_node_coordinate
+        })
+        .expect("should find the start boundary in the source graph");
+    let end_node = graph
+        .nodes()
+        .find(|node| {
+            node.node_id == end_block.node_id
+                && node.sequence_start <= end_node_coordinate
+                && node.sequence_end >= end_node_coordinate
+        })
+        .expect("should find the end boundary in the source graph");
+    let edge_ids = all_intermediate_edges(&graph, start_node, end_node)
+        .iter()
+        .map(|(_source, _target, edge_info)| edge_info[0].edge_id)
+        .collect::<Vec<_>>();
+    BlockGroup::persist_subgraph(
+        conn,
+        source_block_group_id,
+        &edge_ids,
+        &SubgraphBoundary {
+            block: *start_block,
+            node_coordinate: start_node_coordinate,
+        },
+        &SubgraphBoundary {
+            block: *end_block,
+            node_coordinate: end_node_coordinate,
+        },
+        target_block_group_id,
+        create_terminal_edges,
+    )
+}
 
 pub fn get_all_sequences(
     conn: &GraphConnection,

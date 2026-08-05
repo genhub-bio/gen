@@ -1,9 +1,13 @@
 use core::ops::Range;
 use std::collections::HashMap;
 
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
+use gen_core::{
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node,
+    is_start_node,
+};
+use gen_graph::all_intermediate_edges;
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::{BlockGroup, NewBlockGroup, SubgraphBoundary},
     block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::Edge,
@@ -41,6 +45,58 @@ pub enum GraphOperationError {
     StitchedGraphCycle(String),
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "graph selection and persistence need both boundaries"
+)]
+fn derive_subgraph(
+    conn: &GraphConnection,
+    source_block_group_id: &HashId,
+    start_block: &NodeIntervalBlock,
+    end_block: &NodeIntervalBlock,
+    start_node_coordinate: i64,
+    end_node_coordinate: i64,
+    target_block_group_id: &HashId,
+    create_terminal_edges: bool,
+) -> Result<(), BlockGroupError> {
+    let graph = BlockGroup::get_graph(conn, source_block_group_id, None)?;
+    let start_node = graph
+        .nodes()
+        .find(|node| {
+            node.node_id == start_block.node_id
+                && node.sequence_start <= start_node_coordinate
+                && node.sequence_end >= start_node_coordinate
+        })
+        .expect("should find the start boundary in the source graph");
+    let end_node = graph
+        .nodes()
+        .find(|node| {
+            node.node_id == end_block.node_id
+                && node.sequence_start <= end_node_coordinate
+                && node.sequence_end >= end_node_coordinate
+        })
+        .expect("should find the end boundary in the source graph");
+    let edge_ids = all_intermediate_edges(&graph, start_node, end_node)
+        .iter()
+        .map(|(_source, _target, edge_info)| edge_info[0].edge_id)
+        .collect::<Vec<_>>();
+    BlockGroup::persist_subgraph(
+        conn,
+        source_block_group_id,
+        &edge_ids,
+        &SubgraphBoundary {
+            block: *start_block,
+            node_coordinate: start_node_coordinate,
+        },
+        &SubgraphBoundary {
+            block: *end_block,
+            node_coordinate: end_node_coordinate,
+        },
+        target_block_group_id,
+        create_terminal_edges,
+    )
 }
 
 pub fn get_path(
@@ -167,7 +223,7 @@ pub fn derive_chunks(
         let end_block = blocks[blocks.len() - 1];
         let end_node_coordinate = end_coordinate - end_block.start + end_block.sequence_start;
 
-        BlockGroup::derive_subgraph(
+        derive_subgraph(
             conn,
             &parent_block_group_id,
             &start_block,
