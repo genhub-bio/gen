@@ -20,7 +20,7 @@ use crate::{
     db::GraphConnection,
     errors::{FileAdditionError, FileStoreError, QueryError},
     history::dolt::hash_of,
-    operations::{FileAddition, calculate_reader_checksum},
+    operations::FileAddition,
     traits::Query,
 };
 
