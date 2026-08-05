@@ -316,7 +316,49 @@ impl AssetRef {
         to_hash: Option<&DoltHashId>,
         view: AssetView,
     ) -> Result<Vec<Self>, QueryError> {
-        let query = "WITH RECURSIVE ancestry(commit_hash, depth) AS ( \
+        let (ancestry_boundary, history_depth, view_query) = match view {
+            AssetView::Cumulative => (
+                "AND (:from_hash IS NULL OR ancestry.commit_hash <> :from_hash)",
+                "",
+                "SELECT id, uri, file_type, checksum, size, role, logical_path, name, created_on \
+                 FROM asset_versions \
+                 ORDER BY logical_path, id",
+            ),
+            AssetView::Materialized => (
+                "",
+                ", MAX(bounded_ancestry.depth) AS introduction_depth",
+                ", /* Keep only assets present at the upper bound, then rank each logical path by \
+                      its introduction order in first-parent history. Null paths remain \
+                      independent because they are partitioned by asset ID. */ \
+                 materialized_assets AS ( \
+                     SELECT asset_versions.*, \
+                            ROW_NUMBER() OVER ( \
+                                PARTITION BY asset_versions.logical_path, \
+                                             CASE \
+                                                 WHEN asset_versions.logical_path IS NULL \
+                                                 THEN asset_versions.id \
+                                                 END \
+                                ORDER BY asset_versions.introduction_depth, \
+                                         asset_versions.id \
+                            ) AS materialized_rank \
+                     FROM asset_versions \
+                     JOIN dolt_at_gen_asset_refs( \
+                         COALESCE(:to_hash, dolt_hashof('HEAD')) \
+                     ) AS current_assets \
+                       ON current_assets.id = asset_versions.id \
+                 ) \
+                 SELECT id, uri, file_type, checksum, size, role, logical_path, name, created_on \
+                 FROM materialized_assets \
+                 WHERE materialized_rank = 1 \
+                 ORDER BY logical_path, id",
+            ),
+        };
+        let query = format!(
+            "WITH RECURSIVE \
+                     /* Walk first-parent history from the upper bound. Cumulative queries stop at \
+                        the inclusive lower bound; materialized queries continue to the root so \
+                        version precedence comes from commit order rather than wall-clock time. */ \
+                     ancestry(commit_hash, depth) AS ( \
                          SELECT COALESCE(:to_hash, dolt_hashof('HEAD')), 0 \
                          UNION ALL \
                          SELECT parents.parent_hash, ancestry.depth + 1 \
@@ -325,8 +367,10 @@ impl AssetRef {
                            ON parents.commit_hash = ancestry.commit_hash \
                           AND parents.parent_index = 0 \
                          WHERE parents.parent_hash IS NOT NULL \
-                           AND (:from_hash IS NULL OR ancestry.commit_hash <> :from_hash) \
+                           {ancestry_boundary} \
                      ), \
+                     /* If from_hash is not in the walk, reject the entire range instead of \
+                        returning history from an unrelated commit. */ \
                      bounded_ancestry AS ( \
                          SELECT commit_hash, depth \
                          FROM ancestry \
@@ -336,51 +380,35 @@ impl AssetRef {
                                 WHERE commit_hash = :from_hash \
                             ) \
                      ), \
+                     /* Join the selected commits to Dolt's repeated table snapshots, keep local \
+                        files, and collapse each immutable asset ID. Materialized queries also \
+                        record the oldest depth in the full walk as the version's introduction \
+                        order on the selected ref. */ \
                      asset_versions AS ( \
-                         SELECT historical_assets.*, \
-                                ROW_NUMBER() OVER ( \
-                                    PARTITION BY historical_assets.id \
-                                    ORDER BY bounded_ancestry.depth \
-                                ) AS history_rank, \
-                                MAX(bounded_ancestry.depth) OVER ( \
-                                    PARTITION BY historical_assets.id \
-                                ) AS age \
+                         SELECT historical_assets.id, \
+                                historical_assets.uri, \
+                                historical_assets.file_type, \
+                                historical_assets.checksum, \
+                                historical_assets.size, \
+                                historical_assets.role, \
+                                historical_assets.logical_path, \
+                                historical_assets.name, \
+                                historical_assets.created_on \
+                                {history_depth} \
                          FROM bounded_ancestry \
                          JOIN dolt_history_gen_asset_refs AS historical_assets \
                            ON historical_assets.commit_hash = bounded_ancestry.commit_hash \
                          WHERE historical_assets.uri LIKE 'file://%' \
-                     ), \
-                     selected_assets AS ( \
-                         SELECT asset_versions.*, \
-                                ROW_NUMBER() OVER ( \
-                                    PARTITION BY asset_versions.logical_path, \
-                                                 CASE \
-                                                     WHEN asset_versions.logical_path IS NULL \
-                                                     THEN asset_versions.id \
-                                                 END \
-                                    ORDER BY asset_versions.age, \
-                                             asset_versions.created_on DESC, \
-                                             asset_versions.id \
-                                ) AS materialized_rank \
-                         FROM asset_versions \
-                         LEFT JOIN dolt_at_gen_asset_refs( \
-                             COALESCE(:to_hash, dolt_hashof('HEAD')) \
-                         ) AS current_assets \
-                           ON current_assets.id = asset_versions.id \
-                         WHERE asset_versions.history_rank = 1 \
-                           AND (NOT :materialized OR current_assets.id IS NOT NULL) \
+                         GROUP BY historical_assets.id \
                      ) \
-                     SELECT id, uri, file_type, checksum, size, role, logical_path, name, created_on \
-                     FROM selected_assets \
-                     WHERE NOT :materialized OR materialized_rank = 1 \
-                     ORDER BY logical_path, id";
+                     {view_query}"
+        );
         Self::try_query(
             conn,
-            query,
+            &query,
             named_params! {
                 ":from_hash": from_hash,
                 ":to_hash": to_hash,
-                ":materialized": matches!(view, AssetView::Materialized),
             },
         )
     }
@@ -402,11 +430,11 @@ impl AssetRef {
 
     /// Returns the one-file-per-logical-path workspace view for an inclusive commit range.
     ///
-    /// When multiple committed assets share a logical path, the asset introduced by the most
-    /// recent commit in the selected history represents that path at the upper bound. This
-    /// collapsed view is for deciding which files should be materialized, not for history-aware
-    /// conflict detection. Omitting `to_hash` uses `HEAD`; omitting `from_hash` walks through the
-    /// root commit, so omitting both bounds uses the complete history reachable from `HEAD`.
+    /// When multiple committed assets share a logical path, the asset introduced by the nearest
+    /// first-parent commit to the upper bound represents that path. This collapsed view is for
+    /// deciding which files should be materialized, not for history-aware conflict detection.
+    /// Omitting `to_hash` uses `HEAD`; omitting `from_hash` walks through the root commit, so
+    /// omitting both bounds uses the complete history reachable from `HEAD`.
     pub fn get_materialized_assets_at(
         conn: &GraphConnection,
         from_hash: Option<&DoltHashId>,
@@ -1616,7 +1644,8 @@ mod tests {
 
         /// Builds a linear history where `alpha.fa` gains a replacement, its superseded reference
         /// is later deleted, and `beta.fa` is added at `HEAD`. A persistent `zeta.fa` exercises
-        /// unchanged assets, while an external URI verifies that only local files are returned.
+        /// unchanged assets, while an external URI verifies that only local files are returned. The
+        /// replacement has an older `created_on` value so materialization must use commit order.
         /// The saved commit hashes let each test isolate materialized, cumulative, and bounded
         /// history behavior without repeating the setup.
         struct AssetHistoryFixture {
@@ -1669,7 +1698,7 @@ mod tests {
                     id: HashId::convert_str("second-alpha"),
                     uri: "file://assets/second-alpha.fa".to_string(),
                     checksum: Some(Sha256Hash::convert_str("second-alpha-checksum")),
-                    created_on: 2,
+                    created_on: 0,
                     ..first_alpha.clone()
                 };
                 AssetRef::create(conn, &second_alpha).expect("should insert second alpha asset");
@@ -1731,6 +1760,21 @@ mod tests {
                     Some(&fixture.second_commit),
                 )
                 .expect("should materialize second commit"),
+                vec![fixture.second_alpha.clone(), fixture.zeta.clone()]
+            );
+        }
+
+        #[test]
+        fn test_materialized_assets_at_uses_commit_order_in_a_bounded_range() {
+            let fixture = AssetHistoryFixture::new();
+
+            assert_eq!(
+                AssetRef::get_materialized_assets_at(
+                    fixture.conn(),
+                    Some(&fixture.second_commit),
+                    Some(&fixture.second_commit),
+                )
+                .expect("should materialize using commit order"),
                 vec![fixture.second_alpha.clone(), fixture.zeta.clone()]
             );
         }
