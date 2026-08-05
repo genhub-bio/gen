@@ -285,13 +285,8 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "chr1", None);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_group_id,
-                false
-            )
-            .unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                .unwrap(),
             HashSet::from_iter(vec!["ATCG".to_string()])
         );
 
@@ -328,13 +323,8 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "region-a", None);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_group_id,
-                false
-            )
-            .unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                .unwrap(),
             HashSet::from_iter(vec!["TCGA".to_string()])
         );
     }

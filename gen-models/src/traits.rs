@@ -1,6 +1,5 @@
 use std::rc::Rc;
 
-use itertools::Itertools;
 use rusqlite::{
     Connection, Params, Result as SQLResult, Row, ToSql, limits::Limit, params, types::Value,
 };
@@ -100,8 +99,11 @@ pub trait Query {
     {
         let mut results = vec![];
         let batch_size = max_rows_per_batch(conn, 1);
-        for chunk in &ids.iter().chunks(batch_size) {
-            let values: Vec<Value> = chunk.map(|value| Value::from(value.clone())).collect();
+        for chunk in ids.chunks(batch_size) {
+            let values: Vec<Value> = chunk
+                .iter()
+                .map(|value| Value::from(value.clone()))
+                .collect();
             let query = format!(
                 "
                     WITH arr AS (
@@ -132,17 +134,17 @@ pub trait Query {
         results
     }
 
-    fn delete_by_ids<'a, I: ?Sized, T>(conn: &Connection, ids: &'a I) -> Vec<Self::Model>
+    fn delete_by_ids<T>(conn: &Connection, ids: &[T]) -> Vec<Self::Model>
     where
-        &'a I: IntoIterator<Item = &'a T>,
-        T: Clone + 'a,
+        T: Clone,
         Value: From<T>,
     {
         let mut results = vec![];
         let batch_size = max_rows_per_batch(conn, 1);
-        for chunk in &ids.into_iter().chunks(batch_size) {
+        for chunk in ids.chunks(batch_size) {
             let values: Vec<Value> = chunk
-                .map(|value: &'a T| Value::from(value.clone()))
+                .iter()
+                .map(|value| Value::from(value.clone()))
                 .collect();
             results.append(&mut Self::query(
                 conn,

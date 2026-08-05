@@ -547,9 +547,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
+            gen_models_graph_tests::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &block_groups[0].id,
                 false
             )
@@ -604,9 +603,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
+            gen_models_graph_tests::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &block_groups[0].id,
                 false
             )

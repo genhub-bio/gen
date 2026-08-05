@@ -555,13 +555,9 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -620,13 +616,9 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -694,13 +686,8 @@ mod tests {
 
         let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_group.id,
-                false
-            )
-            .unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATAAAACGATCGATCGGGAACACACAGAGA".to_string(),
@@ -751,13 +738,8 @@ mod tests {
 
         let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_group.id,
-                false
-            )
-            .unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGAAAAAGGAACACACAGAGA".to_string(),
@@ -815,13 +797,9 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences
@@ -872,13 +850,9 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -938,13 +912,9 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences

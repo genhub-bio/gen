@@ -421,9 +421,8 @@ mod tests {
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_child_sequences = BlockGroup::get_all_sequences(
+        let all_child_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_child_block_group.id,
             false,
         )
@@ -512,9 +511,8 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 3", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+        let all_grandchild_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_grandchild_block_group.id,
             false,
         )
@@ -556,9 +554,8 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 4", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+        let all_grandchild_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_grandchild_block_group.id,
             false,
         )
@@ -669,9 +666,8 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(
+        let all_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_block_group.id,
             false,
         )
@@ -782,9 +778,8 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(
+        let all_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_block_group.id,
             false,
         )
@@ -961,9 +956,8 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 3", None)
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(
+        let all_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_block_group.id,
             false,
         )
@@ -1141,9 +1135,8 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 3", None)
             .pop()
             .unwrap();
-        let all_sequences = BlockGroup::get_all_sequences(
+        let all_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_block_group.id,
             false,
         )
@@ -1290,9 +1283,8 @@ mod tests {
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_child_sequences = BlockGroup::get_all_sequences(
+        let all_child_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_child_block_group.id,
             false,
         )
@@ -1382,9 +1374,8 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 3", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+        let all_grandchild_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_grandchild_block_group.id,
             false,
         )
@@ -1423,9 +1414,8 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 4", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+        let all_grandchild_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &new_grandchild_block_group.id,
             false,
         )

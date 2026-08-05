@@ -10,7 +10,9 @@ use gen_models::{
     sequence::Sequence,
     traits::Query as _,
 };
-use gen_models_graph_tests::{create_block_group, get_connection, setup_block_group};
+use gen_models_graph_tests::{
+    create_block_group, get_all_sequences, get_connection, setup_block_group,
+};
 use rusqlite::params;
 
 #[test]
@@ -109,7 +111,7 @@ fn test_derive_subgraph_one_insertion() {
         "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
     );
 
-    let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
+    let all_sequences = get_all_sequences(conn, &block_group1_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -143,7 +145,7 @@ fn test_derive_subgraph_one_insertion() {
     .unwrap();
     let node_count_after = Node::query(conn, "SELECT * FROM nodes", params![]).len();
     assert_eq!(node_count_after, node_count_before);
-    let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+    let all_sequences2 = get_all_sequences(conn, &block_group2.id).unwrap();
     assert_eq!(
         all_sequences2,
         HashSet::from_iter(vec!["TTTTTCCCCC".to_string(), "TAAAAAAAAC".to_string(),])
@@ -329,7 +331,7 @@ fn test_derive_subgraph_two_independent_insertions() {
         "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
     );
 
-    let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
+    let all_sequences = get_all_sequences(conn, &block_group1_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -362,7 +364,7 @@ fn test_derive_subgraph_two_independent_insertions() {
         true,
     )
     .unwrap();
-    let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+    let all_sequences2 = get_all_sequences(conn, &block_group2.id).unwrap();
     assert_eq!(
         all_sequences2,
         HashSet::from_iter(vec![
@@ -607,7 +609,7 @@ fn test_derive_subgraph_two_independent_insertions_and_one_deletion() {
     ];
     BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-    let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
+    let all_sequences = get_all_sequences(conn, &block_group1_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -641,7 +643,7 @@ fn test_derive_subgraph_two_independent_insertions_and_one_deletion() {
         true,
     )
     .unwrap();
-    let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+    let all_sequences2 = get_all_sequences(conn, &block_group2.id).unwrap();
     assert_eq!(
         all_sequences2,
         // The deletion is not included in the cloned subgraph since one end of it is

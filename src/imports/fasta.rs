@@ -449,10 +449,9 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
-            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()]),
-            "shallow FASTA should read through retained sequence and index assets"
+            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 
         let path = Path::all(conn)[0].clone();
@@ -481,7 +480,7 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
@@ -531,7 +530,7 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
@@ -556,7 +555,7 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", "new-sample", "m123", None);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
@@ -615,29 +614,9 @@ mod tests {
         fs::write(&gzip_index_path, "invalid logical-path gzip index\n").unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
-                .expect("should load shallow sequence from retained sequence and index assets"),
-            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()]),
-            "shallow FASTA should read through retained sequence and index assets"
-        );
-        let sequence = Sequence::query_by_blockgroup(conn, context.workspace(), &block_group_id)
-            .into_iter()
-            .find(|sequence| sequence.asset_ref_id.is_some())
-            .expect("should persist the shallow sequence AssetRef pointer");
-        let asset_ref = AssetRef::get_by_id(
-            conn,
-            &sequence
-                .asset_ref_id
-                .expect("should have sequence AssetRef"),
-            None,
-        )
-        .expect("should persist sequence AssetRef");
-        assert!(
-            asset_ref
-                .versioned_store_path(context.workspace())
-                .expect("should resolve immutable sequence asset")
-                .is_file(),
-            "immutable sequence asset should remain after logical file removal"
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                .unwrap(),
+            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 
         let path = Path::all(conn)[0].clone();

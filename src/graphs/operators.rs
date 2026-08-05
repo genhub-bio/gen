@@ -665,13 +665,9 @@ mod tests {
             "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
         );
 
-        let all_sequences = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group1_id,
-            false,
-        )
-        .unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group1_id, false)
+                .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -696,13 +692,9 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME, None);
         let block_group2 = block_groups.iter().find(|x| x.name == "chr1").unwrap();
 
-        let all_sequences2 = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group2.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences2 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences2,
             HashSet::from_iter(vec!["TTTTTCCCCC".to_string(), "TAAAAAAAAC".to_string(),])
@@ -762,9 +754,8 @@ mod tests {
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let original_block_group_id = &original_block_groups[0].id;
-        let all_original_sequences = BlockGroup::get_all_sequences(
+        let all_original_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             original_block_group_id,
             false,
         )
@@ -776,9 +767,8 @@ mod tests {
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2", None);
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
-        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+        let all_grandchild_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             grandchild_block_group_id,
             false,
         )
@@ -814,13 +804,9 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, "test3", None);
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
-        let all_sequences2 = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group2.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences2 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences2,
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
@@ -833,13 +819,9 @@ mod tests {
         );
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
-        let all_sequences3 = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group3.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences3 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group3.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences3,
             HashSet::from_iter(vec![
@@ -902,9 +884,8 @@ mod tests {
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let original_block_group_id = &original_block_groups[0].id;
-        let all_original_sequences = BlockGroup::get_all_sequences(
+        let all_original_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             original_block_group_id,
             false,
         )
@@ -916,9 +897,8 @@ mod tests {
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2", None);
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
-        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+        let all_grandchild_sequences = gen_models_graph_tests::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             grandchild_block_group_id,
             false,
         )
@@ -954,13 +934,9 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, "test3", None);
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
-        let all_sequences2 = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group2.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences2 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences2,
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
@@ -973,13 +949,9 @@ mod tests {
         );
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
-        let all_sequences3 = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group3.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences3 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group3.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences3,
             HashSet::from_iter(vec![
@@ -1011,13 +983,9 @@ mod tests {
             .find(|x| x.name == "m123.stitched")
             .unwrap();
 
-        let all_sequences4 = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group4.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences4 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group4.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences4,
             HashSet::from_iter(vec![
@@ -1052,13 +1020,9 @@ mod tests {
             .find(|x| x.name == "m123.reverse-stitched")
             .unwrap();
 
-        let all_sequences5 = BlockGroup::get_all_sequences(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group5.id,
-            false,
-        )
-        .unwrap();
+        let all_sequences5 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group5.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences5,
             HashSet::from_iter(vec![

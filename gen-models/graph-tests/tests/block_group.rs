@@ -7,7 +7,7 @@ use gen_models::{
     region::ResolvedGenRegion,
     sequence::Sequence,
 };
-use gen_models_graph_tests::{get_connection, setup_block_group};
+use gen_models_graph_tests::{get_all_sequences, get_connection, setup_block_group};
 
 #[test]
 fn test_insert_and_deletion_sequences() {
@@ -47,7 +47,7 @@ fn test_insert_and_deletion_sequences() {
     .expect("should insert the sequence change");
 
     assert_eq!(
-        BlockGroup::get_all_sequences(&conn, &block_group_id, false)
+        get_all_sequences(&conn, &block_group_id)
             .expect("should enumerate sequences after insertion"),
         HashSet::from([
             "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
@@ -89,7 +89,7 @@ fn test_insert_and_deletion_sequences() {
     .expect("should insert the deletion change");
 
     assert_eq!(
-        BlockGroup::get_all_sequences(&conn, &block_group_id, false)
+        get_all_sequences(&conn, &block_group_id)
             .expect("should enumerate sequences after deletion"),
         HashSet::from([
             "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),

@@ -10,7 +10,7 @@ use gen_models::{
     sequence::Sequence,
     traits::Query as _,
 };
-use gen_models_graph_tests::{get_connection, setup_block_group};
+use gen_models_graph_tests::{get_all_sequences, get_connection, setup_block_group};
 
 #[test]
 fn test_insert_accession_change_get_all() {
@@ -50,7 +50,7 @@ fn test_insert_accession_change_get_all() {
     };
 
     BlockGroup::insert_change(&conn, &change).unwrap();
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -103,7 +103,7 @@ fn test_insert_annotation_change_get_all() {
     };
 
     BlockGroup::insert_change(&conn, &change).unwrap();
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -144,7 +144,7 @@ fn test_simple_insert_get_all() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -185,7 +185,7 @@ fn test_insert_on_block_boundary_middle() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -226,7 +226,7 @@ fn test_insert_within_block() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -267,7 +267,7 @@ fn test_insert_on_block_boundary_start() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -308,7 +308,7 @@ fn test_insert_on_block_boundary_end() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -349,7 +349,7 @@ fn test_insert_across_entire_block_boundary() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -390,7 +390,7 @@ fn test_insert_across_two_blocks() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -431,7 +431,7 @@ fn test_insert_spanning_blocks() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -474,7 +474,7 @@ fn test_simple_deletion() {
 
     // take out an entire block
     BlockGroup::insert_change(&conn, &change).unwrap();
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -515,7 +515,7 @@ fn test_doesnt_apply_same_insert_twice() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -525,7 +525,7 @@ fn test_doesnt_apply_same_insert_twice() {
     );
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -566,7 +566,7 @@ fn test_insert_at_beginning_of_path() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -607,7 +607,7 @@ fn test_homozygous_insert_at_beginning_of_path() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -648,7 +648,7 @@ fn test_insert_at_end_of_path() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -689,7 +689,7 @@ fn test_insert_at_one_bp_into_block() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -730,7 +730,7 @@ fn test_insert_at_one_bp_from_end_of_block() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -771,7 +771,7 @@ fn test_delete_at_beginning_of_path() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -812,7 +812,7 @@ fn test_delete_at_end_of_path() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -853,7 +853,7 @@ fn test_deletion_starting_at_block_boundary() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -894,7 +894,7 @@ fn test_deletion_ending_at_block_boundary() {
     };
     BlockGroup::insert_change(&conn, &change).unwrap();
 
-    let all_sequences = BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap();
+    let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![

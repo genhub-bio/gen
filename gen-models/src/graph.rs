@@ -1,9 +1,4 @@
-use std::collections::{HashMap, HashSet};
-
-use gen_core::{
-    GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
-};
+use gen_core::{GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock};
 use gen_graph::{GraphError, all_intermediate_edges, flatten_to_interval_tree, graph_loader};
 use intervaltree::IntervalTree;
 
@@ -33,36 +28,6 @@ pub fn load_block_group_graph(
     let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
     let (graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
     Ok(graph)
-}
-
-/// Loads a block group and enumerates the sequence of every graph path.
-pub fn load_block_group_sequences(
-    conn: &GraphConnection,
-    block_group_id: &HashId,
-) -> Result<HashSet<String>, BlockGroupError> {
-    let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
-        .into_iter()
-        .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
-        .collect::<Vec<_>>();
-    let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, None)?;
-    let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
-    let (mut graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
-    prune_graph(&mut graph);
-
-    let sequences_by_node = blocks
-        .iter()
-        .map(|block| {
-            (
-                GraphNode {
-                    node_id: block.node_id,
-                    sequence_start: block.start,
-                    sequence_end: block.end,
-                },
-                block.sequence(),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    Ok(graph_loader::get_all_sequences(&graph, &sequences_by_node))
 }
 
 /// Loads a block group and projects its graph nodes into linear intervals.

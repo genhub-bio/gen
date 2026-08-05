@@ -563,15 +563,6 @@ impl BlockGroup {
         crate::graph::prune_graph(graph);
     }
 
-    pub fn get_all_sequences(
-        conn: &GraphConnection,
-        workspace: &Workspace,
-        block_group_id: &HashId,
-        _prune: bool,
-    ) -> Result<HashSet<String>, BlockGroupError> {
-        crate::graph::load_block_group_sequences(conn, block_group_id)
-    }
-
     pub fn add_accession(
         conn: &GraphConnection,
         path: &Path,
