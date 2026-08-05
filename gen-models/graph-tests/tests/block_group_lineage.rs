@@ -14,7 +14,8 @@ use gen_models::{
     traits::Query as _,
 };
 use gen_models_graph_tests::{
-    create_block_group, get_connection, get_single_block_group_id, setup_block_group,
+    create_block_group, get_all_sequences, get_connection, get_sample_all_sequences,
+    get_single_block_group_id, setup_block_group,
 };
 use rusqlite::{params, types::Value as SQLValue};
 
@@ -183,15 +184,15 @@ fn test_blockgroup_copies_immediate_parent_block_groups() {
     );
 
     assert_eq!(
-        BlockGroup::get_all_sequences(conn, &child_a.id, false).unwrap(),
+        get_all_sequences(conn, &child_a.id).unwrap(),
         HashSet::from_iter(vec!["AAAA".to_string()])
     );
     assert_eq!(
-        BlockGroup::get_all_sequences(conn, &child_b.id, false).unwrap(),
+        get_all_sequences(conn, &child_b.id).unwrap(),
         HashSet::from_iter(vec!["CCCC".to_string()])
     );
     assert_eq!(
-        Sample::get_all_sequences(conn, "test", "child", false, None).unwrap(),
+        get_sample_all_sequences(conn, "test", "child", None).unwrap(),
         HashSet::from_iter(vec!["AAAA".to_string(), "CCCC".to_string()])
     );
 }
@@ -243,7 +244,7 @@ fn test_changes_against_derivative_blockgroups() {
 
     // note we are making our change against the new blockgroup, and not the parent blockgroup
     BlockGroup::insert_change(conn, &change).unwrap();
-    let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
+    let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec!["AAAAAAANNNNTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),])
@@ -305,7 +306,7 @@ fn test_changes_against_derivative_blockgroups() {
         preserve_edge: false,
     };
     BlockGroup::insert_change(conn, &change).unwrap();
-    let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true).unwrap();
+    let all_sequences = get_all_sequences(conn, &gc_bg_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec!["AAAAAAANNNNTCCCCCCCCCCGGGGGGGGGG".to_string(),])
@@ -374,7 +375,7 @@ fn test_changes_against_derivative_diploid_blockgroups() {
         preserve_edge: true,
     };
     BlockGroup::insert_change(conn, &change).unwrap();
-    let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
+    let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -451,7 +452,7 @@ fn test_changes_against_derivative_diploid_blockgroups() {
         preserve_edge: true,
     };
     BlockGroup::insert_change(conn, &change).unwrap();
-    let all_sequences = BlockGroup::get_all_sequences(conn, &gc_bg_id, true).unwrap();
+    let all_sequences = get_all_sequences(conn, &gc_bg_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![
@@ -529,7 +530,7 @@ fn test_prohibits_out_of_frame_changes_against_derivative_diploid_blockgroups() 
 
     // note we are making our change against the new blockgroup, and not the parent blockgroup
     BlockGroup::insert_change(conn, &change).unwrap();
-    let all_sequences = BlockGroup::get_all_sequences(conn, &new_bg_id, true).unwrap();
+    let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
         HashSet::from_iter(vec![

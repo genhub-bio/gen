@@ -3,6 +3,7 @@ name = "gen-models-graph-tests"
 description = "Graph-backed integration tests for gen-models workflows."
 version = "0.2.1"
 edition = "2024"
+license = "Apache-2.0"
 publish = false
 
 [dependencies]

@@ -504,7 +504,9 @@ mod tests {
         )
         .unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -530,7 +532,9 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+                .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
 
@@ -699,7 +703,8 @@ mod tests {
         let conn = context.graph().conn();
 
         let (bg_id, _path) = setup_block_group(conn);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &bg_id, false).unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &bg_id, false).unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("split.gfa");
@@ -716,7 +721,9 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+                .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
 
@@ -753,7 +760,9 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -778,7 +787,9 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+                .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -794,7 +805,9 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -819,7 +832,9 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "anderson promoters 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+                .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -835,7 +850,9 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -860,7 +877,9 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+                .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -925,6 +944,7 @@ mod tests {
         // 7 total
         assert_eq!(edge_ids.len(), 7);
 
+        let node_ids = node_ids.into_iter().collect::<Vec<_>>();
         let nodes = Node::query_by_ids(conn, &node_ids, None);
         let mut node_hashes = HashSet::new();
         for node in nodes {
@@ -976,6 +996,7 @@ mod tests {
         // 7 total
         assert_eq!(edge_ids2.len(), 7);
 
+        let node_ids2 = node_ids2.into_iter().collect::<Vec<_>>();
         let nodes2 = Node::query_by_ids(conn, &node_ids2, None);
         let mut node_hashes2 = HashSet::new();
         for node in nodes2 {

@@ -1864,7 +1864,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -1912,7 +1913,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["GM".to_string()])
         );
     }
@@ -1926,7 +1928,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -1940,7 +1943,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -1954,7 +1958,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["WE*".to_string()])
         );
     }
@@ -1967,7 +1972,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["MW".to_string()])
         );
     }
@@ -2059,7 +2065,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             translate_annotation(&conn, &annotation, Some(&block_group.id), params).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from([expected.to_string()]),
             "reverse-strand protein should read N → C left to right"
         );
@@ -2236,7 +2243,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["M*".to_string()])
         );
     }
@@ -2297,7 +2305,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["ME*".to_string()]),
             "translation should only follow the annotation's own entry node"
         );
@@ -2313,7 +2322,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["*".to_string()])
         );
     }
@@ -2334,7 +2344,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["MP*".to_string(), "MPVG*".to_string()]),
             "frameshift deletion should truncate the variant protein at the premature stop"
         );
@@ -2355,7 +2366,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein =
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["MK*".to_string(), "MND*".to_string()]),
             "frameshift deletion should read through the wild-type stop to a later one"
         );
@@ -2547,12 +2559,15 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
+                .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
-            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
+                .unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
+                .unwrap(),
             "upstream deletion changed the annotated protein",
         );
     }
@@ -2629,16 +2644,20 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
+                .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
+                .unwrap(),
             HashSet::from(["MQ*".to_string()])
         );
         assert_ne!(
-            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
-            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
+                .unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
+                .unwrap(),
             "point mutation inside the CDS did not change the protein",
         );
     }
@@ -2704,7 +2723,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["ME*".to_string()]),
             "translation should only follow the annotation's own entry node"
         );
@@ -2769,7 +2789,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["ME*".to_string(), "MEW".to_string()]),
             "last-base variant was dropped from the extracted subgraph",
         );
@@ -2822,7 +2843,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             translate_from_path(&conn, &block_group.id, 0, TranslationParams::new("test")).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &from_path.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &from_path.id, true)
+                .unwrap(),
             HashSet::from(["*".to_string()]),
             "translate_from_path(0) should only translate the literal entry node (A), \
              not the unrelated D/P/Z branch reachable from PATH_START"
@@ -2844,7 +2866,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
@@ -2870,7 +2893,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
@@ -2887,7 +2911,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let protein = translate_from_path(&conn, &block_group_id, 0, params).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            gen_models_graph_tests::get_all_sequences_with_pruning(&conn, &protein.id, true)
+                .unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }

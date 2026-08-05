@@ -203,21 +203,6 @@ impl Sample {
         Ok(sample_graph)
     }
 
-    pub fn get_all_sequences(
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-        prune: bool,
-        history_ref: Option<&str>,
-    ) -> Result<HashSet<String>, SampleError> {
-        let mut sequences = HashSet::new();
-        for block_group in Sample::get_block_groups(conn, collection_name, sample_name, history_ref)
-        {
-            sequences.extend(BlockGroup::get_all_sequences(conn, &block_group.id, prune)?);
-        }
-        Ok(sequences)
-    }
-
     pub fn get_or_create_child(
         conn: &GraphConnection,
         collection_name: &str,

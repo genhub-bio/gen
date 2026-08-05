@@ -184,7 +184,9 @@ mod tests {
             }
         }
 
-        let actual_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let actual_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
         assert_eq!(actual_sequences, expected_sequences);
 
         let current_path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
@@ -224,7 +226,9 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -271,7 +275,9 @@ mod tests {
                 expected_sequences.push(part1.to_string() + part2);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences =
+            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences
