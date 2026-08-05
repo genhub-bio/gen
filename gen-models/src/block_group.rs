@@ -5,14 +5,13 @@ use std::{
 };
 
 use gen_core::{
-    GraphNode, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    GenGraph, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
     PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, calculate_hash, is_end_node, is_start_node,
     is_terminal,
     range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
-use gen_graph::{GenGraph, all_intermediate_edges, flatten_to_interval_tree, graph_loader};
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
 use rusqlite::{Row, params, types::Value as SQLValue};
@@ -545,15 +544,11 @@ impl BlockGroup {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<GenGraph, BlockGroupError> {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, history_ref);
-        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, history_ref)?;
-        let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
-        let (graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
-        Ok(graph)
+        crate::graph::load_block_group_graph(conn, block_group_id, history_ref)
     }
 
     pub fn prune_graph(graph: &mut GenGraph) {
-        graph_loader::prune_graph(graph);
+        crate::graph::prune_graph(graph);
     }
 
     pub fn get_all_sequences(
@@ -561,31 +556,7 @@ impl BlockGroup {
         block_group_id: &HashId,
         _prune: bool,
     ) -> Result<HashSet<String>, BlockGroupError> {
-        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
-            .into_iter()
-            .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
-            .collect::<Vec<_>>();
-        let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, None)?;
-
-        let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
-        let (mut graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
-        BlockGroup::prune_graph(&mut graph);
-
-        let sequences_by_node = blocks
-            .iter()
-            .map(|block| {
-                (
-                    GraphNode {
-                        node_id: block.node_id,
-                        sequence_start: block.start,
-                        sequence_end: block.end,
-                    },
-                    block.sequence(),
-                )
-            })
-            .collect::<HashMap<GraphNode, String>>();
-
-        Ok(graph_loader::get_all_sequences(&graph, &sequences_by_node))
+        crate::graph::load_block_group_sequences(conn, block_group_id)
     }
 
     pub fn add_accession(
@@ -1021,10 +992,11 @@ impl BlockGroup {
         block_group_id: &HashId,
         remove_ambiguous_positions: bool,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        // make a tree where every node has a span in the graph.
-        let mut graph = BlockGroup::get_graph(conn, block_group_id, None)?;
-        BlockGroup::prune_graph(&mut graph);
-        Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
+        crate::graph::load_block_group_intervaltree(
+            conn,
+            block_group_id,
+            remove_ambiguous_positions,
+        )
     }
 
     pub fn get_current_path(
@@ -1097,13 +1069,10 @@ impl BlockGroup {
                     && node.sequence_end >= end_node_coordinate
             })
             .unwrap();
-        let subgraph_edges = all_intermediate_edges(&current_graph, start_node, end_node);
-
-        // Filter out internal edges (boundary edges) that don't exist in the database
-        let subgraph_edge_ids = subgraph_edges
-            .iter()
-            .map(|(_to, _from, edge_info)| edge_info[0].edge_id)
-            .collect::<Vec<_>>();
+        // Graph construction creates boundary edges that do not exist in persistence. The loader
+        // returns their underlying identifiers so the model layer can query only stored edges.
+        let subgraph_edge_ids =
+            crate::graph::intermediate_edge_ids(&current_graph, start_node, end_node);
         let source_edges = Edge::query_by_ids(conn, &subgraph_edge_ids, None);
 
         let source_block_group_edges = BlockGroupEdge::specific_edges_for_block_group(
@@ -1235,7 +1204,7 @@ impl Query for BlockGroup {
 mod tests {
     use capnp::message::TypedBuilder;
     use chrono::Utc;
-    use gen_core::{PathBlock, region::RegionResolutionError};
+    use gen_core::{GraphNode, PathBlock, region::RegionResolutionError};
 
     use super::*;
     use crate::{
