@@ -3,7 +3,6 @@ use std::collections::HashSet;
 
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, Strand, calculate_hash};
 use gen_models::{
-    block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     edge::Edge,
     node::Node,
@@ -11,7 +10,7 @@ use gen_models::{
     traits::Query as _,
 };
 use gen_models_graph_tests::{
-    create_block_group, get_all_sequences, get_connection, setup_block_group,
+    create_block_group, derive_subgraph, get_all_sequences, get_connection, setup_block_group,
 };
 use rusqlite::params;
 
@@ -132,7 +131,7 @@ fn test_derive_subgraph_one_insertion() {
 
     let block_group2 = create_block_group(conn, "test", "test", "chr1.1");
     let node_count_before = Node::query(conn, "SELECT * FROM nodes", params![]).len();
-    BlockGroup::derive_subgraph(
+    derive_subgraph(
         conn,
         &block_group1_id,
         &start_block,
@@ -353,7 +352,7 @@ fn test_derive_subgraph_two_independent_insertions() {
     let end_node_coordinate = 36 - end_block.start + end_block.sequence_start;
 
     let block_group2 = create_block_group(conn, "test", "test", "chr1.1");
-    BlockGroup::derive_subgraph(
+    derive_subgraph(
         conn,
         &block_group1_id,
         &start_block,
@@ -632,7 +631,7 @@ fn test_derive_subgraph_two_independent_insertions_and_one_deletion() {
     let end_node_coordinate = 36 - end_block.start + end_block.sequence_start;
 
     let block_group2 = create_block_group(conn, "test", "test", "chr1.1");
-    BlockGroup::derive_subgraph(
+    derive_subgraph(
         conn,
         &block_group1_id,
         &start_block,

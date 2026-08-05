@@ -1,5 +1,5 @@
-use gen_core::{GenGraph, GraphNode, HashId, NodeIntervalBlock};
-use gen_graph::{all_intermediate_edges, flatten_to_interval_tree, graph_loader};
+use gen_core::{GenGraph, HashId, NodeIntervalBlock};
+use gen_graph::{flatten_to_interval_tree, graph_loader};
 use intervaltree::IntervalTree;
 
 use crate::{
@@ -32,18 +32,6 @@ pub fn load_block_group_intervaltree(
     let mut graph = load_block_group_graph(conn, block_group_id, None)?;
     prune_graph(&mut graph);
     Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
-}
-
-/// Returns persisted edge identifiers on paths between two graph nodes.
-pub fn intermediate_edge_ids(
-    graph: &GenGraph,
-    start_node: GraphNode,
-    end_node: GraphNode,
-) -> Vec<HashId> {
-    all_intermediate_edges(graph, start_node, end_node)
-        .iter()
-        .map(|(_source, _target, edge_info)| edge_info[0].edge_id)
-        .collect()
 }
 
 /// Identify all edges leading to and from a provided node_id in a block_group and merge them into an existing GenGraph.

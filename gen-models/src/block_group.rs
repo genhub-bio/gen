@@ -165,6 +165,12 @@ pub struct NewBlockGroup<'a> {
     pub is_default: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SubgraphBoundary {
+    pub block: NodeIntervalBlock,
+    pub node_coordinate: i64,
+}
+
 pub type BlockGroupChange = gen_core::BlockGroupChange<ResolvedGenRegion>;
 
 pub trait IntervalTreeSource {
@@ -1050,43 +1056,22 @@ impl BlockGroup {
         Ok(None)
     }
 
-    pub fn derive_subgraph(
+    pub fn persist_subgraph(
         conn: &GraphConnection,
         workspace: &Workspace,
         source_block_group_id: &HashId,
-        start: SubgraphBoundary<'_>,
-        end: SubgraphBoundary<'_>,
+        subgraph_edge_ids: &[HashId],
+        start: &SubgraphBoundary,
+        end: &SubgraphBoundary,
         target_block_group_id: &HashId,
         create_terminal_edges: bool,
     ) -> Result<(), BlockGroupError> {
-        let current_graph = BlockGroup::get_graph(conn, workspace, source_block_group_id, None)?;
-        let start_node = current_graph
-            .nodes()
-            .find(|node| {
-                node.node_id == start.block.node_id
-                    && node.sequence_start <= start.sequence_coordinate
-                    && node.sequence_end >= start.sequence_coordinate
-            })
-            .unwrap();
-        let end_node = current_graph
-            .nodes()
-            .find(|node| {
-                node.node_id == end.block.node_id
-                    && node.sequence_start <= end.sequence_coordinate
-                    && node.sequence_end >= end.sequence_coordinate
-            })
-            .unwrap();
-        // Graph construction creates boundary edges that do not exist in persistence. The loader
-        // returns their underlying identifiers so the model layer can query only stored edges.
-        let subgraph_edge_ids =
-            crate::graph::intermediate_edge_ids(&current_graph, start_node, end_node);
-        let source_edges = Edge::query_by_ids(conn, &subgraph_edge_ids, None);
+        let source_edges = Edge::query_by_ids(conn, subgraph_edge_ids, None);
 
         let source_block_group_edges = BlockGroupEdge::specific_edges_for_block_group(
             conn,
             source_block_group_id,
-            &subgraph_edge_ids,
-            None,
+            subgraph_edge_ids,
         );
         let source_edge_ids = source_edges
             .iter()
@@ -1125,7 +1110,7 @@ impl BlockGroup {
                 0,
                 Strand::Forward,
                 start.block.node_id,
-                start.sequence_coordinate,
+                start.node_coordinate,
                 start.block.strand,
             )?;
             let new_start_edge_data = BlockGroupEdgeData {
@@ -1137,7 +1122,7 @@ impl BlockGroup {
             let new_end_edge = Edge::create(
                 conn,
                 end.block.node_id,
-                end.sequence_coordinate,
+                end.node_coordinate,
                 end.block.strand,
                 PATH_END_NODE_ID,
                 0,
