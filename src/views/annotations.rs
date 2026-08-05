@@ -406,7 +406,7 @@ fn resolve_annotation_file_path(
     let asset_path = workspace
         .asset_dir()
         .ok()?
-        .join(file_addition.clone().hashed_filename());
+        .join(file_addition.hashed_filename()?);
     if asset_path.exists() {
         return Some(asset_path);
     }
@@ -1035,13 +1035,13 @@ mod tests {
                 id: HashId::convert_str("annotation"),
                 asset_uri: "file:///tmp/annotation.gff3".to_string(),
                 file_type: FileTypes::Gff3,
-                checksum: gen_core::Sha256Hash::convert_str("annotation-checksum"),
+                checksum: Some(gen_core::Sha256Hash::convert_str("annotation-checksum")),
             },
             index_file_addition: Some(AnnotationAssetEntry {
                 id: HashId::convert_str("index"),
                 asset_uri: "file:///tmp/annotation.csi".to_string(),
                 file_type: FileTypes::None,
-                checksum: gen_core::Sha256Hash::convert_str("index-checksum"),
+                checksum: Some(gen_core::Sha256Hash::convert_str("index-checksum")),
             }),
             name: None,
             display_name: "annotation".to_string(),

@@ -14,13 +14,14 @@ use rusqlite::{
     types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 use url::{Position, Url};
 
 use crate::{
     db::GraphConnection,
     errors::{FileAdditionError, FileStoreError, QueryError},
     history::dolt::hash_of,
-    operations::{FileAddition, calculate_reader_checksum},
+    operations::FileAddition,
     traits::Query,
 };
 
@@ -97,10 +98,6 @@ fn with_opendal_runtime<T>(f: impl FnOnce() -> T) -> T {
 
 fn opendal_file_addition_error(err: opendal::Error) -> FileAdditionError {
     FileAdditionError::FileReadError(io::Error::other(err))
-}
-
-fn opendal_file_store_error(err: opendal::Error) -> FileStoreError {
-    FileStoreError::IoError(io::Error::other(err))
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -620,25 +617,30 @@ pub struct ChecksumHandle {
 }
 
 impl ChecksumHandle {
+    /// Returns the content checksum only after the associated reader reaches EOF.
+    ///
+    /// Consumers use this after useful streaming work, such as copying an asset into storage, so
+    /// an interrupted read cannot publish the checksum of only a prefix.
     pub fn checksum(&self) -> Option<Sha256Hash> {
         let state = self.state.lock().unwrap();
         if state.complete { state.checksum } else { None }
     }
-
-    pub fn finalized_checksum(&self) -> Option<Sha256Hash> {
-        self.state.lock().unwrap().checksum
-    }
 }
 
+/// A reader that makes the checksum of a fully consumed stream available through a shared handle.
+///
+/// The handle lets callers hash bytes as they pass them to their real destination rather than
+/// performing a checksum-only read of a potentially large asset.
 pub struct ChecksummedReader {
     inner: Box<dyn Read>,
     state: Arc<Mutex<ChecksumState>>,
 }
 
 impl ChecksummedReader {
-    fn new(inner: Box<dyn Read>) -> Self {
+    /// Wraps a reader whose complete sequential contents need to be checksummed.
+    pub fn new(inner: impl Read + 'static) -> Self {
         Self {
-            inner,
+            inner: Box::new(inner),
             state: Arc::new(Mutex::new(ChecksumState {
                 hasher: Sha256::new(),
                 checksum: None,
@@ -652,32 +654,30 @@ impl ChecksummedReader {
             state: Arc::clone(&self.state),
         }
     }
-}
 
-impl Read for ChecksummedReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let bytes_read = self.inner.read(buf)?;
-        let mut state = self.state.lock().unwrap();
-        if bytes_read == 0 {
-            if state.checksum.is_none() {
-                let finalized = state.hasher.clone().finalize();
-                state.checksum = Some(Sha256Hash(finalized.into()));
-            }
-            state.complete = true;
-        } else {
-            state.hasher.update(&buf[..bytes_read]);
-        }
-        Ok(bytes_read)
-    }
-}
-
-impl Drop for ChecksummedReader {
-    fn drop(&mut self) {
+    // Publishing happens only at EOF so consumers never treat a partial stream hash as the asset's
+    // content identity.
+    fn finish(&self) {
         let mut state = self.state.lock().unwrap();
         if state.checksum.is_none() {
             let finalized = state.hasher.clone().finalize();
             state.checksum = Some(Sha256Hash(finalized.into()));
         }
+        state.complete = true;
+    }
+}
+
+impl Read for ChecksummedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes_read = self.inner.read(buf)?;
+        if bytes_read == 0 {
+            if !buf.is_empty() {
+                self.finish();
+            }
+        } else {
+            self.state.lock().unwrap().hasher.update(&buf[..bytes_read]);
+        }
+        Ok(bytes_read)
     }
 }
 
@@ -720,126 +720,78 @@ impl OpenDalLocation {
         Self::new_fs(Path::new("/"), path)
     }
 
-    fn from_remote_uri(asset_uri: &str) -> Result<Self, FileAdditionError> {
+    fn from_remote_uri(asset_uri: &str) -> Result<blocking::StdReader, FileAdditionError> {
         let url = Url::parse(asset_uri)
             .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
-
-        if url.scheme().eq_ignore_ascii_case("s3") {
-            let bucket = url.host_str().ok_or_else(|| {
-                FileAdditionError::FileReadError(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("s3 uri is missing bucket: {asset_uri}"),
-                ))
-            })?;
-
-            let operator = with_opendal_runtime(|| {
-                let builder = services::S3::default().bucket(bucket).allow_anonymous();
-                let op = opendal::Operator::new(builder)?.finish();
-                blocking::Operator::new(op)
-            })
-            .map_err(opendal_file_addition_error)?;
-
-            return Ok(Self {
-                operator,
-                path: url.path().trim_start_matches('/').to_string(),
-            });
-        }
-
-        let operator_uri = url[..Position::BeforePath].to_string();
+        // An OpenDAL operator identifies the storage backend, while its reader identifies an
+        // object within that backend. Keep the object path out of the operator configuration.
+        let backend_uri = &url[..Position::BeforePath];
+        let object_path = url.path().trim_start_matches('/').to_string();
+        let anonymous_access_configured = url
+            .query_pairs()
+            .any(|(key, _)| key.eq_ignore_ascii_case("allow_anonymous"));
         opendal::init_default_registry();
-        let operator = with_opendal_runtime(|| blocking::Operator::from_uri(operator_uri.as_str()))
-            .map_err(opendal_file_addition_error)?;
 
-        Ok(Self {
-            operator,
-            path: url.path().trim_start_matches('/').to_string(),
-        })
+        let open_reader = |allow_anonymous: Option<&str>| {
+            // Query parameters are OpenDAL backend options, not part of the remote object key.
+            let mut options = url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<HashMap<_, _>>();
+            if let Some(value) = allow_anonymous {
+                options.insert("allow_anonymous".to_string(), value.to_string());
+            }
+            let operator =
+                with_opendal_runtime(|| blocking::Operator::from_uri((backend_uri, options)))
+                    .map_err(opendal_file_addition_error)?;
+            Self {
+                operator,
+                path: object_path.clone(),
+            }
+            .reader()
+        };
+
+        // Credentials for another AWS account can reject an otherwise public object. Retry the
+        // actual OpenDAL read anonymously instead of using request signing as a credential probe.
+        match open_reader(None) {
+            Ok(reader) => Ok(reader),
+            Err(_) if url.scheme().eq_ignore_ascii_case("s3") && !anonymous_access_configured => {
+                open_reader(Some("true"))
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    fn reader(self) -> Result<ChecksummedReader, FileAdditionError> {
-        let reader = self
-            .operator
+    fn reader(self) -> Result<blocking::StdReader, FileAdditionError> {
+        self.operator
             .reader(&self.path)
             .map_err(opendal_file_addition_error)?
             .into_std_read(..)
-            .map_err(opendal_file_addition_error)?;
-        Ok(ChecksummedReader::new(Box::new(reader)))
-    }
-
-    fn checksum(&self, display_path: &str) -> Result<Sha256Hash, FileAdditionError> {
-        let reader = match self.operator.reader(&self.path) {
-            Ok(reader) => reader,
-            Err(err) => {
-                return match err.kind() {
-                    opendal::ErrorKind::NotFound => Ok(Sha256Hash::convert_str("non-existent")),
-                    opendal::ErrorKind::PermissionDenied => Err(
-                        FileAdditionError::FilePermissionDenied(display_path.to_string()),
-                    ),
-                    _ => Err(opendal_file_addition_error(err)),
-                };
-            }
-        }
-        .into_std_read(..)
-        .map_err(opendal_file_addition_error)?;
-
-        match calculate_reader_checksum(reader) {
-            Ok(checksum) => Ok(checksum),
-            Err(err) => match err.kind() {
-                io::ErrorKind::NotFound => Ok(Sha256Hash::convert_str("non-existent")),
-                io::ErrorKind::PermissionDenied => Err(FileAdditionError::FilePermissionDenied(
-                    display_path.to_string(),
-                )),
-                _ => Err(FileAdditionError::FileReadError(err)),
-            },
-        }
-    }
-
-    fn copy_to_local_path(
-        &self,
-        workspace: &Workspace,
-        destination_path: &Path,
-    ) -> io::Result<u64> {
-        let asset_location =
-            Self::from_workspace_path(workspace, destination_path).map_err(io::Error::other)?;
-        let mut reader = self
-            .operator
-            .reader(&self.path)
-            .map_err(io::Error::other)?
-            .into_std_read(..)
-            .map_err(io::Error::other)?;
-        let mut writer = asset_location
-            .operator
-            .writer(&asset_location.path)
-            .map_err(io::Error::other)?
-            .into_std_write();
-        let bytes_copied = io::copy(&mut reader, &mut writer)?;
-        writer.close()?;
-        Ok(bytes_copied)
+            .map_err(opendal_file_addition_error)
     }
 }
 
 pub trait AssetUri {
     fn uri(&self) -> &str;
 
-    fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError>;
+    fn reader(&self, workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError>;
 
-    fn checksum(
+    /// Performs the storage work required before recording an asset and returns a verified
+    /// checksum when one is available.
+    ///
+    /// Local assets are retained and hashed during that copy. Remote assets remain lazy unless a
+    /// caller already obtained a checksum while streaming them for another purpose.
+    fn prepare_asset(
         &self,
         workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
-    ) -> Result<Sha256Hash, FileAdditionError>;
+    ) -> Result<Option<Sha256Hash>, FileAdditionError>;
 
     fn stored_asset_uri(
         &self,
         workspace: &Workspace,
         checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError>;
-
-    fn ensure_asset(
-        &self,
-        workspace: &Workspace,
-        checksum: &Sha256Hash,
-    ) -> Result<(), FileAdditionError>;
 
     fn store_file(
         &self,
@@ -870,10 +822,13 @@ pub trait AssetUri {
             })
     }
 
-    fn generate_file_addition_id(checksum: &Sha256Hash, asset_uri: &str) -> HashId
+    fn generate_file_addition_id(checksum: Option<&Sha256Hash>, asset_uri: &str) -> HashId
     where
         Self: Sized,
     {
+        // Checksumless remote assets still need stable database identity. The URI contributes only
+        // to that record ID and is never represented as a content checksum.
+        let checksum = checksum.map(Sha256Hash::to_string).unwrap_or_default();
         let combined = format!("{checksum};{asset_uri}");
         HashId(calculate_hash(&combined))
     }
@@ -932,6 +887,10 @@ impl dyn AssetUri {
     }
 }
 
+/// Chooses where an asset should be materialized without inventing a content identity.
+///
+/// Explicit logical paths are usable without a checksum. Content-addressed materialization under
+/// `.gen/assets` requires a verified checksum.
 pub fn materialization_destination_path(
     workspace: &Workspace,
     asset_uri: &str,
@@ -957,7 +916,7 @@ pub struct LocalAssetUri {
     asset_uri: String,
     source_path: Option<PathBuf>,
     workspace_root: Option<PathBuf>,
-    read_file: Option<ChecksummedReader>,
+    read_file: Option<blocking::StdReader>,
     write_file: Option<opendal::blocking::StdWriter>,
 }
 
@@ -966,31 +925,22 @@ impl AssetUri for LocalAssetUri {
         &self.asset_uri
     }
 
-    fn reader(&self, workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError> {
+    fn reader(&self, workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
         OpenDalLocation::from_workspace_path(workspace, &source_file_path)
             .map_err(opendal_file_addition_error)?
             .reader()
     }
 
-    fn checksum(
+    fn prepare_asset(
         &self,
         workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
-    ) -> Result<Sha256Hash, FileAdditionError> {
-        if let Some(checksum_override) = checksum_override {
-            return Ok(checksum_override);
-        }
-
-        let source_file_path = self.resolved_source_file_path(workspace)?;
-        let checksum_path = if source_file_path.is_file() {
-            source_file_path
-        } else {
-            PathBuf::from(self.file_path())
-        };
-        OpenDalLocation::from_workspace_path(workspace, &checksum_path)
-            .map_err(opendal_file_addition_error)?
-            .checksum(&checksum_path.to_string_lossy())
+    ) -> Result<Option<Sha256Hash>, FileAdditionError> {
+        // Operation creation must retain local bytes, so this copy is also the useful point at
+        // which to verify or calculate their checksum.
+        self.stage_asset_copy(workspace, checksum_override)
+            .map(Some)
     }
 
     fn stored_asset_uri(
@@ -1007,18 +957,6 @@ impl AssetUri for LocalAssetUri {
         let source_asset_uri = Self::new(&source_file_path.to_string_lossy());
         let relative_file_path = Self::asset_relative_path(workspace, &source_asset_uri, checksum)?;
         Ok(Self::asset_uri(&relative_file_path))
-    }
-
-    fn ensure_asset(
-        &self,
-        workspace: &Workspace,
-        checksum: &Sha256Hash,
-    ) -> Result<(), FileAdditionError> {
-        let source_file_path = self.resolved_source_file_path(workspace)?;
-        if source_file_path.is_file() {
-            Self::ensure_asset_copy(workspace, &source_file_path, checksum)?;
-        }
-        Ok(())
     }
 
     fn store_file(
@@ -1303,6 +1241,54 @@ impl LocalAssetUri {
         )))
     }
 
+    // Streams a local asset into content-addressed storage while computing its checksum. Combining
+    // those jobs keeps large files to a single pass and leaves no checksum-only temporary output.
+    fn stage_asset_copy(
+        &self,
+        workspace: &Workspace,
+        checksum_override: Option<Sha256Hash>,
+    ) -> Result<Sha256Hash, FileAdditionError> {
+        let asset_dir = workspace.asset_dir()?;
+        fs::create_dir_all(&asset_dir).map_err(FileAdditionError::FileReadError)?;
+        if let Some(checksum) = checksum_override {
+            let asset_path = asset_dir.join(self.asset_filename(&checksum));
+            if asset_path.exists() {
+                return Ok(checksum);
+            }
+        }
+
+        let mut reader = ChecksummedReader::new(self.reader(workspace)?);
+        let checksum_handle = reader.checksum_handle();
+        let mut staged_file =
+            NamedTempFile::new_in(&asset_dir).map_err(FileAdditionError::FileReadError)?;
+        io::copy(&mut reader, &mut staged_file).map_err(FileAdditionError::FileReadError)?;
+        staged_file
+            .flush()
+            .map_err(FileAdditionError::FileReadError)?;
+        let checksum = checksum_handle.checksum().ok_or_else(|| {
+            FileAdditionError::ChecksumError(format!(
+                "local asset stream did not reach EOF: {}",
+                self.uri()
+            ))
+        })?;
+        if let Some(expected_checksum) = checksum_override
+            && checksum != expected_checksum
+        {
+            return Err(FileAdditionError::ChecksumError(format!(
+                "local asset checksum does not match the provided checksum: {}",
+                self.uri()
+            )));
+        }
+
+        let asset_path = asset_dir.join(self.asset_filename(&checksum));
+        match staged_file.persist_noclobber(asset_path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
+        }
+        Ok(checksum)
+    }
+
     fn sanitize_relative_path(path: &Path) -> Result<PathBuf, FileAdditionError> {
         let mut sanitized = PathBuf::new();
         for component in path.components() {
@@ -1348,54 +1334,35 @@ impl LocalAssetUri {
         normalized
     }
 
-    /// This exists along with store_file because store_file uses an existing FileAddition
-    /// object to determine where to where to store the file, while this method uses the
-    /// provided source_path.
-    pub fn ensure_asset_copy(
-        workspace: &Workspace,
-        source_path: &Path,
-        checksum: &Sha256Hash,
-    ) -> Result<(), FileAdditionError> {
-        let asset_uri = Self::new(&source_path.to_string_lossy());
-        let asset_path = workspace
-            .asset_dir()?
-            .join(asset_uri.asset_filename(checksum));
-        if asset_path.exists() {
-            return Ok(());
-        }
-
-        OpenDalLocation::from_workspace_path(workspace, source_path)
-            .map_err(opendal_file_addition_error)?
-            .copy_to_local_path(workspace, &asset_path)
-            .map_err(FileAdditionError::FileReadError)?;
-        Ok(())
-    }
-
     pub fn store_file(
         file_addition: &FileAddition,
         workspace: &Workspace,
     ) -> Result<(), FileStoreError> {
+        let checksum = file_addition.checksum.ok_or_else(|| {
+            FileStoreError::IoError(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot store local asset without checksum: {}",
+                    file_addition.asset_uri
+                ),
+            ))
+        })?;
+        let asset_uri = Self::new(&file_addition.asset_uri);
         let asset_path = workspace
             .asset_dir()?
-            .join(file_addition.clone().hashed_filename());
+            .join(asset_uri.asset_filename(&checksum));
         if asset_path.exists() {
             return Ok(());
         }
 
-        let source_path = Self::resolve_source_path(workspace, &file_addition.asset_uri).map_err(
-            |err| match err {
-                FileAdditionError::FileReadError(err) => FileStoreError::IoError(err),
+        asset_uri
+            .stage_asset_copy(workspace, Some(checksum))
+            .map(|_| ())
+            .map_err(|error| match error {
+                FileAdditionError::ConfigError(error) => FileStoreError::ConfigError(error),
+                FileAdditionError::FileReadError(error) => FileStoreError::IoError(error),
                 other => FileStoreError::IoError(io::Error::other(other)),
-            },
-        )?;
-        if source_path == asset_path {
-            return Ok(());
-        }
-        OpenDalLocation::from_workspace_path(workspace, &source_path)
-            .map_err(opendal_file_store_error)?
-            .copy_to_local_path(workspace, &asset_path)
-            .map_err(FileStoreError::IoError)?;
-        Ok(())
+            })
     }
 }
 
@@ -1455,16 +1422,18 @@ impl AssetUri for RemoteAssetUri {
         &self.asset_uri
     }
 
-    fn reader(&self, _workspace: &Workspace) -> Result<ChecksummedReader, FileAdditionError> {
-        OpenDalLocation::from_remote_uri(&self.asset_uri)?.reader()
+    fn reader(&self, _workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError> {
+        OpenDalLocation::from_remote_uri(&self.asset_uri)
     }
 
-    fn checksum(
+    fn prepare_asset(
         &self,
         _workspace: &Workspace,
         checksum_override: Option<Sha256Hash>,
-    ) -> Result<Sha256Hash, FileAdditionError> {
-        Ok(Self::checksum_for_uri(&self.asset_uri, checksum_override))
+    ) -> Result<Option<Sha256Hash>, FileAdditionError> {
+        // Recording a remote URI must not require network access or credentials. A caller can pass
+        // a checksum learned during useful streaming work; otherwise it remains unknown.
+        Ok(checksum_override)
     }
 
     fn stored_asset_uri(
@@ -1473,14 +1442,6 @@ impl AssetUri for RemoteAssetUri {
         _checksum: &Sha256Hash,
     ) -> Result<String, FileAdditionError> {
         Ok(self.asset_uri.clone())
-    }
-
-    fn ensure_asset(
-        &self,
-        _workspace: &Workspace,
-        _checksum: &Sha256Hash,
-    ) -> Result<(), FileAdditionError> {
-        Ok(())
     }
 
     fn store_file(
@@ -1498,17 +1459,13 @@ impl RemoteAssetUri {
             asset_uri: asset_uri.to_string(),
         }
     }
-
-    fn checksum_for_uri(asset_uri: &str, checksum_override: Option<Sha256Hash>) -> Sha256Hash {
-        checksum_override.unwrap_or_else(|| Sha256Hash::convert_str(asset_uri))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
-        io::{Read, Write},
+        io::{Read, Seek, SeekFrom, Write},
         net::TcpListener,
         path::PathBuf,
         thread,
@@ -1517,7 +1474,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        history::dolt::commit_all, operations::calculate_file_checksum, test_helpers::setup_gen,
+        history::dolt::commit_all,
+        operations::{calculate_file_checksum, calculate_reader_checksum},
+        test_helpers::setup_gen,
         traits::Query,
     };
 
@@ -1926,8 +1885,8 @@ mod tests {
         let checksum = Sha256Hash([1u8; 32]);
         let file_path = "/path/to/file.txt";
 
-        let id1 = LocalAssetUri::generate_file_addition_id(&checksum, file_path);
-        let id2 = LocalAssetUri::generate_file_addition_id(&checksum, file_path);
+        let id1 = LocalAssetUri::generate_file_addition_id(Some(&checksum), file_path);
+        let id2 = LocalAssetUri::generate_file_addition_id(Some(&checksum), file_path);
 
         assert_eq!(id1, id2);
     }
@@ -1938,8 +1897,8 @@ mod tests {
         let file_path1 = "/path/to/file1.txt";
         let file_path2 = "/path/to/file2.txt";
 
-        let id1 = LocalAssetUri::generate_file_addition_id(&checksum, file_path1);
-        let id2 = LocalAssetUri::generate_file_addition_id(&checksum, file_path2);
+        let id1 = LocalAssetUri::generate_file_addition_id(Some(&checksum), file_path1);
+        let id2 = LocalAssetUri::generate_file_addition_id(Some(&checksum), file_path2);
 
         assert_ne!(id1, id2);
     }
@@ -1950,8 +1909,8 @@ mod tests {
         let checksum2 = Sha256Hash([2u8; 32]);
         let file_path = "/path/to/file.txt";
 
-        let id1 = LocalAssetUri::generate_file_addition_id(&checksum1, file_path);
-        let id2 = LocalAssetUri::generate_file_addition_id(&checksum2, file_path);
+        let id1 = LocalAssetUri::generate_file_addition_id(Some(&checksum1), file_path);
+        let id2 = LocalAssetUri::generate_file_addition_id(Some(&checksum2), file_path);
 
         assert_ne!(id1, id2);
     }
@@ -2391,7 +2350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_asset_uri_reads_http_uri() {
+    fn test_remote_asset_uri_checksums_streamed_http_content() {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2407,8 +2366,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let started = Instant::now();
-            let mut served_get = false;
-            while !served_get && started.elapsed() < Duration::from_secs(5) {
+            let mut served_get_count = 0;
+            while served_get_count < 1 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -2416,8 +2375,8 @@ mod tests {
                 let mut request = [0; 1024];
                 let len = stream.read(&mut request).unwrap();
                 let request = String::from_utf8_lossy(&request[..len]);
-                served_get = request.starts_with("GET ");
-                if served_get {
+                if request.starts_with("GET ") {
+                    served_get_count += 1;
                     stream
                         .write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ninitial",
@@ -2431,18 +2390,234 @@ mod tests {
                         .unwrap();
                 }
             }
-            assert!(served_get);
+            assert_eq!(served_get_count, 1);
         });
 
         let context = setup_gen();
         let uri = format!("http://{addr}/asset.fa");
-        let mut reader = RemoteAssetUri::new(&uri)
-            .reader(context.workspace())
-            .unwrap();
+        let asset_uri = RemoteAssetUri::new(&uri);
+        assert_eq!(
+            asset_uri.prepare_asset(context.workspace(), None).unwrap(),
+            None
+        );
+        let mut reader = ChecksummedReader::new(asset_uri.reader(context.workspace()).unwrap());
+        let checksum_handle = reader.checksum_handle();
         let mut contents = String::new();
         reader.read_to_string(&mut contents).unwrap();
 
         handle.join().unwrap();
+        let expected_checksum = calculate_reader_checksum(contents.as_bytes()).unwrap();
+        assert_eq!(checksum_handle.checksum(), Some(expected_checksum));
+        assert_ne!(expected_checksum, Sha256Hash::convert_str(&uri));
+    }
+
+    #[test]
+    fn test_remote_asset_uri_reader_uses_range_request() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should bind test HTTP listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should configure test HTTP listener");
+        let address = listener.local_addr().expect("should read listener address");
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut served_range = false;
+            while !served_range && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 1024];
+                let length = stream.read(&mut request).expect("should read request");
+                let request = String::from_utf8_lossy(&request[..length]).to_lowercase();
+                if request.starts_with("get ") {
+                    assert!(
+                        request.contains("\r\nrange: bytes=2-6\r\n"),
+                        "remote reader should resume at the seek position: {request}"
+                    );
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\nContent-Range: bytes 2-6/7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\nitial",
+                        )
+                        .expect("should write ranged response");
+                    served_range = true;
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("should write metadata response");
+                }
+            }
+            assert!(served_range, "should serve a ranged GET request");
+        });
+
+        let mut reader = OpenDalLocation::from_remote_uri(&format!("http://{address}/asset.fa"))
+            .expect("should open seekable remote reader");
+        reader
+            .seek(SeekFrom::Start(2))
+            .expect("should seek within remote asset");
+        let mut bytes = [0; 3];
+        let bytes_read = reader
+            .read(&mut bytes)
+            .expect("should read requested remote range");
+        handle.join().expect("should finish HTTP server");
+
+        assert_eq!(bytes_read, bytes.len());
+        assert_eq!(&bytes, b"iti");
+    }
+
+    #[test]
+    fn test_remote_s3_uri_retries_anonymously_after_authenticated_read_fails() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should bind test HTTP listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should configure test HTTP listener");
+        let address = listener.local_addr().expect("should read listener address");
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut saw_signed_request = false;
+            let mut saw_anonymous_request = false;
+            let mut served_content = false;
+            while !served_content && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("should read request");
+                let request = String::from_utf8_lossy(&request[..length]).to_lowercase();
+                if request.contains("\r\nauthorization:") {
+                    saw_signed_request = true;
+                    let body = "<Error><Code>AccessDenied</Code><Message>signed request rejected</Message></Error>";
+                    write!(
+                        stream,
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("should reject signed request");
+                } else if request.starts_with("head ") {
+                    saw_anonymous_request = true;
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("should accept anonymous metadata request");
+                } else if request.starts_with("get ") {
+                    saw_anonymous_request = true;
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 7\r\nContent-Range: bytes 0-6/7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\ninitial",
+                        )
+                        .expect("should serve anonymous content request");
+                    served_content = true;
+                }
+            }
+            (saw_signed_request, saw_anonymous_request, served_content)
+        });
+
+        let mut url = Url::parse("s3://public-bucket/annotations/genes.gff3")
+            .expect("should parse test S3 URI");
+        url.query_pairs_mut()
+            .append_pair("endpoint", &format!("http://{address}"))
+            .append_pair("region", "us-east-1")
+            .append_pair("access_key_id", "other-account-key")
+            .append_pair("secret_access_key", "other-account-secret")
+            .append_pair("disable_config_load", "true")
+            .append_pair("disable_ec2_metadata", "true");
+
+        let mut reader =
+            OpenDalLocation::from_remote_uri(url.as_str()).expect("should retry anonymously");
+        let mut contents = String::new();
+        reader
+            .read_to_string(&mut contents)
+            .expect("should read public S3 content anonymously");
+        let (saw_signed_request, saw_anonymous_request, served_content) =
+            handle.join().expect("should finish HTTP server");
+
+        assert!(
+            saw_signed_request,
+            "should try configured credentials first"
+        );
+        assert!(
+            saw_anonymous_request,
+            "should retry without credentials after the signed read fails"
+        );
+        assert!(
+            served_content,
+            "should serve the anonymously readable object"
+        );
         assert_eq!(contents, "initial");
+    }
+
+    #[test]
+    fn test_remote_s3_uri_respects_explicit_signed_only_access() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("should bind test HTTP listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should configure test HTTP listener");
+        let address = listener.local_addr().expect("should read listener address");
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut signed_request_at = None;
+            let mut saw_signed_request = false;
+            let mut saw_anonymous_request = false;
+            while started.elapsed() < Duration::from_secs(5)
+                && signed_request_at
+                    .is_none_or(|time: Instant| time.elapsed() < Duration::from_millis(200))
+            {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("should read request");
+                let request = String::from_utf8_lossy(&request[..length]).to_lowercase();
+                if request.contains("\r\nauthorization:") {
+                    saw_signed_request = true;
+                    signed_request_at = Some(Instant::now());
+                    let body = "<Error><Code>AccessDenied</Code><Message>signed request rejected</Message></Error>";
+                    write!(
+                        stream,
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .expect("should reject signed request");
+                } else {
+                    saw_anonymous_request = true;
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("should accept anonymous metadata request");
+                    break;
+                }
+            }
+            (saw_signed_request, saw_anonymous_request)
+        });
+
+        let mut url = Url::parse("s3://public-bucket/annotations/genes.gff3")
+            .expect("should parse test S3 URI");
+        url.query_pairs_mut()
+            .append_pair("endpoint", &format!("http://{address}"))
+            .append_pair("region", "us-east-1")
+            .append_pair("access_key_id", "other-account-key")
+            .append_pair("secret_access_key", "other-account-secret")
+            .append_pair("allow_anonymous", "false")
+            .append_pair("disable_config_load", "true")
+            .append_pair("disable_ec2_metadata", "true");
+
+        let result = OpenDalLocation::from_remote_uri(url.as_str());
+        let (saw_signed_request, saw_anonymous_request) =
+            handle.join().expect("should finish HTTP server");
+
+        assert!(
+            result.is_err(),
+            "should return the authenticated read error"
+        );
+        assert!(saw_signed_request, "should try configured credentials");
+        assert!(
+            !saw_anonymous_request,
+            "should not override an explicit signed-only policy"
+        );
     }
 }
