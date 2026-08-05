@@ -1,11 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use gen_core::{GenGraph, GraphNodePosition, HashId, NodeIntervalBlock, PathBlock};
+use gen_core::{
+    GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock,
+};
 use gen_models::{
     accession::AccessionSpan,
     annotations::persist_annotation,
     block_group::{
         BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeCache, IntervalTreeSource,
+        SubgraphBoundary,
     },
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge},
     db::GraphConnection,
@@ -17,7 +21,7 @@ use gen_models::{
 };
 use intervaltree::IntervalTree;
 
-use crate::{GraphError, flatten_to_interval_tree, graph_loader};
+use crate::{GraphError, all_intermediate_edges, flatten_to_interval_tree, graph_loader};
 
 pub fn add_annotation(
     context: &gen_models::db::DbContext,
@@ -38,6 +42,109 @@ pub fn add_annotation(
 
 pub fn prune_graph(graph: &mut GenGraph) {
     graph_loader::prune_graph(graph);
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "subgraph persistence requires both graph boundaries"
+)]
+pub fn derive_subgraph(
+    conn: &GraphConnection,
+    source_block_group_id: &HashId,
+    start_block: &NodeIntervalBlock,
+    end_block: &NodeIntervalBlock,
+    start_node_coordinate: i64,
+    end_node_coordinate: i64,
+    target_block_group_id: &HashId,
+    create_terminal_edges: bool,
+) -> Result<(), BlockGroupError> {
+    let graph = load_block_group_graph(conn, source_block_group_id, None)?;
+    let start_node = graph
+        .nodes()
+        .find(|node| {
+            node.node_id == start_block.node_id
+                && node.sequence_start <= start_node_coordinate
+                && node.sequence_end >= start_node_coordinate
+        })
+        .expect("should find the start boundary in the source graph");
+    let end_node = graph
+        .nodes()
+        .find(|node| {
+            node.node_id == end_block.node_id
+                && node.sequence_start <= end_node_coordinate
+                && node.sequence_end >= end_node_coordinate
+        })
+        .expect("should find the end boundary in the source graph");
+    let edge_ids = all_intermediate_edges(&graph, start_node, end_node)
+        .iter()
+        .map(|(_source, _target, edge_info)| edge_info[0].edge_id)
+        .collect::<Vec<_>>();
+    BlockGroup::persist_subgraph(
+        conn,
+        source_block_group_id,
+        &edge_ids,
+        &SubgraphBoundary {
+            block: *start_block,
+            node_coordinate: start_node_coordinate,
+        },
+        &SubgraphBoundary {
+            block: *end_block,
+            node_coordinate: end_node_coordinate,
+        },
+        target_block_group_id,
+        create_terminal_edges,
+    )
+}
+
+pub fn get_all_sequences(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+) -> Result<HashSet<String>, BlockGroupError> {
+    get_all_sequences_with_pruning(conn, block_group_id, true)
+}
+
+pub fn get_all_sequences_with_pruning(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+    prune: bool,
+) -> Result<HashSet<String>, BlockGroupError> {
+    let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
+        .into_iter()
+        .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+        .collect::<Vec<_>>();
+    let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, None)?;
+    let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
+    let (mut graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
+    if prune {
+        graph_loader::prune_graph(&mut graph);
+    }
+    let sequences_by_node = blocks
+        .iter()
+        .map(|block| {
+            (
+                GraphNode {
+                    node_id: block.node_id,
+                    sequence_start: block.start,
+                    sequence_end: block.end,
+                },
+                block.sequence(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    Ok(graph_loader::get_all_sequences(&graph, &sequences_by_node))
+}
+
+pub fn get_sample_all_sequences(
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+    history_ref: Option<&str>,
+) -> Result<HashSet<String>, SampleError> {
+    let mut sequences = HashSet::new();
+    for block_group in Sample::get_block_groups(conn, collection_name, sample_name, history_ref) {
+        sequences.extend(get_all_sequences(conn, &block_group.id)?);
+    }
+    Ok(sequences)
 }
 
 /// Loads persisted block-group records and constructs their graph representation.

@@ -6,8 +6,8 @@ use std::{
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, calculate_hash, is_end_node, is_start_node,
-    is_terminal,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand, calculate_hash, is_end_node,
+    is_start_node, is_terminal,
     range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -163,7 +163,16 @@ pub struct SubgraphBoundary {
     pub node_coordinate: i64,
 }
 
-pub type BlockGroupChange = gen_core::BlockGroupChange<ResolvedGenRegion>;
+/// A requested sequence-graph change paired with its resolved model region.
+#[derive(Clone, Debug)]
+pub struct BlockGroupChange {
+    pub region: ResolvedGenRegion,
+    pub path_accession: Option<String>,
+    pub block: PathBlock,
+    pub chromosome_index: i64,
+    pub phased: i64,
+    pub preserve_edge: bool,
+}
 
 pub trait IntervalTreeSource {
     fn intervaltree(

@@ -504,7 +504,7 @@ mod tests {
         .unwrap();
 
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -532,7 +532,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
@@ -703,7 +703,7 @@ mod tests {
 
         let (bg_id, _path) = setup_block_group(conn);
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &bg_id, false).unwrap();
+            gen_graph::models::get_all_sequences_with_pruning(conn, &bg_id, false).unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("split.gfa");
@@ -721,7 +721,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
@@ -761,7 +761,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -788,7 +788,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
@@ -806,7 +806,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -833,7 +833,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
@@ -851,7 +851,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -878,7 +878,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);

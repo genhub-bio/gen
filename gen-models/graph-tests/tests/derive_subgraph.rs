@@ -2,6 +2,7 @@ use core::ops::Range;
 use std::collections::HashSet;
 
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, Strand, calculate_hash};
+use gen_graph::models::{derive_subgraph, get_all_sequences};
 use gen_models::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     edge::Edge,
@@ -9,9 +10,7 @@ use gen_models::{
     sequence::Sequence,
     traits::Query as _,
 };
-use gen_models_graph_tests::{
-    create_block_group, derive_subgraph, get_all_sequences, get_connection, setup_block_group,
-};
+use gen_models_graph_tests::{create_block_group, get_connection, setup_block_group};
 use rusqlite::params;
 
 #[test]

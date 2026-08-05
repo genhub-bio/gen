@@ -185,7 +185,7 @@ mod tests {
         }
 
         let actual_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(actual_sequences, expected_sequences);
 
@@ -227,7 +227,7 @@ mod tests {
         let block_group = &block_groups[0];
 
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -276,7 +276,7 @@ mod tests {
             }
         }
         let all_sequences =
-            gen_models_graph_tests::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
