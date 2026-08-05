@@ -1,13 +1,91 @@
-use gen_core::{GraphNodePosition, HashId, NodeIntervalBlock};
-use gen_graph::{GenGraph, GraphError, graph_loader};
+use std::collections::{HashMap, HashSet};
+
+use gen_core::{
+    GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+};
+use gen_graph::{GraphError, all_intermediate_edges, flatten_to_interval_tree, graph_loader};
 use intervaltree::IntervalTree;
 
-use crate::{db::GraphConnection, edge::Edge, node::Node};
+use crate::{
+    block_group::BlockGroupError, block_group_edge::BlockGroupEdge, db::GraphConnection,
+    edge::Edge, node::Node,
+};
 
 pub struct ResolvedGraph {
     pub graph: GenGraph,
     pub interval_tree: IntervalTree<i64, NodeIntervalBlock>,
     pub block_group_id: HashId,
+}
+
+pub fn prune_graph(graph: &mut GenGraph) {
+    graph_loader::prune_graph(graph);
+}
+
+/// Loads persisted block-group records and delegates graph construction to `gen-graph`.
+pub fn load_block_group_graph(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+    history_ref: Option<&str>,
+) -> Result<GenGraph, BlockGroupError> {
+    let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, history_ref);
+    let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, history_ref)?;
+    let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
+    let (graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
+    Ok(graph)
+}
+
+/// Loads a block group and enumerates the sequence of every graph path.
+pub fn load_block_group_sequences(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+) -> Result<HashSet<String>, BlockGroupError> {
+    let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
+        .into_iter()
+        .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+        .collect::<Vec<_>>();
+    let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, None)?;
+    let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
+    let (mut graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
+    prune_graph(&mut graph);
+
+    let sequences_by_node = blocks
+        .iter()
+        .map(|block| {
+            (
+                GraphNode {
+                    node_id: block.node_id,
+                    sequence_start: block.start,
+                    sequence_end: block.end,
+                },
+                block.sequence(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    Ok(graph_loader::get_all_sequences(&graph, &sequences_by_node))
+}
+
+/// Loads a block group and projects its graph nodes into linear intervals.
+pub fn load_block_group_intervaltree(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+    remove_ambiguous_positions: bool,
+) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
+    let mut graph = load_block_group_graph(conn, block_group_id, None)?;
+    prune_graph(&mut graph);
+    Ok(flatten_to_interval_tree(&graph, remove_ambiguous_positions))
+}
+
+/// Returns persisted edge identifiers on paths between two graph nodes.
+pub fn intermediate_edge_ids(
+    graph: &GenGraph,
+    start_node: GraphNode,
+    end_node: GraphNode,
+) -> Vec<HashId> {
+    all_intermediate_edges(graph, start_node, end_node)
+        .iter()
+        .map(|(_source, _target, edge_info)| edge_info[0].edge_id)
+        .collect()
 }
 
 /// Identify all edges leading to and from a provided node_id in a block_group and merge them into an existing GenGraph.
