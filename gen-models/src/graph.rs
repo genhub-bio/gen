@@ -1,17 +1,10 @@
-use gen_core::{GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock};
-use gen_graph::{GraphError, all_intermediate_edges, flatten_to_interval_tree, graph_loader};
+use gen_core::{GenGraph, GraphNode, HashId, NodeIntervalBlock};
+use gen_graph::{all_intermediate_edges, flatten_to_interval_tree, graph_loader};
 use intervaltree::IntervalTree;
 
 use crate::{
-    block_group::BlockGroupError, block_group_edge::BlockGroupEdge, db::GraphConnection,
-    edge::Edge, node::Node,
+    block_group::BlockGroupError, block_group_edge::BlockGroupEdge, db::GraphConnection, edge::Edge,
 };
-
-pub struct ResolvedGraph {
-    pub graph: GenGraph,
-    pub interval_tree: IntervalTree<i64, NodeIntervalBlock>,
-    pub block_group_id: HashId,
-}
 
 pub fn prune_graph(graph: &mut GenGraph) {
     graph_loader::prune_graph(graph);
@@ -83,43 +76,4 @@ pub fn expand(
     let (fragment, _) = graph_loader::build_graph(&load_edges, &load_blocks);
     graph_loader::merge_fragment(graph, &fragment);
     true
-}
-
-/// From a given position in a graph, find positions a given number of characters away. An
-/// expand function can be given that specifies how to expand the input graph when it is exhausted.
-/// By default, this function searches along the known graph, and if a matching position cannot be found
-/// it will expand until it is not possible to grow the graph anymore.
-/// Returns a Result<Vec<GraphNodePosition>>, given a list of matching GraphNodePositions at the requested distance.
-pub fn find_offset(
-    graph: &mut GenGraph,
-    // The position to begin the search from
-    anchor: &GraphNodePosition,
-    // How far from the anchor the position of interst is. negative means search upstream of the graph position.
-    // positive means search downstream.
-    distance: i64,
-    mut expand: impl FnMut(&mut GenGraph, HashId) -> bool,
-) -> Result<Vec<GraphNodePosition>, GraphError> {
-    gen_graph::graph_loader::find_offset(graph, anchor, distance, &mut expand)
-}
-
-impl ResolvedGraph {
-    /// Find a postion in a graph according to a provided coordinate. This is generally utilized by the GenRegion machinery to identify the
-    /// positions a user requested.
-    pub fn resolve_anchor(
-        &self,
-        coord: i64,
-        conn: &GraphConnection,
-    ) -> Result<GraphNodePosition, GraphError> {
-        gen_graph::graph_loader::resolve_anchor(
-            &self.graph,
-            &self.interval_tree,
-            coord,
-            |node_id| {
-                Node::query_nodes_length(conn, &[node_id])
-                    .ok()
-                    .and_then(|lengths| lengths.get(&node_id).copied())
-            },
-            |graph, node_id| expand(conn, graph, &self.block_group_id, node_id),
-        )
-    }
 }
