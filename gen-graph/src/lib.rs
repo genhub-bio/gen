@@ -24,6 +24,7 @@ use petgraph::{
 use thiserror::Error;
 
 pub mod graph_loader;
+pub mod models;
 pub mod traits;
 pub use gen_core::{GenGraph, GraphEdge, GraphNode, GraphNodePosition, GraphNodeSlice};
 pub use traits::MergeGraph;

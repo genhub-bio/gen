@@ -340,7 +340,6 @@ mod tests {
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
     use gen_graph::GraphNode;
     use gen_models::{
-        annotations::add_annotation,
         block_group::{BlockGroup, BlockGroupChange},
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
@@ -579,7 +578,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        add_annotation(
+        gen_graph::models::add_annotation(
             &context,
             collection,
             "SITE",
@@ -605,13 +604,7 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, collection, "deleted");
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            None,
-        )
-        .unwrap();
+        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
         let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {
@@ -765,13 +758,8 @@ mod tests {
 
         assert_eq!(all_sequences, all_sequences2);
 
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group2.id,
-            None,
-        )
-        .unwrap();
+        let graph =
+            gen_graph::models::load_block_group_graph(conn, &block_group2.id, None).unwrap();
         let graph_nodes = graph
             .nodes()
             .filter_map(|node| {
@@ -966,7 +954,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        BlockGroup::insert_change(conn, crate::test_helpers::test_workspace(), &change).unwrap();
+        gen_graph::models::insert_change(conn, &change).unwrap();
 
         let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
         let mut node_ids = HashSet::new();

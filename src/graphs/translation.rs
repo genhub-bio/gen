@@ -618,7 +618,7 @@ fn extract_full_graph(
     workspace: &Workspace,
     block_group_id: &HashId,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)
+    let gen_graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
     let start_node = gen_graph
         .nodes()
@@ -706,7 +706,7 @@ fn extract_from_entry(
     entry_node_id: HashId,
     entry_coord: i64,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)
+    let gen_graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let entry_node = gen_graph
@@ -2010,13 +2010,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
     /// Whether PATH_END is reachable from PATH_START in the protein graph.
     fn start_reaches_end(conn: &GraphConnection, block_group_id: &HashId) -> bool {
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            block_group_id,
-            None,
-        )
-        .expect("should load protein graph");
+        let graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)
+            .expect("should load protein graph");
         let start = graph.nodes().find(|n| n.node_id == PATH_START_NODE_ID);
         let end = graph.nodes().find(|n| n.node_id == PATH_END_NODE_ID);
         match (start, end) {
@@ -2573,13 +2568,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             start_reaches_end(&conn, &protein.id),
             "protein graph has no PATH_START → PATH_END path (disconnected)"
         );
-        let protein_graph = BlockGroup::get_graph(
-            &conn,
-            crate::test_helpers::test_workspace(),
-            &protein.id,
-            None,
-        )
-        .expect("should load protein graph");
+        let protein_graph = gen_graph::models::load_block_group_graph(&conn, &protein.id, None)
+            .expect("should load protein graph");
         assert_eq!(
             connected_components(&protein_graph),
             1,

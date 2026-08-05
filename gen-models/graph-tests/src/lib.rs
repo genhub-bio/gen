@@ -5,22 +5,23 @@ use std::{
 
 use gen_core::{
     GraphNode, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, errors::ConnectionError,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, config::Workspace, errors::ConnectionError,
 };
 use gen_graph::{all_intermediate_edges, graph_loader};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupError, NewBlockGroup, SubgraphBoundary},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
-    db::GraphConnection,
+    db::{ConfigConnection, DbContext, GraphConnection},
     edge::Edge,
-    migrations::run_migrations,
+    migrations::{run_config_migrations, run_migrations},
     node::Node,
     path::Path,
     sample::{NewSample, Sample, SampleError},
     sequence::Sequence,
 };
 use rusqlite::Connection;
+use tempfile::tempdir;
 
 #[expect(
     clippy::too_many_arguments,
@@ -36,7 +37,7 @@ pub fn derive_subgraph(
     target_block_group_id: &HashId,
     create_terminal_edges: bool,
 ) -> Result<(), BlockGroupError> {
-    let graph = BlockGroup::get_graph(conn, source_block_group_id, None)?;
+    let graph = gen_graph::models::load_block_group_graph(conn, source_block_group_id, None)?;
     let start_node = graph
         .nodes()
         .find(|node| {
@@ -140,6 +141,19 @@ pub fn get_connection<'a>(
     rusqlite::vtab::array::load_module(&conn)?;
     run_migrations(&mut conn);
     Ok(GraphConnection(conn))
+}
+
+pub fn setup_gen() -> DbContext {
+    let directory = tempdir()
+        .expect("should create a temporary repository")
+        .keep();
+    let workspace = Workspace::new(directory);
+    workspace.ensure_gen_dir();
+    let graph_conn = get_connection(None).expect("should create the graph database");
+    let mut config_conn = Connection::open_in_memory().expect("should create the config database");
+    run_config_migrations(&mut config_conn);
+    DbContext::new(workspace, graph_conn, ConfigConnection(config_conn))
+        .expect("should create the database context")
 }
 
 pub fn create_block_group(

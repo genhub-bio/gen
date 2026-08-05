@@ -180,8 +180,9 @@ fn load_group_annotations(
     // a combinatorial library). Clip them onto the block group's full graph so an
     // annotation still covers every surviving fragment of its original range, on every
     // branch, with a gap wherever an edit spliced in unrelated sequence.
-    let graph = BlockGroup::get_graph(conn, workspace, &current_block_group.id, history_ref)
-        .unwrap_or_else(|_| GenGraph::new());
+    let graph =
+        gen_graph::models::load_block_group_graph(conn, &current_block_group.id, history_ref)
+            .unwrap_or_else(|_| GenGraph::new());
     Ok(annotations
         .into_iter()
         .filter_map(|annotation| {
@@ -876,15 +877,7 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use gen_core::{HashId, Sha256Hash, Strand};
     use gen_graph::{GenGraph, GraphNode};
-    use gen_models::{
-        annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
-        block_group::BlockGroup,
-        file_types::FileTypes,
-        operations::commit_operation_summary,
-        sample::Sample,
-    };
-    use noodles::{bgzf, core::Position, csi, tabix};
-    use tempfile::{NamedTempFile, tempdir};
+    use gen_models::{file_types::FileTypes, sample::Sample};
 
     use super::{
         AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
@@ -1042,7 +1035,6 @@ mod tests {
         use std::{fs::File, io::BufReader, path::PathBuf};
 
         use gen_models::{
-            block_group::BlockGroup,
             file_types::FileTypes,
             operations::{OperationFile, OperationInfo},
             sample::Sample,
@@ -1078,8 +1070,7 @@ mod tests {
 
         let block_groups = Sample::get_block_groups(conn, "fixtures", "puc19-sample", None);
         let block_group = &block_groups[0];
-        let graph =
-            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
         let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
 
         let groups =
@@ -1121,7 +1112,7 @@ mod tests {
     fn load_annotations_for_group_finds_every_combinatorial_branch() {
         use std::path::PathBuf;
 
-        use gen_models::{block_group::BlockGroup, sample::Sample};
+        use gen_models::sample::Sample;
 
         use super::{AnnotationGroupTrackRequest, load_annotations_for_group};
         use crate::{
@@ -1157,8 +1148,7 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let block_group = &block_groups[0];
 
-        let graph =
-            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
         let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
 
         let entry = AnnotationGroupEntry {
@@ -1211,7 +1201,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        add_annotation(
+        gen_graph::models::add_annotation(
             &context,
             &collection,
             "SITE",
@@ -1255,7 +1245,7 @@ mod tests {
             "the entry source should differ from the currently selected block group"
         );
         let selected_graph =
-            BlockGroup::get_graph(conn, context.workspace(), &selected_block_group.id, None)
+            gen_graph::models::load_block_group_graph(conn, &selected_block_group.id, None)
                 .unwrap();
         let node_ids = selected_graph
             .nodes()

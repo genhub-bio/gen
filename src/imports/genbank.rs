@@ -633,7 +633,7 @@ where
                             None,
                         ),
                     };
-                    BlockGroup::insert_change(conn, context.workspace(), &change).unwrap();
+                    gen_graph::models::insert_change(conn, &change).unwrap();
                     applied_changes.push((edit, change_node_id));
                 }
 

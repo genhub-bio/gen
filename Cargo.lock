@@ -1978,6 +1978,7 @@ name = "gen-graph"
 version = "0.2.1"
 dependencies = [
  "gen-core",
+ "gen-models",
  "interavl",
  "intervaltree",
  "itertools",
@@ -1998,7 +1999,6 @@ dependencies = [
  "flate2",
  "gen-capnp-schemas",
  "gen-core",
- "gen-graph",
  "include_dir",
  "indexmap",
  "intervaltree",
@@ -2030,6 +2030,7 @@ dependencies = [
  "gen-models",
  "intervaltree",
  "rusqdoltlite",
+ "tempfile",
 ]
 
 [[package]]

@@ -4,14 +4,13 @@ use gen_core::{
     GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock, PATH_END_NODE_ID,
     PATH_START_NODE_ID, Strand,
 };
-use gen_graph::{GraphEdge, graph_from_interval_tree, graph_loader};
+use gen_graph::{GraphEdge, graph_from_interval_tree, graph_loader, models::expand};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
     edge::Edge,
-    graph::expand,
     node::Node,
     sample::{NewSample, Sample},
     sequence::Sequence,

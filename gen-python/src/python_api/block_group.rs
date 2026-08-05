@@ -233,10 +233,9 @@ impl PySequenceGraph {
             )
         })?;
         let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
-        let matcher =
-            GenGraphMatcher::new_with_sequence_kind(conn, context.workspace(), graph, kind);
+        let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
 
         let gen_dir = context.workspace().ensure_gen_dir();
         let index_path = gen_dir
@@ -296,10 +295,9 @@ impl PySequenceGraph {
         fs::create_dir_all(&index_dir)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
         let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
-        let matcher =
-            GenGraphMatcher::new_with_sequence_kind(conn, context.workspace(), graph, kind);
+        let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let normalized = kind != SequenceKind::Exact;
         let index = SeedIndex::build(&matcher, k, normalized);
         let path = index_dir.join(format!("{}.bin", self.id));
@@ -360,9 +358,8 @@ impl PySequenceGraph {
     }
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let context = self.require_context("to_dict()")?;
-        let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+        let conn = self.require_context("to_dict()")?.graph().conn();
+        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
         let dict = PyDict::new(py);
         let nodes: Vec<PyGraphNode> = graph
@@ -397,9 +394,8 @@ impl PySequenceGraph {
     }
 
     fn to_rustworkx(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let context = self.require_context("to_rustworkx()")?;
-        let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+        let conn = self.require_context("to_rustworkx()")?.graph().conn();
+        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
         {
             let rustworkx = PyModule::import(py, "rustworkx").map_err(|_| {
@@ -440,9 +436,8 @@ impl PySequenceGraph {
     }
 
     fn to_networkx(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let context = self.require_context("to_networkx()")?;
-        let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+        let conn = self.require_context("to_networkx()")?.graph().conn();
+        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
         {
             let networkx = PyModule::import(py, "networkx").map_err(|_| {

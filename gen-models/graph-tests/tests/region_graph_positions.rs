@@ -16,6 +16,26 @@ use gen_models::{
 };
 use gen_models_graph_tests::get_connection;
 
+trait FindGraphPositions {
+    fn find_graph_positions(
+        &self,
+        conn: &GraphConnection,
+        start_offset: i64,
+        end_offset: i64,
+    ) -> Result<ResolvedGenRegion, gen_graph::GraphError>;
+}
+
+impl FindGraphPositions for ResolvedGenRegion {
+    fn find_graph_positions(
+        &self,
+        conn: &GraphConnection,
+        start_offset: i64,
+        end_offset: i64,
+    ) -> Result<ResolvedGenRegion, gen_graph::GraphError> {
+        gen_graph::models::find_region_graph_positions(self, conn, start_offset, end_offset)
+    }
+}
+
 fn setup_graph() -> (GraphConnection, HashId) {
     let conn = get_connection(None).unwrap();
     Collection::get_or_create(&conn, "test").unwrap();

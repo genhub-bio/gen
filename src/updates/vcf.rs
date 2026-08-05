@@ -687,16 +687,10 @@ pub fn update_with_vcf(
                         }
                     })
                     .collect::<Vec<_>>();
-                BlockGroup::insert_changes(
-                    conn,
-                    context.workspace(),
-                    &in_place_changes,
-                    Some(&mut tree_map),
-                )
-                .unwrap();
-            } else {
-                BlockGroup::insert_changes(conn, context.workspace(), chunk, Some(&mut tree_map))
+                gen_graph::models::insert_changes(conn, &in_place_changes, Some(&mut tree_map))
                     .unwrap();
+            } else {
+                gen_graph::models::insert_changes(conn, chunk, Some(&mut tree_map)).unwrap();
             }
             bar.inc(chunk.len() as u64);
         }

@@ -45,14 +45,9 @@ impl PyRepository {
         };
 
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg.id, None)
+            let graph = gen_graph::models::load_block_group_graph(conn, &bg.id, None)
                 .map_err(block_group_err_to_pyerr)?;
-            let matcher = GenGraphMatcher::new_with_sequence_kind(
-                conn,
-                self.context.workspace(),
-                graph,
-                kind,
-            );
+            let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index = SeedIndex::build(&matcher, k, normalized);
             let path = index_dir.join(format!("{}.bin", bg.id));
             let bytes = index
@@ -98,14 +93,9 @@ impl PyRepository {
         let query_bytes = query.as_bytes();
         let mut results = Vec::new();
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg.id, None)
+            let graph = gen_graph::models::load_block_group_graph(conn, &bg.id, None)
                 .map_err(block_group_err_to_pyerr)?;
-            let matcher = GenGraphMatcher::new_with_sequence_kind(
-                conn,
-                self.context.workspace(),
-                graph,
-                kind,
-            );
+            let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
 
             let index_path = self
                 .context

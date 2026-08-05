@@ -60,7 +60,7 @@ fn derive_subgraph(
     target_block_group_id: &HashId,
     create_terminal_edges: bool,
 ) -> Result<(), BlockGroupError> {
-    let graph = BlockGroup::get_graph(conn, source_block_group_id, None)?;
+    let graph = gen_graph::models::load_block_group_graph(conn, source_block_group_id, None)?;
     let start_node = graph
         .nodes()
         .find(|node| {
@@ -530,7 +530,7 @@ fn validate_stitched_block_group_is_acyclic(
     workspace: &Workspace,
     block_group_id: &HashId,
 ) -> Result<(), GraphOperationError> {
-    let graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)?;
+    let graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)?;
     if is_cyclic_directed(&graph) {
         return Err(GraphOperationError::StitchedGraphCycle(format!(
             "block group {block_group_id} is cyclic"

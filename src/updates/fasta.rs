@@ -243,7 +243,6 @@ mod tests {
     use std::{collections::HashSet, io::Write, path::PathBuf};
 
     use gen_models::{
-        annotations::add_annotation,
         assets::{OperationKind, OperationLog},
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
@@ -833,7 +832,15 @@ mod tests {
             &[],
         )
         .unwrap();
-        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+        gen_graph::models::add_annotation(
+            &context,
+            &collection,
+            "foobar",
+            None,
+            "simple",
+            "m123:5-20",
+        )
+        .unwrap();
 
         Sample::get_or_create_child(conn, &collection, "derived", vec!["simple".to_string()])
             .unwrap();
