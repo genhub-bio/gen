@@ -92,5 +92,5 @@ pub(crate) fn insert_update_change(
         phased: data.phased,
         preserve_edge: data.preserve_edge,
     };
-    BlockGroup::insert_change(conn, &change)
+    gen_graph::models::insert_change(conn, &change)
 }

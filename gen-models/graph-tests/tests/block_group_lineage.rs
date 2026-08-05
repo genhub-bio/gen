@@ -243,7 +243,7 @@ fn test_changes_against_derivative_blockgroups() {
     };
 
     // note we are making our change against the new blockgroup, and not the parent blockgroup
-    BlockGroup::insert_change(conn, &change).unwrap();
+    gen_graph::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -305,7 +305,7 @@ fn test_changes_against_derivative_blockgroups() {
         phased: 0,
         preserve_edge: false,
     };
-    BlockGroup::insert_change(conn, &change).unwrap();
+    gen_graph::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &gc_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -374,7 +374,7 @@ fn test_changes_against_derivative_diploid_blockgroups() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(conn, &change).unwrap();
+    gen_graph::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -451,7 +451,7 @@ fn test_changes_against_derivative_diploid_blockgroups() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(conn, &change).unwrap();
+    gen_graph::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &gc_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -529,7 +529,7 @@ fn test_prohibits_out_of_frame_changes_against_derivative_diploid_blockgroups() 
     };
 
     // note we are making our change against the new blockgroup, and not the parent blockgroup
-    BlockGroup::insert_change(conn, &change).unwrap();
+    gen_graph::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -602,5 +602,5 @@ fn test_prohibits_out_of_frame_changes_against_derivative_diploid_blockgroups() 
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(conn, &change).unwrap();
+    gen_graph::models::insert_change(conn, &change).unwrap();
 }

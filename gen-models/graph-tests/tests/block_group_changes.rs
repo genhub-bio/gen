@@ -49,7 +49,7 @@ fn test_insert_accession_change_get_all() {
         preserve_edge: true,
     };
 
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -102,7 +102,7 @@ fn test_insert_annotation_change_get_all() {
         preserve_edge: true,
     };
 
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -142,7 +142,7 @@ fn test_simple_insert_get_all() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -183,7 +183,7 @@ fn test_insert_on_block_boundary_middle() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -224,7 +224,7 @@ fn test_insert_within_block() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -265,7 +265,7 @@ fn test_insert_on_block_boundary_start() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -306,7 +306,7 @@ fn test_insert_on_block_boundary_end() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -347,7 +347,7 @@ fn test_insert_across_entire_block_boundary() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -388,7 +388,7 @@ fn test_insert_across_two_blocks() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -429,7 +429,7 @@ fn test_insert_spanning_blocks() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -473,7 +473,7 @@ fn test_simple_deletion() {
     };
 
     // take out an entire block
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -513,7 +513,7 @@ fn test_doesnt_apply_same_insert_twice() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -523,7 +523,7 @@ fn test_doesnt_apply_same_insert_twice() {
             "AAAAAAANNNNTTTTTCCCCCCCCCCGGGGGGGGGG".to_string()
         ])
     );
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -564,7 +564,7 @@ fn test_insert_at_beginning_of_path() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -605,7 +605,7 @@ fn test_homozygous_insert_at_beginning_of_path() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -646,7 +646,7 @@ fn test_insert_at_end_of_path() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -687,7 +687,7 @@ fn test_insert_at_one_bp_into_block() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -728,7 +728,7 @@ fn test_insert_at_one_bp_from_end_of_block() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -769,7 +769,7 @@ fn test_delete_at_beginning_of_path() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -810,7 +810,7 @@ fn test_delete_at_end_of_path() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -851,7 +851,7 @@ fn test_deletion_starting_at_block_boundary() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(
@@ -892,7 +892,7 @@ fn test_deletion_ending_at_block_boundary() {
         phased: 0,
         preserve_edge: true,
     };
-    BlockGroup::insert_change(&conn, &change).unwrap();
+    gen_graph::models::insert_change(&conn, &change).unwrap();
 
     let all_sequences = get_all_sequences(&conn, &block_group_id).unwrap();
     assert_eq!(

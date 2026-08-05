@@ -46,7 +46,8 @@ mod tests {
             .expect("GFA import failed");
 
         let gen_graph =
-            Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME, None).unwrap();
+            gen_graph::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
+                .unwrap();
 
         let config = GraphConfig {
             partition: PartitionConfig {
@@ -318,7 +319,8 @@ mod tests {
             .expect("GFA import failed");
 
         let gen_graph =
-            Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME, None).unwrap();
+            gen_graph::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
+                .unwrap();
 
         // Configure with large partition for stability
         let config = GraphConfig {
@@ -389,7 +391,8 @@ mod tests {
             .expect("GFA import failed");
 
         let gen_graph =
-            Sample::get_graph(conn, collection_name, Sample::DEFAULT_NAME, None).unwrap();
+            gen_graph::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
+                .unwrap();
 
         // Configure with large partition for stability
         let config = GraphConfig {

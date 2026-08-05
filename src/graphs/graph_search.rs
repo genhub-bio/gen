@@ -771,7 +771,7 @@ fn validate_seed_index_header_version(header: &SeedIndexHeader) -> Result<(), Se
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{block_group::BlockGroup, collection::Collection};
+    use gen_models::collection::Collection;
 
     use super::*;
     use crate::test_helpers::{setup_block_group, setup_gen};
@@ -784,7 +784,7 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
+        let graph = gen_graph::models::load_block_group_graph(conn, &block_group_id, None).unwrap();
         GenGraphMatcher::new(conn, graph)
     }
 
@@ -793,7 +793,7 @@ mod tests {
         let conn = ctx.graph().conn();
         let _ = Collection::create(conn, "test");
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
+        let graph = gen_graph::models::load_block_group_graph(conn, &block_group_id, None).unwrap();
         GenGraphMatcher::new_ssdna(conn, graph)
     }
 
@@ -802,7 +802,7 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
+        let graph = gen_graph::models::load_block_group_graph(conn, &block_group_id, None).unwrap();
         GenGraphMatcher::new_protein(conn, graph)
     }
 
@@ -811,7 +811,7 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
+        let graph = gen_graph::models::load_block_group_graph(conn, &block_group_id, None).unwrap();
         GenGraphMatcher::new_with_sequence_kind(conn, graph, SequenceKind::Exact)
     }
 

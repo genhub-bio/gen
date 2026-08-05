@@ -214,7 +214,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    BlockGroup::insert_change(conn, &change).unwrap();
+                    gen_graph::models::insert_change(conn, &change).unwrap();
                 }
             }
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),

@@ -5,7 +5,7 @@ use std::{
 };
 
 use gen_core::{
-    GenGraph, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
     PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, calculate_hash, is_end_node, is_start_node,
     is_terminal,
     range::Range,
@@ -545,18 +545,6 @@ impl BlockGroup {
         )))
     }
 
-    pub fn get_graph(
-        conn: &GraphConnection,
-        block_group_id: &HashId,
-        history_ref: Option<&str>,
-    ) -> Result<GenGraph, BlockGroupError> {
-        crate::graph::load_block_group_graph(conn, block_group_id, history_ref)
-    }
-
-    pub fn prune_graph(graph: &mut GenGraph) {
-        crate::graph::prune_graph(graph);
-    }
-
     pub fn add_accession(
         conn: &GraphConnection,
         path: &Path,
@@ -603,82 +591,9 @@ impl BlockGroup {
 
     #[cfg_attr(
         feature = "profiling",
-        tracing::instrument(skip(conn, changes, tree_map))
-    )]
-    pub fn insert_changes(
-        conn: &GraphConnection,
-        changes: &[BlockGroupChange],
-        tree_map: Option<&mut IntervalTreeCache>,
-    ) -> Result<(), BlockGroupError> {
-        let mut new_augmented_edges_by_block_group =
-            HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
-        let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
-        let mut local_tree_map = HashMap::new();
-        let tree_map = match tree_map {
-            Some(tree_map) => tree_map,
-            None => &mut local_tree_map,
-        };
-        for change in changes {
-            let cache_key = change.region.intervaltree_cache_key();
-            #[expect(
-                clippy::map_entry,
-                reason = "entry API doesn't work with ? error propagation"
-            )]
-            if !tree_map.contains_key(&cache_key) {
-                tree_map.insert(
-                    cache_key,
-                    IntervalTreeSource::intervaltree(&change.region, conn)?,
-                );
-            }
-            let tree = tree_map.get(&cache_key);
-            let new_augmented_edges = change.region.plan_edges(conn, change, tree)?;
-            new_augmented_edges_by_block_group
-                .entry(change.region.block_group.id)
-                .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
-                .or_insert_with(|| new_augmented_edges.clone());
-            if let Some(accession) = &change.path_accession {
-                new_accession_edges
-                    .entry((change.region.block_group.id, accession.clone()))
-                    .and_modify(|new_edge_data: &mut Vec<AugmentedEdgeData>| {
-                        new_edge_data.extend(new_augmented_edges.clone())
-                    })
-                    .or_insert_with(|| new_augmented_edges.clone());
-            }
-        }
-        Self::persist_insert_changes(
-            conn,
-            new_augmented_edges_by_block_group,
-            new_accession_edges,
-        )
-    }
-
-    pub fn insert_change(
-        conn: &GraphConnection,
-        change: &BlockGroupChange,
-    ) -> Result<(), BlockGroupError> {
-        let new_augmented_edges = change.region.plan_edges(conn, change, None)?;
-        let mut new_augmented_edges_by_block_group = HashMap::new();
-        new_augmented_edges_by_block_group
-            .insert(change.region.block_group.id, new_augmented_edges.clone());
-        let mut new_accession_edges = HashMap::new();
-        if let Some(accession) = &change.path_accession {
-            new_accession_edges.insert(
-                (change.region.block_group.id, accession.clone()),
-                new_augmented_edges,
-            );
-        }
-        Self::persist_insert_changes(
-            conn,
-            new_augmented_edges_by_block_group,
-            new_accession_edges,
-        )
-    }
-
-    #[cfg_attr(
-        feature = "profiling",
         tracing::instrument(skip(conn, new_augmented_edges_by_block_group, new_accession_edges))
     )]
-    fn persist_insert_changes(
+    pub fn persist_insert_changes(
         conn: &GraphConnection,
         new_augmented_edges_by_block_group: HashMap<HashId, Vec<AugmentedEdgeData>>,
         new_accession_edges: HashMap<(HashId, String), Vec<AugmentedEdgeData>>,
@@ -985,18 +900,6 @@ impl BlockGroup {
         Ok(new_edges)
     }
 
-    pub fn intervaltree_for(
-        conn: &GraphConnection,
-        block_group_id: &HashId,
-        remove_ambiguous_positions: bool,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        crate::graph::load_block_group_intervaltree(
-            conn,
-            block_group_id,
-            remove_ambiguous_positions,
-        )
-    }
-
     pub fn get_current_path(
         conn: &GraphConnection,
         block_group_id: &HashId,
@@ -1179,16 +1082,15 @@ impl Query for BlockGroup {
 mod tests {
     use capnp::message::TypedBuilder;
     use chrono::Utc;
-    use gen_core::{GraphNode, PathBlock, region::RegionResolutionError};
+    use gen_core::region::RegionResolutionError;
 
     use super::*;
     use crate::{
         collection::Collection,
         node::Node,
-        region::{ResolvedGenRegion, ResolvedRegionKind},
         sample::{NewSample, Sample},
         sequence::Sequence,
-        test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
+        test_helpers::{create_bg, get_connection, setup_block_group},
     };
 
     mod region_resolver {
@@ -1452,175 +1354,6 @@ mod tests {
         assert_eq!(block_groups[0].name, "chr1");
         assert!(block_groups[0].parent_block_group_id.is_none());
         assert!(BlockGroupEdge::edges_for_block_group(conn, &block_groups[0].id, None).is_empty());
-    }
-
-    #[test]
-    fn test_get_graph_branched_graph() {
-        // Branched graph: {AAA,GGG} → TTT → {CCC,ATC}
-        // TTT has 2 incoming edges and 2 outgoing edges.
-        // There are explicitly no start/end nodes to ensure we can build graphs purely from coordinates
-        let conn = get_connection(None).unwrap();
-        Collection::get_or_create(&conn, "test").unwrap();
-        crate::sample::Sample::get_or_create(
-            &conn,
-            crate::sample::NewSample {
-                name: "test",
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let bg = BlockGroup::create(
-            &conn,
-            crate::block_group::NewBlockGroup {
-                collection_name: "test",
-                sample_name: "test",
-                name: "branched",
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let seq_aaa = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("AAA")
-            .save(&conn)
-            .unwrap();
-        let seq_ggg = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("GGG")
-            .save(&conn)
-            .unwrap();
-        let seq_ttt = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("TTT")
-            .save(&conn)
-            .unwrap();
-        let seq_ccc = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("CCC")
-            .save(&conn)
-            .unwrap();
-        let seq_atc = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("ATC")
-            .save(&conn)
-            .unwrap();
-
-        let n_aaa = Node::create(&conn, &seq_aaa.hash, &HashId::convert_str("node-aaa")).unwrap();
-        let n_ggg = Node::create(&conn, &seq_ggg.hash, &HashId::convert_str("node-ggg")).unwrap();
-        let n_ttt = Node::create(&conn, &seq_ttt.hash, &HashId::convert_str("node-ttt")).unwrap();
-        let n_ccc = Node::create(&conn, &seq_ccc.hash, &HashId::convert_str("node-ccc")).unwrap();
-        let n_atc = Node::create(&conn, &seq_atc.hash, &HashId::convert_str("node-atc")).unwrap();
-
-        // Edges: AAA→TTT, GGG→TTT, TTT→CCC, TTT→ATC
-        let e_aaa_ttt =
-            Edge::create(&conn, n_aaa, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
-        let e_ggg_ttt =
-            Edge::create(&conn, n_ggg, 3, Strand::Forward, n_ttt, 0, Strand::Forward).unwrap();
-        let e_ttt_ccc =
-            Edge::create(&conn, n_ttt, 3, Strand::Forward, n_ccc, 0, Strand::Forward).unwrap();
-        let e_ttt_atc =
-            Edge::create(&conn, n_ttt, 3, Strand::Forward, n_atc, 0, Strand::Forward).unwrap();
-
-        let expected_edges = [
-            (
-                GraphNode {
-                    node_id: n_aaa,
-                    sequence_start: 3,
-                    sequence_end: 3,
-                },
-                GraphNode {
-                    node_id: n_ttt,
-                    sequence_start: 0,
-                    sequence_end: 3,
-                },
-                e_aaa_ttt.id,
-            ),
-            (
-                GraphNode {
-                    node_id: n_ggg,
-                    sequence_start: 3,
-                    sequence_end: 3,
-                },
-                GraphNode {
-                    node_id: n_ttt,
-                    sequence_start: 0,
-                    sequence_end: 3,
-                },
-                e_ggg_ttt.id,
-            ),
-            (
-                GraphNode {
-                    node_id: n_ttt,
-                    sequence_start: 0,
-                    sequence_end: 3,
-                },
-                GraphNode {
-                    node_id: n_ccc,
-                    sequence_start: 0,
-                    sequence_end: 0,
-                },
-                e_ttt_ccc.id,
-            ),
-            (
-                GraphNode {
-                    node_id: n_ttt,
-                    sequence_start: 0,
-                    sequence_end: 3,
-                },
-                GraphNode {
-                    node_id: n_atc,
-                    sequence_start: 0,
-                    sequence_end: 0,
-                },
-                e_ttt_atc.id,
-            ),
-        ];
-
-        let block_group_edges = [
-            e_aaa_ttt.clone(),
-            e_ggg_ttt.clone(),
-            e_ttt_ccc.clone(),
-            e_ttt_atc.clone(),
-        ]
-        .iter()
-        .map(|edge_id| BlockGroupEdgeData {
-            block_group_id: bg.id,
-            edge_id: edge_id.id,
-            chromosome_index: 0,
-            phased: 0,
-        })
-        .collect::<Vec<_>>();
-
-        BlockGroupEdge::bulk_create(&conn, &block_group_edges);
-        let graph = BlockGroup::get_graph(&conn, &bg.id, None).unwrap();
-
-        // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
-        // 2 terminal blocks: START, END
-        // Total: 7
-        assert_eq!(
-            graph.nodes().len(),
-            7,
-            "expected 7 blocks (5 nodes + 2 terminals), got {}",
-            graph.nodes().len()
-        );
-
-        assert_eq!(
-            graph.all_edges().count(),
-            expected_edges.len(),
-            "expected exactly the 4 branch edges"
-        );
-        for (source, target, edge_id) in expected_edges {
-            let weights = graph
-                .edge_weight(source, target)
-                .unwrap_or_else(|| panic!("missing graph edge {source:?} -> {target:?}"));
-            assert_eq!(
-                weights.len(),
-                1,
-                "expected a single edge weight for {source:?} -> {target:?}"
-            );
-            assert_eq!(weights[0].edge_id, edge_id);
-        }
     }
 
     #[test]
@@ -1926,242 +1659,5 @@ mod tests {
         assert_eq!(nodes[0].node_id, HashId::convert_str("test-a-node"));
         assert_eq!(nodes[0].sequence_start, 3);
         assert_eq!(nodes[0].sequence_end, 10);
-    }
-
-    #[test]
-    fn error_on_out_of_bounds_change() {
-        let conn = get_connection(None).unwrap();
-        let (block_group_id, path) = setup_block_group(&conn);
-        let deletion_sequence = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("")
-            .save(&conn)
-            .unwrap();
-        let deletion_node_id =
-            Node::create(&conn, &deletion_sequence.hash, &HashId::convert_str("1")).unwrap();
-        let deletion = PathBlock {
-            node_id: deletion_node_id,
-            block_sequence: deletion_sequence.get_sequence(None, None).unwrap(),
-            sequence_start: 0,
-            sequence_end: 0,
-            path_start: 350,
-            path_end: 400,
-            strand: Strand::Forward,
-        };
-        let after_end_region =
-            ResolvedGenRegion::from_path(&conn, block_group_id, &path, 350, 400).unwrap();
-        let after_end_change = BlockGroupChange {
-            region: after_end_region,
-            path_accession: None,
-            block: deletion.clone(),
-            chromosome_index: 1,
-            phased: 0,
-            preserve_edge: true,
-        };
-        let before_start_region =
-            ResolvedGenRegion::from_path(&conn, block_group_id, &path, -300, 400).unwrap();
-        let before_start_change = BlockGroupChange {
-            region: before_start_region,
-            path_accession: None,
-            block: deletion,
-            chromosome_index: 1,
-            phased: 0,
-            preserve_edge: true,
-        };
-        let res = BlockGroup::insert_change(&conn, &after_end_change);
-        assert!(matches!(res, Err(BlockGroupError::ChangeOutOfBounds(_))));
-        let res = BlockGroup::insert_change(&conn, &before_start_change);
-        assert!(matches!(res, Err(BlockGroupError::ChangeOutOfBounds(_))));
-    }
-
-    #[test]
-    fn test_blockgroup_interval_tree() {
-        let conn = &get_connection(None).unwrap();
-        let (block_group_id, _path) = setup_block_group(conn);
-        let _new_sample = Sample::get_or_create(
-            conn,
-            NewSample {
-                name: "child",
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
-        let _new_path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1",
-            params![new_bg_id],
-        );
-        let insert_sequence = Sequence::new()
-            .sequence_type("DNA")
-            .sequence("NNNN")
-            .save(conn)
-            .unwrap();
-        let insert_node_id = Node::create(
-            conn,
-            &insert_sequence.hash,
-            &HashId::convert_str("insert-node"),
-        )
-        .unwrap();
-        let insert = PathBlock {
-            node_id: insert_node_id,
-            block_sequence: insert_sequence.get_sequence(0, 4).unwrap(),
-            sequence_start: 0,
-            sequence_end: 4,
-            path_start: 7,
-            path_end: 15,
-            strand: Strand::Forward,
-        };
-        let bg = BlockGroup::get_by_id(conn, &new_bg_id, None).unwrap();
-        let region = ResolvedGenRegion {
-            block_group: bg,
-            path: None,
-            accession: None,
-            annotation: None,
-            kind: ResolvedRegionKind::BlockGroup,
-            anchor_start: 0,
-            anchor_end: 0,
-            feature_length: 0,
-            start: 7,
-            end: 15,
-            start_anchors: None,
-            end_anchors: None,
-            remove_ambiguous_positions: true,
-        };
-        let change = BlockGroupChange {
-            region,
-            path_accession: None,
-            block: insert,
-            chromosome_index: 1,
-            phased: 0,
-            preserve_edge: true,
-        };
-        BlockGroup::insert_change(conn, &change).unwrap();
-
-        let tree = BlockGroup::intervaltree_for(conn, &block_group_id, false).unwrap();
-        let tree2 = BlockGroup::intervaltree_for(conn, &block_group_id, true).unwrap();
-        interval_tree_verify(
-            &tree,
-            3,
-            &[NodeIntervalBlock {
-                node_id: HashId::convert_str("test-a-node"),
-                start: 0,
-                end: 10,
-                sequence_start: 0,
-                sequence_end: 10,
-                strand: Strand::Forward,
-            }],
-        );
-        interval_tree_verify(
-            &tree2,
-            3,
-            &[NodeIntervalBlock {
-                node_id: HashId::convert_str("test-a-node"),
-                start: 0,
-                end: 10,
-                sequence_start: 0,
-                sequence_end: 10,
-                strand: Strand::Forward,
-            }],
-        );
-        interval_tree_verify(
-            &tree,
-            35,
-            &[NodeIntervalBlock {
-                node_id: HashId::convert_str("test-g-node"),
-                start: 30,
-                end: 40,
-                sequence_start: 0,
-                sequence_end: 10,
-                strand: Strand::Forward,
-            }],
-        );
-        interval_tree_verify(
-            &tree2,
-            35,
-            &[NodeIntervalBlock {
-                node_id: HashId::convert_str("test-g-node"),
-                start: 30,
-                end: 40,
-                sequence_start: 0,
-                sequence_end: 10,
-                strand: Strand::Forward,
-            }],
-        );
-
-        // This blockgroup has a change from positions 7-15 of 4 base pairs -- so any changes after this will be ambiguous
-        let tree = BlockGroup::intervaltree_for(conn, &new_bg_id, false).unwrap();
-        let tree2 = BlockGroup::intervaltree_for(conn, &new_bg_id, true).unwrap();
-        interval_tree_verify(
-            &tree,
-            3,
-            &[NodeIntervalBlock {
-                node_id: HashId::convert_str("test-a-node"),
-                start: 0,
-                end: 7,
-                sequence_start: 0,
-                sequence_end: 7,
-                strand: Strand::Forward,
-            }],
-        );
-        interval_tree_verify(
-            &tree2,
-            3,
-            &[NodeIntervalBlock {
-                node_id: HashId::convert_str("test-a-node"),
-                start: 0,
-                end: 7,
-                sequence_start: 0,
-                sequence_end: 7,
-                strand: Strand::Forward,
-            }],
-        );
-        interval_tree_verify(
-            &tree,
-            30,
-            &[
-                NodeIntervalBlock {
-                    node_id: HashId::convert_str("test-g-node"),
-                    start: 26,
-                    end: 36,
-                    sequence_start: 0,
-                    sequence_end: 10,
-                    strand: Strand::Forward,
-                },
-                NodeIntervalBlock {
-                    node_id: HashId::convert_str("test-g-node"),
-                    start: 30,
-                    end: 40,
-                    sequence_start: 0,
-                    sequence_end: 10,
-                    strand: Strand::Forward,
-                },
-            ],
-        );
-        interval_tree_verify(&tree2, 30, &[]);
-        // TODO: This case should return [] because there are 2 distinct nodes at this position and thus it is ambiguous.
-        // currently, the caller needs to filter these out.
-        interval_tree_verify(
-            &tree2,
-            9,
-            &[
-                NodeIntervalBlock {
-                    node_id: HashId::convert_str("insert-node"),
-                    start: 7,
-                    end: 11,
-                    sequence_start: 0,
-                    sequence_end: 4,
-                    strand: Strand::Forward,
-                },
-                NodeIntervalBlock {
-                    node_id: HashId::convert_str("test-a-node"),
-                    start: 7,
-                    end: 10,
-                    sequence_start: 7,
-                    sequence_end: 10,
-                    strand: Strand::Forward,
-                },
-            ],
-        );
     }
 }

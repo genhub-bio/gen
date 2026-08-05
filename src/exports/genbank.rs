@@ -297,7 +297,7 @@ pub fn export_genbank(
         )?;
 
         // Identify the node traversal corresponding to our path.
-        let graph = BlockGroup::get_graph(conn, &block_group.id, history_ref)?;
+        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, history_ref)?;
         let path_nodes = get_path_nodes(&graph, &path_blocks);
         let path_node_set: HashSet<&GraphNode> = HashSet::from_iter(&path_nodes);
         let mut node_it = path_nodes.iter().peekable();

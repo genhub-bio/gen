@@ -310,9 +310,9 @@ fn update_path_library(
         false,
     )?;
 
-    let resolved_with_positions = resolved_region
-        .find_graph_positions(conn, 0, 0)
-        .map_err(UpdateWithLibraryError::from)?;
+    let resolved_with_positions =
+        gen_graph::models::find_region_graph_positions(resolved_region, conn, 0, 0)
+            .map_err(UpdateWithLibraryError::from)?;
     let splice_point = &resolved_with_positions.start_anchors.unwrap()[0];
     let location_accession = create_location_accession(conn, target_block_group.id, splice_point)?;
     create_part_annotations(
@@ -388,8 +388,7 @@ fn update_graph_native_library(
     target_block_group: &BlockGroup,
     parts_list: Vec<Vec<SequencePart>>,
 ) -> Result<(), UpdateWithLibraryError> {
-    let resolved = resolved_region
-        .find_graph_positions(conn, 0, 0)
+    let resolved = gen_graph::models::find_region_graph_positions(resolved_region, conn, 0, 0)
         .map_err(UpdateWithLibraryError::from)?;
     let start_positions = resolved.start_anchors.as_ref().unwrap();
     let end_positions = resolved.end_anchors.as_ref().unwrap();
@@ -500,10 +499,7 @@ mod tests {
 
     use anyhow::Result;
     use gen_models::{
-        annotations::{Annotation, add_annotation},
-        block_group::BlockGroup,
-        path::Path,
-        sample_lineage::SampleLineage,
+        annotations::Annotation, block_group::BlockGroup, path::Path, sample_lineage::SampleLineage,
     };
 
     use super::*;
@@ -654,7 +650,15 @@ mod tests {
             false,
         )
         .unwrap();
-        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+        gen_graph::models::add_annotation(
+            &context,
+            &collection,
+            "foobar",
+            None,
+            "simple",
+            "m123:5-20",
+        )
+        .unwrap();
 
         Sample::get_or_create_child(conn, &collection, "derived", vec!["simple".to_string()])
             .unwrap();
@@ -710,7 +714,15 @@ mod tests {
             false,
         )
         .unwrap();
-        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+        gen_graph::models::add_annotation(
+            &context,
+            &collection,
+            "foobar",
+            None,
+            "simple",
+            "m123:5-20",
+        )
+        .unwrap();
 
         let binding = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
         let parts_path = binding.to_str().unwrap();

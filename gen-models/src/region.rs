@@ -3,17 +3,14 @@ use gen_core::{
     GraphNodePosition, HashId, NodeIntervalBlock,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
-use gen_graph::graph_loader::{self, RegionPositionQuery};
 use intervaltree::IntervalTree;
 use thiserror::Error;
 
 use crate::{
     accession::{Accession, AccessionError},
     annotations::{Annotation, AnnotationError},
-    block_group::{BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource},
-    block_group_edge::AugmentedEdgeData,
+    block_group::{BlockGroup, BlockGroupError, IntervalTreeSource},
     db::GraphConnection,
-    edge::EdgeData,
     errors::PathError,
     path::Path,
     traits::Query,
@@ -488,122 +485,10 @@ impl ResolvedGenRegion {
                 })?;
                 Ok(accession.intervaltree(conn)?)
             }
-            ResolvedRegionKind::BlockGroup => Ok(BlockGroup::intervaltree_for(
-                conn,
-                &self.block_group.id,
-                self.remove_ambiguous_positions,
-            )?),
+            ResolvedRegionKind::BlockGroup => Err(GenRegionError::Unmappable(
+                "block-group regions require graph projection".to_string(),
+            )),
         }
-    }
-
-    pub fn find_graph_positions(
-        &self,
-        conn: &GraphConnection,
-        start_offset: i64,
-        end_offset: i64,
-    ) -> Result<Self, gen_graph::GraphError> {
-        let (start_positions, end_positions) =
-            self.compute_graph_positions(conn, start_offset, end_offset)?;
-        let mut region = self.clone();
-        region.start_anchors = Some(start_positions);
-        region.end_anchors = Some(end_positions);
-        Ok(region)
-    }
-
-    fn compute_graph_positions(
-        &self,
-        conn: &GraphConnection,
-        start_offset: i64,
-        end_offset: i64,
-    ) -> Result<(Vec<GraphNodePosition>, Vec<GraphNodePosition>), gen_graph::GraphError> {
-        let interval_tree = self
-            .intervaltree(conn)
-            .map_err(|_| gen_graph::GraphError::NoPath)?;
-        graph_loader::resolve_region_positions(
-            &interval_tree,
-            RegionPositionQuery {
-                start: self.start,
-                end: self.end,
-                start_offset,
-                end_offset,
-            },
-            |node_id| {
-                crate::node::Node::query_nodes_length(conn, &[node_id])
-                    .ok()
-                    .and_then(|lengths| lengths.get(&node_id).copied())
-            },
-            |graph, node_id| crate::graph::expand(conn, graph, &self.block_group.id, node_id),
-        )
-    }
-
-    #[cfg_attr(
-        feature = "profiling",
-        tracing::instrument(skip(self, conn, change, tree))
-    )]
-    pub fn plan_edges(
-        &self,
-        conn: &GraphConnection,
-        change: &BlockGroupChange,
-        tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
-        match self.kind {
-            ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
-                let local_tree;
-                let tree = match tree {
-                    Some(tree) => tree,
-                    None => {
-                        local_tree = IntervalTreeSource::intervaltree(self, conn)?;
-                        &local_tree
-                    }
-                };
-                return BlockGroup::set_up_new_edges(change, tree);
-            }
-            ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {}
-        };
-
-        let graph_positions_from_tree = |coordinate| {
-            let positions = graph_loader::positions_at_coordinate(tree?, coordinate);
-            (!positions.is_empty()).then_some(positions)
-        };
-
-        let (start_positions, end_positions) =
-            if let (Some(start), Some(end)) = (&self.start_anchors, &self.end_anchors) {
-                (start.clone(), end.clone())
-            } else if let Some(start_positions) = graph_positions_from_tree(self.start)
-                && let Some(end_positions) = graph_positions_from_tree(self.end)
-            {
-                (start_positions, end_positions)
-            } else {
-                let resolved = self
-                    .find_graph_positions(conn, 0, 0)
-                    .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?;
-                (
-                    resolved.start_anchors.expect("should have start anchors"),
-                    resolved.end_anchors.expect("should have end anchors"),
-                )
-            };
-        Ok(graph_loader::plan_region_edges(
-            &start_positions,
-            &end_positions,
-            &change.block,
-            change.preserve_edge,
-            change.chromosome_index,
-            change.phased,
-        )
-        .into_iter()
-        .map(|edge| AugmentedEdgeData {
-            edge_data: EdgeData {
-                source_node_id: edge.source_node_id,
-                source_coordinate: edge.source_coordinate,
-                source_strand: edge.source_strand,
-                target_node_id: edge.target_node_id,
-                target_coordinate: edge.target_coordinate,
-                target_strand: edge.target_strand,
-            },
-            chromosome_index: edge.chromosome_index,
-            phased: edge.phased,
-        })
-        .collect())
     }
 }
 

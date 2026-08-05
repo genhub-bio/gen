@@ -1442,6 +1442,7 @@ dependencies = [
  "hex",
  "itertools",
  "noodles",
+ "petgraph",
  "pyo3",
  "pyo3-macros",
  "rand 0.10.1",
@@ -1472,8 +1473,10 @@ name = "gen-graph"
 version = "0.2.1"
 dependencies = [
  "gen-core",
+ "gen-models",
  "interavl",
  "intervaltree",
+ "itertools",
  "petgraph",
  "serde",
  "thiserror 2.0.18",
@@ -1490,7 +1493,6 @@ dependencies = [
  "fallible-streaming-iterator",
  "gen-capnp-schemas",
  "gen-core",
- "gen-graph",
  "include_dir",
  "indexmap",
  "intervaltree",

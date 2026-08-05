@@ -269,7 +269,7 @@ fn list_annotation_records(
     sample_name: &str,
     name: &str,
 ) -> std::result::Result<List, Error> {
-    let graph = BlockGroup::get_graph(conn, block_group_id, None)
+    let graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)
         .map_err(|e| Error::Other(e.to_string()))?;
     let annotations = Annotation::query_with_lineage(conn, collection_name, sample_name, name)
         .map_err(|e| Error::Other(e.to_string()))?;
@@ -1875,7 +1875,7 @@ impl Repository {
                 .collect()
         };
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, &bg.id, None)
+            let graph = gen_graph::models::load_block_group_graph(conn, &bg.id, None)
                 .map_err(|e| Error::Other(e.to_string()))?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index = SeedIndex::build(&matcher, k as usize, normalized);
@@ -1914,7 +1914,7 @@ impl Repository {
             .join("search_index");
         let mut results = Vec::new();
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, &bg.id, None)
+            let graph = gen_graph::models::load_block_group_graph(conn, &bg.id, None)
                 .map_err(|e| Error::Other(e.to_string()))?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index_path = index_dir.join(format!("{}.bin", bg.id));
@@ -2067,8 +2067,8 @@ impl Repository {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph =
-            BlockGroup::get_graph(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
+        let graph = gen_graph::models::load_block_group_graph(conn, &bg_id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
@@ -2154,8 +2154,8 @@ impl Repository {
     ) -> std::result::Result<bool, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph =
-            BlockGroup::get_graph(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
+        let graph = gen_graph::models::load_block_group_graph(conn, &bg_id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
@@ -2314,8 +2314,8 @@ impl SequenceGraph {
             .join("search_index");
         fs::create_dir_all(&index_dir)
             .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
+        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let index = SeedIndex::build(&matcher, k as usize, normalized);
         let path = index_dir.join(format!("{}.bin", self.id));
@@ -2328,8 +2328,8 @@ impl SequenceGraph {
     fn search(&self, query: String, sequence_kind: String) -> std::result::Result<List, Error> {
         let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
         let conn = self.context.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
+        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let index_dir = self
             .context
@@ -2462,8 +2462,8 @@ impl SequenceGraph {
 
     fn to_dict(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
+        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
 
         let nodes = graph
             .nodes()

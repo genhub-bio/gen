@@ -370,7 +370,7 @@ pub fn import_gfa(
     let bar = progress_bar.add(get_progress_bar(None));
     bar.set_message("Breaking cycles");
     let message_bar = progress_bar.add(get_message_bar());
-    let graph = BlockGroup::get_graph(conn, &block_group.id, None)?;
+    let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None)?;
     let mut undirected_graph: UnGraphMap<GraphNode, GraphEdge> = UnGraphMap::new();
     for node in graph.nodes() {
         undirected_graph.add_node(node);

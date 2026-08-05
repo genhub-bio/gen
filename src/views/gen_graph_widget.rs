@@ -252,7 +252,7 @@ pub fn create_gen_graph_widget(
     GraphWidget::with_renderer(renderer)
 }
 
-/// Compute which edges would be removed by `BlockGroup::prune_graph`.
+/// Compute which edges would be removed by `gen_graph::models::prune_graph`.
 ///
 /// Mirrors the per-source-node, per-chromosome_index deduplication logic: for each
 /// chromosome_index appearing on outgoing edges of a node, the edge with the highest
@@ -1108,7 +1108,8 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1", None).unwrap();
+        let gen_graph =
+            gen_graph::models::load_sample_graph(conn, collection, "SAMPLE1", None).unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);
@@ -1156,7 +1157,9 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, Sample::DEFAULT_NAME, None).unwrap();
+        let gen_graph =
+            gen_graph::models::load_sample_graph(conn, collection, Sample::DEFAULT_NAME, None)
+                .unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let block = controller

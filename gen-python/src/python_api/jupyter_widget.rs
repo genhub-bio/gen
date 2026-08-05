@@ -1089,8 +1089,8 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
         .path()
         .map(PathBuf::from)
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-    let graph =
-        BlockGroup::get_graph(graph_conn, &sg.id, None).map_err(block_group_err_to_pyerr)?;
+    let graph = gen_graph::models::load_block_group_graph(graph_conn, &sg.id, None)
+        .map_err(block_group_err_to_pyerr)?;
     let mut page = GraphPage::new(sg.name.clone(), db_path, graph);
     page.block_group_id = Some(sg.id);
     Ok(page)
@@ -1190,8 +1190,9 @@ impl PyGraphController {
         if let Page::Pending(page_ref) = page {
             let conn = get_connection(&page_ref.db_path)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            let graph = BlockGroup::get_graph(&conn, &page_ref.block_group_id, None)
-                .map_err(block_group_err_to_pyerr)?;
+            let graph =
+                gen_graph::models::load_block_group_graph(&conn, &page_ref.block_group_id, None)
+                    .map_err(block_group_err_to_pyerr)?;
             let mut loaded = GraphPage::new(page_ref.name.clone(), page_ref.db_path.clone(), graph);
             loaded.block_group_id = Some(page_ref.block_group_id);
             *page = Page::Loaded(Box::new(loaded));
@@ -1514,7 +1515,7 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("test DB must be file-backed");
         let (bg_id, _) = setup_block_group(graph_handle.conn());
-        let graph = BlockGroup::get_graph(graph_handle.conn(), &bg_id, None)
+        let graph = gen_graph::models::load_block_group_graph(graph_handle.conn(), &bg_id, None)
             .map_err(crate::python_api::utils::block_group_err_to_pyerr)?;
         let mut ctrl = PyGraphController::new(db_path, graph);
         if let Some(node_detail) = detail {

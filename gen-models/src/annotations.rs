@@ -24,6 +24,7 @@ use crate::{
         FileAddition, OperationAssetRecord, OperationFile, OperationInfo, OperationSummary,
         track_operation_assets,
     },
+    region::ResolvedGenRegion,
     traits::Query,
 };
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -705,19 +706,15 @@ pub fn annotation_index_file_path(
     None
 }
 
-pub fn add_annotation(
+pub fn persist_annotation(
     context: &DbContext,
-    collection: &str,
     name: &str,
     group: Option<&str>,
     sample: &str,
-    region: &str,
+    resolved_region: &ResolvedGenRegion,
+    spans: Vec<AccessionSpan>,
 ) -> Result<OperationSummary, Box<dyn std::error::Error>> {
     let graph_conn = context.graph().conn();
-    let parsed_region = Region::parse(region)?;
-    let resolved_region = crate::region::resolve(&parsed_region, graph_conn, collection, sample)?;
-    let spans = AccessionSpan::from_resolved_region(graph_conn, &resolved_region, None)?;
-
     let accession = Accession::get_or_create(
         graph_conn,
         &NewAccession {
@@ -860,7 +857,7 @@ mod tests {
         block_group::{BlockGroup, PathCache},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         errors::OperationError,
-        operations::{calculate_reader_checksum, commit_operation_summary},
+        operations::calculate_reader_checksum,
         path::Path,
         path_edge::PathEdge,
         sample::Sample,
@@ -1376,66 +1373,6 @@ mod tests {
         );
         let err = parse_annotation_file_type("bam").unwrap_err();
         assert!(matches!(err, AnnotationFileError::UnsupportedFileType(_)));
-    }
-
-    #[test]
-    fn add_annotation_creates_annotation() {
-        let context = setup_gen();
-        let graph_conn = context.graph().conn();
-        let history_store = DoltHistoryStore::new(graph_conn);
-        let _ = setup_block_group(graph_conn);
-
-        let operation_summary = add_annotation(
-            &context,
-            "test",
-            "gene-a",
-            Some("track-1"),
-            "test",
-            "chr1:1-5",
-        )
-        .unwrap();
-        let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
-        assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(graph_conn);
-        operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
-        assert_eq!(
-            operation_logs[0].operation_kind,
-            OperationKind::Other("add annotation gene-a".to_string())
-        );
-
-        let annotations = Annotation::query_by_group(graph_conn, "track-1", None).unwrap();
-        assert_eq!(annotations.len(), 1);
-        assert_eq!(annotations[0].name, "gene-a");
-    }
-
-    #[test]
-    fn test_add_annotation_detects_no_changes() {
-        let context = setup_gen();
-        let graph_conn = context.graph().conn();
-        let _ = setup_block_group(graph_conn);
-
-        let operation_summary = add_annotation(
-            &context,
-            "test",
-            "gene-a",
-            Some("track-1"),
-            "test",
-            "chr1:1-5",
-        )
-        .unwrap();
-        commit_operation_summary(&context, &operation_summary).unwrap();
-
-        let operation_summary = add_annotation(
-            &context,
-            "test",
-            "gene-a",
-            Some("track-1"),
-            "test",
-            "chr1:1-5",
-        )
-        .unwrap();
-        let err = commit_operation_summary(&context, &operation_summary).unwrap_err();
-        assert_eq!(err, OperationError::NoChanges);
     }
 
     #[test]
