@@ -1500,7 +1500,6 @@ impl PyGraphController {
 #[cfg(test)]
 mod tests {
     use r#gen::test_helpers::{setup_block_group, setup_gen_on_disk};
-    use gen_models::block_group::BlockGroup;
     use pyo3::{exceptions::PyValueError, prelude::*};
     use serde_json::Value;
 
