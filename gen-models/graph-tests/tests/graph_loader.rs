@@ -4,14 +4,14 @@ use gen_core::{
     GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock, PATH_END_NODE_ID,
     PATH_START_NODE_ID, Strand,
 };
-use gen_graph::{GraphEdge, graph_from_interval_tree};
+use gen_graph::{GraphEdge, graph_from_interval_tree, graph_loader};
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
     db::GraphConnection,
     edge::Edge,
-    graph::{ResolvedGraph, expand, find_offset},
+    graph::expand,
     node::Node,
     sample::{NewSample, Sample},
     sequence::Sequence,
@@ -215,12 +215,12 @@ fn test_find_offset_within_subset_node() {
         offset: 0,
     };
 
-    let result = find_offset(&mut graph, &anchor, 3, |g, nid| {
+    let result = graph_loader::find_offset(&mut graph, &anchor, 3, |g, nid| {
         expand(&conn, g, &bg_id, nid)
     });
     assert!(
         result.is_ok(),
-        "find_offset(3) should succeed: {:?}",
+        "graph_loader::find_offset(3) should succeed: {:?}",
         result.err()
     );
     let positions = result.unwrap();
@@ -245,12 +245,12 @@ fn test_find_offset_forward_expands_beyond_subset() {
         offset: 0,
     };
 
-    let result = find_offset(&mut graph, &anchor, 7, |g, nid| {
+    let result = graph_loader::find_offset(&mut graph, &anchor, 7, |g, nid| {
         expand(&conn, g, &bg_id, nid)
     });
     assert!(
         result.is_ok(),
-        "find_offset(7) should expand to Z: {:?}",
+        "graph_loader::find_offset(7) should expand to Z: {:?}",
         result.err()
     );
     let positions = result.unwrap();
@@ -294,12 +294,12 @@ fn test_find_offset_forward_expands_after_existing_paths_fail() {
         offset: 0,
     };
 
-    let result = find_offset(&mut graph, &anchor, 7, |g, nid| {
+    let result = graph_loader::find_offset(&mut graph, &anchor, 7, |g, nid| {
         expand(&conn, g, &bg_id, nid)
     });
     assert!(
         result.is_ok(),
-        "find_offset(7) should expand from Y after the existing path fails: {:?}",
+        "graph_loader::find_offset(7) should expand from Y after the existing path fails: {:?}",
         result.err()
     );
     let positions = result.unwrap();
@@ -327,12 +327,12 @@ fn test_find_offset_backward_expands_beyond_subset() {
         offset: 0,
     };
 
-    let result = find_offset(&mut graph, &anchor, -3, |g, nid| {
+    let result = graph_loader::find_offset(&mut graph, &anchor, -3, |g, nid| {
         expand(&conn, g, &bg_id, nid)
     });
     assert!(
         result.is_ok(),
-        "find_offset(-3) should expand to X: {:?}",
+        "graph_loader::find_offset(-3) should expand to X: {:?}",
         result.err()
     );
     let positions = result.unwrap();
@@ -360,7 +360,7 @@ fn test_find_offset_out_of_bounds_with_expansion() {
         offset: 0,
     };
 
-    let result = find_offset(&mut graph, &anchor, 100, |g, nid| {
+    let result = graph_loader::find_offset(&mut graph, &anchor, 100, |g, nid| {
         expand(&conn, g, &bg_id, nid)
     });
     assert!(result.is_err());
@@ -395,7 +395,7 @@ fn test_find_offset_with_fragment_node() {
         offset: 0,
     };
 
-    let result = find_offset(&mut graph, &anchor, 2, |g, nid| {
+    let result = graph_loader::find_offset(&mut graph, &anchor, 2, |g, nid| {
         expand(&conn, g, &bg_id, nid)
     });
     assert!(result.is_ok());
@@ -425,13 +425,18 @@ fn resolve_anchor_before_fragment_stays_on_same_backing_node() {
     .into_iter()
     .collect();
     let graph = graph_from_interval_tree(&tree);
-    let resolved = ResolvedGraph {
-        graph,
-        interval_tree: tree,
-        block_group_id: bg_id,
-    };
-
-    let position = resolved.resolve_anchor(-2, &conn).unwrap();
+    let position = graph_loader::resolve_anchor(
+        &graph,
+        &tree,
+        -2,
+        |node_id| {
+            Node::query_nodes_length(&conn, &[node_id])
+                .ok()
+                .and_then(|lengths| lengths.get(&node_id).copied())
+        },
+        |graph, node_id| expand(&conn, graph, &bg_id, node_id),
+    )
+    .unwrap();
 
     assert_eq!(
         position.graph_node,
@@ -483,7 +488,7 @@ fn test_find_offset_in_variable_length_branch_finds_middle_nodes() {
         offset: 2,
     };
 
-    let from_aaa = find_offset(&mut graph, &aaa_anchor, 2, |_, _| false).unwrap();
+    let from_aaa = graph_loader::find_offset(&mut graph, &aaa_anchor, 2, |_, _| false).unwrap();
     assert_eq!(
         position_set(&from_aaa),
         HashSet::from([
@@ -500,7 +505,7 @@ fn test_find_offset_in_variable_length_branch_finds_middle_nodes() {
         },
         offset: 0,
     };
-    let from_ttt = find_offset(&mut graph, &ttt_anchor, -2, |_, _| false).unwrap();
+    let from_ttt = graph_loader::find_offset(&mut graph, &ttt_anchor, -2, |_, _| false).unwrap();
     assert_eq!(
         position_set(&from_ttt),
         HashSet::from([
@@ -522,7 +527,7 @@ fn test_find_offset_in_variable_length_branch_returns_single_position_within_nod
         offset: 1,
     };
 
-    let positions = find_offset(&mut graph, &anchor, 1, |_, _| false).unwrap();
+    let positions = graph_loader::find_offset(&mut graph, &anchor, 1, |_, _| false).unwrap();
     assert_eq!(
         position_set(&positions),
         HashSet::from([(HashId::convert_str("node-aaa"), 2)])
@@ -541,7 +546,7 @@ fn test_find_offset_in_variable_length_branch_finds_different_ttt_offsets() {
         offset: 2,
     };
 
-    let positions = find_offset(&mut graph, &anchor, 6, |_, _| false).unwrap();
+    let positions = graph_loader::find_offset(&mut graph, &anchor, 6, |_, _| false).unwrap();
     assert_eq!(
         position_set(&positions),
         HashSet::from([
