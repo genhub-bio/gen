@@ -77,7 +77,8 @@ where
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     let path = BlockGroup::get_current_path(conn, &bg.id, history_ref)?;
-                    let graph = BlockGroup::get_graph(conn, &bg.id, history_ref)?;
+                    let graph =
+                        gen_graph::models::load_block_group_graph(conn, &bg.id, history_ref)?;
                     let mut tree = IntervalTree::default();
                     let mut position: i64 = 0;
                     for (node, strand) in project_path(&graph, &path.blocks(conn, history_ref)?) {

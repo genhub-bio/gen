@@ -8,6 +8,7 @@ pub mod config;
 pub mod errors;
 #[allow(clippy::all)]
 pub mod generated;
+pub mod graph;
 pub mod path;
 pub mod range;
 pub mod region;
@@ -17,6 +18,10 @@ pub mod traits;
 pub use config::Workspace;
 use errors::HashError;
 pub use generated::gen_core_capnp;
+pub use graph::{
+    GenGraph, GraphEdge, GraphLoadBlock, GraphLoadEdge, GraphNode, GraphNodePosition,
+    GraphNodeSlice,
+};
 pub use path::PathBlock;
 #[cfg(feature = "python-bindings")]
 use pyo3::pyclass;

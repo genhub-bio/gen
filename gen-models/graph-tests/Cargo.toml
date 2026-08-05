@@ -1,0 +1,15 @@
+[package]
+name = "gen-models-graph-tests"
+description = "Graph-backed integration tests for gen-models workflows.  They are unit tests that rely on functions from gen-graph, so we keep them separate from the regular gen-models tests to avoid circular dependencies between gen-models and gen-graph"
+version = "0.2.1"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+gen-core = { path = "../../gen-core", version = "0.2.1" }
+gen-graph = { path = "../../gen-graph", version = "0.2.1" }
+gen-models = { path = "..", version = "0.2.1" }
+intervaltree = "0.2.7"
+rusqlite = { package = "rusqdoltlite", version = "0.40.14", features = ["bundled", "array", "limits", "fallible_uint", "backup"] }
+tempfile = "3.20.0"

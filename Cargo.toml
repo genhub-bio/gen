@@ -21,8 +21,8 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
-default-members = [".", "gen-core", "gen-models", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
+members = [".", "gen-core", "gen-models", "gen-models/graph-tests", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
+default-members = [".", "gen-core", "gen-models", "gen-models/graph-tests", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
 exclude = ["gen-python", "gen-r/src/rust"]
 
 [features]
@@ -93,6 +93,7 @@ pprof = { version = "0.15.0", optional = true }
 [dev-dependencies]
 cargo-llvm-cov = "0.8.5"
 cargo-deny = "0.19.0"
+gen-models-graph-tests = { path = "gen-models/graph-tests" }
 more-asserts = "0.3.1"
 insta = "1.43.1"
 

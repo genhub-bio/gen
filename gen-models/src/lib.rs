@@ -11,7 +11,6 @@ pub mod errors;
 pub mod file_types;
 #[allow(clippy::all)]
 pub mod generated;
-pub mod graph;
 pub mod history;
 pub use generated::gen_models_capnp;
 pub mod lineage;

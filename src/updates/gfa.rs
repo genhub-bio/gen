@@ -546,7 +546,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -596,7 +597,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }

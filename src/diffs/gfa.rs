@@ -419,8 +419,12 @@ mod tests {
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_child_sequences =
-            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false).unwrap();
+        let all_child_sequences = gen_graph::models::get_all_sequences_with_pruning(
+            conn,
+            &new_child_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // We've replaced the middle AAAA with CCCC, so expect that as the child sequence
         assert_eq!(
@@ -504,8 +508,12 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 3", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
+        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+            conn,
+            &new_grandchild_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // We've replaced the middle AAAA with CCCC and the middle TTTT with GGGG, so four possible sequences
         assert_eq!(
@@ -535,8 +543,12 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 4", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
+        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+            conn,
+            &new_grandchild_block_group.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             all_grandchild_sequences,
@@ -643,7 +655,8 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+            gen_graph::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
+                .unwrap();
 
         assert_eq!(
             all_sequences,
@@ -750,7 +763,8 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+            gen_graph::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
+                .unwrap();
 
         assert_eq!(
             all_sequences,
@@ -916,7 +930,8 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+            gen_graph::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
+                .unwrap();
 
         assert_eq!(
             all_sequences,
@@ -1083,7 +1098,8 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+            gen_graph::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
+                .unwrap();
 
         assert_eq!(
             all_sequences,
@@ -1225,8 +1241,12 @@ mod tests {
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_child_sequences =
-            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false).unwrap();
+        let all_child_sequences = gen_graph::models::get_all_sequences_with_pruning(
+            conn,
+            &new_child_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // We've replaced [2, 6) of AAAA with CCCC
         assert_eq!(
@@ -1311,8 +1331,12 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 3", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
+        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+            conn,
+            &new_grandchild_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // Original is AAAAAAAAAAAAAAAA
         // Grandchild is AACCGGGGAAAAAA
@@ -1339,8 +1363,12 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 4", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
+        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+            conn,
+            &new_grandchild_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // Child is      AACCCCAAAAAAAAAA
         // Grandchild is AACCGGGGAAAAAA

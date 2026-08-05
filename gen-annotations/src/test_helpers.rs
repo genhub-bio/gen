@@ -190,5 +190,5 @@ pub fn setup_test_data(conn: &GraphConnection) {
         preserve_edge: false,
     };
 
-    BlockGroup::insert_change(conn, &change).expect("should apply variant change");
+    gen_graph::models::insert_change(conn, &change).expect("should apply variant change");
 }

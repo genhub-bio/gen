@@ -1,7 +1,6 @@
 use std::{collections::HashSet, rc::Rc};
 
 use gen_core::traits::Capnp;
-use gen_graph::GenGraph;
 use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -177,46 +176,6 @@ impl Sample {
     pub fn delete_by_name(conn: &GraphConnection, name: &str) {
         let mut stmt = conn.prepare("delete from samples where name = ?1").unwrap();
         stmt.execute([name]).unwrap();
-    }
-
-    pub fn get_graph(
-        conn: &GraphConnection,
-        collection: &str,
-        name: &str,
-        history_ref: Option<&str>,
-    ) -> Result<GenGraph, SampleError> {
-        let block_groups = Sample::get_block_groups(conn, collection, name, history_ref);
-        let mut sample_graph = GenGraph::new();
-        for bg in block_groups {
-            let bg_graph = BlockGroup::get_graph(conn, &bg.id, history_ref)?;
-            // Add nodes and edges from block group graph to sample graph
-            for node in bg_graph.nodes() {
-                sample_graph.add_node(node);
-            }
-            for (source, dest, edges) in bg_graph.all_edges() {
-                if let Some(existing_edges) = sample_graph.edge_weight_mut(source, dest) {
-                    existing_edges.extend(edges.clone());
-                } else {
-                    sample_graph.add_edge(source, dest, edges.clone());
-                }
-            }
-        }
-        Ok(sample_graph)
-    }
-
-    pub fn get_all_sequences(
-        conn: &GraphConnection,
-        collection_name: &str,
-        sample_name: &str,
-        prune: bool,
-        history_ref: Option<&str>,
-    ) -> Result<HashSet<String>, SampleError> {
-        let mut sequences = HashSet::new();
-        for block_group in Sample::get_block_groups(conn, collection_name, sample_name, history_ref)
-        {
-            sequences.extend(BlockGroup::get_all_sequences(conn, &block_group.id, prune)?);
-        }
-        Ok(sequences)
     }
 
     pub fn get_or_create_child(

@@ -304,7 +304,8 @@ mod tests {
             preserve_edge: true,
         };
 
-        BlockGroup::insert_change(conn, &change).expect("should apply AA update to child sample");
+        gen_graph::models::insert_change(conn, &change)
+            .expect("should apply AA update to child sample");
 
         let edge_to_insert = Edge::query(
             conn,

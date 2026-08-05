@@ -240,7 +240,6 @@ mod tests {
     use std::{collections::HashSet, io::Write, path::PathBuf};
 
     use gen_models::{
-        annotations::add_annotation,
         assets::{OperationKind, OperationLog},
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
@@ -313,7 +312,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -422,7 +422,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -489,7 +490,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -556,7 +558,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -629,7 +632,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -696,7 +700,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -761,7 +766,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -782,7 +788,15 @@ mod tests {
             false,
         )
         .unwrap();
-        add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
+        gen_graph::models::add_annotation(
+            &context,
+            &collection,
+            "foobar",
+            None,
+            "simple",
+            "m123:5-20",
+        )
+        .unwrap();
 
         Sample::get_or_create_child(conn, &collection, "derived", vec!["simple".to_string()])
             .unwrap();
@@ -805,7 +819,8 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
         let block_group = get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+                .unwrap(),
             HashSet::from_iter([
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATAAACGATCGATCGGGAACACACAGAGA".to_string(),
@@ -859,7 +874,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
 
@@ -919,7 +935,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -973,7 +990,8 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }

@@ -630,7 +630,7 @@ where
                             None,
                         ),
                     };
-                    BlockGroup::insert_change(conn, &change).unwrap();
+                    gen_graph::models::insert_change(conn, &change).unwrap();
                     applied_changes.push((edit, change_node_id));
                 }
 
@@ -1199,7 +1199,9 @@ mod tests {
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
-            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+            let seqs =
+                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                    .unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1247,7 +1249,9 @@ mod tests {
         GATGCCATTGGGATATATCAACGGTGGTATATCCAGTGATTTTTTTCTCCAT",
             );
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
-            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+            let seqs =
+                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                    .unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1294,7 +1298,7 @@ mod tests {
              GGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTACGATGCCATTGGGAT
              ATATCAACGGTGGTATATCCAGTGATTTTTTTCTC",
             );
-            let seqs = BlockGroup::get_all_sequences(
+            let seqs = gen_graph::models::get_all_sequences_with_pruning(
                 conn,
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion", None),
                 false,
@@ -1348,7 +1352,7 @@ mod tests {
              GGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTACGATGCCATTGGGAT
              ATATCAACGGTGGTATATCCAGTGATTTTTTTCTC",
             );
-            let seqs = BlockGroup::get_all_sequences(
+            let seqs = gen_graph::models::get_all_sequences_with_pruning(
                 conn,
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution", None),
                 false,
@@ -1387,7 +1391,7 @@ mod tests {
             // there would be 4! sequences so we just check we have the fully changed and unchanged sequence
             let f = reader::parse_file(&path).unwrap();
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let sequences: HashSet<String> = BlockGroup::get_all_sequences(
+            let sequences: HashSet<String> = gen_graph::models::get_all_sequences_with_pruning(
                 conn,
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None),
                 false,

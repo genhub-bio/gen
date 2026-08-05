@@ -214,7 +214,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    BlockGroup::insert_change(conn, &change).unwrap();
+                    gen_graph::models::insert_change(conn, &change).unwrap();
                 }
             }
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),
@@ -380,7 +380,7 @@ mod tests {
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(conn, &block_group_id, false)
+                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                     .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())
@@ -433,7 +433,7 @@ mod tests {
             let f = reader::parse_file(&path).unwrap();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(conn, &block_group_id, false)
+                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                     .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())
@@ -447,7 +447,7 @@ mod tests {
             // has a deletion in it.
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
             let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(conn, &block_group_id, false)
+                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                     .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())

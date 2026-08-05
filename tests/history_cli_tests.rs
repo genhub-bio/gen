@@ -287,12 +287,9 @@ mod diff_views {
         let parent_block_group_id = unknown_target_block_group
             .parent_block_group_id
             .expect("lineage-derived sample should retain parent block group id");
-        let parent_graph = gen_models::block_group::BlockGroup::get_graph(
-            &graph_conn,
-            &parent_block_group_id,
-            None,
-        )
-        .expect("should load parent block group graph");
+        let parent_graph =
+            gen_graph::models::load_block_group_graph(&graph_conn, &parent_block_group_id, None)
+                .expect("should load parent block group graph");
         assert!(
             parent_graph.nodes().next().is_some(),
             "parent block group graph should contain reference context"

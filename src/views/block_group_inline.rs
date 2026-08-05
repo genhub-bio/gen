@@ -220,7 +220,8 @@ pub fn show_inline_block_group_widget(
     height: u16,
     history_ref: Option<&str>,
 ) -> Result<bool> {
-    let graph = BlockGroup::get_graph(conn, &block_group_id, history_ref).map_err(Error::other)?;
+    let graph = gen_graph::models::load_block_group_graph(conn, &block_group_id, history_ref)
+        .map_err(Error::other)?;
     show_inline_widget(
         conn,
         &graph,

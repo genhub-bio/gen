@@ -15,8 +15,8 @@
 //! coordinate reference frame (left side = 0). But to store graph changes in
 //! the additive model in the database we must convert back to the Node format.
 
+pub use gen_core::GraphNodeSlice;
 use gen_core::{HashId, Strand};
-pub use gen_graph::GraphNodeSlice;
 
 use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
 
