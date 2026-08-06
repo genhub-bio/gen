@@ -80,7 +80,9 @@ function applyThemeBackground(mode: ThemeMode): void {
 }
 
 async function runDemo(): Promise<void> {
-  const baseUrl = window.location.href;
+  // Directory URL, not the raw href: cockle joins this with asset filenames via string
+  // concatenation, not URL resolution, so a trailing "index.html" would break it.
+  const baseUrl = new URL('.', window.location.href).href;
   const themeMode = selectThemeMode();
   // Set before the terminal opens so there is no black/white flash while xterm initializes.
   applyThemeBackground(themeMode);
