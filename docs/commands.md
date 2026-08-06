@@ -36,6 +36,14 @@ Operations are changes that have been made to the database. Commands such as `im
 To see all operations, `gen operations` will list operations. The operation the database currently is on
 will be prefixed with a `>`.
 
+# Cache
+
+Remote annotation indexes and unindexed remote annotation files are cached under
+`.gen/cache`. Indexed annotation files are read remotely by range instead of
+being downloaded in full when the server supports range requests. Otherwise,
+the file is streamed into the cache and reused locally. Run `gen cache-clear` to
+remove the cache. Local repository files and `.gen/assets` are not affected.
+
 # View diff
 
 Compare two commits or branches with:

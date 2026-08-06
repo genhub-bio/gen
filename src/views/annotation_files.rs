@@ -1,5 +1,6 @@
 use std::path::Path as FsPath;
 
+use gen_core::{HashId, Sha256Hash};
 use gen_models::{
     assets::{AssetRef, AssetUri, Assets},
     db::GraphConnection,
@@ -8,10 +9,10 @@ use gen_models::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnotationAssetEntry {
-    pub id: gen_core::HashId,
+    pub id: HashId,
     pub asset_uri: String,
     pub file_type: FileTypes,
-    pub checksum: Option<gen_core::Sha256Hash>,
+    pub checksum: Option<Sha256Hash>,
 }
 
 impl AnnotationAssetEntry {

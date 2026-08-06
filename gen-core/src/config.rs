@@ -6,6 +6,7 @@ use std::{
 use crate::errors::ConfigError;
 
 pub const ASSETS_DIR_NAME: &str = "assets";
+pub const CACHE_DIR_NAME: &str = "cache";
 pub const DEFAULT_GRAPH_DB_NAME: &str = "default.db";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +75,26 @@ impl Workspace {
             .find_gen_dir()
             .ok_or(ConfigError::GenDirectoryNotFound)?
             .join(ASSETS_DIR_NAME))
+    }
+
+    /// Returns the workspace cache location without creating it.
+    ///
+    /// Cache inspection and clearing use this path so those operations never create an empty
+    /// `.gen/cache` as a side effect.
+    pub fn find_cache_dir(&self) -> Option<PathBuf> {
+        self.find_gen_dir().map(|dir| dir.join(CACHE_DIR_NAME))
+    }
+
+    /// Creates and returns the workspace cache used for downloaded remote data.
+    ///
+    /// The directory is created lazily so repositories that only use local assets do not acquire
+    /// cache state.
+    pub fn ensure_cache_dir(&self) -> Result<PathBuf, ConfigError> {
+        let dir = self
+            .find_cache_dir()
+            .ok_or(ConfigError::GenDirectoryNotFound)?;
+        ensure_dir(&dir);
+        Ok(dir)
     }
 
     pub fn find_search_index(&self) -> Option<PathBuf> {
@@ -186,5 +207,17 @@ mod tests {
 
         assert_eq!(asset_dir, tmp_dir_path.join(".gen").join(ASSETS_DIR_NAME));
         assert!(asset_dir.is_dir());
+    }
+
+    #[test]
+    fn test_ensure_cache_dir_creates_cache_directory_lazily() {
+        let tmp_dir = tempdir().unwrap();
+        let workspace = Workspace::new(tmp_dir.path());
+        let gen_dir = workspace.ensure_gen_dir();
+        let cache_dir = gen_dir.join(CACHE_DIR_NAME);
+        assert!(!cache_dir.exists());
+
+        assert_eq!(workspace.ensure_cache_dir().unwrap(), cache_dir);
+        assert!(cache_dir.is_dir());
     }
 }

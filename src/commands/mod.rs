@@ -8,6 +8,7 @@ use gen_models::{
     operations::{OperationSummary, commit_operation_summary},
 };
 
+pub mod cache;
 pub mod checkout;
 pub mod cli_context;
 pub mod clone;
@@ -366,6 +367,9 @@ pub enum Commands {
         #[arg(short, long)]
         sample: Option<String>,
     },
+    /// Clear cached remote assets
+    #[command(name = "cache-clear")]
+    CacheClear {},
     /// Search for an exact sequence across all block groups
     ///
     /// Each match is reported with a blocks column formatted as [hash:start-end, ...],
@@ -546,6 +550,13 @@ mod tests {
             parse_diff_revisions("main..feature", None),
             Ok(("main".into(), "feature".into(), DiffRange::TwoDot))
         );
+    }
+
+    #[test]
+    fn test_cache_clear_command_parses() {
+        let cli =
+            Cli::try_parse_from(["gen", "cache-clear"]).expect("should parse cache-clear command");
+        assert!(matches!(cli.command, Some(Commands::CacheClear {})));
     }
 
     mod commit_tests {
