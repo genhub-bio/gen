@@ -78,6 +78,8 @@ webbrowser = "1.0.5"
 reqwest = { version = "0.12.23", default-features = false,features = ["blocking", "json", "multipart", "stream", "rustls-tls"] }
 rand = "0.10.1"
 base64 = "0.22.1"
+crc32c = "0.6.8"
+md-5 = "0.10.6"
 getrandom = "0.3.3"
 directories = "6.0.0"
 httparse = "1.10.1"

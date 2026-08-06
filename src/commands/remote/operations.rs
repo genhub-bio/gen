@@ -52,10 +52,12 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fs,
-    io::{self, Write as _},
+    io::{self, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
 };
 
+use base64::{Engine as _, engine::general_purpose};
+use crc32c::crc32c_append;
 use gen_core::{
     DoltHashId, HashId, Sha256Hash,
     config::{DEFAULT_GRAPH_DB_NAME, Workspace},
@@ -69,15 +71,18 @@ use gen_models::{
     },
     operations::{Defaults, Remote, RemoteBranch, calculate_file_checksum},
 };
+use md5::Md5;
 use reqwest::blocking::{Body, Client};
 use rusqlite::Error as SqlError;
+use sha2::{Digest as _, Sha256};
 use url::Url;
 
 use crate::{
     commands::remote::{
         client::{
-            AssetTransferRequest, CapabilityRequest, RemoteOperation, RepositoryRemote,
-            acquire_asset_transfers, acquire_capability,
+            AssetTransferCompletionRequest, AssetTransferRequest, AssetUploadReceipt,
+            CapabilityRequest, RemoteOperation, RepositoryRemote, acquire_asset_transfers,
+            acquire_capability, complete_asset_transfers,
         },
         login_origin,
     },
@@ -219,12 +224,35 @@ fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
         .ok_or_else(|| format!("Local asset {} has no checksum", asset.id).into())
 }
 
+fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String), std::io::Error> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut sha256 = Sha256::new();
+    let mut md5 = Md5::new();
+    let mut crc32c = 0;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let length = reader.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        sha256.update(&buffer[..length]);
+        md5.update(&buffer[..length]);
+        crc32c = crc32c_append(crc32c, &buffer[..length]);
+    }
+    Ok((
+        Sha256Hash(sha256.finalize().into()),
+        general_purpose::STANDARD.encode(md5.finalize()),
+        general_purpose::STANDARD.encode(crc32c.to_be_bytes()),
+    ))
+}
+
 fn upload_asset(
     client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<AssetUploadReceipt, Box<dyn Error>> {
     let relative_path = LocalAssetUri::path_from_uri(&asset.uri)
         .ok_or_else(|| format!("Invalid local asset URI: {}", asset.uri))?;
     let expected_checksum = asset_checksum(asset)?;
@@ -239,13 +267,14 @@ fn upload_asset(
             asset.logical_path.as_deref(),
         )?
     };
-    let actual_checksum = calculate_file_checksum(&source_path).map_err(|error| {
-        format!(
-            "Unable to read asset {} at {}: {error}",
-            asset.id,
-            source_path.display()
-        )
-    })?;
+    let (actual_checksum, md5, crc32c) =
+        calculate_upload_checksums(&source_path).map_err(|error| {
+            format!(
+                "Unable to read asset {} at {}: {error}",
+                asset.id,
+                source_path.display()
+            )
+        })?;
     if actual_checksum != expected_checksum {
         return Err(format!(
             "Asset {} at {} does not match its recorded checksum",
@@ -259,10 +288,16 @@ fn upload_asset(
     let response = client
         .put(url)
         .header("content-type", "application/octet-stream")
+        // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
+        // composite objects (those > 5GB)
+        .header("content-md5", &md5)
+        .header("x-goog-if-generation-match", "0")
         .body(Body::sized(file, length))
         .send()
         .map_err(|error| error.without_url())?;
-    if !response.status().is_success() {
+    if !response.status().is_success()
+        && response.status() != reqwest::StatusCode::PRECONDITION_FAILED
+    {
         return Err(format!(
             "Asset {} upload failed with HTTP {}",
             asset.id,
@@ -270,7 +305,10 @@ fn upload_asset(
         )
         .into());
     }
-    Ok(())
+    Ok(AssetUploadReceipt {
+        id: asset.id,
+        crc32c,
+    })
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -437,9 +475,9 @@ fn transfer_assets(
     operation: RemoteOperation,
     branch: &str,
     previous_hash: Option<&DoltHashId>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<AssetUploadReceipt>, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let repository = RepositoryRemote::parse(&remote.url)?;
     let response = acquire_asset_transfers(
@@ -474,6 +512,7 @@ fn transfer_assets(
         .map(|(id, asset)| (*id, asset.clone()))
         .collect();
     let client = Client::new();
+    let mut upload_receipts = Vec::new();
     for transfer in response.assets {
         let Some(asset) = assets.remove(&transfer.id) else {
             if current_assets.contains_key(&transfer.id)
@@ -488,7 +527,9 @@ fn transfer_assets(
             .into());
         };
         match operation {
-            RemoteOperation::Push => upload_asset(&client, workspace, &asset, &transfer.url)?,
+            RemoteOperation::Push => {
+                upload_receipts.push(upload_asset(&client, workspace, &asset, &transfer.url)?);
+            }
             RemoteOperation::Clone | RemoteOperation::Pull => {
                 let destination_logical_path = if materialized_asset_ids.contains(&asset.id) {
                     asset.logical_path.as_deref()
@@ -525,7 +566,7 @@ fn transfer_assets(
         )
         .into());
     }
-    Ok(())
+    Ok(upload_receipts)
 }
 
 pub fn clone_into_workspace(
@@ -618,7 +659,7 @@ pub fn execute_push(
             Ok(())
         },
     )?;
-    transfer_assets(
+    let upload_receipts = transfer_assets(
         &graph,
         workspace,
         &remote,
@@ -626,6 +667,17 @@ pub fn execute_push(
         &branch,
         previous_hash.as_ref(),
     )?;
+    if !remote.url.starts_with("file://") {
+        let repository = RepositoryRemote::parse(&remote.url)?;
+        complete_asset_transfers(
+            &repository,
+            &AssetTransferCompletionRequest {
+                branch: &branch,
+                assets: &upload_receipts,
+            },
+            login_origin,
+        )?;
+    }
     if let Err(error) = run_graph_transfer(
         &graph,
         &remote,
@@ -1352,13 +1404,21 @@ mod tests {
         let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
-            for request_index in 0..3 {
+            for request_index in 0..4 {
                 let (mut stream, _) = listener.accept().expect("should accept capability request");
                 let mut request = [0_u8; 8192];
                 let read = stream
                     .read(&mut request)
                     .expect("should read capability request");
                 requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                if request_index == 2 {
+                    write!(
+                        stream,
+                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+                    )
+                    .expect("should write completion response");
+                    continue;
+                }
                 let body = if request_index == 1 {
                     "{\"assets\":[]}".to_string()
                 } else {
@@ -1398,11 +1458,14 @@ mod tests {
         execute_push(&workspace, None, None, false).expect("push should succeed");
         let requests = server.join().expect("capability server should finish");
 
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 4);
         assert!(requests[0].contains("\"operation\":\"push\""));
         assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
         assert!(requests[1].contains("\"operation\":\"push\""));
-        assert!(requests[2].contains("\"operation\":\"pull\""));
+        assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
+        assert!(requests[2].contains("\"branch\":\"main\""));
+        assert!(requests[2].contains("\"assets\":[]"));
+        assert!(requests[3].contains("\"operation\":\"pull\""));
         let graph =
             get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
         let local_hash = hash_of(&graph, "main").expect("should query local branch");
@@ -1425,14 +1488,22 @@ mod tests {
         let transfer_url = format!("file://{}", remote_graph.display());
         let server = thread::spawn(move || {
             let mut requests = Vec::new();
-            for request_index in 0..3 {
+            for request_index in 0..4 {
                 let (mut stream, _) = listener.accept().expect("should accept capability request");
                 let mut request = [0_u8; 8192];
                 let read = stream
                     .read(&mut request)
                     .expect("should read capability request");
                 requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
-                if request_index < 2 {
+                if request_index < 3 {
+                    if request_index == 2 {
+                        write!(
+                            stream,
+                            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+                        )
+                        .expect("should write completion response");
+                        continue;
+                    }
                     let body = if request_index == 0 {
                         format!(
                             "{{\"remote_url\":\"{transfer_url}\",\
@@ -1482,11 +1553,13 @@ mod tests {
             .expect("tracking fetch failure should not fail push");
         let requests = server.join().expect("capability server should finish");
 
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 4);
         assert!(requests[0].contains("\"operation\":\"push\""));
         assert!(requests[1].starts_with("POST /api/repos/alice/example/asset-transfers "));
         assert!(requests[1].contains("\"operation\":\"push\""));
-        assert!(requests[2].contains("\"operation\":\"pull\""));
+        assert!(requests[2].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
+        assert!(requests[2].contains("\"branch\":\"main\""));
+        assert!(requests[3].contains("\"operation\":\"pull\""));
     }
 
     #[test]
