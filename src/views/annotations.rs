@@ -431,7 +431,7 @@ fn resolve_local_annotation_file_path(
     None
 }
 
-/// Builds the stable filename used when a remote annotation or index is materialized locally.
+/// Builds the stable filename used when a remote annotation or index is cached locally.
 ///
 /// Cache path construction calls this for both data and index files. A known content checksum is
 /// the preferred identity; checksumless assets use the URI for stable reuse, and retaining the
