@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    time::Instant,
 };
 
 use crossterm::event::{self, KeyCode};
@@ -11,7 +10,11 @@ use gen_diff::operations::{
 };
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::DbContext, history::HistoryEntry};
-use gen_tui::{graph_controller::GraphController, theme::current_theme};
+use gen_tui::{
+    graph_view::{GraphView, GraphViewState},
+    layout_engine::LayoutEngine,
+    theme::current_theme,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Style,
@@ -24,9 +27,7 @@ use crate::views::{
         DiffGraphComponent, apply_diff_highlights, block_group_label, build_diff_graph_component,
         change_label_for_block_group,
     },
-    gen_graph_widget::{
-        GenGraphNodeSizer, create_gen_graph_controller_without_dimming, create_gen_graph_widget,
-    },
+    gen_graph_widget::{ZoomLevels, create_gen_graph_engine},
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
     tui_runtime::TuiSession,
 };
@@ -175,19 +176,24 @@ fn load_diff_samples_for_entry(
     collect_diff_samples(&diffs.diff_graph)
 }
 
-fn build_graph_controller(
+fn build_graph_view<'a>(
     samples: &[OperationSampleComponent],
     entries: &[ExplorerEntry],
     selected_entry: usize,
     empty_graph: &GenGraph,
-) -> GraphController<GenGraph, GenGraphNodeSizer> {
+    conn: &'a gen_models::db::GraphConnection,
+) -> (
+    LayoutEngine<GenGraph>,
+    ZoomLevels<'a>,
+    GraphViewState<GraphNode>,
+) {
     if let Some(component) = resolve_current_component(samples, entries, selected_entry) {
-        let mut controller =
-            create_gen_graph_controller_without_dimming(component.render.graph.clone());
-        apply_diff_highlights(&mut controller, &component.render);
-        controller
+        let (engine, zoom_levels, mut view_state) =
+            create_gen_graph_engine(component.render.graph.clone(), conn);
+        apply_diff_highlights(&mut view_state, &component.render);
+        (engine, zoom_levels, view_state)
     } else {
-        create_gen_graph_controller_without_dimming(empty_graph.clone())
+        create_gen_graph_engine(empty_graph.clone(), conn)
     }
 }
 
@@ -306,7 +312,8 @@ pub fn view_operations(
     let mut expanded_samples = BTreeSet::new();
     let mut entries: Vec<ExplorerEntry> = Vec::new();
     let mut selected_entry = 0usize;
-    let mut graph_controller = create_gen_graph_controller_without_dimming(empty_graph.clone());
+    let (mut graph_engine, mut graph_zoom_levels, mut graph_view_state) =
+        create_gen_graph_engine(empty_graph.clone(), conn);
 
     let mut view_graph = false;
     let mut graph_view_focus = GraphViewFocus::List;
@@ -315,13 +322,8 @@ pub fn view_operations(
     let status_bar_height: u16 = 1;
 
     let mut selected = 0usize;
-    let mut last_frame_time = Instant::now();
 
     loop {
-        let now = Instant::now();
-        let frame_delta = now.duration_since(last_frame_time);
-        last_frame_time = now;
-
         terminal.draw(|frame| {
             let rows: Vec<Row> = history_entries
                 .iter()
@@ -484,16 +486,10 @@ pub fn view_operations(
                 let inner_canvas = graph_block.inner(graph_chunks[1]);
                 frame.render_widget(graph_block, graph_chunks[1]);
 
-                graph_controller.viewport_state.focus();
-                graph_controller.viewport_state.viewport_bounds = inner_canvas;
-                graph_controller.update_animations(frame_delta);
-
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
-                let widget = create_gen_graph_widget(conn, context.workspace())
-                    .detail_level(graph_controller.get_detail_level())
-                    .style(canvas_style)
-                    .cursor();
-                frame.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
+                let active_renderer = &graph_zoom_levels[graph_view_state.zoom_index].1;
+                let view = GraphView::new(&mut graph_engine, active_renderer).style(canvas_style);
+                frame.render_stateful_widget(view, inner_canvas, &mut graph_view_state);
             }
 
             render_status_bar(frame, status_bar_area, &panel_messages);
@@ -552,12 +548,14 @@ pub fn view_operations(
                                 }
                                 entries = build_explorer_entries(&diff_samples, &expanded_samples);
                                 selected_entry = first_selectable_entry(&entries).unwrap_or(0);
-                                graph_controller = build_graph_controller(
-                                    &diff_samples,
-                                    &entries,
-                                    selected_entry,
-                                    &empty_graph,
-                                );
+                                (graph_engine, graph_zoom_levels, graph_view_state) =
+                                    build_graph_view(
+                                        &diff_samples,
+                                        &entries,
+                                        selected_entry,
+                                        &empty_graph,
+                                        conn,
+                                    );
                             }
                         }
                         KeyCode::Down => {
@@ -575,12 +573,14 @@ pub fn view_operations(
                                 }
                                 entries = build_explorer_entries(&diff_samples, &expanded_samples);
                                 selected_entry = first_selectable_entry(&entries).unwrap_or(0);
-                                graph_controller = build_graph_controller(
-                                    &diff_samples,
-                                    &entries,
-                                    selected_entry,
-                                    &empty_graph,
-                                );
+                                (graph_engine, graph_zoom_levels, graph_view_state) =
+                                    build_graph_view(
+                                        &diff_samples,
+                                        &entries,
+                                        selected_entry,
+                                        &empty_graph,
+                                        conn,
+                                    );
                             }
                         }
                         KeyCode::Char('v') => {
@@ -598,11 +598,12 @@ pub fn view_operations(
                             }
                             entries = build_explorer_entries(&diff_samples, &expanded_samples);
                             selected_entry = first_selectable_entry(&entries).unwrap_or(0);
-                            graph_controller = build_graph_controller(
+                            (graph_engine, graph_zoom_levels, graph_view_state) = build_graph_view(
                                 &diff_samples,
                                 &entries,
                                 selected_entry,
                                 &empty_graph,
+                                conn,
                             );
                         }
                         _ => {}
@@ -621,12 +622,14 @@ pub fn view_operations(
                                         previous_selectable_entry(&entries, selected_entry)
                                     {
                                         selected_entry = previous_entry;
-                                        graph_controller = build_graph_controller(
-                                            &diff_samples,
-                                            &entries,
-                                            selected_entry,
-                                            &empty_graph,
-                                        );
+                                        (graph_engine, graph_zoom_levels, graph_view_state) =
+                                            build_graph_view(
+                                                &diff_samples,
+                                                &entries,
+                                                selected_entry,
+                                                &empty_graph,
+                                                conn,
+                                            );
                                     }
                                 }
                                 KeyCode::Down => {
@@ -634,12 +637,14 @@ pub fn view_operations(
                                         next_selectable_entry(&entries, selected_entry)
                                     {
                                         selected_entry = next_entry;
-                                        graph_controller = build_graph_controller(
-                                            &diff_samples,
-                                            &entries,
-                                            selected_entry,
-                                            &empty_graph,
-                                        );
+                                        (graph_engine, graph_zoom_levels, graph_view_state) =
+                                            build_graph_view(
+                                                &diff_samples,
+                                                &entries,
+                                                selected_entry,
+                                                &empty_graph,
+                                                conn,
+                                            );
                                     }
                                 }
                                 KeyCode::Enter | KeyCode::Right => {
@@ -653,12 +658,14 @@ pub fn view_operations(
                                         );
                                         selected_entry = sample_row_index(&entries, sample_index)
                                             .unwrap_or(selected_entry);
-                                        graph_controller = build_graph_controller(
-                                            &diff_samples,
-                                            &entries,
-                                            selected_entry,
-                                            &empty_graph,
-                                        );
+                                        (graph_engine, graph_zoom_levels, graph_view_state) =
+                                            build_graph_view(
+                                                &diff_samples,
+                                                &entries,
+                                                selected_entry,
+                                                &empty_graph,
+                                                conn,
+                                            );
                                     }
                                 }
                                 KeyCode::Left => {
@@ -673,18 +680,20 @@ pub fn view_operations(
                                         );
                                         selected_entry = sample_row_index(&entries, sample_index)
                                             .unwrap_or(selected_entry);
-                                        graph_controller = build_graph_controller(
-                                            &diff_samples,
-                                            &entries,
-                                            selected_entry,
-                                            &empty_graph,
-                                        );
+                                        (graph_engine, graph_zoom_levels, graph_view_state) =
+                                            build_graph_view(
+                                                &diff_samples,
+                                                &entries,
+                                                selected_entry,
+                                                &empty_graph,
+                                                conn,
+                                            );
                                     }
                                 }
                                 _ => {}
                             }
                         } else {
-                            let _ = graph_controller.handle_key_event(key);
+                            let _ = graph_view_state.handle_key_event(key);
                         }
                     }
                 }
@@ -855,8 +864,8 @@ mod tests {
         let main_commit = history
             .commit_all("main")
             .expect("should commit main state");
-        graph
-            .with_transaction(|| history.merge(&CommitRef("feature".to_string())))
+        history
+            .merge(&CommitRef("feature".to_string()))
             .expect("should merge feature branch");
         let merge_commit = history
             .current_head()
