@@ -1,4 +1,5 @@
-use gen_tui::{ViewportState, WorldPos};
+use gen_graph::GraphNode;
+use gen_tui::{WorldPos, graph_view::GraphViewState};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -107,9 +108,11 @@ fn try_draw_label_at(
     true
 }
 
-/// Draw a label near a world-space position on the canvas.
+/// Draw a label near a screen-space position on the canvas.
 ///
-/// `area_of_interest` is a tuple of (left_pos, right_pos) world-space corners of the annotation span.
+/// `area_of_interest` is a tuple of (left_pos, right_pos) screen-space corners (in the
+/// rendering `GraphView`'s frame, origin at the area's bottom-left, Y-up) of the annotation
+/// span.
 /// - left_pos.x and right_pos.x define the x range (first to last block)
 /// - left_pos.y and right_pos.y define the y range (min to max y across all blocks)
 ///   `max_distance` is the maximum Manhattan distance from the annotation to search for label placement.
@@ -127,7 +130,7 @@ pub fn draw_label_near_pos(
     area_of_interest: (WorldPos, WorldPos),
     label: &str,
     color: Color,
-    viewport_state: &ViewportState,
+    view_state: &GraphViewState<GraphNode>,
     max_distance: u16,
 ) -> Option<(u16, u16)> {
     if area.width == 0 || area.height == 0 {
@@ -135,8 +138,8 @@ pub fn draw_label_near_pos(
     }
 
     let (left_pos, right_pos) = area_of_interest;
-    let (term_x_a, term_y_a) = viewport_state.world_to_terminal(left_pos)?;
-    let (term_x_b, term_y_b) = viewport_state.world_to_terminal(right_pos)?;
+    let (term_x_a, term_y_a) = view_state.screen_to_terminal(left_pos.x, left_pos.y)?;
+    let (term_x_b, term_y_b) = view_state.screen_to_terminal(right_pos.x, right_pos.y)?;
 
     let x_min = term_x_a.min(term_x_b);
     let x_max = term_x_a.max(term_x_b);
@@ -188,7 +191,10 @@ pub fn draw_label_near_pos(
     for text in truncations(label) {
         let width = text.chars().count() as u16;
 
-        let below = (center_x.saturating_sub(width / 2), annotation_bottom);
+        let below = (
+            center_x.saturating_sub(width / 2),
+            annotation_bottom.saturating_add(1),
+        );
 
         if try_draw_label_at(buf, area, below.0, below.1, &text, color) {
             return Some(below);
