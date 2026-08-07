@@ -1,95 +1,93 @@
 #[cfg(test)]
-use crate::graph_controller::{GraphController, WorldBuffer};
+use petgraph::graph::NodeIndex;
+#[cfg(test)]
+use ratatui::widgets::StatefulWidget as _;
+
+#[cfg(test)]
+use crate::distribute_nodes::{GapSizer, GapSizes};
 #[cfg(test)]
 use crate::layout::VisualDetail;
 #[cfg(test)]
-use crate::plotter::plot_viewport_graph;
-#[cfg(test)]
 use crate::testing::create_test_terminal;
 #[cfg(test)]
-use crate::testing::mocks::{FixedNodeSizer, MockDomainGraph, TestRenderers};
+use crate::testing::mocks::{FixedNodeSizer, MockDomainGraph, TestGraphs, TestRenderers};
 
-/// Helper function to create viewport-based visual snapshots using GraphController
 #[cfg(test)]
-fn make_snapshot_custom<NS, R>(
+const TARGET_GAP_COMBINATIONS: [(u64, u64); 6] = [(0, 0), (1, 0), (4, 0), (0, 2), (1, 2), (4, 2)];
+
+#[cfg(test)]
+const COMPLEX_DAG_ADDITIONAL_Y_GAP_COMBINATIONS: [(u64, u64); 2] = [(1, 1), (1, 3)];
+
+#[cfg(test)]
+fn fixed_gap(gap: u64) -> GapSizer {
+    match gap {
+        0 => |_| 0,
+        1 => |_| 1,
+        2 => |_| 2,
+        3 => |_| 3,
+        4 => |_| 4,
+        _ => panic!("unsupported test gap {gap}"),
+    }
+}
+
+/// Helper function to create viewport-based visual snapshots using `LayoutEngine` + `GraphView`.
+/// `backward_edges` rewrites cyclic edges onto pin nodes (see `LayoutEngine::window_for`);
+/// pass an empty slice for acyclic fixtures.
+#[cfg(test)]
+fn make_snapshot_custom<S, R>(
     domain_graph: MockDomainGraph,
     viewport_width: u16,
     viewport_height: u16,
-    layer_count: usize,
-    node_count: usize,
-    node_sizer: NS,
-    mut renderer: R,
+    node_sizer: S,
+    renderer: R,
+    backward_edges: &[(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)],
+    target_gaps: GapSizes,
 ) -> String
 where
-    NS: crate::plotter::NodeSizer<MockDomainGraph>,
-    R: crate::plotter::NodeRenderer<MockDomainGraph>,
+    S: crate::testing::mocks::MockRenderer<MockDomainGraph>,
+    R: crate::testing::mocks::MockRenderer<MockDomainGraph>,
 {
-    use crate::graph_controller::GraphConfig;
+    use ratatui::widgets::StatefulWidget as _;
+
+    use crate::{
+        graph_view::{GraphView, GraphViewState},
+        layout_engine::LayoutEngine,
+        testing::mocks::MockVisual,
+    };
 
     let mut terminal = create_test_terminal(viewport_width, viewport_height);
 
-    // // alternatively - very minimalist node labels:
-    // let mut renderer = TestRenderers::minimal();
-    // let node_sizer = TestNodeSizers::fixed_1x1();
+    let mut engine = LayoutEngine::new_with_backward_edges(domain_graph.clone(), backward_edges);
+    let mut visual = MockVisual::new(node_sizer, renderer);
+    visual.detail = VisualDetail::Full;
 
-    // Use configurable partitions for testing
-    let mut config = GraphConfig::default();
-    config.partition.layer_count = layer_count;
-    config.partition.node_count = node_count;
-    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
-
-    let test_viewport = ratatui::layout::Rect::new(0, 0, viewport_width, viewport_height);
-    controller.viewport_state.viewport_bounds = test_viewport;
-
-    // Set detail level before the camera
-    controller.set_detail_level(VisualDetail::Full);
+    let mut state = GraphViewState::default();
+    state.gaps = target_gaps;
 
     let result = terminal.draw(|f| {
         let area = f.area();
-        controller.viewport_state.viewport_bounds = area;
-        let loaded_partitions = controller.ensure_camera_coverage();
-        let partition_indices = loaded_partitions.unwrap_or_default();
-        println!(
-            "number of partitions loaded: {}, indices: {:?}",
-            partition_indices.len(),
-            partition_indices
-        );
-
-        controller
-            .rebuild_viewport_graph()
-            .expect("Failed to rebuild viewport graph for snapshot generation");
-        let viewport_graph = controller.get_viewport_graph();
-        let detail_level = controller.get_detail_level();
-
-        // Export viewport graph to dot if RUST_LOG=debug is active
-        if std::env::var("RUST_LOG")
-            .map(|v| v.contains("debug"))
-            .unwrap_or(false)
-        {
-            // Generate a filename based on the current test name
-            let current_thread = std::thread::current();
-            let test_name = current_thread.name().unwrap_or("unknown_test");
-            let filename = format!("{}_viewport.dot", test_name);
-            if let Err(e) = crate::dot_export::export_to_dot(viewport_graph, &filename) {
-                eprintln!("Failed to export dot file {}: {}", filename, e);
-            }
-        }
-
-        let mut buffer = WorldBuffer::new(f.buffer_mut(), &controller.viewport_state);
-        plot_viewport_graph(
-            viewport_graph,
-            &mut buffer,
-            &mut renderer,
-            controller.graph(),
-            detail_level,
-            &crate::theme::current_theme(),
-        );
+        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
     });
 
     match result {
-        Ok(_) => format!("{}", terminal.backend()),
+        Ok(_) => terminal.backend().to_string(),
         Err(e) => format!("Rendering failed: {}", e),
     }
+}
+
+/// Auto-detect backward edges by running cycle removal relative to an optional pinned
+/// source/sink and collecting the edges it rewrites onto pin nodes. On an acyclic graph
+/// this always returns an empty list.
+#[cfg(test)]
+fn detect_backward_edges(
+    domain_graph: &MockDomainGraph,
+    pin_source: Option<petgraph::graph::NodeIndex>,
+    pin_sink: Option<petgraph::graph::NodeIndex>,
+) -> Vec<(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)> {
+    crate::cycle_removal::remove_cycles(domain_graph, pin_source, pin_sink)
+        .backward_edges
+        .into_iter()
+        .collect()
 }
 
 /// Helper function to create viewport-based visual snapshots with default node sizer and renderer
@@ -98,8 +96,78 @@ fn make_snapshot(
     domain_graph: MockDomainGraph,
     viewport_width: u16,
     viewport_height: u16,
-    layer_count: usize,
-    node_count: usize,
+) -> String {
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let renderer = TestRenderers::debug();
+    let backward_edges = detect_backward_edges(&domain_graph, None, None);
+
+    make_snapshot_custom(
+        domain_graph,
+        viewport_width,
+        viewport_height,
+        node_sizer,
+        renderer,
+        &backward_edges,
+        GapSizes::default(),
+    )
+}
+
+/// Render an acyclic fixture at an explicit pair of target gaps.
+#[cfg(test)]
+fn make_snapshot_at_target_gaps(
+    domain_graph: MockDomainGraph,
+    viewport_width: u16,
+    viewport_height: u16,
+    target_gaps: (u64, u64),
+) -> String {
+    let (data_data_x, data_data_y) = target_gaps;
+
+    make_snapshot_at_gap_sizes(
+        domain_graph,
+        viewport_width,
+        viewport_height,
+        GapSizes {
+            data_data_x: fixed_gap(data_data_x),
+            data_data_y: fixed_gap(data_data_y),
+            ..GapSizes::default()
+        },
+    )
+}
+
+#[cfg(test)]
+fn make_snapshot_at_gap_sizes(
+    domain_graph: MockDomainGraph,
+    viewport_width: u16,
+    viewport_height: u16,
+    target_gaps: GapSizes,
+) -> String {
+    let backward_edges = detect_backward_edges(&domain_graph, None, None);
+
+    make_snapshot_custom(
+        domain_graph,
+        viewport_width,
+        viewport_height,
+        FixedNodeSizer {
+            width: 5,
+            height: 3,
+        },
+        TestRenderers::debug(),
+        &backward_edges,
+        target_gaps,
+    )
+}
+
+/// Like `make_snapshot`, but rewrites `backward_edges` onto pin nodes, so a cyclic domain
+/// graph renders as a loop instead of panicking.
+#[cfg(test)]
+fn make_snapshot_with_backward_edges(
+    domain_graph: MockDomainGraph,
+    viewport_width: u16,
+    viewport_height: u16,
+    backward_edges: &[(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)],
 ) -> String {
     let node_sizer = FixedNodeSizer {
         width: 5,
@@ -111,10 +179,39 @@ fn make_snapshot(
         domain_graph,
         viewport_width,
         viewport_height,
-        layer_count,
-        node_count,
         node_sizer,
         renderer,
+        backward_edges,
+        GapSizes::default(),
+    )
+}
+
+/// Render a loopback fixture at an explicit pair of target gaps.
+#[cfg(test)]
+fn make_snapshot_with_backward_edges_at_target_gaps(
+    domain_graph: MockDomainGraph,
+    viewport_width: u16,
+    viewport_height: u16,
+    backward_edges: &[(petgraph::graph::NodeIndex, petgraph::graph::NodeIndex)],
+    target_gaps: (u64, u64),
+) -> String {
+    let (data_data_x, data_data_y) = target_gaps;
+
+    make_snapshot_custom(
+        domain_graph,
+        viewport_width,
+        viewport_height,
+        FixedNodeSizer {
+            width: 5,
+            height: 3,
+        },
+        TestRenderers::debug(),
+        backward_edges,
+        GapSizes {
+            data_data_x: fixed_gap(data_data_x),
+            data_data_y: fixed_gap(data_data_y),
+            ..GapSizes::default()
+        },
     )
 }
 
@@ -129,7 +226,7 @@ fn viewport_visual_regression_simple_chain() {
     domain_graph.add_edge(node_0, node_1, ());
     domain_graph.add_edge(node_1, node_2, ());
 
-    let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
     insta::assert_snapshot!("simple_chain", snapshot);
 }
 
@@ -147,8 +244,18 @@ fn viewport_visual_regression_diamond() {
     domain_graph.add_edge(node_1, node_3, ());
     domain_graph.add_edge(node_2, node_3, ());
 
-    let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
     insta::assert_snapshot!("diamond", snapshot);
+}
+
+#[test]
+fn target_gap_combinations_diamond() {
+    let domain_graph = TestGraphs::domain_diamond();
+
+    for target_gaps @ (gap_x, gap_y) in TARGET_GAP_COMBINATIONS {
+        let snapshot = make_snapshot_at_target_gaps(domain_graph.clone(), 80, 24, target_gaps);
+        insta::assert_snapshot!(format!("target_gaps_diamond_x_{gap_x}_y_{gap_y}"), snapshot);
+    }
 }
 
 #[test]
@@ -158,7 +265,7 @@ fn viewport_visual_regression_single_node() {
     let mut domain_graph = MockDomainGraph::new();
     domain_graph.add_node(());
 
-    let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
     insta::assert_snapshot!("single_node", snapshot);
 }
 
@@ -179,7 +286,7 @@ fn viewport_visual_regression_subcombinatorial_dag() {
     domain_graph.add_edge(nodes[3], nodes[5], ());
     domain_graph.add_edge(nodes[4], nodes[5], ());
 
-    let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
     insta::assert_snapshot!("subcombinatorial_dag", snapshot);
 }
 
@@ -213,122 +320,179 @@ fn viewport_visual_regression_complex_dag() {
     domain_graph.add_edge(nodes[6], nodes[8], ());
     domain_graph.add_edge(nodes[7], nodes[8], ());
 
-    let snapshot = make_snapshot(domain_graph, 60, 20, 2, 8);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
     insta::assert_snapshot!("complex_dag", snapshot);
 }
 
 #[test]
-fn viewport_multi_partition_boundary_handling() {
+fn target_gap_combinations_complex_dag() {
+    let domain_graph = TestGraphs::domain_complex_dag();
+
+    for target_gaps @ (gap_x, gap_y) in TARGET_GAP_COMBINATIONS
+        .into_iter()
+        .chain(COMPLEX_DAG_ADDITIONAL_Y_GAP_COMBINATIONS)
+    {
+        let snapshot = make_snapshot_at_target_gaps(domain_graph.clone(), 80, 24, target_gaps);
+        insta::assert_snapshot!(
+            format!("target_gaps_complex_dag_x_{gap_x}_y_{gap_y}"),
+            snapshot
+        );
+    }
+
+    let identity_y = GapSizes {
+        data_data_x: |_| 1,
+        data_data_y: |gap| gap,
+        data_routing_y: |gap| gap,
+        routing_routing_y: |gap| gap,
+        ..GapSizes::default()
+    };
+    let snapshot = make_snapshot_at_gap_sizes(domain_graph, 80, 24, identity_y);
+    insta::assert_snapshot!("target_gaps_complex_dag_x_1_y_identity", snapshot);
+}
+
+#[test]
+fn viewport_wide_chain_go_to_node() {
     let _ = env_logger::try_init();
-    // Create a wide graph that forces multiple partitions to test boundary handling
+    use ratatui::widgets::StatefulWidget as _;
+
+    use crate::{
+        graph_view::{GraphView, GraphViewState},
+        layout_engine::LayoutEngine,
+        testing::mocks::MockVisual,
+    };
+
+    // A wide chain, long enough to require panning to reach the tail.
     let mut domain_graph = MockDomainGraph::new();
     let nodes: Vec<_> = (0..20).map(|_| domain_graph.add_node(())).collect();
-
-    // Create a long chain that should force multiple partitions
     for i in 0..19 {
         domain_graph.add_edge(nodes[i], nodes[i + 1], ());
     }
 
-    let snapshot = make_snapshot(domain_graph, 120, 30, 3, 5); // Wide viewport
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut engine = LayoutEngine::new(domain_graph.clone());
+    let mut visual = MockVisual::new(node_sizer, TestRenderers::debug());
+    visual.detail = VisualDetail::Full;
+    let mut terminal = create_test_terminal(80, 24);
+    let mut state = GraphViewState::default();
+    // Snapshot 1: default view, anchored at the start of the chain.
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    });
+    let start_snapshot = terminal.backend().to_string();
+    insta::assert_snapshot!("wide_chain_start", start_snapshot);
 
-    insta::assert_snapshot!("multi_partition_chain", snapshot);
+    // Snapshot 2: jump to the last node to see the tail end, rather than widening the
+    // viewport to fit all 20 nodes in one shot.
+    state.go_to_node(nodes[19], (0.0, 0.0));
+    let _ = terminal.draw(|f| {
+        let area = f.area();
+        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    });
+    let end_snapshot = terminal.backend().to_string();
+    insta::assert_snapshot!("wide_chain_end", end_snapshot);
 }
 
 #[test]
-fn viewport_visual_regression_extended_complex_dag_no_partitioning() {
+fn viewport_long_chain_middle_window_wormholes() {
+    const NODE_BUDGET: usize = 10;
+    const NODE_COUNT: usize = 100;
+
+    let domain_graph = TestGraphs::domain_long_chain(NODE_COUNT);
+    let anchor = NodeIndex::new(50);
+    let mut engine = crate::layout_engine::LayoutEngine::new(domain_graph);
+    engine
+        .activate_world_at(anchor, NODE_BUDGET, None)
+        .expect("should build the middle window");
+    let world = engine.active_world().expect("should have an active world");
+    assert_eq!(
+        world.members().count(),
+        NODE_BUDGET,
+        "The node budget should count domain nodes, not wormholes"
+    );
+    assert_eq!(
+        world.layout().external_edges.len(),
+        2,
+        "A middle window in a linear chain should have one wormhole on each side"
+    );
+
+    let mut visual = crate::testing::mocks::MockVisual::new(
+        FixedNodeSizer {
+            width: 5,
+            height: 3,
+        },
+        TestRenderers::debug(),
+    );
+    visual.detail = VisualDetail::Full;
+    let mut state = crate::graph_view::GraphViewState::default();
+    state.go_to_node(anchor, (0.5, 0.5));
+    state.hide_cursor();
+    let mut terminal = create_test_terminal(90, 12);
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            crate::graph_view::GraphView::new(&mut engine, &visual).render(
+                area,
+                frame.buffer_mut(),
+                &mut state,
+            );
+        })
+        .expect("should render the middle window");
+
+    assert_eq!(
+        state.frame.ids().count(),
+        NODE_BUDGET,
+        "The rendered frame should contain exactly the budgeted domain nodes"
+    );
+    assert_eq!(
+        state.wormhole.len(),
+        2,
+        "The rendered frame should contain two wormholes in addition to the domain nodes"
+    );
+    for &(stub, boundary, target) in &state.wormhole {
+        let boundary_rect = state
+            .frame
+            .rect_of(boundary)
+            .expect("should place each wormhole boundary node");
+        if target.index() < boundary.index() {
+            assert!(
+                stub.right() < boundary_rect.left(),
+                "A predecessor wormhole should be left of its boundary node"
+            );
+        } else {
+            assert!(
+                stub.left() > boundary_rect.right(),
+                "A successor wormhole should be right of its boundary node"
+            );
+        }
+    }
+    insta::assert_snapshot!(
+        "long_chain_middle_window_wormholes",
+        terminal.backend().to_string()
+    );
+}
+
+#[test]
+fn viewport_visual_regression_extended_complex_dag() {
     let _ = env_logger::try_init();
-    // Test 1: No partitioning - everything in one partition
     use crate::testing::mocks::TestGraphs;
     let domain_graph = TestGraphs::domain_complex_dag();
 
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
-    insta::assert_snapshot!("extended_complex_dag_no_partitioning", snapshot);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
+    insta::assert_snapshot!("extended_complex_dag", snapshot);
 }
 
 #[test]
-fn viewport_visual_regression_extended_complex_dag_layer_partitioning() {
+fn viewport_visual_regression_extended_diamond() {
     let _ = env_logger::try_init();
-    // Test 2: Layer-based partitioning
-    use crate::testing::mocks::TestGraphs;
-    let domain_graph = TestGraphs::domain_complex_dag();
-
-    let snapshot = make_snapshot(domain_graph, 80, 25, 3, usize::MAX);
-    insta::assert_snapshot!("extended_complex_dag_layer_partitioning", snapshot);
-}
-
-// This test is a good example of why we try to go for articulation points:
-//  By breaking up the graph between layers that each have multiple nodes
-//  suboptimal node orderings are encountered. This is also non-deterministic,
-//  hence disabling this test.
-//
-//  Valid outcome, but ugly:
-//
-//                        █████
-//                    ╭───█N5██───╮
-//            █████ ╭─╯   █████   │ █████
-//          ╭─█N1██─│─╮           ├─█N7██─╮
-//    █████ │ █████ │ ├─╮ █████ ╭─╯ █████ │ █████ █████
-//    █N0██─┤       │ │ ├─█N4██─┤         ├─█N8██─█N9██
-//    █████ │ █████ ├─│─╯ █████ ╰─╮ █████ │ █████ █████
-//          ╰─█N2██─╯ │           ├─█N6██─╯
-//            █████   │   █████   │ █████
-//                    ╰───█N3██───╯
-//                        █████
-//
-// Ideal outcome:
-//                      █████
-//                  ╭───█N3██───╮
-//            █████ │   █████   │ █████
-//          ╭─█N1██─┤           ├─█N6██─╮
-//    █████ │ █████ ╰─╮ █████ ╭─╯ █████ │ █████ █████
-//    █N0██─┤         ├─█N4██─┤         ├─█N8██─█N9██
-//    █████ │ █████ ╭─╯ █████ ╰─╮ █████ │ █████ █████
-//          ╰─█N2██─┤           ├─█N7██─╯
-//            █████ │   █████   │ █████
-//                  ╰───█N5██───╯
-//                      █████
-#[test]
-fn viewport_visual_regression_extended_complex_dag_node_partitioning() {
-    let _ = env_logger::try_init();
-    // Test 3: Node-based partitioning
-    use crate::testing::mocks::TestGraphs;
-    let domain_graph = TestGraphs::domain_complex_dag();
-
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, 3);
-    insta::assert_snapshot!("extended_complex_dag_node_partitioning", snapshot);
-}
-
-#[test]
-fn viewport_visual_regression_extended_diamond_no_partitioning() {
-    let _ = env_logger::try_init();
-    // Test 1: No partitioning - everything in one partition
     use crate::testing::mocks::TestGraphs;
     let domain_graph = TestGraphs::domain_extended_diamond();
 
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
-    insta::assert_snapshot!("extended_diamond_no_partitioning", snapshot);
-}
-
-#[test]
-fn viewport_visual_regression_extended_diamond_layer_partitioning() {
-    let _ = env_logger::try_init();
-    // Test 2: Layer-based partitioning
-    use crate::testing::mocks::TestGraphs;
-    let domain_graph = TestGraphs::domain_extended_diamond();
-
-    let snapshot = make_snapshot(domain_graph, 80, 25, 3, usize::MAX);
-    insta::assert_snapshot!("extended_diamond_layer_partitioning", snapshot);
-}
-
-#[test]
-fn viewport_visual_regression_extended_diamond_node_partitioning() {
-    let _ = env_logger::try_init();
-    // Test 3: Node-based partitioning
-    use crate::testing::mocks::TestGraphs;
-    let domain_graph = TestGraphs::domain_extended_diamond();
-
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, 3);
-    insta::assert_snapshot!("extended_diamond_node_partitioning", snapshot);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
+    insta::assert_snapshot!("extended_diamond", snapshot);
 }
 
 #[test]
@@ -336,13 +500,13 @@ fn test_layer_coordinate_alignment_and_ordering() {
     let _ = env_logger::try_init();
 
     use crate::{
-        geometry::WorldPos,
-        graph_controller::{GraphConfig, GraphController},
-        layout::VisualDetail,
-        testing::mocks::{FixedNodeSizer, TestGraphs},
+        layout::NodeRole,
+        layout_engine::LayoutEngine,
+        plotter::NodeRenderer,
+        testing::mocks::{FixedNodeSizer, MockDomainGraph, TestGraphs},
+        viewport_graph::ViewportGraph,
     };
 
-    // Create domain_extended_diamond with partitioning to test layer alignment
     let domain_graph = TestGraphs::domain_extended_diamond();
 
     let node_sizer = FixedNodeSizer {
@@ -350,59 +514,35 @@ fn test_layer_coordinate_alignment_and_ordering() {
         height: 3,
     };
 
-    // Use partitioning settings that will force partition creation
-    let mut config = GraphConfig::default();
-    config.partition.layer_count = 2; // Force layer-based partitioning
-    config.partition.node_count = 3; // Force node-based partitioning as well
+    let mut engine = LayoutEngine::new(domain_graph.clone());
 
-    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+    let anchor = engine.default_anchor().expect("should have graph nodes");
+    let assembled = engine
+        .window_for(anchor, domain_graph.node_count() * 8)
+        .expect("should build a window covering the graph");
+    let backward_edges = assembled.backward_edges.clone();
 
-    // Set detail level first
-    controller.set_detail_level(VisualDetail::Full);
+    let geometry = {
+        let visual = &node_sizer;
+        crate::graph_widget::build_window_geometry(
+            assembled,
+            &GapSizes {
+                data_data_x: |_| 1,
+                data_data_y: |_| 0,
+                ..GapSizes::default()
+            },
+            |role| match role {
+                NodeRole::Data(domain_idx) => {
+                    NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_idx)
+                }
+                _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
+            },
+        )
+    };
+    let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
+    let viewport_graph = &viewport_graph;
 
-    // Set camera bounds to cover the unlimited viewport BEFORE creating viewport graph
-    controller.viewport_state.viewport_bounds =
-        ratatui::layout::Rect::new(0, 0, u16::MAX / 2, u16::MAX / 2);
-    controller.viewport_state.camera_current = WorldPos::new(0, 0);
-    controller.viewport_state.camera_target = WorldPos::new(0, 0);
-
-    // Get total partition count first to verify all are loaded
-    let total_partition_count = controller
-        .partition_controller
-        .partition_table
-        .partitions
-        .len();
-    println!("Total partitions in graph: {}", total_partition_count);
-
-    // Load all partitions by ensuring camera coverage
-    let loaded_partitions = controller.ensure_camera_coverage().unwrap_or_default();
-    println!("Number of partitions loaded: {}", loaded_partitions.len());
-
-    // Assert that ALL partitions were loaded, not just multiple
-    assert_eq!(
-        loaded_partitions.len(),
-        total_partition_count,
-        "Expected all {} partitions to be loaded, but only {} were loaded",
-        total_partition_count,
-        loaded_partitions.len()
-    );
-
-    // Rebuild the viewport graph with unlimited bounds
-    let result = controller.rebuild_viewport_graph();
-    assert!(
-        result.is_ok(),
-        "Failed to rebuild viewport graph: {:?}",
-        result
-    );
-
-    let viewport_graph = controller.get_viewport_graph();
-
-    // Verify we have layers
-    assert!(
-        viewport_graph.layer_count() > 0,
-        "No layers found in viewport graph"
-    );
-    println!("Viewport graph has {} layers", viewport_graph.layer_count());
+    assert!(viewport_graph.layer_count() > 0);
 
     // Group nodes by layer and collect their x-coordinates
     let mut layer_x_coords: Vec<Vec<i64>> = Vec::new();
@@ -412,28 +552,16 @@ fn test_layer_coordinate_alignment_and_ordering() {
             let mut x_coords = Vec::new();
 
             for &domain_node in layer_nodes {
-                // Find world position for this domain node
-                if let Some(world_pos) = viewport_graph.node_positions.get(&domain_node) {
-                    x_coords.push(world_pos.x);
-                } else {
-                    panic!(
-                        "Domain node {:?} in layer {} not found in domain_to_world mapping",
-                        domain_node, layer_idx
-                    );
-                }
+                let world_pos = viewport_graph
+                    .node_positions
+                    .get(&domain_node)
+                    .expect("should position every layered domain node");
+                x_coords.push(world_pos.x);
             }
-
-            println!(
-                "Layer {}: {} nodes with x-coordinates: {:?}",
-                layer_idx,
-                x_coords.len(),
-                x_coords
-            );
             layer_x_coords.push(x_coords);
         }
     }
 
-    // Test 1: Verify that all nodes in each layer share the same x-coordinate
     for (layer_idx, x_coords) in layer_x_coords.iter().enumerate() {
         if !x_coords.is_empty() {
             let first_x = x_coords[0];
@@ -444,18 +572,13 @@ fn test_layer_coordinate_alignment_and_ordering() {
                     layer_idx, first_x, x
                 );
             }
-            println!(
-                "Layer {} has consistent x-coordinate: {}",
-                layer_idx, first_x
-            );
         }
     }
 
-    // Test 2: Verify that x-coordinates are ordered between layers (increasing from layer to layer)
     let layer_x_representatives: Vec<i64> = layer_x_coords
         .iter()
         .filter(|coords| !coords.is_empty())
-        .map(|coords| coords[0]) // Take first (they should all be the same per layer)
+        .map(|coords| coords[0])
         .collect();
 
     for i in 1..layer_x_representatives.len() {
@@ -471,33 +594,15 @@ fn test_layer_coordinate_alignment_and_ordering() {
         );
     }
 
-    println!(
-        "Layer x-coordinates are properly ordered: {:?}",
-        layer_x_representatives
-    );
-
-    // Additional verification: Check that we have the expected layer structure for extended diamond
-    // Expected structure: [0] -> [1,2] -> [3] -> [4,5] -> [6] -> [7]
-    // So we should have layers with node counts roughly matching this pattern
     let layer_sizes: Vec<usize> = layer_x_coords.iter().map(|coords| coords.len()).collect();
-    println!("Layer sizes: {:?}", layer_sizes);
-
-    // For extended diamond, we expect some layers to have multiple nodes (the diamond middles)
-    let has_multi_node_layers = layer_sizes.iter().any(|&size| size > 1);
-    assert!(
-        has_multi_node_layers,
-        "Expected some layers to have multiple nodes for diamond structure, but all layers have single nodes"
-    );
-
-    println!("Test completed successfully - layer coordinate alignment and ordering verified");
+    assert!(layer_sizes.iter().any(|&size| size > 1));
 }
 
 #[test]
 fn viewport_visual_regression_bridge_position_with_variable_node_widths() {
     use crate::{
         layout::VisualDetail,
-        plotter::NodeSizer,
-        testing::mocks::{MockDomainGraph, TestGraphs, TestRenderers},
+        testing::mocks::{MockDomainGraph, MockRenderer, TestGraphs, TestRenderers},
     };
 
     let _ = env_logger::try_init();
@@ -506,7 +611,7 @@ fn viewport_visual_regression_bridge_position_with_variable_node_widths() {
     #[derive(Debug, Clone)]
     struct VariableWidthSizer;
 
-    impl NodeSizer<MockDomainGraph> for VariableWidthSizer {
+    impl MockRenderer<MockDomainGraph> for VariableWidthSizer {
         fn get_node_size(
             &self,
             node: &petgraph::stable_graph::NodeIndex<u32>,
@@ -532,11 +637,11 @@ fn viewport_visual_regression_bridge_position_with_variable_node_widths() {
     let snapshot = make_snapshot_custom(
         TestGraphs::domain_diamond(),
         80,
-        25,
-        2,
-        3,
+        24,
         node_sizer,
         renderer,
+        &[],
+        GapSizes::default(),
     );
 
     insta::assert_snapshot!("bridge_position_variable_widths", snapshot);
@@ -548,208 +653,61 @@ fn test_skip_layer() {
     use crate::testing::mocks::TestGraphs;
 
     let domain_graph = TestGraphs::domain_skip_layer();
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("skip_layer", snapshot);
 }
 
 #[test]
-fn test_skip_layer_partition_boundary() {
+fn viewport_chain_long_spanning_edge() {
     let _ = env_logger::try_init();
-    use crate::testing::mocks::TestGraphs;
-
-    let domain_graph = TestGraphs::domain_skip_layer();
-    let snapshot = make_snapshot(domain_graph, 80, 25, 2, usize::MAX);
-
-    insta::assert_snapshot!("skip_layer_partition_boundary", snapshot);
-}
-
-#[test]
-fn viewport_chain_three_partitions_spanning_edge() {
-    let _ = env_logger::try_init();
-    // Create a chain graph divided into 3 partitions on layer basis
-    // with one edge completely spanning the middle partition.
-    //
-    // Graph structure with layers:
-    // Layer 0: [0]
-    // Layer 1: [1]
-    // Layer 2: [2]
-    // Layer 3: [3]
-    // Layer 4: [4]
-    // Layer 5: [5]
-    //
-    // Partitions (layer_count=2):
-    // Partition 0: Layers 0-1 (nodes 0, 1)
-    // Partition 1 (middle): Layers 2-3 (nodes 2, 3)
-    // Partition 2: Layers 4-5 (nodes 4, 5)
+    // A chain with one edge that skips several ranks entirely.
     //
     // Regular chain edges: 0->1->2->3->4->5
-    // Spanning edge: 1->4 (spans middle partition completely)
+    // Spanning edge: 1->4
     let mut domain_graph = MockDomainGraph::new();
     let nodes: Vec<_> = (0..6).map(|_| domain_graph.add_node(())).collect();
 
-    // Create the chain
     for i in 0..5 {
         domain_graph.add_edge(nodes[i], nodes[i + 1], ());
     }
-
-    // Add the spanning edge that completely skips the middle partition
-    // Node 1 is in partition 0 (layer 1), node 4 is in partition 2 (layer 4)
     domain_graph.add_edge(nodes[1], nodes[4], ());
 
-    // Use layer_count=2 to create 3 partitions from 6 layers
-    // This creates partition boundaries at layers 2 and 4
-    let snapshot = make_snapshot(domain_graph, 100, 30, 2, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
-    insta::assert_snapshot!("chain_three_partitions_spanning_edge", snapshot);
+    insta::assert_snapshot!("chain_long_spanning_edge", snapshot);
 }
 
 #[test]
-fn viewport_chain_five_partitions_long_spanning_edge() {
+fn viewport_chain_very_long_spanning_edge() {
     let _ = env_logger::try_init();
-    // Create a longer chain graph divided into 5 partitions (3 data + 2 bridge)
-    // with one edge completely spanning the middle partitions.
-    //
-    // With node_count=5 and the spanning edge 1->8, we get:
-    // Partition 0: 6 nodes (0-5)     - Data partition
-    // Partition 1: 0 nodes           - Bridge partition for edges crossing from 0 to 2
-    // Partition 2: 5 nodes (4-8)     - Data partition
-    // Partition 3: 0 nodes           - Bridge partition for edges crossing from 2 to 4
-    // Partition 4: 3 nodes (7-9)     - Data partition
+    // A longer chain with one edge that skips most of the graph.
     //
     // Regular chain edges: 0->1->2->3->4->5->6->7->8->9
-    // Long spanning edge: 1->8 (spans bridge partitions 1 and 3, and data partition 2)
+    // Long spanning edge: 1->8
     let mut domain_graph = MockDomainGraph::new();
     let nodes: Vec<_> = (0..10).map(|_| domain_graph.add_node(())).collect();
 
-    // Create the chain
-    for i in 0..9 {
-        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
-    }
-
-    // Add the spanning edge that completely skips partitions 1, 2, and 3
-    // Node 1 is in partition 0 (layer 1), node 8 is in partition 4 (layer 8)
-    domain_graph.add_edge(nodes[1], nodes[8], ());
-
-    // Note: if you cut off the partitions using node_count=5 the test will fail due to
-    // a visual artefact, which is concession made when using node_count to create the cut.
-    // Topologically, the graph was still correct.
-    let snapshot = make_snapshot(domain_graph, 120, 35, 2, usize::MAX);
-
-    insta::assert_snapshot!("chain_five_partitions_long_spanning_edge", snapshot);
-}
-
-#[test]
-fn viewport_chain_five_partitions_verify_partition_count() {
-    let _ = env_logger::try_init();
-    use crate::{
-        geometry::WorldPos,
-        graph_algorithms::find_articulation_points,
-        graph_controller::{GraphConfig, GraphController},
-        layout::VisualDetail,
-        testing::mocks::FixedNodeSizer,
-    };
-
-    // Create the same chain graph as above
-    let mut domain_graph = MockDomainGraph::new();
-    let nodes: Vec<_> = (0..10).map(|_| domain_graph.add_node(())).collect();
     for i in 0..9 {
         domain_graph.add_edge(nodes[i], nodes[i + 1], ());
     }
     domain_graph.add_edge(nodes[1], nodes[8], ());
 
-    // Check articulation points
-    let articulation_points = find_articulation_points(&domain_graph);
-    println!(
-        "Articulation points in 10-node chain: {:?}",
-        articulation_points
-    );
-    println!(
-        "Number of articulation points: {}",
-        articulation_points.len()
-    );
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
-    let node_sizer = FixedNodeSizer {
-        width: 5,
-        height: 3,
-    };
-
-    // Configure for partitioning - use node_count to control partition size
-    // With 10 nodes and node_count=5, we get 3 data partitions (6 + 5 + 3 nodes) + 2 bridge partitions
-    let mut config = GraphConfig::default();
-    config.partition.layer_count = 2;
-    config.partition.node_count = 5; // Allow up to 5 nodes per partition
-
-    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
-    controller.set_detail_level(VisualDetail::Full);
-
-    // Set viewport to cover everything
-    controller.viewport_state.viewport_bounds =
-        ratatui::layout::Rect::new(0, 0, u16::MAX / 2, u16::MAX / 2);
-    controller.viewport_state.camera_current = WorldPos::new(0, 0);
-    controller.viewport_state.camera_target = WorldPos::new(0, 0);
-
-    // Check how many partitions are actually created
-    let total_partition_count = controller
-        .partition_controller
-        .partition_table
-        .partitions
-        .len();
-    println!("Total partitions created: {}", total_partition_count);
-
-    // Verify we have 5 partitions total (3 data + 2 bridge partitions)
-    assert_eq!(
-        total_partition_count, 5,
-        "Expected 5 partitions (3 data + 2 bridge), but found {}",
-        total_partition_count
-    );
-
-    // Load all partitions
-    let loaded_partitions = controller.ensure_camera_coverage().unwrap_or_default();
-    println!("Partitions loaded: {}", loaded_partitions.len());
-    assert_eq!(
-        loaded_partitions.len(),
-        total_partition_count,
-        "Expected all partitions to be loaded"
-    );
-
-    // Print partition details and verify spanning edge crosses multiple partitions
-    let mut data_partition_count = 0;
-    for (i, partition) in controller
-        .partition_controller
-        .partition_table
-        .partitions
-        .iter()
-        .enumerate()
-    {
-        println!("Partition {}: {} nodes", i, partition.graph.node_count());
-        if partition.graph.node_count() > 0 {
-            data_partition_count += 1;
-        }
-    }
-
-    println!(
-        "Data partitions: {}, Bridge partitions: {}",
-        data_partition_count,
-        total_partition_count - data_partition_count
-    );
-
-    // The spanning edge 1->8 should cross partitions 1, 2, and 3
-    // Node 1 is in partition 0, node 8 is in partition 4
-    println!(
-        "✓ Confirmed: 5 partitions created (3 data + 2 bridge), spanning edge crosses middle partitions"
-    );
+    insta::assert_snapshot!("chain_very_long_spanning_edge", snapshot);
 }
 
 #[test]
-fn test_skip_layer_terminal_stitch_edge_bundles() {
+fn test_skip_layer_edges_carry_bundles() {
     let _ = env_logger::try_init();
 
     use crate::{
-        geometry::WorldPos,
-        graph_controller::{GraphConfig, GraphController},
-        layout::VisualDetail,
+        layout::NodeRole,
+        layout_engine::LayoutEngine,
+        plotter::NodeRenderer,
         testing::mocks::{FixedNodeSizer, TestGraphs},
+        viewport_graph::ViewportGraph,
     };
 
     let domain_graph = TestGraphs::domain_skip_layer();
@@ -759,60 +717,44 @@ fn test_skip_layer_terminal_stitch_edge_bundles() {
         height: 3,
     };
 
-    let mut config = GraphConfig::default();
-    config.partition.layer_count = 2;
-    config.partition.node_count = 3;
+    let mut engine = LayoutEngine::new(domain_graph.clone());
 
-    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
+    let anchor = engine.default_anchor().expect("should have graph nodes");
+    let assembled = engine
+        .window_for(anchor, domain_graph.node_count() * 8)
+        .expect("should build a window covering the graph");
+    let backward_edges = assembled.backward_edges.clone();
 
-    controller.set_detail_level(VisualDetail::Full);
+    let geometry = {
+        let visual = &node_sizer;
+        crate::graph_widget::build_window_geometry(
+            assembled,
+            &GapSizes {
+                data_data_x: |_| 1,
+                data_data_y: |_| 0,
+                ..GapSizes::default()
+            },
+            |role| match role {
+                NodeRole::Data(domain_idx) => {
+                    NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_idx)
+                }
+                _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
+            },
+        )
+    };
+    let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
 
-    controller.viewport_state.viewport_bounds =
-        ratatui::layout::Rect::new(0, 0, u16::MAX / 2, u16::MAX / 2);
-    controller.initialize_cursor();
-    controller.viewport_state.camera_current = WorldPos::new(0, 0);
-    controller.viewport_state.camera_target = WorldPos::new(0, 0);
-
-    let result = controller.rebuild_viewport_graph();
-    assert!(
-        result.is_ok(),
-        "Failed to rebuild viewport graph: {:?}",
-        result
-    );
-
-    let viewport_graph = controller.get_viewport_graph();
-
-    // Count edges that lack bundles by iterating through the viewport graph
-    let mut edges_without_bundles = 0;
-    let mut total_edges = 0;
-
-    for edge in viewport_graph.graph.all_edges() {
-        total_edges += 1;
-        let (source, target, edge_data) = edge;
-
-        // Check if this edge has an empty bundle (indicating it's from terminal stitch nodes)
-        if edge_data.is_empty() {
-            edges_without_bundles += 1;
-            println!(
-                "Edge from {:?} to {:?} lacks bundle: {:?}",
-                source, target, edge_data
-            );
-        }
-    }
-
-    println!("Total edges in viewport graph: {}", total_edges);
-    println!("Edges without bundles: {}", edges_without_bundles);
-
-    // After filtering out edges with empty bundles in viewport_graph.rs,
-    // there should be 0 edges without bundles in the viewport graph
+    // Every edge in the assembled viewport graph should carry a bundle back to the domain
+    // edge(s) it represents.
+    let edges_without_bundles = viewport_graph
+        .graph
+        .all_edges()
+        .filter(|(_, _, bundle)| bundle.is_empty())
+        .count();
     assert_eq!(
         edges_without_bundles, 0,
-        "Expected 0 edges without bundles (they should be filtered out at viewport graph creation), but found {}",
+        "expected every viewport edge to carry a bundle, but found {}",
         edges_without_bundles
-    );
-
-    println!(
-        "Test completed successfully - no unbundled edges in viewport graph (filtered at creation)"
     );
 }
 
@@ -822,8 +764,7 @@ fn viewport_even_width_node_spacing() {
     // Test that even-width nodes have proper spacing for edge routing
     use crate::{
         layout::VisualDetail,
-        plotter::NodeSizer,
-        testing::mocks::{MockDomainGraph, TestRenderers},
+        testing::mocks::{MockDomainGraph, MockRenderer, TestRenderers},
     };
 
     // Create a simple diamond graph
@@ -841,7 +782,7 @@ fn viewport_even_width_node_spacing() {
     #[derive(Debug, Clone)]
     struct OddEvenSizer;
 
-    impl NodeSizer<MockDomainGraph> for OddEvenSizer {
+    impl MockRenderer<MockDomainGraph> for OddEvenSizer {
         fn get_node_size(
             &self,
             node: &petgraph::stable_graph::NodeIndex<u32>,
@@ -867,328 +808,21 @@ fn viewport_even_width_node_spacing() {
     let snapshot = make_snapshot_custom(
         domain_graph,
         80,
-        25,
-        usize::MAX,
-        usize::MAX,
+        43,
         node_sizer,
         renderer,
+        &[],
+        GapSizes::default(),
     );
 
     insta::assert_snapshot!("even_width_nodes", snapshot);
 }
 
-#[test]
-fn test_edge_viewport_intersection_endpoints_outside() {
-    let _ = env_logger::try_init();
-
-    use petgraph::{
-        stable_graph::StableDiGraph,
-        visit::{EdgeRef, IntoEdgeReferences},
-    };
-
-    use crate::{
-        geometry::BigRect,
-        layout::{LayoutEngine, VisualDetail},
-        partition::{PartitionEdge, PartitionNode},
-        testing::mocks::FixedNodeSizer,
-    };
-
-    // Create a larger partition graph with multiple nodes to ensure
-    // there's enough distance between the endpoints
-    let mut partition_graph = StableDiGraph::<PartitionNode, PartitionEdge, u32>::new();
-
-    // Create a chain: 0 -> 1 -> 2 -> 3 -> 4
-    // This will space out the nodes significantly
-    let nodes: Vec<_> = (0..5)
-        .map(|i| partition_graph.add_node(PartitionNode::Data(petgraph::graph::NodeIndex::new(i))))
-        .collect();
-
-    for i in 0..4 {
-        partition_graph.add_edge(
-            nodes[i],
-            nodes[i + 1],
-            Some((
-                petgraph::graph::NodeIndex::new(i),
-                petgraph::graph::NodeIndex::new(i + 1),
-            )),
-        );
-    }
-
-    // Create a layout engine
-    let mut layout_engine = LayoutEngine::new(&partition_graph, 0);
-
-    // Use small node sizes to ensure clear separation
-    let node_sizer = FixedNodeSizer {
-        width: 2,
-        height: 2,
-    };
-
-    // Compute the layout
-    let layout = layout_engine
-        .compute_layout(&node_sizer, VisualDetail::Full)
-        .expect("Failed to compute layout");
-
-    // Get the positions of the first and last data nodes
-    let node0_pos = layout
-        .graph
-        .node_indices()
-        .find_map(|idx| {
-            let node = layout.graph.node_weight(idx)?;
-            if matches!(node.role, crate::layout::NodeRole::Data(n) if n.index() == 0) {
-                Some(node.pos)
-            } else {
-                None
-            }
-        })
-        .expect("Node 0 not found in layout");
-
-    let node4_pos = layout
-        .graph
-        .node_indices()
-        .find_map(|idx| {
-            let node = layout.graph.node_weight(idx)?;
-            if matches!(node.role, crate::layout::NodeRole::Data(n) if n.index() == 4) {
-                Some(node.pos)
-            } else {
-                None
-            }
-        })
-        .expect("Node 4 not found in layout");
-
-    println!("Node 0 position: {:?}", node0_pos);
-    println!("Node 4 position: {:?}", node4_pos);
-
-    // Create a small viewport in the middle of the graph
-    // Position it between nodes 1 and 3 to ensure it doesn't overlap with node 0 or 4
-    let viewport_center_x = (node0_pos.x + node4_pos.x) / 2;
-    let viewport_center_y = (node0_pos.y + node4_pos.y) / 2;
-
-    // Make viewport very small - just 2x2 cells
-    let viewport = BigRect::from_coords(
-        viewport_center_x - 1,
-        viewport_center_y - 1,
-        viewport_center_x + 1,
-        viewport_center_y + 1,
-    );
-
-    println!("Viewport: {:?}", viewport);
-
-    // Count data nodes in the viewport (excluding routing nodes)
-    let data_nodes_in_viewport = layout
-        .find_nodes_in_rect(viewport)
-        .iter()
-        .filter(|obj| {
-            matches!(
-                obj.object_type,
-                crate::geometry::SpatialObjectType::DataNode(_)
-            )
-        })
-        .count();
-
-    println!("Data nodes in viewport: {}", data_nodes_in_viewport);
-
-    // Query for edges in the viewport
-    let edges_in_viewport = layout.find_edges_in_rect(viewport);
-    println!("Edges in viewport: {}", edges_in_viewport.len());
-
-    // Debug: print all edges and their bounding boxes
-    for (idx, edge_ref) in layout.graph.edge_references().enumerate() {
-        let source = edge_ref.source();
-        let target = edge_ref.target();
-        let source_node = layout.graph.node_weight(source).unwrap();
-        let target_node = layout.graph.node_weight(target).unwrap();
-        println!(
-            "Edge {}: ({}, {}) to ({}, {})",
-            idx, source_node.pos.x, source_node.pos.y, target_node.pos.x, target_node.pos.y
-        );
-    }
-
-    // The viewport should be in the middle of the chain, containing node 2 (the middle node)
-    // but not nodes 0 or 4 (the endpoints). There should be edges crossing through it
-    // from routing nodes connecting the chain segments.
-    assert!(
-        !edges_in_viewport.is_empty(),
-        "Expected to find edges crossing through viewport, but found none. \
-         This indicates that the spatial indexing is not capturing edges whose \
-         endpoints are outside the viewport."
-    );
-
-    println!(
-        "✓ Successfully found {} edge(s) crossing through viewport",
-        edges_in_viewport.len()
-    );
-}
-
-#[test]
-fn test_diagonal_edge_viewport_intersection() {
-    let _ = env_logger::try_init();
-
-    use petgraph::stable_graph::StableDiGraph;
-
-    use crate::{
-        geometry::BigRect,
-        layout::{LayoutEngine, VisualDetail},
-        partition::{PartitionEdge, PartitionNode},
-        testing::mocks::FixedNodeSizer,
-    };
-
-    // Create a diamond graph to test diagonal edges
-    // Structure:  0
-    //            / \
-    //           1   2
-    //            \ /
-    //             3
-    let mut partition_graph = StableDiGraph::<PartitionNode, PartitionEdge, u32>::new();
-
-    let nodes: Vec<_> = (0..4)
-        .map(|i| partition_graph.add_node(PartitionNode::Data(petgraph::graph::NodeIndex::new(i))))
-        .collect();
-
-    // Add diamond edges
-    partition_graph.add_edge(
-        nodes[0],
-        nodes[1],
-        Some((
-            petgraph::graph::NodeIndex::new(0),
-            petgraph::graph::NodeIndex::new(1),
-        )),
-    );
-    partition_graph.add_edge(
-        nodes[0],
-        nodes[2],
-        Some((
-            petgraph::graph::NodeIndex::new(0),
-            petgraph::graph::NodeIndex::new(2),
-        )),
-    );
-    partition_graph.add_edge(
-        nodes[1],
-        nodes[3],
-        Some((
-            petgraph::graph::NodeIndex::new(1),
-            petgraph::graph::NodeIndex::new(3),
-        )),
-    );
-    partition_graph.add_edge(
-        nodes[2],
-        nodes[3],
-        Some((
-            petgraph::graph::NodeIndex::new(2),
-            petgraph::graph::NodeIndex::new(3),
-        )),
-    );
-
-    let mut layout_engine = LayoutEngine::new(&partition_graph, 0);
-    let node_sizer = FixedNodeSizer {
-        width: 3,
-        height: 3,
-    };
-
-    let layout = layout_engine
-        .compute_layout(&node_sizer, VisualDetail::Full)
-        .expect("Failed to compute layout");
-
-    // Find node positions
-    let find_node = |node_index: usize| {
-        layout
-            .graph
-            .node_indices()
-            .find_map(|idx| {
-                let node = layout.graph.node_weight(idx)?;
-                if matches!(node.role, crate::layout::NodeRole::Data(n) if n.index() == node_index)
-                {
-                    Some(node.pos)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| panic!("Node {} not found in layout", node_index))
-    };
-
-    let node0_pos = find_node(0);
-    let node1_pos = find_node(1);
-    let node2_pos = find_node(2);
-    let node3_pos = find_node(3);
-
-    println!("Node 0 (top): {:?}", node0_pos);
-    println!("Node 1 (left): {:?}", node1_pos);
-    println!("Node 2 (right): {:?}", node2_pos);
-    println!("Node 3 (bottom): {:?}", node3_pos);
-
-    // Create a small viewport positioned in the center of the diamond
-    // This should not contain any of the 4 corner nodes, but should
-    // intersect the diagonal routing edges between them
-    let center_x = (node0_pos.x + node3_pos.x) / 2;
-    let center_y = (node1_pos.y + node2_pos.y) / 2;
-
-    // Make a small viewport around the center - expand by 2 units in each direction
-    let viewport = BigRect::from_coords(center_x - 2, center_y - 2, center_x + 2, center_y + 2);
-
-    println!("Viewport (center region): {:?}", viewport);
-
-    // Query for nodes - we expect none of the data nodes to be in this tiny viewport
-    let data_nodes_in_viewport = layout
-        .find_nodes_in_rect(viewport)
-        .iter()
-        .filter(|obj| {
-            matches!(
-                obj.object_type,
-                crate::geometry::SpatialObjectType::DataNode(_)
-            )
-        })
-        .count();
-
-    println!("Data nodes in viewport: {}", data_nodes_in_viewport);
-
-    // Debug: Print all edges and their positions
-    use petgraph::visit::{EdgeRef, IntoEdgeReferences};
-    println!("\nAll edges in layout:");
-    for edge_ref in layout.graph.edge_references() {
-        let source = edge_ref.source();
-        let target = edge_ref.target();
-        let source_node = layout.graph.node_weight(source).unwrap();
-        let target_node = layout.graph.node_weight(target).unwrap();
-        let bbox_min_x = source_node.pos.x.min(target_node.pos.x);
-        let bbox_max_x = source_node.pos.x.max(target_node.pos.x);
-        let bbox_min_y = source_node.pos.y.min(target_node.pos.y);
-        let bbox_max_y = source_node.pos.y.max(target_node.pos.y);
-        println!(
-            "  Edge ({},{}) -> ({},{}) | AABB: x[{},{}] y[{},{}]",
-            source_node.pos.x,
-            source_node.pos.y,
-            target_node.pos.x,
-            target_node.pos.y,
-            bbox_min_x,
-            bbox_max_x,
-            bbox_min_y,
-            bbox_max_y
-        );
-    }
-
-    // Query for edges - we expect to find routing edges that cross through this center point
-    let edges_in_viewport = layout.find_edges_in_rect(viewport);
-    println!("\nEdges found in viewport: {}", edges_in_viewport.len());
-
-    // The spatial indexing should capture edges that cross through the viewport
-    // even if both endpoints are outside
-    assert!(
-        !edges_in_viewport.is_empty(),
-        "Expected to find edges crossing through the center of the diamond, but found none. \
-         This would indicate that diagonal edges with endpoints outside the viewport \
-         are not being captured by spatial indexing."
-    );
-
-    println!(
-        "✓ Successfully found {} edge(s) crossing through center region",
-        edges_in_viewport.len()
-    );
-}
-
 /// Test for determinism by running the same layout multiple times and comparing snapshots.
-/// This test uses the complex_dag graph with node-based partitioning (which forces bridge creation)
-/// to ensure that HashMap/HashSet iterations produce consistent results.
+/// This test uses the complex_dag graph to ensure that HashMap/HashSet iterations produce
+/// consistent results.
 #[test]
-fn test_layout_determinism_with_partitioning() {
+fn test_layout_determinism() {
     let _ = env_logger::try_init();
     use crate::testing::mocks::TestGraphs;
 
@@ -1199,7 +833,7 @@ fn test_layout_determinism_with_partitioning() {
     for i in 0..num_iterations {
         // Clone the graph for each iteration since make_snapshot takes ownership
         let graph = TestGraphs::domain_complex_dag();
-        let snapshot = make_snapshot(graph, 80, 25, usize::MAX, 3);
+        let snapshot = make_snapshot(graph, 80, 24);
         snapshots.push(snapshot);
         log::trace!("Generated snapshot {} for determinism test", i);
     }
@@ -1217,7 +851,7 @@ fn test_layout_determinism_with_partitioning() {
     }
 
     // Also verify against the stored snapshot to ensure the output is correct
-    insta::assert_snapshot!("determinism_check_complex_dag_node_partitioning", first);
+    insta::assert_snapshot!("determinism_check_complex_dag", first);
 }
 
 /// Proves crossing-reduction tie handling is deterministic by constructing the same symmetric
@@ -1259,8 +893,8 @@ fn test_layout_determinism_across_edge_insertion_order_symmetric_fan() {
     graph_2.add_edge(node_1, node_4, ());
     graph_2.add_edge(node_2, node_4, ());
 
-    let snapshot1 = make_snapshot(graph_1, 80, 25, usize::MAX, usize::MAX);
-    let snapshot2 = make_snapshot(graph_2, 80, 25, usize::MAX, usize::MAX);
+    let snapshot1 = make_snapshot(graph_1, 80, 24);
+    let snapshot2 = make_snapshot(graph_2, 80, 24);
 
     assert_eq!(
         snapshot1, snapshot2,
@@ -1272,34 +906,10 @@ fn test_layout_determinism_across_edge_insertion_order_symmetric_fan() {
 fn test_double_chain() {
     let _ = env_logger::try_init();
 
-    // Create a graph with 18 nodes arranged in two chains with a common start and stop node.
-    // Chain 1: node_1 -> node_2 -> node_3 -> node_4 -> node_5 -> node_6 -> node_7 -> node_8 -> node_9 -> node_10 (10 nodes)
-    // Chain 2: node_1 -> node_12 -> node_13 -> node_14 -> node_15 -> node_16 -> node_17 -> node_18 -> node_19 -> node_10 (10 nodes)
-    // Shared nodes: node_1 (start), node_10 (stop)
-    // Total unique nodes: 18
+    // Two ten-node chains share their first and last nodes.
 
     let mut domain_graph = MockDomainGraph::new();
 
-    // Add all nodes (indices 0-17 correspond to node_1-node_10 and node_12-node_19)
-    // Using index mapping:
-    // 0 -> node_1 (shared start)
-    // 1 -> node_2
-    // 2 -> node_3
-    // 3 -> node_4
-    // 4 -> node_5
-    // 5 -> node_6
-    // 6 -> node_7
-    // 7 -> node_8
-    // 8 -> node_9
-    // 9 -> node_10 (shared stop)
-    // 10 -> node_12
-    // 11 -> node_13
-    // 12 -> node_14
-    // 13 -> node_15
-    // 14 -> node_16
-    // 15 -> node_17
-    // 16 -> node_18
-    // 17 -> node_19
     let nodes: Vec<_> = (0..18).map(|_| domain_graph.add_node(())).collect();
 
     // Chain 1: node_1(0) -> node_2(1) -> node_3(2) -> node_4(3) -> node_5(4) -> node_6(5) -> node_7(6) -> node_8(7) -> node_9(8) -> node_10(9)
@@ -1314,7 +924,7 @@ fn test_double_chain() {
     }
     domain_graph.add_edge(nodes[17], nodes[9], ());
 
-    let snapshot = make_snapshot(domain_graph, 120, 40, 5, 20);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("double_chain", snapshot);
 }
@@ -1350,7 +960,7 @@ fn test_asymmetric_diamond() {
     domain_graph.add_edge(node_a, node_f, ());
     domain_graph.add_edge(node_f, node_e, ());
 
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("asymmetric_diamond", snapshot);
 }
@@ -1373,7 +983,7 @@ fn test_asymmetric_diamond_2_1() {
     domain_graph.add_edge(node_a, node_e, ());
     domain_graph.add_edge(node_e, node_d, ());
 
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("asymmetric_diamond_2_1", snapshot);
 }
@@ -1404,7 +1014,7 @@ fn test_asymmetric_diamond_4_1() {
     domain_graph.add_edge(node_a, node_g, ());
     domain_graph.add_edge(node_g, node_f, ());
 
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("asymmetric_diamond_4_1", snapshot);
 }
@@ -1434,7 +1044,7 @@ fn test_asymmetric_diamond_3_2() {
     domain_graph.add_edge(node_f1, node_f2, ());
     domain_graph.add_edge(node_f2, node_e, ());
 
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("asymmetric_diamond_3_2", snapshot);
 }
@@ -1466,9 +1076,147 @@ fn test_asymmetric_diamond_4_2() {
     domain_graph.add_edge(node_x, node_y, ());
     domain_graph.add_edge(node_y, node_f, ());
 
-    let snapshot = make_snapshot(domain_graph, 80, 25, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("asymmetric_diamond_4_2", snapshot);
+}
+
+/// Test a complex multi-level DAG with dense intermediate connectivity.
+///
+/// Uses alphabetic single-character labels (node N → Nth letter A-Z) with 1×1 cells,
+/// except N17 (4×1) and N3 (6×1) which are wider to stress horizontal spacing.
+#[test]
+fn test_complex_multipath_dag() {
+    let _ = env_logger::try_init();
+
+    use crate::{geometry::WorldPos, testing::mocks::MockRenderer};
+
+    #[derive(Debug, Clone)]
+    struct AlphabeticSizer;
+
+    impl MockRenderer<MockDomainGraph> for AlphabeticSizer {
+        fn get_node_size(
+            &self,
+            node: &petgraph::stable_graph::NodeIndex<u32>,
+            _scale: VisualDetail,
+        ) -> (u64, u64) {
+            match node.index() {
+                17 => (4, 1),
+                3 => (6, 1),
+                _ => (1, 1),
+            }
+        }
+
+        fn get_dummy_size(&self) -> (u64, u64) {
+            (1, 1)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct AlphabeticRenderer;
+
+    impl MockRenderer<MockDomainGraph> for AlphabeticRenderer {
+        fn render_node(
+            &self,
+            buffer: &mut crate::viewport_state::WorldBuffer,
+            area: crate::geometry::WorldRect,
+            node_id: &petgraph::stable_graph::NodeIndex<u32>,
+            _scale: VisualDetail,
+        ) {
+            let letter = char::from_u32(b'A' as u32 + node_id.index() as u32).unwrap_or('?');
+            let Some(visible) = buffer.calculate_visible_area(area) else {
+                return;
+            };
+            for y in visible.min.y..=visible.max.y {
+                let width = (visible.max.x - visible.min.x + 1) as usize;
+                let content = letter.to_string().repeat(width);
+                buffer.set_string(WorldPos::new(visible.min.x, y), &content);
+            }
+        }
+    }
+
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..22).map(|_| domain_graph.add_node(())).collect();
+
+    let edges: &[(usize, usize)] = &[
+        (0, 10),
+        (0, 11),
+        (0, 8),
+        (0, 19),
+        (1, 7),
+        (1, 12),
+        (1, 13),
+        (1, 18),
+        (2, 11),
+        (2, 10),
+        (2, 19),
+        (2, 8),
+        (3, 21),
+        (4, 10),
+        (4, 8),
+        (4, 11),
+        (4, 19),
+        (5, 11),
+        (5, 19),
+        (5, 10),
+        (5, 8),
+        (6, 21),
+        (7, 2),
+        (7, 0),
+        (7, 5),
+        (7, 4),
+        (8, 6),
+        (9, 7),
+        (9, 18),
+        (9, 13),
+        (9, 12),
+        (10, 6),
+        (11, 6),
+        (12, 2),
+        (12, 4),
+        (12, 0),
+        (12, 5),
+        (13, 0),
+        (13, 4),
+        (13, 2),
+        (13, 5),
+        (14, 18),
+        (14, 13),
+        (14, 12),
+        (14, 7),
+        (15, 1),
+        (15, 17),
+        (15, 14),
+        (15, 9),
+        (15, 16),
+        (16, 7),
+        (16, 12),
+        (16, 18),
+        (16, 13),
+        (17, 6),
+        (18, 2),
+        (18, 4),
+        (18, 0),
+        (18, 5),
+        (19, 6),
+        (20, 3),
+        (20, 15),
+    ];
+
+    for &(from, to) in edges {
+        domain_graph.add_edge(nodes[from], nodes[to], ());
+    }
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        132,
+        43,
+        AlphabeticSizer,
+        AlphabeticRenderer,
+        &[],
+        GapSizes::default(),
+    );
+    insta::assert_snapshot!("complex_multipath_dag", snapshot);
 }
 
 /// Build a dense all-to-all grid with a bypass node.
@@ -1527,7 +1275,7 @@ fn test_grid_all_to_all_with_bypass() {
     let _ = env_logger::try_init();
 
     let domain_graph = make_grid_all_to_all_with_bypass(4, 4);
-    let snapshot = make_snapshot(domain_graph, 120, 40, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("grid_all_to_all_with_bypass", snapshot);
 }
@@ -1540,9 +1288,8 @@ fn test_grid_disperse_zoom_preserves_spacing() {
     let _ = env_logger::try_init();
 
     use crate::{
-        geometry::WorldPos,
-        graph_controller::{GraphConfig, GraphController},
-        testing::mocks::FixedNodeSizer,
+        layout::NodeRole, layout_engine::LayoutEngine, plotter::NodeRenderer,
+        testing::mocks::FixedNodeSizer, viewport_graph::ViewportGraph,
     };
 
     let domain_graph = make_grid_all_to_all_with_bypass(4, 4);
@@ -1550,36 +1297,45 @@ fn test_grid_disperse_zoom_preserves_spacing() {
         width: 5,
         height: 3,
     };
-    let mut config = GraphConfig::default();
-    config.partition.layer_count = usize::MAX;
-    config.partition.node_count = usize::MAX;
 
-    let mut controller = GraphController::new_with_config(domain_graph.clone(), node_sizer, config);
-    controller.set_detail_level(VisualDetail::Full);
-    controller.viewport_state.viewport_bounds =
-        ratatui::layout::Rect::new(0, 0, u16::MAX / 2, u16::MAX / 2);
-    controller.viewport_state.camera_current = WorldPos::new(0, 0);
-    controller.viewport_state.camera_target = WorldPos::new(0, 0);
+    let mut engine = LayoutEngine::new(domain_graph.clone());
 
     // First grid layer (domain indices 1-4) plus the bypass node (index 18)
     // span all distinct rows of the layout.
     let row_node_indices = [1u32, 2, 3, 4, 18];
 
-    let collect_row_ys = |controller: &mut GraphController<MockDomainGraph, FixedNodeSizer>| {
-        controller
-            .ensure_camera_coverage()
-            .expect("Failed to ensure camera coverage");
-        controller
-            .rebuild_viewport_graph()
-            .expect("Failed to rebuild viewport graph");
-        let viewport_graph = controller.get_viewport_graph();
+    let collect_row_ys = |engine: &mut LayoutEngine<MockDomainGraph>, gap_y: u64| {
+        let anchor = engine.default_anchor().expect("should have graph nodes");
+        // Cover the full graph so boundary doors do not affect row spacing.
+        let assembled = engine
+            .window_for(anchor, domain_graph.node_count() * 30)
+            .expect("should build a window covering the graph");
+        let backward_edges = assembled.backward_edges.clone();
+        let geometry = {
+            let visual = &node_sizer;
+            crate::graph_widget::build_window_geometry(
+                assembled,
+                &GapSizes {
+                    data_data_x: |_| 1,
+                    data_data_y: fixed_gap(gap_y),
+                    ..GapSizes::default()
+                },
+                |role| match role {
+                    NodeRole::Data(domain_idx) => {
+                        NodeRenderer::<MockDomainGraph>::get_node_size(visual, domain_idx)
+                    }
+                    _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
+                },
+            )
+        };
+        let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
         let mut ys: Vec<i64> = row_node_indices
             .iter()
             .map(|&i| {
                 viewport_graph
                     .node_positions
                     .get(&petgraph::graph::NodeIndex::new(i as usize))
-                    .expect("Node missing from viewport graph")
+                    .expect("should include the node in the viewport graph")
                     .y
             })
             .collect();
@@ -1589,8 +1345,9 @@ fn test_grid_disperse_zoom_preserves_spacing() {
 
     let uniform_gaps = |ys: &[i64]| -> Vec<i64> { ys.windows(2).map(|w| w[1] - w[0]).collect() };
 
-    // Default spacing: rows must be uniformly spaced (no dead space)
-    let initial_ys = collect_row_ys(&mut controller);
+    // Default gap: rows must be uniformly spaced (no dead space)
+    let default_gap_y = 0;
+    let initial_ys = collect_row_ys(&mut engine, default_gap_y);
     let initial_gaps = uniform_gaps(&initial_ys);
     assert!(
         initial_gaps.iter().all(|&g| g == initial_gaps[0]),
@@ -1598,11 +1355,9 @@ fn test_grid_disperse_zoom_preserves_spacing() {
         initial_gaps
     );
 
-    // Disperse twice: vertex spacing 1 -> 3 -> 5, so row gaps grow to height + spacing
-    controller.disperse();
-    controller.disperse();
-
-    let dispersed_ys = collect_row_ys(&mut controller);
+    // Disperse: row gaps grow to height + gap_y
+    let dispersed_gap_y = default_gap_y + 4;
+    let dispersed_ys = collect_row_ys(&mut engine, dispersed_gap_y);
     let dispersed_gaps = uniform_gaps(&dispersed_ys);
     assert!(
         dispersed_gaps.iter().all(|&g| g == dispersed_gaps[0]),
@@ -1616,14 +1371,11 @@ fn test_grid_disperse_zoom_preserves_spacing() {
         dispersed_gaps[0]
     );
 
-    // Contract back to the default spacing: layout must return to the original
-    controller.contract();
-    controller.contract();
-
-    let contracted_ys = collect_row_ys(&mut controller);
+    // Contract back to the default gap: layout must return to the original
+    let contracted_ys = collect_row_ys(&mut engine, default_gap_y);
     assert_eq!(
         contracted_ys, initial_ys,
-        "Contracting back to default spacing must restore the original row positions"
+        "Contracting back to default gap must restore the original row positions"
     );
 }
 
@@ -1634,7 +1386,7 @@ fn test_grid_5_layers_by_4_with_bypass() {
     let _ = env_logger::try_init();
 
     let domain_graph = make_grid_all_to_all_with_bypass(5, 4);
-    let snapshot = make_snapshot(domain_graph, 120, 40, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("grid_5_layers_by_4_with_bypass", snapshot);
 }
@@ -1646,7 +1398,7 @@ fn test_grid_4_layers_by_5_with_bypass() {
     let _ = env_logger::try_init();
 
     let domain_graph = make_grid_all_to_all_with_bypass(4, 5);
-    let snapshot = make_snapshot(domain_graph, 120, 40, usize::MAX, usize::MAX);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
 
     insta::assert_snapshot!("grid_4_layers_by_5_with_bypass", snapshot);
 }
@@ -1657,12 +1409,12 @@ fn test_grid_4_layers_by_5_with_bypass() {
 fn test_grid_all_to_all_with_bypass_variable_widths() {
     let _ = env_logger::try_init();
 
-    use crate::plotter::NodeSizer;
+    use crate::testing::mocks::MockRenderer;
 
     #[derive(Debug, Clone)]
     struct WideBypassSizer;
 
-    impl NodeSizer<MockDomainGraph> for WideBypassSizer {
+    impl MockRenderer<MockDomainGraph> for WideBypassSizer {
         fn get_node_size(
             &self,
             node: &petgraph::stable_graph::NodeIndex<u32>,
@@ -1689,38 +1441,35 @@ fn test_grid_all_to_all_with_bypass_variable_widths() {
 
     let snapshot = make_snapshot_custom(
         domain_graph,
-        120,
-        40,
-        usize::MAX,
-        usize::MAX,
+        132,
+        43,
         WideBypassSizer,
         renderer,
+        &[],
+        GapSizes::default(),
     );
 
     insta::assert_snapshot!("grid_all_to_all_with_bypass_variable_widths", snapshot);
 }
 
-/// Test rendering and positioning of very large nodes during zoom operations.
-///
-/// This test verifies that nodes with extreme widths (1000+ characters) are rendered
-/// correctly without coordinate overflow issues. The test zooms through different
-/// detail levels and ensures that:
-/// 1. Large nodes don't cause coordinate wraparound or positioning errors
-/// 2. Spatial relationships between nodes are maintained (left node < right node)
-/// 3. Cursor positioning remains stable during zoom operations
-///
-/// This test specifically addresses coordinate overflow bugs where very wide nodes
-/// could exceed u16::MAX coordinates and cause rendering artifacts.
+/// Very wide nodes must not overflow coordinates or destabilize the camera during zoom.
 #[test]
 fn test_large_node_rendering_with_zoom() {
     let _ = env_logger::try_init();
 
+    use ratatui::widgets::StatefulWidget as _;
+
     use crate::{
         geometry::WorldRect,
-        graph_controller::{GraphConfig, GraphController, WorldBuffer},
+        graph_painter::Camera,
+        graph_view::{GraphView, GraphViewState},
         layout::VisualDetail,
-        plotter::{NodeRenderer, NodeSizer},
-        testing::{create_test_terminal, mocks::MockDomainGraph},
+        layout_engine::LayoutEngine,
+        testing::{
+            create_test_terminal,
+            mocks::{MockDomainGraph, MockRenderer, MockVisual},
+        },
+        viewport_state::WorldBuffer,
     };
 
     // 1. Create a 3-node chain graph: 0 -> 1 -> 2
@@ -1735,7 +1484,7 @@ fn test_large_node_rendering_with_zoom() {
     #[derive(Debug, Clone)]
     struct VariableDetailSizer;
 
-    impl NodeSizer<MockDomainGraph> for VariableDetailSizer {
+    impl MockRenderer<MockDomainGraph> for VariableDetailSizer {
         fn get_node_size(
             &self,
             node: &petgraph::stable_graph::NodeIndex<u32>,
@@ -1761,9 +1510,9 @@ fn test_large_node_rendering_with_zoom() {
     #[derive(Debug, Clone)]
     struct UltrawideRenderer;
 
-    impl NodeRenderer<MockDomainGraph> for UltrawideRenderer {
+    impl MockRenderer<MockDomainGraph> for UltrawideRenderer {
         fn render_node(
-            &mut self,
+            &self,
             buffer: &mut WorldBuffer,
             area: WorldRect,
             node_id: &petgraph::stable_graph::NodeIndex<u32>,
@@ -1791,109 +1540,81 @@ fn test_large_node_rendering_with_zoom() {
         }
     }
 
-    let viewport_width = 80;
-    let viewport_height = 20;
+    let viewport_width = 132;
+    let viewport_height = 43;
     let mut terminal = create_test_terminal(viewport_width, viewport_height);
-    let mut config = GraphConfig::default();
-    config.partition.layer_count = usize::MAX;
-    config.partition.node_count = usize::MAX;
 
-    let mut controller =
-        GraphController::new_with_config(domain_graph.clone(), VariableDetailSizer, config);
+    let mut engine = LayoutEngine::new(domain_graph.clone());
+    let mut visual = MockVisual::new(VariableDetailSizer, UltrawideRenderer);
 
     // 4. Starts in minimal level-of-detail
-    controller.set_detail_level(VisualDetail::Minimal);
-
-    // 5. Cursor setup (not visible in the snapshots though)
-    controller.show_cursor();
-    controller.initialize_cursor();
-    controller.cursor.set_node(node_0, (0.0, 0.0));
-
-    // Set cursor to the center of the viewport
+    visual.detail = VisualDetail::Minimal;
+    let mut state = GraphViewState::default();
+    // 5. Cursor/camera setup, anchored at the center of the viewport.
     let vp_center_x = viewport_width / 2;
     let vp_center_y = viewport_height / 2;
-    let initial_cursor_viewport_pos = crate::geometry::ViewportPos::new(vp_center_x, vp_center_y);
-    controller
-        .cursor
-        .set_viewport_pos(initial_cursor_viewport_pos);
-
-    let renderer = UltrawideRenderer;
+    state.cursor.set_node(node_0, (0.0, 0.0));
+    state.show_cursor();
+    let initial_anchor_screen = (vp_center_x as i64, vp_center_y as i64);
+    state.camera = Some(Camera {
+        anchor: node_0,
+        anchor_fraction: (0.0, 0.0),
+        anchor_screen: initial_anchor_screen,
+        hard_zone: 2,
+    });
 
     // 6. Snapshot 1: Minimal detail level
     let _ = terminal.draw(|f| {
         let area = f.area();
-        controller.viewport_state.viewport_bounds = area;
-
-        let widget = crate::graph_widget::GraphWidget::with_renderer(renderer.clone())
-            .detail_level(VisualDetail::Minimal)
-            .cursor();
-        f.render_stateful_widget(widget, area, &mut controller);
+        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
     });
-    let minimal_snapshot = format!("{}", terminal.backend());
+    let minimal_snapshot = terminal.backend().to_string();
     insta::assert_snapshot!("variable_detail_chain_minimal", minimal_snapshot);
 
-    // 7. Simulate hitting '+' to zoom in (goes to Truncated)
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let plus_key = KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE);
-    controller.handle_key_event(plus_key).unwrap();
-    controller.trigger_rebuild();
+    // 7. Zoom in (goes to Truncated)
+    visual.detail = VisualDetail::Truncated;
 
     // Snapshot 2: Truncated detail level
     let _ = terminal.draw(|f| {
         let area = f.area();
-        controller.viewport_state.viewport_bounds = area;
-
-        let widget = crate::graph_widget::GraphWidget::with_renderer(renderer.clone())
-            .detail_level(controller.get_detail_level())
-            .cursor();
-        f.render_stateful_widget(widget, area, &mut controller);
+        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
     });
-    let truncated_snapshot = format!("{}", terminal.backend());
+    let truncated_snapshot = terminal.backend().to_string();
     insta::assert_snapshot!("variable_detail_chain_truncated", truncated_snapshot);
 
-    // 8. Simulate hitting '+' again to zoom in (goes to Full)
-    controller.handle_key_event(plus_key).unwrap();
-    controller.trigger_rebuild();
+    // 8. Zoom in again (goes to Full)
+    visual.detail = VisualDetail::Full;
 
     // Snapshot 3: Full detail level
     let _ = terminal.draw(|f| {
         let area = f.area();
-        controller.viewport_state.viewport_bounds = area;
-
-        let widget = crate::graph_widget::GraphWidget::with_renderer(renderer.clone())
-            .detail_level(controller.get_detail_level())
-            .cursor();
-        f.render_stateful_widget(widget, area, &mut controller);
+        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
     });
-    let full_snapshot = format!("{}", terminal.backend());
+    let full_snapshot = terminal.backend().to_string();
     insta::assert_snapshot!("variable_detail_chain_full", full_snapshot);
 
     // 9. Confirms node 1's minimum x is to the right of node 0's maximum x
 
-    let viewport_graph = controller.get_viewport_graph();
-
-    let pos0 = viewport_graph.node_positions.get(&node_0).unwrap();
-    let pos1 = viewport_graph.node_positions.get(&node_1).unwrap();
-
-    let node0 = viewport_graph.get_node(pos0).unwrap();
-    let node1 = viewport_graph.get_node(pos1).unwrap();
-
-    let rect0 = WorldRect::from_center_and_size(*pos0, node0.size);
-    let rect1 = WorldRect::from_center_and_size(*pos1, node1.size);
+    let rect0 = state.frame.rect_of(node_0).unwrap();
+    let rect1 = state.frame.rect_of(node_1).unwrap();
 
     assert!(
-        rect1.min.x > rect0.max.x,
+        rect1.left() > rect0.right(),
         "Node 1's minimum x ({}) should be to the right of node 0's maximum x ({})",
-        rect1.min.x,
-        rect0.max.x
+        rect1.left(),
+        rect0.right()
     );
 
-    // Verify that the cursor has maintained its viewport position throughout the zoom operations
-    let final_cursor_viewport_pos = controller.cursor.viewport_pos;
+    // Verify that the camera's pinned anchor position remained stable throughout the zoom
+    // operations - zooming must not silently perturb it.
+    let final_anchor_screen = state
+        .camera
+        .expect("should retain the camera")
+        .anchor_screen;
     assert_eq!(
-        initial_cursor_viewport_pos, final_cursor_viewport_pos,
-        "Cursor viewport position should remain stable during zoom operations. Initial: {:?}, Final: {:?}",
-        initial_cursor_viewport_pos, final_cursor_viewport_pos
+        initial_anchor_screen, final_anchor_screen,
+        "Camera anchor screen position should remain stable during zoom operations. Initial: {:?}, Final: {:?}",
+        initial_anchor_screen, final_anchor_screen
     );
 }
 
@@ -1903,7 +1624,7 @@ fn test_large_node_rendering_with_zoom() {
 fn test_diamond_variable_width_parallel_nodes() {
     let _ = env_logger::try_init();
 
-    use crate::plotter::NodeSizer;
+    use crate::testing::mocks::MockRenderer;
 
     // Create diamond: A -> {B, C} -> D
     let mut domain_graph = MockDomainGraph::new();
@@ -1921,7 +1642,7 @@ fn test_diamond_variable_width_parallel_nodes() {
     #[derive(Debug, Clone)]
     struct VariableWidthSizer;
 
-    impl NodeSizer<MockDomainGraph> for VariableWidthSizer {
+    impl MockRenderer<MockDomainGraph> for VariableWidthSizer {
         fn get_node_size(
             &self,
             node: &petgraph::stable_graph::NodeIndex<u32>,
@@ -1944,13 +1665,323 @@ fn test_diamond_variable_width_parallel_nodes() {
 
     let snapshot = make_snapshot_custom(
         domain_graph,
-        80,
-        25,
-        usize::MAX,
-        usize::MAX,
+        132,
+        43,
         node_sizer,
         renderer,
+        &[],
+        GapSizes::default(),
     );
 
     insta::assert_snapshot!("diamond_variable_width_parallel", snapshot);
+}
+
+#[test]
+fn viewport_visual_regression_circular_genome_loop() {
+    let _ = env_logger::try_init();
+    // a -> b -> c -> d, plus a backward edge d -> a closing the loop, mirroring a
+    // circular genome's PATH_END -> PATH_START edge.
+    let mut domain_graph = MockDomainGraph::new();
+    let a = domain_graph.add_node(());
+    let b = domain_graph.add_node(());
+    let c = domain_graph.add_node(());
+    let d = domain_graph.add_node(());
+    domain_graph.add_edge(a, b, ());
+    domain_graph.add_edge(b, c, ());
+    domain_graph.add_edge(c, d, ());
+
+    let snapshot = make_snapshot_with_backward_edges(domain_graph, 80, 24, &[(d, a)]);
+
+    insta::assert_snapshot!("circular_genome_loop", snapshot);
+}
+
+#[test]
+fn backward_edge_pin_layer_insertion() {
+    let _ = env_logger::try_init();
+    // Linear chain 0→1→2→3→4 with a backward edge (4, 0) closing the loop, exercising the
+    // pin/dummy/data interplay in the simplest possible subgraph.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..5).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..4 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot =
+        make_snapshot_with_backward_edges(domain_graph, 132, 43, &[(nodes[4], nodes[0])]);
+
+    insta::assert_snapshot!("backward_edge_pin_layer_insertion", snapshot);
+}
+
+#[test]
+fn backward_edge_minimal_triangle() {
+    let _ = env_logger::try_init();
+    // Smallest possible cycle: 3 nodes, backward edge 2 → 0.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..3).map(|_| domain_graph.add_node(())).collect();
+    domain_graph.add_edge(nodes[0], nodes[1], ());
+    domain_graph.add_edge(nodes[1], nodes[2], ());
+
+    let snapshot =
+        make_snapshot_with_backward_edges(domain_graph, 132, 43, &[(nodes[2], nodes[0])]);
+
+    insta::assert_snapshot!("backward_edge_minimal_triangle", snapshot);
+}
+
+#[test]
+fn backward_edge_six_node_cycle() {
+    let _ = env_logger::try_init();
+    // 6-node cycle mirroring the cycle_no_path.gfa fixture from the view-cycles branch.
+    // Forward: 0 → 1 → 2 → 3 → 4 → 5, backward edge 5 → 0.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..6).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..5 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot =
+        make_snapshot_with_backward_edges(domain_graph, 132, 43, &[(nodes[5], nodes[0])]);
+
+    insta::assert_snapshot!("backward_edge_six_node_cycle", snapshot);
+}
+
+#[test]
+fn backward_edge_partial_loop() {
+    let _ = env_logger::try_init();
+    // Backward edge that doesn't close to the start node.
+    // Chain: 0 → 1 → 2 → 3 → 4, backward edge 3 → 1 creates an inner loop.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..5).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..4 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot =
+        make_snapshot_with_backward_edges(domain_graph, 132, 43, &[(nodes[3], nodes[1])]);
+
+    insta::assert_snapshot!("backward_edge_partial_loop", snapshot);
+}
+
+#[test]
+fn target_gap_combinations_partial_loopback() {
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..5).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..4 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+    let backward_edges = [(nodes[3], nodes[1])];
+
+    for target_gaps @ (gap_x, gap_y) in TARGET_GAP_COMBINATIONS {
+        let snapshot = make_snapshot_with_backward_edges_at_target_gaps(
+            domain_graph.clone(),
+            132,
+            43,
+            &backward_edges,
+            target_gaps,
+        );
+        insta::assert_snapshot!(
+            format!("target_gaps_partial_loopback_x_{gap_x}_y_{gap_y}"),
+            snapshot
+        );
+    }
+}
+
+#[test]
+fn backward_edge_diamond_loop() {
+    let _ = env_logger::try_init();
+    // Diamond 0 → {1, 2} → 3 with a backward edge 3 → 0 creating a loop
+    // around the entire structure.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..4).map(|_| domain_graph.add_node(())).collect();
+    domain_graph.add_edge(nodes[0], nodes[1], ());
+    domain_graph.add_edge(nodes[0], nodes[2], ());
+    domain_graph.add_edge(nodes[1], nodes[3], ());
+    domain_graph.add_edge(nodes[2], nodes[3], ());
+
+    let snapshot =
+        make_snapshot_with_backward_edges(domain_graph, 132, 43, &[(nodes[3], nodes[0])]);
+
+    insta::assert_snapshot!("backward_edge_diamond_loop", snapshot);
+}
+
+#[test]
+fn backward_edge_branched_cycle() {
+    let _ = env_logger::try_init();
+    // Main chain with an external branch that merges in mid-cycle.
+    // Chain: 0 → 1 → 2 → 3 → 4, branch: 5 → 2, backward edge 4 → 0.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..6).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..4 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+    domain_graph.add_edge(nodes[5], nodes[2], ());
+
+    let snapshot =
+        make_snapshot_with_backward_edges(domain_graph, 132, 43, &[(nodes[4], nodes[0])]);
+
+    insta::assert_snapshot!("backward_edge_branched_cycle", snapshot);
+}
+
+#[test]
+fn backward_edge_local_loop() {
+    let _ = env_logger::try_init();
+    // Long chain 0→1→…→7 with a backward edge 5→2 that only loops over the middle. The
+    // bypass should span just the 2→5 region, not the whole graph - contrast with
+    // backward_edge_six_node_cycle's full-width loop.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..8).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..7 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot =
+        make_snapshot_with_backward_edges(domain_graph, 132, 43, &[(nodes[5], nodes[2])]);
+
+    insta::assert_snapshot!("backward_edge_local_loop", snapshot);
+}
+
+#[test]
+fn backward_edge_two_independent_local_loops() {
+    let _ = env_logger::try_init();
+    // Two disjoint local cycles on one chain: 2→0 on the left and 7→5 on the right. Each
+    // should render as its own compact bypass over its own region, rather than both
+    // stacking as full-width lines competing across the whole canvas.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..8).map(|_| domain_graph.add_node(())).collect();
+    for i in 0..7 {
+        domain_graph.add_edge(nodes[i], nodes[i + 1], ());
+    }
+
+    let snapshot = make_snapshot_with_backward_edges(
+        domain_graph,
+        132,
+        43,
+        &[(nodes[2], nodes[0]), (nodes[7], nodes[5])],
+    );
+
+    insta::assert_snapshot!("backward_edge_two_independent_local_loops", snapshot);
+}
+
+// Cycle auto-detection tests. Unlike the `backward_edge_*` tests above, these hand a raw
+// cyclic graph to the auto-detecting `make_snapshot`/`make_snapshot_pinned` path and let
+// `cycle_removal::remove_cycles` identify the backward edges, so they exercise detection,
+// self-loops, and `pin_source` end to end rather than the explicit-edge entry point.
+
+/// Build a graph from an explicit node count and edge list.
+#[cfg(test)]
+fn graph_from_edges(node_count: usize, edges: &[(usize, usize)]) -> MockDomainGraph {
+    let mut graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
+    for &(source, target) in edges {
+        graph.add_edge(nodes[source], nodes[target], ());
+    }
+    graph
+}
+
+/// Build a single directed cycle `0 -> 1 -> ... -> node_count-1 -> 0`.
+#[cfg(test)]
+fn cycle_graph(node_count: usize) -> MockDomainGraph {
+    let mut graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
+    for i in 0..node_count {
+        graph.add_edge(nodes[i], nodes[(i + 1) % node_count], ());
+    }
+    graph
+}
+
+/// Add an edge between two nodes identified by their positional index.
+#[cfg(test)]
+fn add_edge_by_index(graph: &mut MockDomainGraph, source: usize, target: usize) {
+    let nodes: Vec<_> = graph.node_indices().collect();
+    graph.add_edge(nodes[source], nodes[target], ());
+}
+
+/// Like `make_snapshot`, but forces `pin_source` to the given node index so cycle detection
+/// breaks each cycle relative to that node.
+#[cfg(test)]
+fn make_snapshot_pinned(
+    domain_graph: MockDomainGraph,
+    viewport_width: u16,
+    viewport_height: u16,
+    pin_source: usize,
+) -> String {
+    use ratatui::widgets::StatefulWidget as _;
+
+    use crate::{
+        graph_view::{GraphView, GraphViewState},
+        layout_engine::LayoutEngine,
+        testing::mocks::MockVisual,
+    };
+
+    let node_sizer = FixedNodeSizer {
+        width: 5,
+        height: 3,
+    };
+    let mut visual = MockVisual::new(node_sizer, TestRenderers::debug());
+    visual.detail = VisualDetail::Full;
+
+    let mut terminal = create_test_terminal(viewport_width, viewport_height);
+
+    let pin_source = Some(petgraph::graph::NodeIndex::new(pin_source));
+    let backward_edges = detect_backward_edges(&domain_graph, pin_source, None);
+
+    let mut engine = LayoutEngine::new_with_backward_edges(domain_graph.clone(), &backward_edges);
+
+    let mut state = GraphViewState::default();
+    let result = terminal.draw(|f| {
+        let area = f.area();
+        GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut state);
+    });
+
+    match result {
+        Ok(_) => terminal.backend().to_string(),
+        Err(e) => format!("Rendering failed: {}", e),
+    }
+}
+
+#[test]
+fn cycle_simple_autodetected() {
+    let _ = env_logger::try_init();
+    // A bare 3-cycle with no explicit backward edge: detection finds the loop-closing edge.
+    let snapshot = make_snapshot(graph_from_edges(3, &[(0, 1), (1, 2), (2, 0)]), 132, 43);
+    insta::assert_snapshot!("cycle_simple_autodetected", snapshot);
+}
+
+#[test]
+fn cycle_self_loop_autodetected() {
+    let _ = env_logger::try_init();
+    // A single node with a self-loop (0 -> 0): the pins land right next to the node and the
+    // loop stays entirely local. Self-loops were a non-goal of the pin work but fall out of
+    // the same window once detection reports them.
+    let snapshot = make_snapshot(graph_from_edges(1, &[(0, 0)]), 80, 24);
+    insta::assert_snapshot!("cycle_self_loop_autodetected", snapshot);
+}
+
+#[test]
+fn cycle_with_chord_autodetected() {
+    let _ = env_logger::try_init();
+    // An 8-cycle plus a chord (6 -> 3): two backward edges, each scoped to its own span.
+    let mut domain_graph = cycle_graph(8);
+    add_edge_by_index(&mut domain_graph, 6, 3);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
+    insta::assert_snapshot!("cycle_with_chord_autodetected", snapshot);
+}
+
+#[test]
+fn cycle_with_two_chords_autodetected() {
+    let _ = env_logger::try_init();
+    // An 8-cycle plus two chords (6 -> 3, 4 -> 1): three independent backward edges.
+    let mut domain_graph = cycle_graph(8);
+    add_edge_by_index(&mut domain_graph, 6, 3);
+    add_edge_by_index(&mut domain_graph, 4, 1);
+    let snapshot = make_snapshot(domain_graph, 80, 24);
+    insta::assert_snapshot!("cycle_with_two_chords_autodetected", snapshot);
+}
+
+#[test]
+fn cycle_pinned_source() {
+    let _ = env_logger::try_init();
+    // A 12-cycle with node 6 pinned as the source: detection breaks the cycle relative to
+    // node 6 rather than at petgraph's default entry point.
+    let snapshot = make_snapshot_pinned(cycle_graph(12), 80, 24, 6);
+    insta::assert_snapshot!("cycle_pinned_source", snapshot);
 }

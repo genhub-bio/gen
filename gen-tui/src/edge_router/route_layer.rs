@@ -4,13 +4,14 @@ use itertools::Itertools;
 use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
 use super::{
-    LayoutError, NodeData, layout_graph_process::simplify_graph, route_channel::Router,
+    LayoutError, NodeData,
+    layout_graph_process::{BundledLegEdges, simplify_graph},
+    route_channel::Router,
     temp_graph::TempGraph,
 };
 use crate::{
-    geometry::{LocalPos, PartitionIndex},
+    geometry::LocalPos,
     layout::{LayoutEdge, LayoutNode, NodeRole},
-    partition::StitchSide,
 };
 
 #[derive(Clone, Debug)]
@@ -26,15 +27,10 @@ struct Pin {
     position: i64,
 }
 
-#[allow(clippy::type_complexity)]
-fn enumerate_bicliques(
-    edges: &Vec<(u64, u64)>,
-) -> Result<Vec<(HashSet<u64>, HashSet<u64>)>, LayoutError> {
-    // Enumerate all maximal bicliques in the graph using the MBEA algorithm from:
-    // Zhang et al. 2014 "On finding bicliques in bipartite graphs: a novel algorithm and its application to the
-    // integration of diverse biological data types"
+type Biclique = (HashSet<u64>, HashSet<u64>);
 
-    // Setup the bipartite graph
+fn enumerate_bicliques(edges: &[(u64, u64)]) -> Result<Vec<Biclique>, LayoutError> {
+    // MBEA from Zhang et al. (2014), "On finding bicliques in bipartite graphs."
     let mut part1 = HashSet::new();
     let mut part2 = HashSet::new();
     for edge in edges {
@@ -64,41 +60,16 @@ fn enumerate_bicliques(
                 node_id,
                 position: (0, 0),
                 node_type: None,
-                ports: None,
-                glyph_index: None,
                 size: (1, 1),
-                // These are temporary test nodes, no original domain data
                 original_node_id: None,
                 layer: None,
-                partition_index: None,
             },
         );
     }
 
-    let mut temp_edge_index = 1;
     for edge in edges {
-        graph.add_edge(
-            temp_edge_index,
-            edge.0,
-            edge.1,
-            LayoutEdge::new(
-                NodeIndex::new(edge.0 as usize),
-                NodeIndex::new(edge.1 as usize),
-            ),
-        )?;
-        temp_edge_index += 1;
-        // Also add the reverse of the edge since we need it for exploring for
-        // cliques
-        graph.add_edge(
-            temp_edge_index,
-            edge.1,
-            edge.0,
-            LayoutEdge::new(
-                NodeIndex::new(edge.1 as usize),
-                NodeIndex::new(edge.0 as usize),
-            ),
-        )?;
-        temp_edge_index += 1;
+        graph.add_edge(edge.0, edge.1)?;
+        graph.add_edge(edge.1, edge.0)?;
     }
 
     let left_neighbors = part1.clone();
@@ -158,7 +129,7 @@ fn find_biclique(
     right_neighbors: &HashSet<u64>,
     right_candidates: &[u64],
     clique_outsiders: &[u64],
-) -> Vec<(HashSet<u64>, HashSet<u64>)> {
+) -> Vec<Biclique> {
     let mut found_bicliques = vec![];
 
     let mut clique_outsiders_copy = clique_outsiders.to_vec();
@@ -244,18 +215,7 @@ fn find_biclique(
 }
 
 fn make_nets(bicliques: &mut [(HashSet<u64>, HashSet<u64>)]) -> Vec<HashSet<(u64, u64)>> {
-    // Partition the edges of each biclique into nets, which are non-overlapping
-    // bicliques chosen such that each edge is included in exactly one net,
-    // preferentially the largest biclique.
-
-    // Returns a list of sets, each containing the edges of a net.
-
-    // Each biclique results in a net, with the restriction that:
-    // - nodes may be shared between nets
-    // - edges are not duplicated
-
-    // We will build the nets one by one, starting with the largest biclique
-    // and removing edges that have already been used.
+    // Assign each edge to one net, preferring the largest containing biclique.
     let mut nets: Vec<HashSet<(u64, u64)>> = vec![];
 
     // Sort the bicliques by number of edges (descending)
@@ -470,12 +430,6 @@ fn make_terminals(
 }
 
 fn make_pin_lists(left_pins: Vec<Pin>, right_pins: Vec<Pin>) -> (Vec<u64>, Vec<u64>) {
-    // Converts lists consisting of Pin objects (with 'obj' and 'pos' attributes)
-    // into longer lists where each element is either an object or 0.
-    // E.g. [Pin("foo", 2), Pin("bar", 4)] becomes [0, 0, "foo", 0, "bar"]
-    // When applied to multiple lists at the same time, trailing 0s are
-    //added to normalize their lengths.
-
     let all_pins = [left_pins.clone(), right_pins.clone()].concat();
 
     assert!(!all_pins.is_empty(), "Both lists are empty");
@@ -508,8 +462,6 @@ fn make_pin_lists(left_pins: Vec<Pin>, right_pins: Vec<Pin>) -> (Vec<u64>, Vec<u
 }
 
 fn translate_graph(graph: &mut TempGraph, x_offset: i64, y_offset: i64) -> Result<(), LayoutError> {
-    // Translate a graph by a given offset. Assumes that the graph has a 'pos' attribute
-    // for each node. Modifies the graph in place.
     for node_index in graph.node_indices() {
         let mut node_data = graph.get_node(node_index).unwrap();
         let (x, y) = node_data.position;
@@ -524,12 +476,10 @@ pub fn layout_layer(
     left_positions: &[LayoutNode],
     right_positions: &[LayoutNode],
     edges: &[(NodeIndex, NodeIndex)],
-    edge_bundles: &HashMap<(NodeIndex, NodeIndex), Vec<(NodeIndex, NodeIndex)>>,
+    edge_bundles: &BundledLegEdges,
 ) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
     let mut selected =
         layout_layer_internal(left_positions, right_positions, edges, edge_bundles, false)?;
-    // Remove collinear channel joins before scoring so node count measures
-    // routing complexity consistently across all four orientations.
     simplify_graph(&mut selected)?;
     let mut selected_score = (total_edge_length(&selected), selected.node_count());
     for (swap_layers, reverse_order) in [(false, true), (true, false), (true, true)] {
@@ -565,7 +515,7 @@ fn layout_layer_swapped(
     left_positions: &[LayoutNode],
     right_positions: &[LayoutNode],
     edges: &[(NodeIndex, NodeIndex)],
-    edge_bundles: &HashMap<(NodeIndex, NodeIndex), Vec<(NodeIndex, NodeIndex)>>,
+    edge_bundles: &BundledLegEdges,
     reverse_order: bool,
 ) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
     let reflect_positions = |positions: &[LayoutNode]| {
@@ -582,8 +532,6 @@ fn layout_layer_swapped(
         .iter()
         .map(|&(left, right)| (right, left))
         .collect::<Vec<_>>();
-    // Only the lookup keys use layer-local indices. Bundle contents identify
-    // original graph edges and must retain their original direction.
     let swapped_bundles = edge_bundles
         .iter()
         .map(|(&(left, right), bundle)| ((right, left), bundle.clone()))
@@ -596,8 +544,6 @@ fn layout_layer_swapped(
         reverse_order,
     )?;
 
-    // Routing chooses a new channel width. Restore the original left boundary,
-    // letting the original right layer move to accommodate that width.
     if let Some(left_node) = left_positions.first() {
         let routed_left = graph[NodeIndex::new(right_positions.len())].pos.x;
         for node in graph.node_weights_mut() {
@@ -607,16 +553,13 @@ fn layout_layer_swapped(
     Ok(graph)
 }
 
-/// Sum of the Manhattan lengths of every edge segment in the layer graph. Every
-/// edge here is a single axis-aligned run (horizontal or vertical) between two
-/// adjacent layout nodes, so `|dx| + |dy|` is its exact length.
 fn total_edge_length(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) -> i64 {
     graph
         .edge_indices()
-        .filter_map(|edge_idx| {
-            let (source_idx, target_idx) = graph.edge_endpoints(edge_idx)?;
-            let source = graph.node_weight(source_idx)?;
-            let target = graph.node_weight(target_idx)?;
+        .filter_map(|edge_index| {
+            let (source_index, target_index) = graph.edge_endpoints(edge_index)?;
+            let source = graph.node_weight(source_index)?;
+            let target = graph.node_weight(target_index)?;
             Some((source.pos.x - target.pos.x).abs() + (source.pos.y - target.pos.y).abs())
         })
         .sum()
@@ -626,32 +569,30 @@ fn layout_layer_internal(
     left_positions: &[LayoutNode],
     right_positions: &[LayoutNode],
     edges: &[(NodeIndex, NodeIndex)],
-    edge_bundles: &HashMap<(NodeIndex, NodeIndex), Vec<(NodeIndex, NodeIndex)>>,
+    edge_bundles: &BundledLegEdges,
     reverse_order: bool,
 ) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
-    // If reverse_order is true, flip the vertical positions of nodes within each layer.
-    // This mirrors the layer across the horizontal axis y=0 (top becomes bottom).
-    // A global negation is its own exact inverse regardless of either side's vertical
-    // extent, so after routing we can flip the result back the same way.
+    // If reverse_order is true, mirror both layers across the horizontal axis y=0.
+    // A global negation is its own inverse regardless of either layer's extent.
     let (left_positions_flipped, right_positions_flipped) = if reverse_order {
-        (
-            left_positions
-                .iter()
-                .map(|node| {
-                    let mut flipped = node.clone();
-                    flipped.pos.y = -node.pos.y;
-                    flipped
-                })
-                .collect(),
-            right_positions
-                .iter()
-                .map(|node| {
-                    let mut flipped = node.clone();
-                    flipped.pos.y = -node.pos.y;
-                    flipped
-                })
-                .collect(),
-        )
+        let left_flipped = left_positions
+            .iter()
+            .map(|node| {
+                let mut flipped = node.clone();
+                flipped.pos.y = -node.pos.y;
+                flipped
+            })
+            .collect();
+        let right_flipped = right_positions
+            .iter()
+            .map(|node| {
+                let mut flipped = node.clone();
+                flipped.pos.y = -node.pos.y;
+                flipped
+            })
+            .collect();
+
+        (left_flipped, right_flipped)
     } else {
         (left_positions.to_vec(), right_positions.to_vec())
     };
@@ -659,20 +600,7 @@ fn layout_layer_internal(
     let left_positions = &left_positions_flipped;
     let right_positions = &right_positions_flipped;
 
-    // Build a rectilinear routing between two layers of the graph.
-    // A layer is defined as the bipartite subgraph between two sets of nodes that have
-    // been assigned consecutive ranks in the Sugiyama algorithm.
-    // left_data and right_data are dictionaries mapping node IDs to their positions.
-    // Any new nodes added to the layer graph will be assigned IDs starting from next_free_id.
-    // If next_free_id is not provided, it will be set to max(left | right) + 1.
-
-    // Where appropriate, edges are routed over a common bus to save visual clutter.
-    // This does introduce a problem of ambiguity when routing edges over a common bus:
-    // "do *all* nodes on this bus have the same neighbors, or do they share a subset?"
-    // We solve this problem by connecting nodes through distinct terminals in cases
-    // where it would otherwise be ambiguous. The area between the nodes and the terminals,
-    // and the area between sets of terminals are called "channels" (so one layer
-    // can have up to 3 channels).
+    // Route consecutive layers through terminal channels and shared buses.
 
     // Create a mapping from edge NodeIndex to sequential u64 IDs for routing algorithm
     // The edges use indices into left_positions and right_positions arrays
@@ -777,7 +705,16 @@ fn layout_layer_internal(
             .sorted_by_key(|node| (node.pos.x, node.pos.y))
             .collect::<Vec<&LayoutNode>>()[0]
             .pos;
-        let graph1_nodes: Vec<_> = graph1.nodes().sorted_by_key(|node| node.position).collect();
+        // `node_id` breaks ties deterministically: `TempGraph::nodes()` iterates a `HashMap`, so
+        // without a tie-break, two nodes sharing this corner's position would sort in whatever
+        // arbitrary bucket order the map happens to produce - which can differ between otherwise
+        // identical calls (see the `node_id` sort in the channel-merge loop below for the same
+        // hazard). Since `node_id`s are assigned in construction order, sorting by it recovers a
+        // stable order that only depends on the graph's own topology.
+        let graph1_nodes: Vec<_> = graph1
+            .nodes()
+            .sorted_by_key(|node| (node.position, node.node_id))
+            .collect();
         if !graph1_nodes.is_empty() {
             let graph1_anchor = graph1_nodes[0].position;
             let offset_x = left_anchor.x - graph1_anchor.0;
@@ -820,15 +757,15 @@ fn layout_layer_internal(
     // Only anchor and translate if both graphs have nodes
     if graph1.node_count() > 0 && graph2.node_count() > 0 {
         // Anchor the bottom-left node of G2 to the bottom-right node of G1
-        // For G1, we sort the nodes descending by x coordinate and ascending by y coordinate to get bottom-right
+        // For G1, we sort the nodes descending by x coordinate and ascending by y coordinate to get bottom-right.
         let graph1_nodes: Vec<_> = graph1
             .nodes()
-            .sorted_by_key(|node| (-node.position.0, node.position.1))
+            .sorted_by_key(|node| (-node.position.0, node.position.1, node.node_id))
             .collect();
         // For G2 conventional sorting (x and y ascending) is sufficient to get bottom-left
         let graph2_nodes: Vec<_> = graph2
             .nodes()
-            .sorted_by_key(|node| (node.position.0, node.position.1))
+            .sorted_by_key(|node| (node.position.0, node.position.1, node.node_id))
             .collect();
 
         if !graph1_nodes.is_empty() && !graph2_nodes.is_empty() {
@@ -876,14 +813,14 @@ fn layout_layer_internal(
 
     // Only anchor and translate if both graphs have nodes
     if graph2.node_count() > 0 && graph3.node_count() > 0 {
-        // Anchor the bottom-left node of G3 to the bottom-right node of G2
+        // Anchor the bottom-left node of G3 to the bottom-right node of G2.
         let graph2_nodes: Vec<_> = graph2
             .nodes()
-            .sorted_by_key(|node| (-node.position.0, node.position.1))
+            .sorted_by_key(|node| (-node.position.0, node.position.1, node.node_id))
             .collect();
         let graph3_nodes: Vec<_> = graph3
             .nodes()
-            .sorted_by_key(|node| (node.position.0, node.position.1))
+            .sorted_by_key(|node| (node.position.0, node.position.1, node.node_id))
             .collect();
 
         if !graph2_nodes.is_empty() && !graph3_nodes.is_empty() {
@@ -903,24 +840,15 @@ fn layout_layer_internal(
     // Map from (position) to NodeIndex in layer_graph for coordinate-based deduplication
     let mut position_to_node_idx: HashMap<(i64, i64), NodeIndex> = HashMap::new();
 
-    // Get partition index from first node
-    let partition_idx: PartitionIndex = left_positions
-        .first()
-        .map(|n| n.partition_idx())
-        .unwrap_or(0);
-
     // Helper function to convert NodeData to LayoutNode
     let convert_to_layout_node =
         |node: &NodeData, adjusted_position: (i64, i64)| -> Result<LayoutNode, LayoutError> {
-            let pos = LocalPos::new(partition_idx, adjusted_position.into());
+            let pos = LocalPos::new(adjusted_position.into());
 
             // Determine node role
             let role = if let Some(ref node_type) = node.node_type {
                 if node_type == "Routing" {
                     NodeRole::Routing
-                } else if node_type == "Stitching" {
-                    // Default to Left for stitching nodes in layer context
-                    NodeRole::Stitch(StitchSide::Left)
                 } else if let Some(original_id) = node.original_node_id {
                     NodeRole::Data(NodeIndex::new(original_id as usize))
                 } else {
@@ -951,34 +879,32 @@ fn layout_layer_internal(
         left_array_idx_to_node.insert(array_idx, node_idx);
     }
 
-    // The right side corresponds to the original V nodes, with updated x coordinates
-    let right_boundary = if graph3.node_count() > 0 {
-        graph3
-            .nodes()
-            .map(|node| node.position.0)
-            .max()
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    // The right side corresponds to the original V nodes, with updated x coordinates.
+    let right_boundary = graph3
+        .nodes()
+        .map(|node| node.position.0)
+        .max()
+        .unwrap_or(0);
 
     let mut right_array_idx_to_node: HashMap<usize, NodeIndex> = HashMap::new();
     for (array_idx, node) in right_positions.iter().enumerate() {
         let new_position = (right_boundary, node.pos.y);
         // Create layout node with updated x position
-        let new_pos = LocalPos::new(partition_idx, new_position.into());
+        let new_pos = LocalPos::new(new_position.into());
         let updated_node = LayoutNode::new(node.role.clone(), new_pos, node.size, node.layer);
         let node_idx = layer_graph.add_node(updated_node);
         position_to_node_idx.insert(new_position, node_idx);
         right_array_idx_to_node.insert(array_idx, node_idx);
     }
 
-    // Merge the three channel graphs into the StableGraph layer graph
+    // Sort temporary nodes by geometry so randomized hash order cannot affect insertion order.
     for source_graph in [graph1, graph2, graph3] {
-        for node_data in source_graph.nodes() {
+        let mut graph_nodes: Vec<NodeData> = source_graph.nodes().collect();
+        graph_nodes.sort_by_key(|node| (node.position, node.node_id));
+        for node_data in &graph_nodes {
             let position = node_data.position;
 
-            // Check if a node already exists at this position (coordinate-based deduplication)
+            // Check if a node already exists at this position (coordinate-based deduplication).
             if position_to_node_idx.contains_key(&position) {
                 // Already added (e.g. an original right or left node position)
                 continue;
@@ -996,32 +922,40 @@ fn layout_layer_internal(
         }
 
         // Add edges using coordinate-based mapping
-        for node1_data in source_graph.nodes() {
+        for node1_data in &graph_nodes {
             let node1_pos = node1_data.position;
 
             // Get the mapped node index for this position in the layer graph
             if let Some(&layer_node1_idx) = position_to_node_idx.get(&node1_pos) {
-                // Iterate through neighbors in the source graph
-                for node2_id in source_graph.neighbors(node1_data.node_id) {
-                    // Get node2's data to find its position
-                    if let Some(node2_data) = source_graph.get_node(node2_id) {
-                        let node2_pos = node2_data.position;
-                        if let Some(&layer_node2_idx) = position_to_node_idx.get(&node2_pos)
-                            && layer_node1_idx != layer_node2_idx
-                        {
-                            // Check if edge already exists to avoid duplicates
-                            if layer_graph
-                                .find_edge(layer_node1_idx, layer_node2_idx)
+                // Iterate through neighbors in the source graph, sorted by their deterministic
+                // geometry for the same reason as `graph_nodes` above. Sorting the randomized
+                // `HashSet` by router-assigned id is not sufficient: those ids inherit any
+                // nondeterminism in node creation order and would make edge insertion order vary.
+                let mut sorted_neighbors: Vec<NodeData> = source_graph
+                    .neighbors(node1_data.node_id)
+                    .into_iter()
+                    .filter_map(|node_id| source_graph.get_node(node_id))
+                    .collect();
+                sorted_neighbors.sort_by_key(|node| (node.position, node.node_id));
+                for node2_data in sorted_neighbors {
+                    let node2_pos = node2_data.position;
+                    if let Some(&layer_node2_idx) = position_to_node_idx.get(&node2_pos) {
+                        // Check if edge already exists to avoid duplicates
+                        if layer_graph
+                            .find_edge(layer_node1_idx, layer_node2_idx)
+                            .is_none()
+                            && layer_graph
+                                .find_edge(layer_node2_idx, layer_node1_idx)
                                 .is_none()
-                                && layer_graph
-                                    .find_edge(layer_node2_idx, layer_node1_idx)
-                                    .is_none()
-                            {
-                                // Create LayoutEdge with empty bundle initially
-                                // Bundles will be applied via BFS after all edges are added
-                                let layout_edge = LayoutEdge { bundle: vec![] };
-                                layer_graph.add_edge(layer_node1_idx, layer_node2_idx, layout_edge);
-                            }
+                        {
+                            // An ordinary edge is born empty; bundles (including a wormhole's,
+                            // which is now a real domain-labelled edge like any other) are
+                            // applied via BFS below, once every edge exists to search over.
+                            let layout_edge = LayoutEdge {
+                                bundle: Vec::new(),
+                                is_backward_span: false,
+                            };
+                            layer_graph.add_edge(layer_node1_idx, layer_node2_idx, layout_edge);
                         }
                     }
                 }
@@ -1034,7 +968,7 @@ fn layout_layer_internal(
     // Sort the keys to ensure deterministic iteration order
     let mut sorted_bundles: Vec<_> = edge_bundles.iter().collect();
     sorted_bundles.sort_by_key(|((left, right), _)| (*left, *right));
-    for ((left_idx, right_idx), bundle) in sorted_bundles {
+    for ((left_idx, right_idx), (bundle, is_backward_span)) in sorted_bundles {
         let start_node = match left_array_idx_to_node.get(&left_idx.index()) {
             Some(&node) => node,
             None => continue, // Node not found, skip
@@ -1046,53 +980,49 @@ fn layout_layer_internal(
 
         // Use BFS to find the path between start and end nodes
         if let Some(path) = find_path_bfs(&layer_graph, start_node, end_node) {
-            // Label all edges in the path with the bundle
+            // Label all edges in the path with the bundle and is_backward_span flag
             for i in 0..path.len() - 1 {
                 let u = path[i];
                 let v = path[i + 1];
 
-                if let Some(edge_idx) = layer_graph.find_edge(u, v) {
-                    if let Some(edge_weight) = layer_graph.edge_weight_mut(edge_idx) {
-                        // Add the bundle to this edge (avoiding duplicates)
-                        for label in bundle {
-                            if !edge_weight.bundle.contains(label) {
-                                edge_weight.bundle.push(*label);
-                            }
+                let edge_idx = layer_graph
+                    .find_edge(u, v)
+                    .or_else(|| layer_graph.find_edge(v, u));
+                if let Some(edge_idx) = edge_idx
+                    && let Some(edge_weight) = layer_graph.edge_weight_mut(edge_idx)
+                {
+                    // Add the bundle to this edge (avoiding duplicates)
+                    for label in bundle {
+                        if !edge_weight.bundle.contains(label) {
+                            edge_weight.bundle.push(*label);
                         }
                     }
-                } else if let Some(edge_idx) = layer_graph.find_edge(v, u) {
-                    // Try the reverse direction (undirected graph)
-                    if let Some(edge_weight) = layer_graph.edge_weight_mut(edge_idx) {
-                        for label in bundle {
-                            if !edge_weight.bundle.contains(label) {
-                                edge_weight.bundle.push(*label);
-                            }
-                        }
-                    }
+                    edge_weight.is_backward_span |= *is_backward_span;
                 }
             }
         }
     }
 
-    // If we flipped the positions for routing, flip the result back. Negation
-    // about y=0 is its own exact inverse regardless of either side's vertical
-    // extent, so this always restores the original coordinates.
+    // If we flipped the positions for routing, flip the result back
     if reverse_order {
-        for node in layer_graph.node_weights_mut() {
-            node.pos.y = -node.pos.y;
-        }
+        // Find the vertical extent of the routed layer graph
+        let all_y: Vec<i64> = layer_graph
+            .node_indices()
+            .map(|idx| layer_graph.node_weight(idx).unwrap().pos.y)
+            .collect();
 
-        for node_index in layer_graph.node_indices() {
-            let node = &layer_graph[node_index];
-            if matches!(node.role, NodeRole::Routing) {
-                let incident_bundles: Vec<_> = layer_graph
-                    .edges(node_index)
-                    .map(|edge| &edge.weight().bundle)
-                    .collect();
-                assert!(
-                    incident_bundles.len() != 2 || incident_bundles[0] == incident_bundles[1],
-                    "degree-two routing node {node_index:?} joins different bundles"
-                );
+        if !all_y.is_empty() {
+            let min_y = *all_y.iter().min().unwrap();
+            let max_y = *all_y.iter().max().unwrap();
+
+            // Collect node indices first to avoid borrow checker issues
+            let node_indices: Vec<_> = layer_graph.node_indices().collect();
+
+            // Flip all node positions back: y_new = max_y + min_y - y_old
+            for node_idx in node_indices {
+                if let Some(node) = layer_graph.node_weight_mut(node_idx) {
+                    node.pos.y = max_y + min_y - node.pos.y;
+                }
             }
         }
     }
@@ -1145,21 +1075,9 @@ fn find_path_bfs(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
-
-    use itertools::Itertools;
     use more_asserts::{assert_ge, assert_gt};
-    use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
-    use super::{
-        Pin, enumerate_bicliques, find_path_bfs, layout_layer, layout_layer_internal,
-        layout_layer_swapped, make_nets, make_pin_lists, make_terminals, total_edge_length,
-    };
-    use crate::{
-        edge_router::layout_graph_process::simplify_graph,
-        geometry::LocalPos,
-        layout::{LayoutEdge, LayoutNode, NodeRole},
-    };
+    use super::*;
 
     #[test]
     fn test_enumerate_bicliques() {
@@ -1289,16 +1207,15 @@ mod tests {
 
     #[test]
     fn test_route_layer_example_1() {
-        // Test with example 1 from the main block
         // Create LayoutNodes for the test
         let left_nodes = vec![
-            LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 0, 1), (0, 0), None),
-            LayoutNode::data(NodeIndex::new(2), LocalPos::new_xy(0, 1, 1), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 1), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(2), LocalPos::new_xy(1, 1), (0, 0), None),
         ];
         let right_nodes = vec![
-            LayoutNode::data(NodeIndex::new(3), LocalPos::new_xy(0, 0, 2), (0, 0), None),
-            LayoutNode::data(NodeIndex::new(4), LocalPos::new_xy(0, 1, 2), (0, 0), None),
-            LayoutNode::data(NodeIndex::new(5), LocalPos::new_xy(0, 2, 2), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(3), LocalPos::new_xy(0, 2), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(4), LocalPos::new_xy(1, 2), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(5), LocalPos::new_xy(2, 2), (0, 0), None),
         ];
 
         // Create edges using NodeIndex
@@ -1313,32 +1230,22 @@ mod tests {
         let edge_bundles = HashMap::new();
         let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
 
-        if let Err(ref e) = graph {
-            println!("Error in layout_layer: {:?}", e);
-        }
-        assert!(graph.is_ok());
-
-        let graph = graph.unwrap();
+        let graph = graph.expect("should route the first example");
 
         // Verify nodes and edges exist
         assert_ge!(graph.node_count(), 5); // At least original nodes
         assert_ge!(graph.edge_count(), 5); // At least original edges
-
-        // Verify original nodes are present (simplified test for StableGraph)
-        // TODO: Add more detailed verification once we have better test infrastructure
-        assert!(graph.node_count() >= 5);
     }
 
     #[test]
     fn test_route_layer_example_2() {
-        // Test with example 2 from the main block
         let left_nodes = vec![
-            LayoutNode::data(NodeIndex::new(5), LocalPos::new_xy(0, 2, 0), (0, 0), None),
-            LayoutNode::data(NodeIndex::new(2), LocalPos::new_xy(0, 2, 2), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(5), LocalPos::new_xy(2, 0), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(2), LocalPos::new_xy(2, 2), (0, 0), None),
         ];
         let right_nodes = vec![LayoutNode::data(
             NodeIndex::new(3),
-            LocalPos::new_xy(0, 3, 1),
+            LocalPos::new_xy(3, 1),
             (0, 0),
             None,
         )];
@@ -1351,31 +1258,22 @@ mod tests {
         let edge_bundles = HashMap::new();
         let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
 
-        if let Err(ref e) = graph {
-            println!("ERROR in test_route_layer_example_2: {:?}", e);
-        }
-        assert!(graph.is_ok());
-
-        let graph = graph.unwrap();
+        let graph = graph.expect("should route the second example");
 
         // Verify the result has the expected structure
         assert_gt!(graph.node_count(), 2); // Should have original nodes plus routing nodes
         assert_gt!(graph.edge_count(), 1); // Should have original edges plus routing edges
-
-        // Verify original nodes are present (simplified test for StableGraph)
-        assert!(graph.node_count() >= 2);
     }
 
     #[test]
     fn test_route_layer_example_3() {
-        // Test with example 3 from the main block
         let left_nodes = vec![
-            LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 1, 1), (0, 0), None),
-            LayoutNode::data(NodeIndex::new(5), LocalPos::new_xy(0, 2, 0), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(1, 1), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(5), LocalPos::new_xy(2, 0), (0, 0), None),
         ];
         let right_nodes = vec![LayoutNode::data(
             NodeIndex::new(2),
-            LocalPos::new_xy(0, 2, 2),
+            LocalPos::new_xy(2, 2),
             (0, 0),
             None,
         )];
@@ -1388,148 +1286,143 @@ mod tests {
         let edge_bundles = HashMap::new();
         let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles);
 
-        if let Err(ref e) = graph {
-            println!("ERROR in test_route_layer_example_3: {:?}", e);
-        }
-        assert!(graph.is_ok());
+        graph.expect("should route the third example");
     }
+
+    /// A wormhole door is a real node from crawl time onward (see
+    /// `crawl::build_window_graph`), not synthesized by `layout_layer` - it's routed exactly
+    /// like any other node given in `right_nodes` with a real edge to its boundary.
     #[test]
-    fn test_swapped_routing_preserves_nodes_and_bundles() {
-        let left = vec![LayoutNode::data(
-            NodeIndex::new(10),
-            LocalPos::new_xy(3, 7, -2),
-            (2, 1),
-            Some(0),
-        )];
-        let right = vec![
-            LayoutNode::data(
-                NodeIndex::new(20),
-                LocalPos::new_xy(3, 19, -5),
-                (4, 1),
-                Some(1),
-            ),
-            LayoutNode::data(
-                NodeIndex::new(30),
-                LocalPos::new_xy(3, 19, 4),
-                (6, 1),
-                Some(1),
+    fn test_layout_layer_routes_a_wormhole_node_on_the_right_like_any_other_node() {
+        let external_target = NodeIndex::new(999);
+        let left_nodes = vec![
+            LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 0), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(2), LocalPos::new_xy(0, 5), (0, 0), None),
+        ];
+        let right_nodes = vec![
+            LayoutNode::data(NodeIndex::new(3), LocalPos::new_xy(3, 0), (0, 0), None),
+            LayoutNode::new(
+                NodeRole::Wormhole(external_target),
+                LocalPos::new_xy(3, 5),
+                (0, 0),
+                None,
             ),
         ];
         let edges = vec![
-            (NodeIndex::new(0), NodeIndex::new(0)),
-            (NodeIndex::new(0), NodeIndex::new(1)),
+            (NodeIndex::new(0), NodeIndex::new(0)), // left[0] to right[0]
+            (NodeIndex::new(1), NodeIndex::new(1)), // left[1] (boundary) to right[1] (wormhole)
         ];
-        let bundles = HashMap::from([
-            (edges[0], vec![(NodeIndex::new(10), NodeIndex::new(20))]),
-            (edges[1], vec![(NodeIndex::new(10), NodeIndex::new(30))]),
-        ]);
-        for reverse_order in [false, true] {
-            let graph = layout_layer_swapped(&left, &right, &edges, &bundles, reverse_order)
-                .expect("should route swapped layers");
-            for original in left.iter().chain(&right) {
-                let restored = graph
-                    .node_weights()
-                    .find(|node| node.role == original.role)
-                    .expect("should preserve boundary nodes");
-                assert_eq!(restored.pos.y, original.pos.y);
-                assert_eq!(restored.partition_idx(), original.partition_idx());
-                assert_eq!(restored.size, original.size);
-                assert_eq!(restored.layer, original.layer);
-                if original.layer == Some(0) {
-                    assert_eq!(restored.pos.x, original.pos.x);
-                } else {
-                    assert!(restored.pos.x > left[0].pos.x);
-                }
-            }
-            for bundle in bundles.values() {
-                let (source, target) = bundle[0];
-                let source = graph
-                    .node_indices()
-                    .find(|&node| graph[node].role == NodeRole::Data(source))
-                    .expect("should retain source");
-                let target = graph
-                    .node_indices()
-                    .find(|&node| graph[node].role == NodeRole::Data(target))
-                    .expect("should retain target");
-                let path =
-                    find_path_bfs(&graph, source, target).expect("should retain connectivity");
-                for pair in path.windows(2) {
-                    let edge = graph
-                        .find_edge(pair[0], pair[1])
-                        .expect("should retain path edge");
-                    assert!(graph[edge].bundle.contains(&bundle[0]));
-                    assert!(
-                        graph[pair[0]].pos.x == graph[pair[1]].pos.x
-                            || graph[pair[0]].pos.y == graph[pair[1]].pos.y
-                    );
-                }
-            }
-        }
-    }
-    #[test]
-    fn test_selects_best_of_all_four_orientations() {
-        let left = [0, 4, 9]
-            .into_iter()
-            .enumerate()
-            .map(|(index, y)| {
-                LayoutNode::data(
-                    NodeIndex::new(index),
-                    LocalPos::new_xy(0, 0, y),
-                    (0, 0),
-                    Some(0),
-                )
-            })
-            .collect::<Vec<_>>();
-        let right = [-2, 3, 7]
-            .into_iter()
-            .enumerate()
-            .map(|(index, y)| {
-                LayoutNode::data(
-                    NodeIndex::new(index + 3),
-                    LocalPos::new_xy(0, 10, y),
-                    (0, 0),
-                    Some(1),
-                )
-            })
-            .collect::<Vec<_>>();
-        let edges = [(0, 1), (0, 2), (1, 0), (2, 0)]
-            .map(|(left, right)| (NodeIndex::new(left), NodeIndex::new(right)));
-        let bundles = edges
-            .iter()
-            .map(|&edge| (edge, vec![(edge.0, NodeIndex::new(edge.1.index() + 3))]))
-            .collect();
-        let mut candidates = [
-            layout_layer_internal(&left, &right, &edges, &bundles, false),
-            layout_layer_internal(&left, &right, &edges, &bundles, true),
-            layout_layer_swapped(&left, &right, &edges, &bundles, false),
-            layout_layer_swapped(&left, &right, &edges, &bundles, true),
-        ]
-        .map(|result| result.expect("should route candidate"));
-        for candidate in &mut candidates {
-            simplify_graph(candidate).expect("should simplify candidate");
-        }
-        let expected = candidates
-            .iter()
-            .min_by_key(|candidate| (total_edge_length(candidate), candidate.node_count()))
-            .expect("should have four candidates");
-        let selected =
-            layout_layer(&left, &right, &edges, &bundles).expect("should select best orientation");
-        assert_eq!(selected.node_count(), expected.node_count());
-        assert_eq!(routing_segments(&selected), routing_segments(expected));
+        let edge_bundles = HashMap::new();
+
+        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
+            .expect("should route a wormhole node on the right");
+
+        let wormhole_count = graph
+            .node_weights()
+            .filter(
+                |node| matches!(node.role, NodeRole::Wormhole(target) if target == external_target),
+            )
+            .count();
+        assert_eq!(
+            wormhole_count, 1,
+            "expected exactly one wormhole node, routed like any other"
+        );
+
+        let data_count = graph
+            .node_weights()
+            .filter(|node| matches!(node.role, NodeRole::Data(_)))
+            .count();
+        assert_eq!(
+            data_count, 3,
+            "the wormhole node must not disturb any of the real data nodes"
+        );
     }
 
-    fn routing_segments(
-        graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>,
-    ) -> Vec<((i64, i64), (i64, i64))> {
-        graph
-            .edge_indices()
-            .map(|edge| {
-                let (source, target) = graph.edge_endpoints(edge).expect("should have endpoints");
-                let source = (graph[source].pos.x, graph[source].pos.y);
-                let target = (graph[target].pos.x, graph[target].pos.y);
-                (source.min(target), source.max(target))
+    #[test]
+    fn test_layout_layer_routes_a_wormhole_node_on_the_left_like_any_other_node() {
+        let external_target = NodeIndex::new(998);
+        let left_nodes = vec![
+            LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 0), (0, 0), None),
+            LayoutNode::new(
+                NodeRole::Wormhole(external_target),
+                LocalPos::new_xy(0, 5),
+                (0, 0),
+                None,
+            ),
+        ];
+        let right_nodes = vec![
+            LayoutNode::data(NodeIndex::new(3), LocalPos::new_xy(3, 0), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(4), LocalPos::new_xy(3, 5), (0, 0), None),
+        ];
+        let edges = vec![
+            (NodeIndex::new(0), NodeIndex::new(0)), // left[0] to right[0]
+            (NodeIndex::new(1), NodeIndex::new(1)), // left[1] (wormhole) to right[1] (boundary)
+        ];
+        let edge_bundles = HashMap::new();
+
+        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
+            .expect("should route a wormhole node on the left");
+
+        let wormhole_count = graph
+            .node_weights()
+            .filter(
+                |node| matches!(node.role, NodeRole::Wormhole(target) if target == external_target),
+            )
+            .count();
+        assert_eq!(
+            wormhole_count, 1,
+            "expected exactly one wormhole node, routed like any other"
+        );
+    }
+
+    #[test]
+    fn test_layout_layer_keeps_two_wormhole_nodes_at_distinct_positions() {
+        let left_nodes = vec![
+            LayoutNode::data(NodeIndex::new(1), LocalPos::new_xy(0, 0), (0, 0), None),
+            LayoutNode::data(NodeIndex::new(2), LocalPos::new_xy(0, 1), (0, 0), None),
+        ];
+        let target_a = NodeIndex::new(901);
+        let target_b = NodeIndex::new(902);
+        let right_nodes = vec![
+            LayoutNode::new(
+                NodeRole::Wormhole(target_a),
+                LocalPos::new_xy(3, 0),
+                (0, 0),
+                None,
+            ),
+            LayoutNode::new(
+                NodeRole::Wormhole(target_b),
+                LocalPos::new_xy(3, 100),
+                (0, 0),
+                None,
+            ),
+        ];
+        let edges = vec![
+            (NodeIndex::new(0), NodeIndex::new(0)), // left[0] to right[0]
+            (NodeIndex::new(1), NodeIndex::new(1)), // left[1] to right[1]
+        ];
+        let edge_bundles = HashMap::new();
+
+        let graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)
+            .expect("should route two wormhole nodes");
+
+        let wormhole_positions: Vec<_> = graph
+            .node_weights()
+            .filter_map(|node| match node.role {
+                NodeRole::Wormhole(target) if target == target_a || target == target_b => {
+                    Some(node.pos)
+                }
+                _ => None,
             })
-            .sorted()
-            .collect()
+            .collect();
+        assert_eq!(
+            wormhole_positions.len(),
+            2,
+            "both wormhole nodes must be present"
+        );
+        assert_ne!(
+            wormhole_positions[0], wormhole_positions[1],
+            "distinct wormhole nodes must land at distinct positions"
+        );
     }
 }

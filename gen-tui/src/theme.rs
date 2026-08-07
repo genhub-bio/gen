@@ -8,10 +8,11 @@ use ratatui::style::Color;
 /// Compact Base16-style palette of 16 colors addressed by slot index.
 ///
 /// Slot assignments:
-///   0x00 – canvas bg, edge bg, node fg, cursor fg
-///   0x05 – node bg, edge fg
-///   0x07 – cursor bg
-///   0x08–0x0E – highlight / accent colors
+///   0x00 – canvas/edge background and sequence foreground
+///   0x03 – cursor cell background
+///   0x05 – node background and edge foreground
+///   0x07 – default highlight for `Color::Reset`
+///   0x08–0x0F – highlight/accent colors; 0x0B also marks cursors and wormhole arrivals
 #[derive(Debug, Clone, Copy)]
 pub struct Theme(pub [Color; 16]);
 
@@ -53,10 +54,10 @@ static THEME: LazyLock<RwLock<Theme>> = LazyLock::new(|| RwLock::new(Theme::defa
 
 /// Returns a snapshot copy of the current global theme.
 pub fn current_theme() -> Theme {
-    *THEME.read().expect("theme lock poisoned")
+    *THEME.read().expect("should acquire the theme read lock")
 }
 
 /// Replace the global theme.
 pub fn set_theme(theme: Theme) {
-    *THEME.write().expect("theme lock poisoned") = theme;
+    *THEME.write().expect("should acquire the theme write lock") = theme;
 }

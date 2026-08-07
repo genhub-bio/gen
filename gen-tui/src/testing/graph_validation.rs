@@ -188,57 +188,6 @@ pub fn assert_valid_layout_graph(
     }
 }
 
-/// Utility function to print detailed validation information for debugging
-pub fn print_validation_details(
-    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>,
-    validation: &GraphValidationResult,
-) {
-    println!("🔍 Graph Validation Details:");
-    println!(
-        "  📊 Nodes: {}, Edges: {}",
-        graph.node_count(),
-        graph.edge_count()
-    );
-    println!(
-        "  🔗 Connected: {} ({} components)",
-        validation.is_connected, validation.connected_components
-    );
-    println!(
-        "  📐 Rectilinear edges: {}",
-        validation.has_only_rectilinear_edges
-    );
-    println!("  🎯 No overlaps: {}", !validation.has_overlapping_nodes);
-
-    if !validation.non_rectilinear_edges.is_empty() {
-        println!("  ⚠️  Non-rectilinear edges:");
-        for (source, target) in &validation.non_rectilinear_edges {
-            let source_node = graph.node_weight(*source).unwrap();
-            let target_node = graph.node_weight(*target).unwrap();
-            println!(
-                "    {:?} -> {:?}: ({},{}) -> ({},{})",
-                source,
-                target,
-                source_node.pos.x,
-                source_node.pos.y,
-                target_node.pos.x,
-                target_node.pos.y
-            );
-        }
-    }
-
-    if !validation.overlapping_pairs.is_empty() {
-        println!("  ⚠️  Overlapping nodes:");
-        for (node1, node2) in &validation.overlapping_pairs {
-            let node1_data = graph.node_weight(*node1).unwrap();
-            let _node2_data = graph.node_weight(*node2).unwrap();
-            println!(
-                "    {:?} and {:?} both at ({},{})",
-                node1, node2, node1_data.pos.x, node1_data.pos.y
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,28 +211,42 @@ mod tests {
         // Create a simple connected graph with rectilinear edges
         let node1 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(1)),
-            LocalPos::new(0, (0, 0).into()),
+            LocalPos::new((0, 0).into()),
             (1, 1),
             Some(0),
         ));
 
         let node2 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(2)),
-            LocalPos::new(0, (1, 0).into()),
+            LocalPos::new((1, 0).into()),
             (1, 1),
             Some(0),
         ));
 
         let node3 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(3)),
-            LocalPos::new(0, (1, 1).into()),
+            LocalPos::new((1, 1).into()),
             (1, 1),
             Some(0),
         ));
 
         // Add rectilinear edges
-        graph.add_edge(node1, node2, LayoutEdge { bundle: vec![] }); // Horizontal
-        graph.add_edge(node2, node3, LayoutEdge { bundle: vec![] }); // Vertical
+        graph.add_edge(
+            node1,
+            node2,
+            LayoutEdge {
+                bundle: vec![],
+                is_backward_span: false,
+            },
+        ); // Horizontal
+        graph.add_edge(
+            node2,
+            node3,
+            LayoutEdge {
+                bundle: vec![],
+                is_backward_span: false,
+            },
+        ); // Vertical
 
         let validation = validate_layout_graph(&graph);
 
@@ -300,14 +263,14 @@ mod tests {
         // Create two disconnected components
         let node1 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(1)),
-            LocalPos::new(0, (0, 0).into()),
+            LocalPos::new((0, 0).into()),
             (1, 1),
             Some(0),
         ));
 
         let node2 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(2)),
-            LocalPos::new(0, (1, 0).into()),
+            LocalPos::new((1, 0).into()),
             (1, 1),
             Some(0),
         ));
@@ -315,12 +278,19 @@ mod tests {
         // Disconnected node
         let _node3 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(3)),
-            LocalPos::new(0, (5, 5).into()),
+            LocalPos::new((5, 5).into()),
             (1, 1),
             Some(0),
         ));
 
-        graph.add_edge(node1, node2, LayoutEdge { bundle: vec![] });
+        graph.add_edge(
+            node1,
+            node2,
+            LayoutEdge {
+                bundle: vec![],
+                is_backward_span: false,
+            },
+        );
 
         let validation = validate_layout_graph(&graph);
 
@@ -336,20 +306,27 @@ mod tests {
         // Create nodes with diagonal edge
         let node1 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(1)),
-            LocalPos::new(0, (0, 0).into()),
+            LocalPos::new((0, 0).into()),
             (1, 1),
             Some(0),
         ));
 
         let node2 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(2)),
-            LocalPos::new(0, (1, 1).into()),
+            LocalPos::new((1, 1).into()),
             (1, 1),
             Some(0),
         ));
 
         // Diagonal edge (non-rectilinear)
-        graph.add_edge(node1, node2, LayoutEdge { bundle: vec![] });
+        graph.add_edge(
+            node1,
+            node2,
+            LayoutEdge {
+                bundle: vec![],
+                is_backward_span: false,
+            },
+        );
 
         let validation = validate_layout_graph(&graph);
 
@@ -366,14 +343,14 @@ mod tests {
         // Create overlapping nodes at the same position
         let _node1 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(1)),
-            LocalPos::new(0, (0, 0).into()),
+            LocalPos::new((0, 0).into()),
             (1, 1),
             Some(0),
         ));
 
         let _node2 = graph.add_node(LayoutNode::new(
             NodeRole::Data(NodeIndex::new(2)),
-            LocalPos::new(0, (0, 0).into()), // Same position as node1
+            LocalPos::new((0, 0).into()), // Same position as node1
             (1, 1),
             Some(0),
         ));
