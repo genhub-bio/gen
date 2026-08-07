@@ -8,7 +8,7 @@ use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
     PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, is_end_node, is_start_node,
 };
-use gen_graph::{GenGraph, GraphEdge, GraphNode};
+use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
     cycle_removal::remove_cycles,
@@ -27,7 +27,20 @@ use petgraph::{
     Direction,
     visit::{DfsEvent, depth_first_search},
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
+
+use crate::views::{
+    annotation_track::{
+        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
+        span_should_hide_in_truncated,
+    },
+    graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
+    inline_label_placement::draw_label_near_pos,
+};
 
 /// Ordered `+`/`-` zoom gap-size steps, tightest to loosest, paired with a `NodeRenderer` in
 /// [`build_zoom_levels`] to form the actual zoom table. Graph-agnostic - kept separate from
@@ -791,6 +804,248 @@ pub fn highlight_match_range<R>(
     for (s, t) in m.slices.iter().zip(m.slices.iter().skip(1)) {
         view_state.set_edge_highlight((s.block, t.block), style);
     }
+}
+
+/// A mapped cell rectangle: the node it's on, and its top-left/bottom-right columns.
+type CellRegion = (GraphNode, (i64, i64), (i64, i64));
+
+/// The mapped column range a `GraphNodeSlice` occupies once rendered, using the same
+/// `clamp_col` math `highlight_match_range` uses to paint it. Computing conflicts against
+/// this (rather than against raw, unmapped sequence coordinates) is what catches
+/// collisions that only exist after mapping - e.g. two annotations that don't overlap at
+/// `Full` detail can still both collapse onto the same cell once a node is small enough to
+/// be `Truncated`.
+fn slice_region(detail_level: VisualDetail, slice: &GraphNodeSlice) -> CellRegion {
+    let block_seq_len = slice.block.length();
+    let col_start = slice.start as i64;
+    let col_end = slice.end.saturating_sub(1) as i64;
+    let tl = (clamp_col(col_start, block_seq_len, detail_level), 0);
+    let br = (clamp_col(col_end, block_seq_len, detail_level), 0);
+    (slice.block, tl, br)
+}
+
+/// Whether two mapped cell regions occupy any of the same cells.
+fn regions_overlap(a: &CellRegion, b: &CellRegion) -> bool {
+    a.0 == b.0 && a.1.0 <= b.2.0 && b.1.0 <= a.2.0
+}
+
+/// The 8 theme accent slots annotation colors and `AnnotationColorCache::next_color` are
+/// drawn from.
+fn accent_colors() -> [Color; 8] {
+    let theme = current_theme();
+    [
+        theme[0x08],
+        theme[0x09],
+        theme[0x0A],
+        theme[0x0B],
+        theme[0x0C],
+        theme[0x0D],
+        theme[0x0E],
+        theme[0x0F],
+    ]
+}
+
+/// Re-register every overlay highlight on `view_state`, replacing whatever highlights were
+/// previously set.
+///
+/// Span overlays are processed longest-first so shorter (inner) spans paint on top; any
+/// path overlay is applied last so the route paints over the span tints. Each span's color
+/// is chosen greedily: its color from a previous pass (`color_cache`) if it's still
+/// conflict-free, or else the next color in rotation, so spans that never conflict with
+/// anything still get spread across distinct colors instead of colors reshuffling across
+/// frames or collapsing onto one repeated color. Only hunts for a different free accent
+/// slot when the preferred color is actually taken by a previously-processed span whose
+/// mapped cell range overlaps this one; only gives up and accepts a collision if every slot
+/// is already taken by a genuine neighbor - with only 8 slots, a dense pile of
+/// mutually-overlapping annotations can still collide, but this makes collisions the
+/// exception rather than the default.
+///
+/// `overlays` is written back with the colors actually used, so `draw_annotation_labels`
+/// (which reads `overlay.style` separately, after this runs) labels each span in the same
+/// color that got painted. Callers run this after any change that invalidates mapped
+/// highlight columns (zoom, detail change) or, in the live TUI viewers, every frame because
+/// the overlay set changes with scrolling.
+pub fn reapply_overlays<R>(
+    engine: &LayoutEngine<GenGraph>,
+    view_state: &mut GraphViewState<GraphNode>,
+    levels: &[(VisualDetail, R, GapSizes)],
+    overlays: &mut [GraphOverlay],
+    color_cache: &mut AnnotationColorCache,
+) {
+    let detail_level = levels[view_state.zoom_index.min(levels.len() - 1)].0;
+    let graph = engine.graph();
+
+    // DB-loaded tracks are too busy to paint at minimal detail; a span confined to a
+    // partial slice of a single node is also dropped at truncated detail, mirroring the
+    // label suppression below.
+    let mut span_indices: Vec<usize> = overlays
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, overlay)| {
+            overlay
+                .span()
+                .filter(|_| {
+                    !matches!(
+                        (detail_level, &overlay.source),
+                        (VisualDetail::Minimal, OverlaySource::Track(_))
+                    )
+                })
+                .filter(|span| {
+                    detail_level != VisualDetail::Truncated
+                        || !span_should_hide_in_truncated(span, graph)
+                })
+                .map(|_| idx)
+        })
+        .collect();
+    span_indices.sort_by_key(|&idx| {
+        let span = overlays[idx]
+            .span()
+            .expect("filtered to span overlays above");
+        -(span
+            .segments
+            .iter()
+            .map(|segment| segment.end - segment.start)
+            .sum::<i64>())
+    });
+
+    // Decide every span's locus and color first (only needs `&engine`); painting
+    // (`&mut view_state`) happens in a second pass once every color is settled.
+    let accents = accent_colors();
+    let mut occupied: Vec<(CellRegion, Color)> = Vec::new();
+    let mut decisions: Vec<(usize, GraphLocus, Color)> = Vec::new();
+    for idx in span_indices {
+        let span = overlays[idx]
+            .span()
+            .expect("filtered to span overlays above");
+        let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+            continue;
+        };
+        let regions: Vec<CellRegion> = locus
+            .slices
+            .iter()
+            .map(|slice| slice_region(detail_level, slice))
+            .collect();
+        let used: Vec<Color> = occupied
+            .iter()
+            .filter(|(placed, _)| regions.iter().any(|region| regions_overlap(placed, region)))
+            .map(|(_, color)| *color)
+            .collect();
+
+        // Prefer this span's previous color, or, the first time it's seen, the next color
+        // in rotation, so spans that never conflict with anything still get spread across
+        // distinct colors instead of repeatedly landing on the same one. Only hunt for a
+        // different free accent slot when the preferred color is actually taken by
+        // something this span overlaps; only give up and accept a collision if every slot
+        // is taken.
+        let preferred = color_cache
+            .get(&span.id)
+            .unwrap_or_else(|| color_cache.next_color(&accents));
+        let color = if used.contains(&preferred) {
+            accents
+                .into_iter()
+                .find(|c| !used.contains(c))
+                .unwrap_or(preferred)
+        } else {
+            preferred
+        };
+        color_cache.set(span.id, color);
+
+        for region in regions {
+            occupied.push((region, color));
+        }
+        decisions.push((idx, locus, color));
+    }
+
+    view_state.clear_all_highlights();
+    for (idx, locus, color) in &decisions {
+        overlays[*idx].style.color = *color;
+        highlight_match_range(view_state, levels, locus, overlays[*idx].style);
+    }
+    for overlay in overlays.iter() {
+        if let Some(nodes) = overlay.path_nodes() {
+            view_state.set_path_highlight(overlay.style, nodes.to_vec());
+        }
+    }
+}
+
+/// Draw floating labels for `overlays` after the graph has been rendered into `buf`.
+///
+/// Overlays are labelled longest-first so the covered-by-later check matches highlight
+/// paint order. A label is suppressed when its span is fully covered by a shorter overlay
+/// on top, when it collapses into a truncated node, or when no free cell is found near its
+/// span. Returns `true` if any labelled overlay was suppressed, so the caller can show a
+/// single "some annotations hidden" hint.
+pub fn draw_annotation_labels<R>(
+    buf: &mut Buffer,
+    area: Rect,
+    engine: &LayoutEngine<GenGraph>,
+    view_state: &GraphViewState<GraphNode>,
+    levels: &[(VisualDetail, R, GapSizes)],
+    overlays: &[GraphOverlay],
+) -> bool {
+    let detail_level = levels[view_state.zoom_index.min(levels.len() - 1)].0;
+    let graph = engine.graph();
+    let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
+        .iter()
+        .filter_map(|overlay| {
+            overlay
+                .span()
+                .filter(|span| !span.name.is_empty())
+                .filter(|_| {
+                    !matches!(
+                        (detail_level, &overlay.source),
+                        (VisualDetail::Minimal, OverlaySource::Track(_))
+                    )
+                })
+                .map(|span| (span, overlay.style))
+        })
+        .collect();
+    if labeled.is_empty() {
+        return false;
+    }
+    labeled.sort_by_key(|(span, _)| {
+        -(span
+            .segments
+            .iter()
+            .map(|segment| segment.end - segment.start)
+            .sum::<i64>())
+    });
+
+    let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
+    let theme = current_theme();
+    let max_distance = if detail_level == VisualDetail::Minimal {
+        10
+    } else {
+        5
+    };
+
+    let mut any_hidden = false;
+    for (idx, (span, style)) in labeled.iter().enumerate() {
+        let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+            continue;
+        };
+        if span_covered_by_later(span, idx, &span_refs) {
+            any_hidden = true;
+            continue;
+        }
+        if detail_level == VisualDetail::Truncated && span_should_hide_in_truncated(span, graph) {
+            any_hidden = true;
+            continue;
+        }
+        let Some(bounds) = locus_label_bounds(&locus, &view_state.frame, detail_level) else {
+            continue;
+        };
+        let color = match style.color {
+            Color::Reset => theme[0x06],
+            other => other,
+        };
+        let label = span_label_text(span);
+        if draw_label_near_pos(buf, area, bounds, &label, color, view_state, max_distance).is_none()
+        {
+            any_hidden = true;
+        }
+    }
+    any_hidden
 }
 
 #[cfg(test)]
