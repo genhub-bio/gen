@@ -6,10 +6,8 @@ use std::{
 };
 
 use itertools::Itertools;
-use petgraph::graph::NodeIndex;
 
 use super::{LayoutError, NodeData, temp_graph::TempGraph};
-use crate::layout::LayoutEdge;
 
 #[derive(Clone, Debug)]
 struct JogScore {
@@ -70,7 +68,7 @@ impl GraphBuilder<'_> {
     }
 
     fn transpose(&mut self) {
-        for position in self.node_positions_by_id.values_mut() {
+        for (_node_id, position) in self.node_positions_by_id.iter_mut() {
             let (x, y) = position;
             *position = (*y, *x);
         }
@@ -86,7 +84,7 @@ impl GraphBuilder<'_> {
             self.node_ids_by_position.insert(*position, *node_id);
         }
 
-        for port in self.node_ports_by_id.values_mut() {
+        for (_node_id, port) in self.node_ports_by_id.iter_mut() {
             let (n, e, s, w) = port;
             *port = (*e, *n, *w, *s);
         }
@@ -104,45 +102,20 @@ impl GraphBuilder<'_> {
         for node_id in &edge_nodes {
             let position = self.node_positions_by_id.get(node_id);
             if let Some(position) = position {
-                // Get port information if available
-                let ports = self
-                    .node_ports_by_id
-                    .get(node_id)
-                    .map(|(n, e, s, w)| (*n != 0, *e != 0, *s != 0, *w != 0));
-
-                // Calculate glyph index from ports
-                let glyph_index = if let Some((n, e, s, w)) = ports {
-                    Some(((n as i64) << 3) | ((e as i64) << 2) | ((s as i64) << 1) | (w as i64))
-                } else {
-                    None
-                };
-
                 let node_data = NodeData {
                     node_id: *node_id,
                     position: *position,
                     node_type: Some("Routing".to_string()),
-                    ports,
-                    glyph_index,
-                    size: (1, 1), // Routing nodes are small
-                    // Routing nodes don't have original domain data
+                    size: (1, 1),
                     original_node_id: None,
                     layer: None,
-                    partition_index: None,
                 };
                 graph.add_node(*node_id, node_data);
             }
         }
 
-        for (edge_id_counter, edge) in (1..).zip(self.edges.iter()) {
-            graph.add_edge(
-                edge_id_counter,
-                edge.0,
-                edge.1,
-                LayoutEdge::new(
-                    NodeIndex::new(edge.0 as usize),
-                    NodeIndex::new(edge.1 as usize),
-                ),
-            )?;
+        for edge in &self.edges {
+            graph.add_edge(edge.0, edge.1)?;
         }
 
         Ok(graph)
@@ -334,7 +307,7 @@ impl Router {
         max_density
     }
 
-    // Step 1: Make feasible top and bottom connections in minimal manner
+    // Make feasible top and bottom connections.
     fn add_vertical_wire(
         &self,
         net: u64,
@@ -542,50 +515,42 @@ impl Router {
         }
     }
 
+    /// Nets occupying more than one track, sorted for deterministic mutation order.
     fn split_nets(tracks_by_net: &HashMap<u64, HashSet<i64>>) -> Vec<u64> {
-        let mut result = HashSet::new();
-        for (net, tracks) in tracks_by_net.iter() {
-            if tracks.len() > 1 {
-                result.insert(net);
-            }
-        }
-
-        result.into_iter().copied().collect::<Vec<u64>>()
+        let mut result: Vec<u64> = tracks_by_net
+            .iter()
+            .filter(|(_, tracks)| tracks.len() > 1)
+            .map(|(net, _)| *net)
+            .collect();
+        result.sort_unstable();
+        result
     }
 
-    // Step 2: Free as many tracks as possible by collapsing split nets
+    // Free tracks by collapsing split nets.
     fn generate_jog_patterns(
         &self,
         tracks_by_net: &mut HashMap<u64, HashSet<i64>>,
     ) -> Vec<Vec<Vec<(i64, i64)>>> {
-        // Generate all possible jog patterns for the current column
-        // Returns a pattern as a list of jogs, grouped by the net they belong to:
-        // [((track1, track2), (track3, track4), ...), ((track5, track6), (track7, track8), ...), ...]
-        // (This also includes empty groups to keep the distinction between nets)
-
-        let mut jogs_partitioned_by_net: Vec<Vec<(i64, i64)>> = vec![];
+        let mut jogs_by_net: Vec<Vec<(i64, i64)>> = vec![];
         let split_nets = Self::split_nets(tracks_by_net);
-        for net in split_nets.iter().sorted() {
-            // Generate all possible jogs for this net (non-overlapping)
+        for net in &split_nets {
             let track_set = tracks_by_net.get(net);
             if let Some(track_set) = track_set {
                 let track_list = track_set.iter().copied().sorted().collect::<Vec<i64>>();
-                jogs_partitioned_by_net.push(track_list.iter().copied().tuple_windows().collect());
+                jogs_by_net.push(track_list.iter().copied().tuple_windows().collect());
             }
         }
 
-        // To build the patterns we take the cartesian product of the power sets of each net
         let mut jog_powersets: Vec<Vec<Vec<(i64, i64)>>> = vec![];
 
-        for net_jogs in jogs_partitioned_by_net {
-            // Exclude the empty subset so each split net contributes at least one jog in a pattern.
+        for net_jogs in jogs_by_net {
             let powerset: Vec<Vec<(i64, i64)>> = net_jogs
                 .iter()
                 .cloned()
                 .powerset()
                 .filter(|subset| !subset.is_empty())
                 .collect();
-            jog_powersets.push(powerset.clone());
+            jog_powersets.push(powerset);
         }
 
         jog_powersets
@@ -602,14 +567,6 @@ impl Router {
     }
 
     fn validate_pattern(pattern: &[Vec<(i64, i64)>]) -> bool {
-        // Pattern is a list of jogs, grouped by net:
-        // [((track1, track2), (track3, track4), ...), ((track5, track6), (track7, track8), ...), ...]
-        // Check if the jogs in the pattern are valid by testing for overlaps
-        // between the jogs of different nets. This is a two-step combination:
-        // 1) each net is checked against all other nets
-        // 2) all jogs from one net are checked against all jogs from the other net
-        // Returns True if valid, False otherwise
-
         for jog_pair in pattern.iter().combinations(2) {
             let net1_jogs = jog_pair[0];
             let net2_jogs = jog_pair[1];
@@ -649,14 +606,8 @@ impl Router {
     fn evaluate_jogs(
         &self,
         tracks_by_net: &mut HashMap<u64, HashSet<i64>>,
-        pattern: &Vec<Vec<(i64, i64)>>,
+        pattern: &[Vec<(i64, i64)>],
     ) -> JogScore {
-        // pattern is a list of lists of tuples (track1,track2) grouped by net
-        // Returns a score as 3 values:
-        // 1. Number of tracks freed
-        // 2. Outermost split net distance from edge
-        // 3. Sum of jog lengths
-
         // 1) Number of new empty tracks created by the jogs (higher is better)
         // From the paper: "a pattern [of jogs] will free up one track for every jog it contains,
         // plus one additional track for every net it finishes"
@@ -713,15 +664,15 @@ impl Router {
         for net in Self::split_nets(tracks_by_net) {
             let tracks = tracks_by_net.get(&net);
             if let Some(tracks) = tracks {
-                let dangling_tracks: HashSet<i64> =
+                let wormhole_tracks: HashSet<i64> =
                     tracks.difference(&all_tracks).copied().collect();
-                if dangling_tracks.is_empty() {
+                if wormhole_tracks.is_empty() {
                     continue;
                 }
-                let min_dangling_track = dangling_tracks.iter().min().unwrap();
-                let distance_from_bottom = min_dangling_track - 1;
-                let max_dangling_track = dangling_tracks.iter().max().unwrap();
-                let distance_from_top = self.channel_width - max_dangling_track;
+                let min_wormhole_track = wormhole_tracks.iter().min().unwrap();
+                let distance_from_bottom = min_wormhole_track - 1;
+                let max_wormhole_track = wormhole_tracks.iter().max().unwrap();
+                let distance_from_top = self.channel_width - max_wormhole_track;
                 if distance_from_bottom < distance_from_top {
                     net_distances.push(distance_from_bottom);
                 } else {
@@ -733,7 +684,7 @@ impl Router {
         // Save a sorted list so that we can also compare the second net etc.
         let distance_ranking = net_distances.clone().iter().sorted().copied().collect();
 
-        // 3) Minimize the total length of the jogs
+        // 3) Maximize the total length of the jogs.
         let mut jog_length_sum = 0;
         for (y1, y2) in &all_jogs {
             jog_length_sum += y2 - y1;
@@ -747,9 +698,6 @@ impl Router {
     }
 
     fn compare_scores(score1: &JogScore, score2: &JogScore) -> bool {
-        // Find the best pattern with multiple tiebreakers
-        // returns True if score1 is better than score2
-
         // Maximize the number of tracks freed
         if score1.number_freed != score2.number_freed {
             return score1.number_freed > score2.number_freed;
@@ -758,14 +706,7 @@ impl Router {
         // Maximize the distance of the outermost split net from the edge
         // If the distance is the same, then compare the second outermost net etc.
 
-        // TODO: Can these lengths differ?
-        assert!(score1.distance_ranking.len() == score2.distance_ranking.len());
-        for (d1, d2) in score1
-            .distance_ranking
-            .clone()
-            .into_iter()
-            .zip(score2.distance_ranking.clone())
-        {
+        for (d1, d2) in score1.distance_ranking.iter().zip(&score2.distance_ranking) {
             if d1 != d2 {
                 return d1 > d2;
             }
@@ -903,12 +844,10 @@ impl Router {
                 }
                 // If the net is closed, y2 will be removed in a later step
             }
-        } else {
-            println!("No valid patterns found");
         }
     }
 
-    // Step 3: Add jogs to reduce the range of split nets
+    // Add jogs to reduce the range of split nets.
     fn occupied_tracks(&self, tracks_by_net: &HashMap<u64, HashSet<i64>>) -> HashSet<i64> {
         let mut result = HashSet::new();
         for tracks in tracks_by_net.values() {
@@ -929,13 +868,9 @@ impl Router {
         // Assumes that there are not other tracks of the same net in the way
         // Returns the position of that track number if successful, or the original track if not.
 
-        // Rust is very picky about ranges and reversed ranges.  They are not
-        // the same type.  Clippy doesn't understand that they need to be
-        // converted to a vector in order for the compiler to be happy.
-        #[allow(clippy::useless_conversion)]
         let tracks: Vec<_> = match goal.cmp(&track) {
-            Ordering::Greater => (track + 1..goal + 1).into_iter().collect(),
-            Ordering::Less => (track - 1..goal - 1).rev().into_iter().collect(),
+            Ordering::Greater => (track + 1..goal + 1).collect(),
+            Ordering::Less => (track - 1..goal - 1).rev().collect(),
             Ordering::Equal => {
                 return track;
             }
@@ -1034,7 +969,7 @@ impl Router {
         }
     }
 
-    // Step 4: Add jogs to raise rising nets and lower falling nets
+    // Raise rising nets and lower falling nets.
     fn push_unsplit_nets(
         &mut self,
         tracks_by_net: &HashMap<u64, HashSet<i64>>,
@@ -1068,25 +1003,23 @@ impl Router {
         for net in nets_to_jog {
             let tracks = tracks_by_net.get(&net);
             if let Some(tracks) = tracks {
-                let track = tracks.iter().next();
-                if let Some(track) = track {
-                    let classification = self.classify_net(net);
-                    let goal = if classification == "rising" {
-                        self.channel_width
-                    } else if classification == "falling" {
-                        1
-                    } else {
-                        continue;
-                    };
-
-                    // Record the achievable distance to the goal track
-                    let destination = self.scout(tracks_by_net, net, *track, goal, graph_builder);
-                    let distance = (track - destination).abs();
-                    if distance >= self.minimum_jog_length {
-                        track_distances.push((distance, net, *track, goal));
-                    }
+                let track = *tracks
+                    .iter()
+                    .next()
+                    .expect("should contain the selected net's track");
+                let classification = self.classify_net(net);
+                let goal = if classification == "rising" {
+                    self.channel_width
+                } else if classification == "falling" {
+                    1
                 } else {
-                    println!("No tracks found for net: {}", net);
+                    continue;
+                };
+
+                let destination = self.scout(tracks_by_net, net, track, goal, graph_builder);
+                let distance = (track - destination).abs();
+                if distance >= self.minimum_jog_length {
+                    track_distances.push((distance, net, track, goal));
                 }
             }
         }
@@ -1100,47 +1033,46 @@ impl Router {
         graph_builder: &mut GraphBuilder,
         track_distances: &[(i64, u64, i64, i64)],
     ) {
-        // Execute longer jogs first
-        for (_, net, track, goal) in track_distances.iter().sorted_by_key(|distance| -distance.0) {
+        // Break distance ties by net because each jog mutates shared track state.
+        for (_, net, track, goal) in track_distances
+            .iter()
+            .sorted_by_key(|distance| (-distance.0, distance.1))
+        {
             self.jog(tracks_by_net, *net, *track, *goal, graph_builder);
         }
     }
 
-    // Step 5: Widen channel if needed to make previously not feasible top or bottom connections
+    // Widen the channel to make blocked boundary connections feasible.
     fn widen_channel(
         &mut self,
         tracks_by_net: &mut HashMap<u64, HashSet<i64>>,
         from_side: Option<&str>,
         graph_builder: &mut GraphBuilder,
     ) -> Result<(), LayoutError> {
-        // Inserts a new track which must be:
-        // (a) reachable from the top or bottom
-        // (b) as close as possible to the middle of the channel
-        // If the track x is selected, then the old tracks x, x+1, ... will be moved up to x+1, x+2, ...
-        // Note: we are assuming that this function is only called when there is no space left on the channel
-
-        // Choose the lower middle on odd widths (match Python's round-half-to-even then +1).
+        // Insert an accessible track as close to the middle as possible.
         let mid_track = ((self.channel_width as f64) / 2.0).round() as i64 + 1;
 
         // Find a position for the new track that is as close to the middle as possible,
         // and that is accessible from the pins without violating a vertical constraint.
-        let current_vertical_wires = self.vertical_wiring(graph_builder); // Call function once
-        let (min_start, max_end) = if current_vertical_wires.is_empty() {
-            (1, self.channel_width)
+        let current_vertical_wires = self.vertical_wiring(graph_builder);
+        let min_start;
+        let max_end;
+
+        if current_vertical_wires.is_empty() {
+            min_start = 1;
+            max_end = self.channel_width;
         } else {
-            (
-                current_vertical_wires
-                    .iter()
-                    .min_by(|wire1, wire2| wire1.0.cmp(&wire2.0))
-                    .unwrap()
-                    .0,
-                current_vertical_wires
-                    .iter()
-                    .max_by(|wire1, wire2| wire1.1.cmp(&wire2.1))
-                    .unwrap()
-                    .1,
-            )
-        };
+            min_start = current_vertical_wires
+                .iter()
+                .min_by(|wire1, wire2| wire1.0.cmp(&wire2.0))
+                .unwrap()
+                .0;
+            max_end = current_vertical_wires
+                .iter()
+                .max_by(|wire1, wire2| wire1.1.cmp(&wire2.1))
+                .unwrap()
+                .1;
+        }
 
         let new_track_candidate_bottom = cmp::min(min_start, mid_track);
         let new_track_candidate_top = cmp::max(max_end + 1, mid_track);
@@ -1171,7 +1103,7 @@ impl Router {
 
         // Update the active assignments for all tracks above the new track,
         // starting from the top down so we don't overwrite any existing assignments
-        for old_tracks in tracks_by_net.values_mut() {
+        for (_net, old_tracks) in tracks_by_net.iter_mut() {
             let mut new_tracks = HashSet::new();
             for old_track in old_tracks.iter() {
                 if *old_track >= new_track {
@@ -1197,9 +1129,7 @@ impl Router {
                     if let Some(entry) = graph_builder.node_positions_by_id.get_mut(node_id) {
                         *entry = (x, new_y);
                     };
-                    // Old coord mapping will be removed when rebuilding updated_pos_to_id
                 }
-                // else: node coordinates remain unchanged
             }
         }
 
@@ -1245,14 +1175,7 @@ impl Router {
         self.channel_length = cmp::max(self.channel_length, self.current_column + 1);
     }
 
-    fn _add_border_spacing(&self, edge_spacing: i64, graph_builder: &mut GraphBuilder) {
-        // Increase the space between nodes at the minimum and maximum y coordinates
-        // and all other nodes by a set distance.
-        // Following Python implementation exactly
-        //
-        // Parameters:
-        //     edge_spacing: Distance to add between edge nodes and other nodes
-
+    fn add_border_spacing(&self, edge_spacing: i64, graph_builder: &mut GraphBuilder) {
         if graph_builder.node_ids().is_empty() {
             return;
         }
@@ -1270,8 +1193,7 @@ impl Router {
                 new_y += edge_spacing;
             }
 
-            // Add additional spacing for the top boundary (channel_width + 1)
-            // This matches Python's condition exactly
+            // Add another unit above the channel's top boundary.
             if y == self.channel_width + 1 {
                 new_y += edge_spacing;
             }
@@ -1414,7 +1336,7 @@ impl Router {
         let net = graph_builder.nets_by_edge.get(edge1).cloned();
         let role = graph_builder.roles_by_edge.get(edge1).cloned();
 
-        // Remove the old edges
+        // Replace both incident edges with one direct edge.
         graph_builder
             .edges
             .retain(|(u, v)| !(*u == node_id || *v == node_id));
@@ -1520,7 +1442,7 @@ impl Router {
         }
 
         // Add a unit of spacing at the edges of the channel
-        self._add_border_spacing(1, graph_builder);
+        self.add_border_spacing(1, graph_builder);
 
         // Simplify linear paths by removing unnecessary intermediate nodes
         self.simplify_linear_paths(graph_builder);

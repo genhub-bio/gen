@@ -2,190 +2,85 @@
 
 use std::collections::HashMap;
 
-use petgraph::{graph::NodeIndex, stable_graph::StableDiGraph};
+use petgraph::{graph::NodeIndex, stable_graph::StableDiGraph, visit::GraphBase};
 use ratatui::style::{Color, Style};
 
 use crate::{
-    geometry::WorldRect,
-    graph_controller::WorldBuffer,
-    layout::VisualDetail,
-    partition::{PartitionEdge, PartitionNode, StitchSide},
-    plotter::{NodeRenderer, NodeSizer},
+    geometry::WorldRect, graph_widget::NODE_GLYPH, layout::VisualDetail, plotter::NodeRenderer,
+    viewport_state::WorldBuffer,
 };
 
-// Type aliases for common test graph types
-pub type MockPartitionGraph = StableDiGraph<PartitionNode, PartitionEdge, u32>;
+// Type alias for the common test graph type
 pub type MockDomainGraph = StableDiGraph<(), ()>;
 pub type MockNodeId = NodeIndex<u32>;
+
+/// Test-only mirror of the production `NodeRenderer`, carrying the detail level as an
+/// explicit argument rather than internal state. Implementors typically override only
+/// the sizing methods or only `render_node`; [`MockVisual`] composes two implementors
+/// so a test can vary sizing and rendering independently.
+pub trait MockRenderer<G: GraphBase> {
+    fn get_node_size(&self, node: &G::NodeId, detail_level: VisualDetail) -> (u64, u64) {
+        let _ = (node, detail_level);
+        (1, 1)
+    }
+
+    fn get_dummy_size(&self) -> (u64, u64) {
+        (1, 1)
+    }
+
+    fn render_node(
+        &self,
+        buffer: &mut WorldBuffer,
+        area: WorldRect,
+        node_id: &G::NodeId,
+        detail_level: VisualDetail,
+    ) {
+        let _ = (buffer, area, node_id, detail_level);
+    }
+}
+
+/// Combines a sizing-focused and a rendering-focused [`MockRenderer`] into a single
+/// [`NodeRenderer`], threading a stored detail level into both.
+pub struct MockVisual<S, R> {
+    pub sizer: S,
+    pub renderer: R,
+    pub detail: VisualDetail,
+}
+
+impl<S, R> MockVisual<S, R> {
+    pub fn new(sizer: S, renderer: R) -> Self {
+        Self {
+            sizer,
+            renderer,
+            detail: VisualDetail::Truncated,
+        }
+    }
+}
+
+impl<G, S, R> NodeRenderer<G> for MockVisual<S, R>
+where
+    G: GraphBase,
+    S: MockRenderer<G>,
+    R: MockRenderer<G>,
+{
+    fn get_node_size(&self, node: &G::NodeId) -> (u64, u64) {
+        self.sizer.get_node_size(node, self.detail)
+    }
+
+    fn get_dummy_size(&self) -> (u64, u64) {
+        self.sizer.get_dummy_size()
+    }
+
+    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
+        self.renderer
+            .render_node(buffer, area, node_id, self.detail);
+    }
+}
 
 /// Collection of standardized test graphs for consistent testing
 pub struct TestGraphs;
 
 impl TestGraphs {
-    /// Simple linear chain: A -> B -> C (returns partition graph)
-    pub fn simple_chain() -> MockPartitionGraph {
-        let mut graph = MockPartitionGraph::new();
-
-        // Add stitch nodes
-        let left_stitch = graph.add_node(PartitionNode::Stitch(StitchSide::Left));
-        let right_stitch = graph.add_node(PartitionNode::Stitch(StitchSide::Right));
-
-        // Add data nodes
-        let a = graph.add_node(PartitionNode::Data(NodeIndex::new(0)));
-        let b = graph.add_node(PartitionNode::Data(NodeIndex::new(1)));
-        let c = graph.add_node(PartitionNode::Data(NodeIndex::new(2)));
-
-        // Connect stitch nodes to data nodes
-        graph.add_edge(left_stitch, a, None);
-        graph.add_edge(c, right_stitch, None);
-
-        // Connect data nodes
-        graph.add_edge(a, b, Some((NodeIndex::new(0), NodeIndex::new(1))));
-        graph.add_edge(b, c, Some((NodeIndex::new(1), NodeIndex::new(2))));
-
-        graph
-    }
-
-    /// Diamond pattern: A -> B -> D, A -> C -> D (returns partition graph)
-    pub fn diamond() -> MockPartitionGraph {
-        let mut graph = MockPartitionGraph::new();
-
-        // Add stitch nodes
-        let left_stitch = graph.add_node(PartitionNode::Stitch(StitchSide::Left));
-        let right_stitch = graph.add_node(PartitionNode::Stitch(StitchSide::Right));
-
-        // Add data nodes
-        let a = graph.add_node(PartitionNode::Data(NodeIndex::new(0)));
-        let b = graph.add_node(PartitionNode::Data(NodeIndex::new(1)));
-        let c = graph.add_node(PartitionNode::Data(NodeIndex::new(2)));
-        let d = graph.add_node(PartitionNode::Data(NodeIndex::new(3)));
-
-        // Connect stitch nodes to data nodes
-        graph.add_edge(left_stitch, a, None);
-        graph.add_edge(d, right_stitch, None);
-
-        // Connect data nodes
-        graph.add_edge(a, b, Some((NodeIndex::new(0), NodeIndex::new(1))));
-        graph.add_edge(a, c, Some((NodeIndex::new(0), NodeIndex::new(2))));
-        graph.add_edge(b, d, Some((NodeIndex::new(1), NodeIndex::new(3))));
-        graph.add_edge(c, d, Some((NodeIndex::new(2), NodeIndex::new(3))));
-
-        graph
-    }
-
-    /// Complex DAG with multiple levels and branches (returns partition graph)
-    pub fn complex_dag() -> MockPartitionGraph {
-        let mut graph = MockPartitionGraph::new();
-
-        // Add stitch nodes
-        let left_stitch = graph.add_node(PartitionNode::Stitch(StitchSide::Left));
-        let right_stitch = graph.add_node(PartitionNode::Stitch(StitchSide::Right));
-
-        // Add data nodes
-        let nodes: Vec<_> = (0..10)
-            .map(|i| graph.add_node(PartitionNode::Data(NodeIndex::new(i))))
-            .collect();
-
-        // Connect left stitch to the first node (node 0 is the root)
-        graph.add_edge(left_stitch, nodes[0], None);
-
-        // Connect the sink nodes (nodes 6 and 7) to the right stitch
-        graph.add_edge(nodes[9], right_stitch, None);
-
-        // Create a complex hierarchical structure
-        graph.add_edge(
-            nodes[0],
-            nodes[1],
-            Some((NodeIndex::new(0), NodeIndex::new(1))),
-        );
-        graph.add_edge(
-            nodes[0],
-            nodes[2],
-            Some((NodeIndex::new(0), NodeIndex::new(2))),
-        );
-        graph.add_edge(
-            nodes[1],
-            nodes[3],
-            Some((NodeIndex::new(1), NodeIndex::new(3))),
-        );
-        graph.add_edge(
-            nodes[1],
-            nodes[4],
-            Some((NodeIndex::new(1), NodeIndex::new(4))),
-        );
-        graph.add_edge(
-            nodes[2],
-            nodes[4],
-            Some((NodeIndex::new(2), NodeIndex::new(4))),
-        );
-        graph.add_edge(
-            nodes[2],
-            nodes[5],
-            Some((NodeIndex::new(2), NodeIndex::new(5))),
-        );
-        graph.add_edge(
-            nodes[3],
-            nodes[6],
-            Some((NodeIndex::new(3), NodeIndex::new(6))),
-        );
-        graph.add_edge(
-            nodes[4],
-            nodes[6],
-            Some((NodeIndex::new(4), NodeIndex::new(6))),
-        );
-        graph.add_edge(
-            nodes[4],
-            nodes[7],
-            Some((NodeIndex::new(4), NodeIndex::new(7))),
-        );
-        graph.add_edge(
-            nodes[5],
-            nodes[7],
-            Some((NodeIndex::new(5), NodeIndex::new(7))),
-        );
-
-        graph.add_edge(
-            nodes[6],
-            nodes[8],
-            Some((NodeIndex::new(6), NodeIndex::new(8))),
-        );
-        graph.add_edge(
-            nodes[7],
-            nodes[8],
-            Some((NodeIndex::new(7), NodeIndex::new(8))),
-        );
-        graph.add_edge(
-            nodes[8],
-            nodes[9],
-            Some((NodeIndex::new(8), NodeIndex::new(9))),
-        );
-
-        graph
-    }
-
-    /// Single node (edge case testing)
-    pub fn single_node() -> MockPartitionGraph {
-        let mut graph = MockPartitionGraph::new();
-
-        // Add stitch nodes
-        let left_stitch = graph.add_node(PartitionNode::Stitch(StitchSide::Left));
-        let right_stitch = graph.add_node(PartitionNode::Stitch(StitchSide::Right));
-
-        // Add single data node
-        let node = graph.add_node(PartitionNode::Data(NodeIndex::new(0)));
-
-        // Connect stitch nodes to the single data node
-        graph.add_edge(left_stitch, node, None);
-        graph.add_edge(node, right_stitch, None);
-
-        graph
-    }
-
-    /// Empty graph (edge case testing)
-    pub fn empty() -> MockPartitionGraph {
-        MockPartitionGraph::new()
-    }
-
     /// Create a corresponding domain graph for testing (simple chain)
     pub fn domain_simple_chain() -> MockDomainGraph {
         let mut graph = MockDomainGraph::new();
@@ -339,6 +234,80 @@ impl TestGraphs {
 
         graph
     }
+
+    /// A plain `0 -> 1 -> ... -> length - 1` chain, for subsetting-logic tests exercising the
+    /// simplest possible topology at a realistic size.
+    pub fn domain_long_chain(length: usize) -> MockDomainGraph {
+        let mut graph = MockDomainGraph::new();
+        let nodes: Vec<_> = (0..length).map(|_| graph.add_node(())).collect();
+        for pair in nodes.windows(2) {
+            graph.add_edge(pair[0], pair[1], ());
+        }
+        graph
+    }
+
+    /// `diamonds` diamonds chained end to end: `0 -> {1, 2} -> 3 -> {4, 5} -> 6 -> ...`. Each
+    /// diamond after the first reuses the previous one's join node as its own fork node, adding
+    /// exactly 3 new nodes (two branches plus a join) and 4 new edges.
+    pub fn domain_diamond_chain(diamonds: usize) -> MockDomainGraph {
+        let mut graph = MockDomainGraph::new();
+        let mut fork = graph.add_node(());
+        for _ in 0..diamonds {
+            let branch_a = graph.add_node(());
+            let branch_b = graph.add_node(());
+            let join = graph.add_node(());
+            graph.add_edge(fork, branch_a, ());
+            graph.add_edge(fork, branch_b, ());
+            graph.add_edge(branch_a, join, ());
+            graph.add_edge(branch_b, join, ());
+            fork = join;
+        }
+        graph
+    }
+
+    /// A "strut": `layers` layers of `width` nodes each, with every node in one layer connected
+    /// to every node in the next (a chain of dense many-to-many blocks - `width = 2` gives a
+    /// chain of 2-by-2 blocks, 4 edges per layer transition).
+    pub fn domain_strut(layers: usize, width: usize) -> MockDomainGraph {
+        let mut graph = MockDomainGraph::new();
+        let mut layer_nodes: Vec<Vec<NodeIndex>> = Vec::with_capacity(layers);
+        for _ in 0..layers {
+            layer_nodes.push((0..width).map(|_| graph.add_node(())).collect());
+        }
+        for pair in layer_nodes.windows(2) {
+            for &source in &pair[0] {
+                for &target in &pair[1] {
+                    graph.add_edge(source, target, ());
+                }
+            }
+        }
+        graph
+    }
+
+    /// A `rows` by `cols` grid where node `(row, col)` connects to its right neighbour
+    /// `(row, col + 1)` and its down neighbour `(row + 1, col)` when in bounds - a DAG (required
+    /// by the Sugiyama-based layout pipeline) that still gives every interior node the 4
+    /// connections (2 in, 2 out) of an ordinary undirected grid. Returns the graph plus a
+    /// `(row, col) -> NodeIndex` lookup so callers can pick a specific anchor (a corner, the
+    /// center, an edge midpoint) by grid position instead of raw node insertion order.
+    pub fn domain_grid(rows: usize, cols: usize) -> (MockDomainGraph, Vec<Vec<NodeIndex>>) {
+        let mut graph = MockDomainGraph::new();
+        let mut node_at: Vec<Vec<NodeIndex>> = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            node_at.push((0..cols).map(|_| graph.add_node(())).collect());
+        }
+        for row in 0..rows {
+            for col in 0..cols {
+                if col + 1 < cols {
+                    graph.add_edge(node_at[row][col], node_at[row][col + 1], ());
+                }
+                if row + 1 < rows {
+                    graph.add_edge(node_at[row][col], node_at[row + 1][col], ());
+                }
+            }
+        }
+        (graph, node_at)
+    }
 }
 
 /// Collection of standardized node sizers for testing
@@ -379,35 +348,22 @@ pub struct FixedNodeSizer {
     pub height: u64,
 }
 
-impl NodeSizer<MockPartitionGraph> for FixedNodeSizer {
-    fn get_node_size(&self, _node: &MockNodeId, _scale: VisualDetail) -> (u64, u64) {
+// Detail-aware sizing for pairing inside a MockVisual.
+impl<G: GraphBase> MockRenderer<G> for FixedNodeSizer {
+    fn get_node_size(&self, _node: &G::NodeId, _detail_level: VisualDetail) -> (u64, u64) {
         (self.width, self.height)
-    }
-
-    fn get_dummy_size(&self) -> (u64, u64) {
-        (1, 1)
     }
 }
 
-// Also implement for partition graph reference (for LayoutEngine)
-impl NodeSizer<&MockPartitionGraph> for FixedNodeSizer {
-    fn get_node_size(&self, _node: &MockNodeId, _scale: VisualDetail) -> (u64, u64) {
+// Full renderer for direct use as a controller's renderer (renders a plain glyph; used
+// by tests that measure layout rather than rendered output).
+impl<G: GraphBase> NodeRenderer<G> for FixedNodeSizer {
+    fn get_node_size(&self, _node: &G::NodeId) -> (u64, u64) {
         (self.width, self.height)
     }
 
-    fn get_dummy_size(&self) -> (u64, u64) {
-        (1, 1)
-    }
-}
-
-// Implement for domain graph (for GraphController)
-impl NodeSizer<MockDomainGraph> for FixedNodeSizer {
-    fn get_node_size(
-        &self,
-        _node: &petgraph::stable_graph::NodeIndex,
-        _scale: VisualDetail,
-    ) -> (u64, u64) {
-        (self.width, self.height)
+    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, _node_id: &G::NodeId) {
+        buffer.set_char(area.center(), NODE_GLYPH);
     }
 }
 
@@ -435,34 +391,8 @@ impl Default for ScaleAwareNodeSizer {
     }
 }
 
-impl NodeSizer<MockPartitionGraph> for ScaleAwareNodeSizer {
-    fn get_node_size(&self, _node: &MockNodeId, scale: VisualDetail) -> (u64, u64) {
-        match scale {
-            VisualDetail::Minimal => self.base_size,
-            VisualDetail::Full => self.full_multiplier,
-            VisualDetail::Truncated => self.truncated_size,
-        }
-    }
-}
-
-// Also implement for partition graph reference (for LayoutEngine)
-impl NodeSizer<&MockPartitionGraph> for ScaleAwareNodeSizer {
-    fn get_node_size(&self, _node: &MockNodeId, scale: VisualDetail) -> (u64, u64) {
-        match scale {
-            VisualDetail::Minimal => self.base_size,
-            VisualDetail::Full => self.full_multiplier,
-            VisualDetail::Truncated => self.truncated_size,
-        }
-    }
-}
-
-// Implement for domain graph (for GraphController)
-impl NodeSizer<MockDomainGraph> for ScaleAwareNodeSizer {
-    fn get_node_size(
-        &self,
-        _node: &petgraph::stable_graph::NodeIndex,
-        scale: VisualDetail,
-    ) -> (u64, u64) {
+impl<G: GraphBase> MockRenderer<G> for ScaleAwareNodeSizer {
+    fn get_node_size(&self, _node: &G::NodeId, scale: VisualDetail) -> (u64, u64) {
         match scale {
             VisualDetail::Minimal => self.base_size,
             VisualDetail::Full => self.full_multiplier,
@@ -495,17 +425,7 @@ impl Default for VariableNodeSizer {
     }
 }
 
-impl NodeSizer<MockPartitionGraph> for VariableNodeSizer {
-    fn get_node_size(&self, node: &MockNodeId, _scale: VisualDetail) -> (u64, u64) {
-        self.size_map
-            .get(&(node.index() as u32))
-            .copied()
-            .unwrap_or((5, 2))
-    }
-}
-
-// Also implement for partition graph reference (for LayoutEngine)
-impl NodeSizer<&MockPartitionGraph> for VariableNodeSizer {
+impl MockRenderer<MockDomainGraph> for VariableNodeSizer {
     fn get_node_size(&self, node: &MockNodeId, _scale: VisualDetail) -> (u64, u64) {
         self.size_map
             .get(&(node.index() as u32))
@@ -558,9 +478,9 @@ impl Default for DebugNodeRenderer {
     }
 }
 
-impl NodeRenderer<MockDomainGraph> for DebugNodeRenderer {
+impl MockRenderer<MockDomainGraph> for DebugNodeRenderer {
     fn render_node(
-        &mut self,
+        &self,
         buffer: &mut WorldBuffer,
         area: WorldRect,
         node_id: &NodeIndex<u32>,
@@ -608,13 +528,13 @@ impl MinimalNodeRenderer {
 }
 
 // Generic implementation for all graph types
-impl<G> NodeRenderer<G> for MinimalNodeRenderer
+impl<G> MockRenderer<G> for MinimalNodeRenderer
 where
     G: petgraph::visit::GraphBase,
     G::NodeId: std::fmt::Debug,
 {
     fn render_node(
-        &mut self,
+        &self,
         buffer: &mut WorldBuffer,
         area: WorldRect,
         _node_id: &G::NodeId,
@@ -656,9 +576,9 @@ impl Default for MockGenomicRenderer {
     }
 }
 
-impl NodeRenderer<MockDomainGraph> for MockGenomicRenderer {
+impl MockRenderer<MockDomainGraph> for MockGenomicRenderer {
     fn render_node(
-        &mut self,
+        &self,
         buffer: &mut WorldBuffer,
         area: WorldRect,
         node_id: &NodeIndex<u32>,
@@ -703,24 +623,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_graph_creation() {
-        let simple = TestGraphs::simple_chain();
-        assert_eq!(simple.node_count(), 5); // 3 data nodes + 2 stitch nodes
-        assert_eq!(simple.edge_count(), 4); // 2 data edges + 2 stitch edges
-
-        let diamond = TestGraphs::diamond();
-        assert_eq!(diamond.node_count(), 6); // 4 data nodes + 2 stitch nodes
-        assert_eq!(diamond.edge_count(), 6); // 4 data edges + 2 stitch edges
-    }
-
-    #[test]
     fn test_node_sizers() {
         let fixed = TestNodeSizers::fixed_1x1();
         let node_id: NodeIndex<u32> = NodeIndex::new(0);
 
-        // Test with MockPartitionGraph type annotation
         let size_base: (u64, u64) =
-            <FixedNodeSizer as NodeSizer<MockPartitionGraph>>::get_node_size(
+            <FixedNodeSizer as MockRenderer<MockDomainGraph>>::get_node_size(
                 &fixed,
                 &node_id,
                 VisualDetail::Minimal,
@@ -729,13 +637,13 @@ mod tests {
 
         let scale_aware = TestNodeSizers::scale_aware();
         let size_base_aware: (u64, u64) =
-            <ScaleAwareNodeSizer as NodeSizer<MockPartitionGraph>>::get_node_size(
+            <ScaleAwareNodeSizer as MockRenderer<MockDomainGraph>>::get_node_size(
                 &scale_aware,
                 &node_id,
                 VisualDetail::Minimal,
             );
         let size_full_aware: (u64, u64) =
-            <ScaleAwareNodeSizer as NodeSizer<MockPartitionGraph>>::get_node_size(
+            <ScaleAwareNodeSizer as MockRenderer<MockDomainGraph>>::get_node_size(
                 &scale_aware,
                 &node_id,
                 VisualDetail::Full,
