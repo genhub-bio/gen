@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    time::Instant,
 };
 
 use crossterm::event::{self, Event, KeyCode};
@@ -10,7 +9,7 @@ use gen_diff::{
     operations::{BlockGroupChangeKind, BlockGroupDiff, OperationDiff},
 };
 use gen_models::db::GraphConnection;
-use gen_tui::theme::current_theme;
+use gen_tui::{graph_view::GraphView, theme::current_theme};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -22,7 +21,7 @@ use crate::views::{
         DiffGraphComponent, apply_diff_highlights, block_group_label, build_diff_graph_component,
         change_label_for_block_group,
     },
-    gen_graph_widget::{create_gen_graph_controller_without_dimming, create_gen_graph_widget},
+    gen_graph_widget::create_gen_graph_engine,
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
     tui_runtime::TuiSession,
 };
@@ -69,11 +68,7 @@ enum DiffPanel {
     Graph,
 }
 
-pub fn view_diff(
-    conn: &GraphConnection,
-    workspace: &gen_core::Workspace,
-    diff: &OperationDiff,
-) -> Result<(), io::Error> {
+pub fn view_diff(conn: &GraphConnection, diff: &OperationDiff) -> Result<(), io::Error> {
     let samples = collect_samples(&diff.diff_graph);
 
     if samples.is_empty() {
@@ -96,11 +91,9 @@ pub fn view_diff(
     panel_focus.include_panel(DiffPanel::Graph);
     let panel_styles = PanelStyles::default();
 
-    let mut graph_controller =
-        create_gen_graph_controller_without_dimming(current_component.render.graph.clone());
-    apply_diff_highlights(&mut graph_controller, &current_component.render);
-
-    let mut last_frame_time = Instant::now();
+    let (mut graph_engine, mut graph_zoom_levels, mut graph_view_state) =
+        create_gen_graph_engine(current_component.render.graph.clone(), conn);
+    apply_diff_highlights(&mut graph_view_state, &current_component.render);
 
     loop {
         entries = build_explorer_entries(&samples, &expanded_samples);
@@ -109,14 +102,10 @@ pub fn view_diff(
             && selected_component.render.title != current_component.render.title
         {
             current_component = selected_component;
-            graph_controller =
-                create_gen_graph_controller_without_dimming(current_component.render.graph.clone());
-            apply_diff_highlights(&mut graph_controller, &current_component.render);
+            (graph_engine, graph_zoom_levels, graph_view_state) =
+                create_gen_graph_engine(current_component.render.graph.clone(), conn);
+            apply_diff_highlights(&mut graph_view_state, &current_component.render);
         }
-
-        let now = Instant::now();
-        let frame_delta = now.duration_since(last_frame_time);
-        last_frame_time = now;
 
         terminal.draw(|f| {
             let outer = Layout::default()
@@ -159,18 +148,12 @@ pub fn view_diff(
                 panel_block(graph_title, &panel_focus, DiffPanel::Graph, panel_styles);
             let inner_canvas = graph_block.inner(main[1]);
 
-            graph_controller.viewport_state.focus();
-            graph_controller.viewport_state.viewport_bounds = inner_canvas;
-            graph_controller.update_animations(frame_delta);
-
             f.render_widget(graph_block, main[1]);
 
             let canvas_style = Style::default().bg(current_theme()[0x00]);
-            let widget = create_gen_graph_widget(conn, workspace)
-                .detail_level(graph_controller.get_detail_level())
-                .style(canvas_style)
-                .cursor();
-            f.render_stateful_widget(widget, inner_canvas, &mut graph_controller);
+            let active_renderer = &graph_zoom_levels[graph_view_state.zoom_index].1;
+            let view = GraphView::new(&mut graph_engine, active_renderer).style(canvas_style);
+            f.render_stateful_widget(view, inner_canvas, &mut graph_view_state);
 
             let panel_messages = if panel_focus.is_navigation() {
                 "*tab* toggle focus | *enter* activate | *q* quit"
@@ -240,60 +223,8 @@ pub fn view_diff(
                     _ => {}
                 }
             } else {
-                let _ = graph_controller.handle_key_event(key);
+                let _ = graph_view_state.handle_key_event(key);
             }
-        }
-    }
-
-    Ok(())
-}
-
-/// Display one annotated graph diff without the operation/sample explorer.
-pub fn view_diff_graph(
-    conn: &GraphConnection,
-    workspace: &gen_core::Workspace,
-    diff_graph: &DiffGenGraph,
-    title: String,
-) -> Result<(), io::Error> {
-    let component = build_diff_graph_component(diff_graph, title);
-    let mut session = TuiSession::enter()?;
-    let terminal = session.terminal_mut();
-    let mut graph_controller = create_gen_graph_controller_without_dimming(component.graph.clone());
-    apply_diff_highlights(&mut graph_controller, &component);
-    let mut last_frame_time = Instant::now();
-
-    loop {
-        let now = Instant::now();
-        let frame_delta = now.duration_since(last_frame_time);
-        last_frame_time = now;
-
-        terminal.draw(|frame| {
-            let areas = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
-                .split(frame.area());
-            let graph_block = ratatui::widgets::Block::bordered().title(component.title.clone());
-            let canvas_area = graph_block.inner(areas[0]);
-            graph_controller.viewport_state.focus();
-            graph_controller.viewport_state.viewport_bounds = canvas_area;
-            graph_controller.update_animations(frame_delta);
-
-            frame.render_widget(graph_block, areas[0]);
-            let widget = create_gen_graph_widget(conn, workspace)
-                .detail_level(graph_controller.get_detail_level())
-                .style(ratatui::style::Style::default().bg(current_theme()[0x00]))
-                .cursor();
-            frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
-            render_status_bar(frame, areas[1], "*←→↑↓* pan | *+/-* zoom | *q/esc* quit");
-        })?;
-
-        if event::poll(std::time::Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-                break;
-            }
-            let _ = graph_controller.handle_key_event(key);
         }
     }
 
