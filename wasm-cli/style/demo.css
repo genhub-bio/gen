@@ -17,25 +17,22 @@
 
 /*
  * Catppuccin base00/base01/base02/base05 duplicated from src/theme.ts so the page has the
- * right background painted before JS runs (avoiding a black/white flash). `selectThemeMode()`
- * picks between these with the same `prefers-color-scheme` query, so the two never disagree.
+ * right background painted before JS runs (avoiding a black/white flash). The inline script at
+ * the top of `assets/index.html`'s `<head>` sets `data-theme` on `<html>` before this stylesheet
+ * loads, so it's already in place by the time these rules apply.
  */
 :root {
   --gen-base00: #1e1e2e;
   --gen-base01: #181825;
   --gen-base02: #313244;
   --gen-base05: #cdd6f4;
-  --gen-base0d: #89b4fa;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --gen-base00: #eff1f5;
-    --gen-base01: #e6e9ef;
-    --gen-base02: #ccd0da;
-    --gen-base05: #4c4f69;
-    --gen-base0d: #1e66f5;
-  }
+:root[data-theme='light'] {
+  --gen-base00: #eff1f5;
+  --gen-base01: #e6e9ef;
+  --gen-base02: #ccd0da;
+  --gen-base05: #4c4f69;
 }
 
 /*
@@ -56,58 +53,6 @@ body {
   flex-direction: column;
   background-color: var(--gen-base00);
   color: var(--gen-base05);
-}
-
-#intro-bar {
-  flex: none;
-  padding: 0.6em 0.8em;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  background-color: var(--gen-base01);
-  color: var(--gen-base05);
-}
-
-.theme-toggle {
-  flex-shrink: 0;
-  display: inline-flex;
-  cursor: pointer;
-}
-
-.theme-toggle input {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-.theme-toggle-track {
-  position: relative;
-  width: 2.4em;
-  height: 1.3em;
-  border-radius: 999px;
-  background-color: var(--gen-base02);
-  transition: background-color 0.15s ease-in-out;
-}
-
-.theme-toggle-thumb {
-  position: absolute;
-  top: 0.15em;
-  left: 0.15em;
-  width: 1em;
-  height: 1em;
-  border-radius: 50%;
-  background-color: var(--gen-base0d);
-  transition: transform 0.15s ease-in-out;
-}
-
-.theme-toggle input:checked + .theme-toggle-track .theme-toggle-thumb {
-  transform: translateX(1.1em);
-}
-
-.theme-toggle input:focus-visible + .theme-toggle-track {
-  outline: 2px solid var(--gen-base0d);
-  outline-offset: 2px;
 }
 
 #upload-bar {
