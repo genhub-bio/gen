@@ -1,17 +1,17 @@
 use std::{
-    collections::{HashMap, HashSet},
     error::Error,
     time::{Duration, Instant},
 };
 
-use crossterm::event::{
-    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
-use gen_core::{HashId, PATH_START_NODE_ID, Workspace};
+use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use gen_core::PATH_START_NODE_ID;
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, traits::Query};
 use gen_tui::{
-    LineStyle, graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle,
+    LineStyle,
+    graph_view::{GraphView, GraphViewState},
+    layout_engine::LayoutEngine,
+    plotter::PathStyle,
     theme::current_theme,
 };
 use log::{info, warn};
@@ -19,166 +19,19 @@ use ratatui::{
     layout::{Constraint, Direction, HorizontalAlignment, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Block, Padding, Paragraph, Wrap},
 };
+use rusqlite::params;
 
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
     views::{
-        annotation_files::AnnotationFileEntry,
-        annotation_groups::load_annotation_group_entries,
-        annotations::{
-            AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
-            load_annotations_for_group,
-        },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
-        gen_graph_widget::{
-            GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget,
-            draw_annotation_labels, reapply_overlays,
-        },
-        graph_overlay::{
-            AnnotationColorCache, GraphOverlay, OverlaySource, file_track_key, group_track_key,
-            has_path_overlay, project_path_overlay_nodes, remove_path_overlay,
-            remove_track_overlays, replace_track_overlays, set_path_overlay,
-        },
+        gen_graph_widget::{self, create_gen_graph_engine},
         panels::{render_status_bar, render_with_optional_clear},
-        region_search::{
-            RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
-            resolve_region_search_matches,
-        },
         tui_runtime::TuiSession,
     },
 };
-
-#[derive(Debug, Default)]
-struct RegionSearchState {
-    query: String,
-    matches: Vec<RegionSearchMatch>,
-    selected_match: Option<usize>,
-    focused: bool,
-}
-
-impl RegionSearchState {
-    fn clear_matches(&mut self) {
-        self.matches.clear();
-        self.selected_match = None;
-    }
-
-    fn set_matches(&mut self, matches: Vec<RegionSearchMatch>) {
-        self.matches = matches;
-        self.selected_match = self.selected_match.and_then(|selected_match| {
-            (selected_match < self.matches.len()).then_some(selected_match)
-        });
-    }
-
-    fn move_selection(&mut self, delta: isize) {
-        if self.matches.is_empty() {
-            self.selected_match = None;
-            return;
-        }
-        let count = self.matches.len() as isize;
-        self.selected_match = Some(match self.selected_match {
-            Some(selected_match) => ((selected_match as isize + delta).rem_euclid(count)) as usize,
-            None if delta < 0 => self.matches.len() - 1,
-            None => 0,
-        });
-    }
-
-    fn handle_key(&mut self, key: KeyEvent) -> RegionSearchInputAction {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-            self.query.clear();
-            self.clear_matches();
-            return RegionSearchInputAction::Cleared;
-        }
-        match key.code {
-            KeyCode::Char(character) => {
-                self.query.push(character);
-                self.selected_match = None;
-                RegionSearchInputAction::Changed
-            }
-            KeyCode::Backspace => {
-                if self.query.pop().is_some() {
-                    self.selected_match = None;
-                    if self.query.is_empty() {
-                        self.clear_matches();
-                        RegionSearchInputAction::Cleared
-                    } else {
-                        RegionSearchInputAction::Changed
-                    }
-                } else {
-                    RegionSearchInputAction::Ignored
-                }
-            }
-            KeyCode::Up => {
-                self.move_selection(-1);
-                RegionSearchInputAction::Ignored
-            }
-            KeyCode::Down => {
-                self.move_selection(1);
-                RegionSearchInputAction::Ignored
-            }
-            KeyCode::Enter => self
-                .selected_match
-                .and_then(|selected_match| self.matches.get(selected_match))
-                .cloned()
-                .map_or(RegionSearchInputAction::Ignored, |region_match| {
-                    RegionSearchInputAction::Selected(Box::new(region_match))
-                }),
-            KeyCode::Esc => RegionSearchInputAction::Closed,
-            _ => RegionSearchInputAction::Ignored,
-        }
-    }
-}
-
-fn is_region_search_command(key_code: KeyCode) -> bool {
-    key_code == KeyCode::Char('g')
-}
-
-fn focus_region_search(state: &mut RegionSearchState) {
-    state.focused = true;
-    state.clear_matches();
-}
-
-#[derive(Clone, Debug)]
-enum RegionSearchInputAction {
-    Changed,
-    Cleared,
-    Selected(Box<RegionSearchMatch>),
-    Closed,
-    Ignored,
-}
-
-fn refresh_region_search(
-    state: &mut RegionSearchState,
-    search_error: &mut Option<String>,
-    request: Option<&RegionSearchRequest<'_>>,
-) {
-    state.selected_match = None;
-    *search_error = None;
-    if state.query.trim().is_empty() {
-        state.clear_matches();
-        return;
-    }
-    let Some(request) = request else {
-        state.clear_matches();
-        *search_error = Some("select a block group first".to_string());
-        return;
-    };
-    match resolve_region_search_matches(request, state.query.trim()) {
-        Ok(matches) => state.set_matches(matches),
-        Err(error) => {
-            state.clear_matches();
-            *search_error = Some(error);
-        }
-    }
-}
-
-fn search_match_window_start(selected_match: Option<usize>, match_count: usize) -> usize {
-    selected_match
-        .unwrap_or(0)
-        .saturating_sub(4)
-        .min(match_count.saturating_sub(5))
-}
 
 // Frequency by which we check for external updates to the db
 const REFRESH_INTERVAL: u64 = 3; // seconds
@@ -206,257 +59,133 @@ fn get_block_group_path_nodes(
     block_group_id: &gen_core::HashId,
     graph: &GenGraph,
 ) -> Result<Vec<gen_graph::GraphNode>, String> {
+    use gen_models::path::Path;
+
     // Query the database for the most recent path for this block group
-    let path = BlockGroup::get_current_path(conn, block_group_id, None)
-        .map_err(|error| format!("Failed to query path: {error}"))?;
+    let path = Path::get(
+        conn,
+        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
+        rusqlite::params![block_group_id],
+    )
+    .map_err(|e| format!("Failed to query path: {}", e))?;
 
-    let path_blocks = path.coordinate_blocks(conn, None);
-
-    let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
-    if path_nodes.is_empty() {
-        return Err("Path nodes not found in current graph state".to_string());
-    }
-
-    Ok(path_nodes)
+    crate::views::helpers::project_path_nodes(conn, &path, graph)
 }
 
-/// Toggle the path overlay for a block group.
-///
-/// The path lives in `overlays` alongside the annotation overlays and is repainted each
-/// frame by the render loop, so this only adds or removes it. Returns whether the path
-/// overlay is now enabled.
+/// Toggle path highlighting for a block group
 fn toggle_path_highlight(
     conn: &GraphConnection,
-    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+    engine: &LayoutEngine<GenGraph>,
+    view_state: &mut GraphViewState<GraphNode>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
-    overlays: &mut Vec<GraphOverlay>,
 ) -> Result<bool, String> {
-    if has_path_overlay(overlays) {
-        remove_path_overlay(overlays);
+    let style = PathStyle::new(color)
+        .with_line_style(LineStyle::Bold)
+        .with_merge_glyphs(true);
+    // Check if highlighting is already active for this style
+    if view_state.has_highlight(&style) {
+        view_state.clear_highlight(&style);
         Ok(false)
     } else {
-        let style = PathStyle::new(color)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        let path_nodes = get_block_group_path_nodes(conn, block_group_id, controller.graph())?;
-        set_path_overlay(overlays, style, path_nodes);
+        // Get the path nodes for this block group
+        let path_nodes = get_block_group_path_nodes(conn, block_group_id, engine.graph())?;
+
+        // Set the path highlight using GraphNodes directly
+        view_state.set_path_highlight(style, path_nodes);
         Ok(true)
     }
 }
 
-/// Node IDs present in the current viewport (excluding terminal start/end nodes).
-pub(crate) fn extract_viewport_node_ids(
-    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
-) -> HashSet<HashId> {
-    use gen_core::{is_end_node, is_start_node};
-    use petgraph::visit::NodeIndexable;
-    let graph = controller.graph();
-    controller
-        .get_viewport_graph()
-        .data_nodes()
-        .map(|(_, idx, _)| <&GenGraph as NodeIndexable>::from_index(&graph, idx.index()).node_id)
-        .filter(|&id| !is_start_node(id) && !is_end_node(id))
-        .collect()
-}
-
-/// Compute the coordinate window (min sequence start, max sequence end) of visible blocks
-/// in the current viewport, using the graph controller's viewport graph.
-pub(crate) fn current_view_coordinate_window(
-    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
-) -> Option<(i64, i64)> {
-    use gen_core::{is_end_node, is_start_node};
-    use petgraph::visit::NodeIndexable;
-
-    let viewport_graph = controller.get_viewport_graph();
-    let graph = controller.graph();
-    let mut start = i64::MAX;
-    let mut end = i64::MIN;
-
-    for (_world_pos, domain_idx, _layout_node) in viewport_graph.data_nodes() {
-        let block = <&GenGraph as NodeIndexable>::from_index(&graph, domain_idx.index());
-        if is_start_node(block.node_id) || is_end_node(block.node_id) {
-            continue;
-        }
-        start = start.min(block.sequence_start);
-        end = end.max(block.sequence_end);
-    }
-
-    (start <= end).then_some((start, end))
-}
-
-pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
-    let span = (window.1 - window.0).max(1);
-    (window.0.saturating_sub(span), window.1.saturating_add(span))
-}
-
-struct AnnotationViewportRequest<'a> {
-    conn: &'a GraphConnection,
-    workspace: &'a Workspace,
-    history_ref: Option<&'a str>,
-    block_group: &'a BlockGroup,
-    node_ids: &'a HashSet<HashId>,
-}
-
-fn load_annotation_groups_for_viewport(
-    request: AnnotationViewportRequest<'_>,
-    explorer_state: &mut CollectionExplorerState,
-    overlays: &mut Vec<GraphOverlay>,
-    messages: &mut crate::views::messages::MessageBuffer,
+/// Handle a click on a wormhole (`NodeRole::Wormhole`) stub: `boundary` is the node inside the
+/// current window the stub is attached to, `target` is the off-screen domain node it leads to
+/// (see `GraphViewState::wormhole_hit`).
+///
+/// If `target` belongs to a known world (`LayoutEngine::wormhole_world_for`), reactivate that
+/// exact world and frame the entry node. An evicted world is rebuilt from the same `WorldKey`.
+///
+/// Otherwise this is new territory: build fresh, anchored on `target`, with `boundary`
+/// force-included so it is guaranteed visible as the new world's return boundary.
+///
+/// Either way, direction (which edge of the new window to enter from) is decided by whether
+/// `target` is a successor or predecessor of `boundary` (`LayoutEngine::is_successor`): exiting
+/// toward a successor enters the new window from the left, exiting toward a predecessor enters
+/// from the right - the same direction you'd naturally keep moving in.
+fn teleport_through_wormhole(
+    graph_engine: &mut LayoutEngine<GenGraph>,
+    graph_view_state: &mut GraphViewState<GraphNode>,
+    boundary: GraphNode,
+    target: GraphNode,
 ) {
-    for entry in
-        load_annotation_group_entries(request.conn, request.block_group, request.history_ref)
-    {
-        let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
-            conn: request.conn,
-            workspace: request.workspace,
-            history_ref: request.history_ref,
-            current_block_group: request.block_group,
-            entry: &entry,
-            node_ids: request.node_ids,
-        }) {
-            Ok(spans) => spans,
-            Err(err) => {
-                messages.push_warn(format!(
-                    "Failed to load annotations for group {}: {err}",
-                    entry.id
-                ));
-                continue;
-            }
-        };
-        if spans.is_empty() {
-            continue;
-        }
-        explorer_state
-            .active_annotation_groups
-            .insert(entry.id.clone());
-        replace_track_overlays(overlays, &group_track_key(&entry.id), spans);
-    }
-}
-
-/// Shared inputs for loading an annotation file's track, common to activating one file
-/// (on checkbox toggle) and auto-activating every available file on load.
-struct AnnotationFileActivationContext<'a> {
-    conn: &'a GraphConnection,
-    history_ref: Option<&'a str>,
-    workspace: &'a Workspace,
-    collection_name: &'a str,
-    sample_name: &'a str,
-    block_group_name: Option<&'a str>,
-    block_graph: &'a GenGraph,
-    query_window: Option<(i64, i64)>,
-}
-
-/// Load `entry`'s track and record its overlays, index availability, and loaded window.
-/// Shared by the checkbox toggle-on handlers and by automatic activation on load.
-fn activate_annotation_file(
-    context: &AnnotationFileActivationContext,
-    entry: &AnnotationFileEntry,
-    overlays: &mut Vec<GraphOverlay>,
-    annotation_file_index_available: &mut HashMap<HashId, bool>,
-    annotation_file_loaded_windows: &mut HashMap<HashId, (i64, i64)>,
-) -> Result<(), Box<dyn Error>> {
-    let node_filter: HashSet<HashId> = context
-        .block_graph
-        .nodes()
-        .map(|node| node.node_id)
-        .collect();
-    let request = AnnotationFileTrackRequest {
-        conn: context.conn,
-        history_ref: context.history_ref,
-        workspace: context.workspace,
-        collection_name: context.collection_name,
-        sample_name: context.sample_name,
-        block_group_name: context.block_group_name,
-        query_window: context.query_window,
-        node_filter: &node_filter,
-        entry,
-    };
-    let load = load_annotation_file_track(&request)?;
-    let id = entry.file_addition.id;
-    replace_track_overlays(overlays, &file_track_key(&id), load.track.annotations);
-    annotation_file_index_available.insert(id, load.index_available);
-    if let Some(window) = load.loaded_window {
-        annotation_file_loaded_windows.insert(id, window);
+    let coarse_mode = graph_view_state.cursor.coarse_mode;
+    // Direction is always about what we're actually leaving (the clicked stub's own boundary
+    // node) versus what we're heading toward (its target) - independent of which node ends up
+    // being the framed/placed one below, so this must not be recomputed against that instead.
+    // `boundary` and `target` are always directly adjacent (that's what makes them an
+    // external-edge pair), so whether we're heading "ahead" is just whether `target` is a
+    // successor of `boundary` - no whole-graph rank needed.
+    let exits_toward_successor = graph_engine.is_successor(boundary, target);
+    let entry_fraction = if exits_toward_successor {
+        (0.0, 0.5)
     } else {
-        annotation_file_loaded_windows.remove(&id);
+        (1.0, 0.5)
+    };
+    graph_engine.remember_wormhole_choice(boundary, target, exits_toward_successor);
+    // Also record the reverse: `target`'s own door facing `boundary` should prefer `boundary`
+    // right back, so that if `target` is ever (re)built as its own window and `boundary` falls
+    // outside its budget, leaving immediately back through "the same door" still lands where we
+    // actually came from rather than whatever's lowest-index on that side. Doesn't matter for
+    // *this* render (a fresh build force-includes `boundary` as a real node, and a cache hit
+    // reuses the window exactly as built) - only for a later rebuild of either window.
+    graph_engine.remember_wormhole_choice(target, boundary, !exits_toward_successor);
+
+    match graph_engine.wormhole_world_for(target) {
+        Some(world_key) => {
+            if graph_engine.activate_known_world(world_key).is_err() {
+                return;
+            }
+            let world_boundary_node = target;
+            graph_view_state.go_to_node_framed(
+                world_key.anchor,
+                world_boundary_node,
+                entry_fraction,
+            );
+        }
+        None => {
+            let node_budget =
+                graph_engine.neighborhood_node_budget(graph_view_state.last_area_width() as usize);
+            if graph_engine
+                .activate_world_at(target, node_budget, Some(boundary))
+                .is_err()
+            {
+                return;
+            }
+            graph_view_state.go_to_node(target, entry_fraction);
+        }
+    };
+
+    if exits_toward_successor {
+        graph_view_state.queue_snap_left();
+    } else {
+        graph_view_state.queue_snap_right();
     }
-    Ok(())
+    graph_view_state.cursor.coarse_mode = coarse_mode;
+    graph_view_state.mark_wormhole_entry(target);
 }
 
-/// Activate every annotation file that isn't already active, skipping any whose
-/// underlying file isn't available (deleted, moved, or otherwise unresolvable) so a
-/// missing file doesn't block the rest from showing. Mirrors
-/// `load_annotation_groups_for_viewport`'s auto-activation of DB-derived groups.
-fn auto_activate_annotation_files_for_viewport(
-    context: &AnnotationFileActivationContext,
-    entries: &[AnnotationFileEntry],
-    explorer_state: &mut CollectionExplorerState,
-    overlays: &mut Vec<GraphOverlay>,
-    annotation_file_index_available: &mut HashMap<HashId, bool>,
-    annotation_file_loaded_windows: &mut HashMap<HashId, (i64, i64)>,
-) {
-    for entry in entries {
-        let id = entry.file_addition.id;
-        if explorer_state.is_annotation_file_active(&id) {
-            continue;
-        }
-        if activate_annotation_file(
-            context,
-            entry,
-            overlays,
-            annotation_file_index_available,
-            annotation_file_loaded_windows,
-        )
-        .is_ok()
-        {
-            explorer_state.active_annotation_files.insert(id);
-        }
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "CLI entrypoint needs to forward explicit view selection and history state"
-)]
 pub fn view_block_group(
     conn: &GraphConnection,
     config_conn: &gen_models::db::ConfigConnection,
-    workspace: &gen_core::config::Workspace,
+    _workspace: &gen_core::config::Workspace,
     name: Option<String>,
     sample_name: Option<String>,
     collection_name: &str,
     position: Option<String>, // Node ID and offset
     history_ref: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut current_collection_name = collection_name.to_string();
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Loading block group");
-
-    // Get the node object corresponding to the position given by the user
-    let origin = if let Some(position_str) = position {
-        let parts = position_str.split(":").collect::<Vec<&str>>();
-        if parts.len() != 2 {
-            panic!("Invalid position: {}", position_str);
-        }
-        let node_id = HashId::try_from(parts[0])?;
-        let offset = parts[1].parse::<i64>().unwrap();
-        let node = Node::select(conn)
-            .id(node_id)
-            .load()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("node {node_id} was not found"),
-                )
-            })?;
-        Some((node, offset))
-    } else {
-        None
-    };
 
     let mut block_graph;
     let mut block_group_id: Option<gen_core::HashId> = None;
@@ -467,12 +196,10 @@ pub fn view_block_group(
     }
 
     if let (Some(name), Some(sample_name)) = (name, sample_name.as_ref()) {
-        let block_group = BlockGroup::get_by_name(
+        let block_group = BlockGroup::get(
             conn,
-            &current_collection_name,
-            sample_name,
-            &name,
-            history_ref,
+            "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
+            params![collection_name, sample_name, name],
         );
 
         if block_group.is_err() {
@@ -480,13 +207,13 @@ pub fn view_block_group(
                 "No block group found with name {:?} and sample {:?} in collection {} ",
                 name,
                 sample_name.clone(),
-                current_collection_name
+                collection_name
             );
         }
 
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, workspace, &block_group.id, history_ref)?;
+        block_graph = BlockGroup::get_graph(conn, &block_group.id, history_ref)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -496,14 +223,6 @@ pub fn view_block_group(
     bar.finish();
 
     let mut messages = crate::views::messages::MessageBuffer::new(MESSAGE_BUFFER_LIMIT);
-    // Every annotation currently painted on the canvas, from both loaded files and
-    // loaded groups, keyed by track (see `graph_overlay::file_track_key`/`group_track_key`).
-    let mut overlays: Vec<GraphOverlay> = Vec::new();
-    let mut annotation_colors = AnnotationColorCache::new();
-    let mut annotation_file_index_available: std::collections::HashMap<HashId, bool> =
-        std::collections::HashMap::new();
-    let mut annotation_file_loaded_windows: std::collections::HashMap<HashId, (i64, i64)> =
-        std::collections::HashMap::new();
     let mut current_block_group =
         block_group_id.map(
             |bg_id| match BlockGroup::get_by_id(conn, &bg_id, history_ref) {
@@ -521,7 +240,7 @@ pub fn view_block_group(
         config_conn,
         sample_name.as_deref(),
         current_block_group.as_ref(),
-        &current_collection_name,
+        collection_name,
         history_ref,
     );
 
@@ -529,17 +248,15 @@ pub fn view_block_group(
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
-    let mut graph_controller = create_gen_graph_controller(block_graph.clone());
+    let (mut graph_engine, mut graph_zoom_levels, mut graph_view_state) =
+        create_gen_graph_engine(block_graph.clone(), conn);
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
-    if origin.is_some() {
+    if position.is_some() {
         warn!("Origin positioning not yet supported in GenGraphWidget");
     }
 
     bar.finish();
-
-    let mut annotation_groups_loaded = false;
-    let mut annotation_files_loaded = false;
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -547,9 +264,6 @@ pub fn view_block_group(
     let terminal = session.terminal_mut();
 
     // Basic event loop
-    let tick_rate = Duration::from_millis(16); // ~60fps
-    let mut last_tick = Instant::now();
-    let mut last_frame_time = Instant::now();
     let mut show_panel = false;
     let mut panel_mode = PanelMode::Details;
     let show_sidebar = true;
@@ -559,10 +273,6 @@ pub fn view_block_group(
     let mut mouse_last_pos: Option<(u16, u16)> = None;
     let mut mouse_is_dragging = false;
     let mut last_sidebar_area = Rect::default();
-    let mut last_search_area = Rect::default();
-    let mut last_search_dropdown_area = Rect::default();
-    let mut search_state = RegionSearchState::default();
-    let mut search_error: Option<String> = None;
 
     // Track the last selected block group to detect changes
     let mut last_selected_block_group_id = block_group_id;
@@ -575,81 +285,8 @@ pub fn view_block_group(
         while crossterm::event::poll(Duration::from_millis(0))? {
             match event::read()? {
                 event::Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if search_state.focused && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
-                    {
-                        match search_state.handle_key(key) {
-                            RegionSearchInputAction::Changed => {
-                                let request = current_block_group.as_ref().map(|block_group| {
-                                    RegionSearchRequest {
-                                        conn,
-                                        collection_name: &current_collection_name,
-                                        sample_name: block_group.sample_name.as_str(),
-                                    }
-                                });
-                                refresh_region_search(
-                                    &mut search_state,
-                                    &mut search_error,
-                                    request.as_ref(),
-                                );
-                            }
-                            RegionSearchInputAction::Cleared => {
-                                search_error = None;
-                                remove_search_overlay(&mut overlays);
-                            }
-                            RegionSearchInputAction::Selected(search_match) => {
-                                match activate_search_match(
-                                    &mut graph_controller,
-                                    &mut overlays,
-                                    search_match.as_ref(),
-                                    conn,
-                                    workspace,
-                                ) {
-                                    Ok(()) => {
-                                        search_state.focused = false;
-                                        search_state.clear_matches();
-                                        search_error = None;
-                                        focus_zone = FocusZone::Canvas;
-                                    }
-                                    Err(error) => search_error = Some(error),
-                                }
-                            }
-                            RegionSearchInputAction::Closed => {
-                                search_state.focused = false;
-                                search_state.clear_matches();
-                                search_error = None;
-                            }
-                            RegionSearchInputAction::Ignored => {}
-                        }
-                        continue;
-                    }
-
-                    if search_state.focused {
-                        search_state.focused = false;
-                        search_state.clear_matches();
-                        search_error = None;
-                    }
-
-                    if is_region_search_command(key.code) {
-                        if !search_state.focused {
-                            focus_region_search(&mut search_state);
-                            let request = current_block_group.as_ref().map(|block_group| {
-                                RegionSearchRequest {
-                                    conn,
-                                    collection_name: &current_collection_name,
-                                    sample_name: block_group.sample_name.as_str(),
-                                }
-                            });
-                            refresh_region_search(
-                                &mut search_state,
-                                &mut search_error,
-                                request.as_ref(),
-                            );
-                        }
-                        continue;
-                    }
-
                     // Any keyboard navigation shows the cursor.
-                    if !graph_controller.is_cursor_visible()
+                    if !graph_view_state.is_cursor_visible()
                         && matches!(
                             key.code,
                             KeyCode::Left
@@ -659,7 +296,7 @@ pub fn view_block_group(
                                 | KeyCode::Char('h' | 'j' | 'k' | 'l')
                         )
                     {
-                        graph_controller.show_cursor();
+                        graph_view_state.show_cursor();
                     }
 
                     // Global handlers
@@ -714,8 +351,8 @@ pub fn view_block_group(
                     match focus_zone {
                         FocusZone::Canvas => match key.code {
                             KeyCode::Enter => {
-                                if graph_controller.cursor.is_coarse_mode() {
-                                    graph_controller.cursor.set_coarse_mode(false);
+                                if graph_view_state.cursor.coarse_mode {
+                                    graph_view_state.cursor.coarse_mode = false;
                                 } else {
                                     // TODO: Node selection not yet supported, always show panel for now
                                     show_panel = true;
@@ -725,10 +362,10 @@ pub fn view_block_group(
                                 }
                             }
                             KeyCode::Esc => {
-                                if !graph_controller.is_cursor_visible() {
-                                    graph_controller.show_cursor();
-                                } else if !graph_controller.cursor.is_coarse_mode() {
-                                    graph_controller.cursor.set_coarse_mode(true);
+                                if !graph_view_state.is_cursor_visible() {
+                                    graph_view_state.show_cursor();
+                                } else if !graph_view_state.cursor.coarse_mode {
+                                    graph_view_state.cursor.coarse_mode = true;
                                 } else if !show_panel {
                                     focus_zone = FocusZone::Sidebar;
                                 }
@@ -739,10 +376,10 @@ pub fn view_block_group(
                                 {
                                     match toggle_path_highlight(
                                         conn,
-                                        &graph_controller,
+                                        &graph_engine,
+                                        &mut graph_view_state,
                                         block_group_id,
                                         Color::Red,
-                                        &mut overlays,
                                     ) {
                                         Ok(highlighting_enabled) => {
                                             if highlighting_enabled {
@@ -762,8 +399,29 @@ pub fn view_block_group(
                                     warn!("No block group selected for path highlighting");
                                 }
                             }
+                            KeyCode::Char('+') | KeyCode::Char('=') => {
+                                gen_graph_widget::zoom_in(
+                                    &mut graph_view_state,
+                                    &graph_zoom_levels,
+                                );
+                            }
+                            KeyCode::Char('-') => {
+                                gen_graph_widget::zoom_out(
+                                    &mut graph_view_state,
+                                    &graph_zoom_levels,
+                                );
+                            }
                             _ => {
-                                graph_controller.handle_key_event(key).ok();
+                                if let Ok(Some((boundary, target))) =
+                                    graph_view_state.handle_key_event(key)
+                                {
+                                    teleport_through_wormhole(
+                                        &mut graph_engine,
+                                        &mut graph_view_state,
+                                        boundary,
+                                        target,
+                                    );
+                                }
                             }
                         },
                         FocusZone::Panel => match key.code {
@@ -772,8 +430,10 @@ pub fn view_block_group(
                                 focus_zone = FocusZone::Canvas;
                                 tui_layout_change = true;
                             }
-                            KeyCode::Char('c') if panel_mode == PanelMode::Messages => {
-                                messages.clear();
+                            KeyCode::Char('c') => {
+                                if panel_mode == PanelMode::Messages {
+                                    messages.clear();
+                                }
                             }
                             _ => {}
                         },
@@ -783,165 +443,6 @@ pub fn view_block_group(
                             if let Some(requested_zone) = explorer_state.focus_change_requested {
                                 focus_zone = requested_zone;
                                 explorer_state.focus_change_requested = None;
-                            }
-                            // Handle annotation file toggle requests
-                            if let Some(toggled_id) =
-                                explorer_state.annotation_file_toggle_requested.take()
-                            {
-                                if explorer_state.is_annotation_file_active(&toggled_id) {
-                                    if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
-                                        && let Some(bg) = current_block_group.as_ref()
-                                    {
-                                        let query_window =
-                                            current_view_coordinate_window(&graph_controller)
-                                                .map(expand_query_window);
-                                        let context = AnnotationFileActivationContext {
-                                            conn,
-                                            history_ref,
-                                            workspace,
-                                            collection_name: &current_collection_name,
-                                            sample_name: bg.sample_name.as_str(),
-                                            block_group_name: Some(&bg.name),
-                                            block_graph: &block_graph,
-                                            query_window,
-                                        };
-                                        if let Err(err) = activate_annotation_file(
-                                            &context,
-                                            entry,
-                                            &mut overlays,
-                                            &mut annotation_file_index_available,
-                                            &mut annotation_file_loaded_windows,
-                                        ) {
-                                            messages.push_warn(format!("{err}"));
-                                            explorer_state.deactivate_annotation_file(&toggled_id);
-                                            remove_track_overlays(
-                                                &mut overlays,
-                                                &file_track_key(&toggled_id),
-                                            );
-                                            annotation_file_index_available.remove(&toggled_id);
-                                            annotation_file_loaded_windows.remove(&toggled_id);
-                                        }
-                                    }
-                                } else {
-                                    remove_track_overlays(
-                                        &mut overlays,
-                                        &file_track_key(&toggled_id),
-                                    );
-                                    annotation_file_index_available.remove(&toggled_id);
-                                    annotation_file_loaded_windows.remove(&toggled_id);
-                                }
-                            }
-                            // Handle annotation group toggle requests
-                            if let Some(toggled_group) =
-                                explorer_state.annotation_group_toggle_requested.take()
-                            {
-                                if explorer_state.is_annotation_group_active(&toggled_group) {
-                                    if current_block_group.is_some() {
-                                        let node_ids = extract_viewport_node_ids(&graph_controller);
-                                        let entry = explorer.annotation_group_entry(&toggled_group);
-                                        let spans = match entry.map(|entry| {
-                                            load_annotations_for_group(
-                                                &AnnotationGroupTrackRequest {
-                                                    conn,
-                                                    workspace,
-                                                    history_ref,
-                                                    current_block_group: current_block_group
-                                                        .as_ref()
-                                                        .expect("current block group should exist"),
-                                                    entry,
-                                                    node_ids: &node_ids,
-                                                },
-                                            )
-                                        }) {
-                                            Some(Ok(spans)) => spans,
-                                            Some(Err(err)) => {
-                                                messages.push_warn(format!(
-                                                    "Failed to load annotations for group {}: {err}",
-                                                    toggled_group
-                                                ));
-                                                Vec::new()
-                                            }
-                                            None => Vec::new(),
-                                        };
-                                        if spans.is_empty() {
-                                            explorer_state
-                                                .deactivate_annotation_group(&toggled_group);
-                                        } else {
-                                            replace_track_overlays(
-                                                &mut overlays,
-                                                &group_track_key(&toggled_group),
-                                                spans,
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    remove_track_overlays(
-                                        &mut overlays,
-                                        &group_track_key(&toggled_group),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                event::Event::Mouse(mouse)
-                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                        && (last_search_area.contains(Position {
-                            x: mouse.column,
-                            y: mouse.row,
-                        }) || (search_state.focused
-                            && last_search_dropdown_area.contains(Position {
-                                x: mouse.column,
-                                y: mouse.row,
-                            }))) =>
-                {
-                    let was_focused = search_state.focused;
-                    if !was_focused {
-                        focus_region_search(&mut search_state);
-                        let request =
-                            current_block_group
-                                .as_ref()
-                                .map(|block_group| RegionSearchRequest {
-                                    conn,
-                                    collection_name: &current_collection_name,
-                                    sample_name: block_group.sample_name.as_str(),
-                                });
-                        refresh_region_search(
-                            &mut search_state,
-                            &mut search_error,
-                            request.as_ref(),
-                        );
-                    }
-                    focus_zone = FocusZone::Canvas;
-                    if last_search_dropdown_area.contains(Position {
-                        x: mouse.column,
-                        y: mouse.row,
-                    }) {
-                        let row = mouse
-                            .row
-                            .saturating_sub(last_search_dropdown_area.top() + 1)
-                            as usize
-                            + search_match_window_start(
-                                search_state.selected_match,
-                                search_state.matches.len(),
-                            );
-                        if row < search_state.matches.len() {
-                            search_state.selected_match = Some(row);
-                            let search_match = search_state.matches[row].clone();
-                            match activate_search_match(
-                                &mut graph_controller,
-                                &mut overlays,
-                                &search_match,
-                                conn,
-                                workspace,
-                            ) {
-                                Ok(()) => {
-                                    search_state.focused = false;
-                                    search_state.clear_matches();
-                                    search_error = None;
-                                    focus_zone = FocusZone::Canvas;
-                                }
-                                Err(error) => search_error = Some(error),
                             }
                         }
                     }
@@ -953,96 +454,13 @@ pub fn view_block_group(
                             y: mouse.row,
                         }) =>
                 {
+                    mouse_last_pos = None;
+                    mouse_is_dragging = false;
                     focus_zone = FocusZone::Sidebar;
                     explorer.handle_mouse(&mut explorer_state, mouse.column, mouse.row);
                     if let Some(requested_zone) = explorer_state.focus_change_requested {
                         focus_zone = requested_zone;
                         explorer_state.focus_change_requested = None;
-                    }
-                    // Handle annotation file toggle requests
-                    if let Some(toggled_id) = explorer_state.annotation_file_toggle_requested.take()
-                    {
-                        if explorer_state.is_annotation_file_active(&toggled_id) {
-                            if let Some(entry) = explorer.annotation_file_entry(&toggled_id)
-                                && let Some(bg) = current_block_group.as_ref()
-                            {
-                                let query_window =
-                                    current_view_coordinate_window(&graph_controller)
-                                        .map(expand_query_window);
-                                let context = AnnotationFileActivationContext {
-                                    conn,
-                                    history_ref,
-                                    workspace,
-                                    collection_name: &current_collection_name,
-                                    sample_name: bg.sample_name.as_str(),
-                                    block_group_name: Some(&bg.name),
-                                    block_graph: &block_graph,
-                                    query_window,
-                                };
-                                if let Err(err) = activate_annotation_file(
-                                    &context,
-                                    entry,
-                                    &mut overlays,
-                                    &mut annotation_file_index_available,
-                                    &mut annotation_file_loaded_windows,
-                                ) {
-                                    messages.push_warn(format!("{err}"));
-                                    explorer_state.deactivate_annotation_file(&toggled_id);
-                                    remove_track_overlays(
-                                        &mut overlays,
-                                        &file_track_key(&toggled_id),
-                                    );
-                                    annotation_file_index_available.remove(&toggled_id);
-                                    annotation_file_loaded_windows.remove(&toggled_id);
-                                }
-                            }
-                        } else {
-                            remove_track_overlays(&mut overlays, &file_track_key(&toggled_id));
-                            annotation_file_index_available.remove(&toggled_id);
-                            annotation_file_loaded_windows.remove(&toggled_id);
-                        }
-                    }
-                    // Handle annotation group toggle requests
-                    if let Some(toggled_group) =
-                        explorer_state.annotation_group_toggle_requested.take()
-                    {
-                        if explorer_state.is_annotation_group_active(&toggled_group) {
-                            if let Some(bg) = current_block_group.as_ref() {
-                                let node_ids = extract_viewport_node_ids(&graph_controller);
-                                let entry = explorer.annotation_group_entry(&toggled_group);
-                                let spans = match entry.map(|entry| {
-                                    load_annotations_for_group(&AnnotationGroupTrackRequest {
-                                        conn,
-                                        workspace,
-                                        history_ref,
-                                        current_block_group: bg,
-                                        entry,
-                                        node_ids: &node_ids,
-                                    })
-                                }) {
-                                    Some(Ok(spans)) => spans,
-                                    Some(Err(err)) => {
-                                        messages.push_warn(format!(
-                                            "Failed to load annotations for group {}: {err}",
-                                            toggled_group
-                                        ));
-                                        Vec::new()
-                                    }
-                                    None => Vec::new(),
-                                };
-                                if spans.is_empty() {
-                                    explorer_state.deactivate_annotation_group(&toggled_group);
-                                } else {
-                                    replace_track_overlays(
-                                        &mut overlays,
-                                        &group_track_key(&toggled_group),
-                                        spans,
-                                    );
-                                }
-                            }
-                        } else {
-                            remove_track_overlays(&mut overlays, &group_track_key(&toggled_group));
-                        }
                     }
                 }
                 event::Event::Mouse(mouse) if focus_zone == FocusZone::Canvas => match mouse.kind {
@@ -1051,18 +469,28 @@ pub fn view_block_group(
                         mouse_is_dragging = false;
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        if let Some((lx, ly)) = mouse_last_pos {
-                            let dx = mouse.column as i16 - lx as i16;
-                            let dy = mouse.row as i16 - ly as i16;
-                            graph_controller.move_by_terminal(dx, dy);
-                            graph_controller.sync_cursor_to_closest_node();
+                        if let Some((last_x, last_y)) = mouse_last_pos {
+                            let dx = mouse.column as i16 - last_x as i16;
+                            let dy = mouse.row as i16 - last_y as i16;
+                            graph_view_state.move_by_terminal(dx, dy);
+                            graph_view_state.rebase_camera_to_closest_node();
                             mouse_is_dragging = true;
                         }
                         mouse_last_pos = Some((mouse.column, mouse.row));
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         if !mouse_is_dragging {
-                            graph_controller.handle_click(mouse.column, mouse.row);
+                            match graph_view_state.wormhole_hit(mouse.column, mouse.row) {
+                                Some((boundary, target)) => teleport_through_wormhole(
+                                    &mut graph_engine,
+                                    &mut graph_view_state,
+                                    boundary,
+                                    target,
+                                ),
+                                None => {
+                                    graph_view_state.handle_click(mouse.column, mouse.row);
+                                }
+                            }
                         }
                         mouse_last_pos = None;
                         mouse_is_dragging = false;
@@ -1074,37 +502,6 @@ pub fn view_block_group(
         }
         if should_quit {
             break;
-        }
-
-        if let Some(selected_collection) = explorer_state.collection_change_requested.take() {
-            current_collection_name = selected_collection;
-            explorer_state.selected_block_group_id = None;
-            last_selected_block_group_id = None;
-            current_block_group = None;
-            block_graph = get_empty_graph();
-            graph_controller = create_gen_graph_controller(block_graph.clone());
-            explorer.refresh(
-                conn,
-                config_conn,
-                None,
-                None,
-                &current_collection_name,
-                history_ref,
-            );
-            explorer.force_reload(&mut explorer_state);
-            explorer_state.list_state.select(Some(0));
-            explorer_state.retain_annotation_files(&explorer.data.annotation_files);
-            explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
-            overlays.clear();
-            annotation_file_index_available.clear();
-            annotation_file_loaded_windows.clear();
-            explorer_state.active_annotation_groups.clear();
-            annotation_groups_loaded = false;
-            is_loading = false;
-            last_refresh = Instant::now();
-            search_state.clear_matches();
-            search_state.focused = false;
-            search_error = None;
         }
 
         // Trigger reload if selection changed to a new block group
@@ -1126,113 +523,13 @@ pub fn view_block_group(
                 config_conn,
                 selected_sample,
                 current_block_group.as_ref(),
-                &current_collection_name,
+                collection_name,
                 history_ref,
             ) {
                 explorer.force_reload(&mut explorer_state);
-                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
-                explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
-                annotation_file_index_available
-                    .retain(|id, _| explorer_state.is_annotation_file_active(id));
-                annotation_file_loaded_windows
-                    .retain(|id, _| explorer_state.is_annotation_file_active(id));
-                let active_file_keys: HashSet<String> = explorer_state
-                    .active_annotation_files
-                    .iter()
-                    .map(file_track_key)
-                    .collect();
-                overlays.retain(|o| match &o.source {
-                    OverlaySource::Track(key) if key.starts_with("file:") => {
-                        active_file_keys.contains(key)
-                    }
-                    OverlaySource::Track(key) => {
-                        key.strip_prefix("group:").is_some_and(|group_id| {
-                            explorer_state.is_annotation_group_active(group_id)
-                        })
-                    }
-                    _ => true,
-                });
             }
             last_refresh = Instant::now();
         }
-
-        // Reload indexed annotation file tracks when the user scrolls past the loaded window.
-        // Annotation group reload piggybacks on the viewport-rebuild signal: when the camera has
-        // moved far enough that the cropped-graph node set changes, invalidate and re-load.
-        if !is_loading
-            && let Some(bg) = current_block_group.as_ref()
-            && let Some(visible_window) = current_view_coordinate_window(&graph_controller)
-        {
-            if graph_controller.detect_motion() {
-                annotation_groups_loaded = false;
-            }
-            let query_window = expand_query_window(visible_window);
-            let node_filter: std::collections::HashSet<HashId> =
-                block_graph.nodes().map(|node| node.node_id).collect();
-            for entry in &explorer.data.annotation_files {
-                let id = entry.file_addition.id;
-                if !explorer_state.is_annotation_file_active(&id) {
-                    continue;
-                }
-                if !annotation_file_index_available
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-
-                let needs_reload = match annotation_file_loaded_windows.get(&id) {
-                    Some((loaded_start, loaded_end)) => {
-                        visible_window.0 < *loaded_start || visible_window.1 > *loaded_end
-                    }
-                    None => true,
-                };
-
-                if !needs_reload {
-                    continue;
-                }
-
-                let request = AnnotationFileTrackRequest {
-                    conn,
-                    history_ref,
-                    workspace,
-                    collection_name: &current_collection_name,
-                    sample_name: bg.sample_name.as_str(),
-                    block_group_name: Some(&bg.name),
-                    query_window: Some(query_window),
-                    node_filter: &node_filter,
-                    entry,
-                };
-                match load_annotation_file_track(&request) {
-                    Ok(load) => {
-                        replace_track_overlays(
-                            &mut overlays,
-                            &file_track_key(&id),
-                            load.track.annotations,
-                        );
-                        if let Some(window) = load.loaded_window {
-                            annotation_file_loaded_windows.insert(id, window);
-                        } else {
-                            annotation_file_loaded_windows.remove(&id);
-                        }
-                        annotation_file_index_available.insert(id, load.index_available);
-                    }
-                    Err(err) => {
-                        messages.push_warn(format!("{err}"));
-                        explorer_state.deactivate_annotation_file(&id);
-                        remove_track_overlays(&mut overlays, &file_track_key(&id));
-                        annotation_file_index_available.remove(&id);
-                        annotation_file_loaded_windows.remove(&id);
-                    }
-                }
-            }
-        }
-
-        // Calculate frame delta for smooth animations
-        let now = Instant::now();
-        let frame_delta = now.duration_since(last_frame_time);
-        last_frame_time = now;
 
         // Draw the UI
         terminal.draw(|frame| {
@@ -1268,50 +565,18 @@ pub fn view_block_group(
             last_sidebar_area = sidebar_area;
             let viewer_root_area = sidebar_layout[1];
 
-            let visible_search_matches = search_state.matches.len().min(5);
-            let search_dropdown_rows = if visible_search_matches > 0 {
-                visible_search_matches as u16 + 2
-            } else if search_state.focused && search_error.is_some() {
-                3
-            } else {
-                0
-            };
-            let search_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(vec![
-                    Constraint::Length(3),
-                    Constraint::Length(search_dropdown_rows),
-                    Constraint::Min(1),
-                ])
-                .split(viewer_root_area);
-            let search_input_area = search_layout[0];
-            let search_dropdown_area = search_layout[1];
-            last_search_area = search_input_area;
-            last_search_dropdown_area = if search_state.focused {
-                search_dropdown_area
-            } else {
-                Rect::default()
-            };
-            let viewer_content_area = search_layout[2];
-
             // The panel pops up in the graph area, it does not overlap with the sidebar
             let panel_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(vec![Constraint::Percentage(80), Constraint::Percentage(20)])
-                .split(viewer_content_area);
+                .split(viewer_root_area);
             let panel_area = panel_layout[1];
 
             let canvas_area = if show_panel {
                 panel_layout[0]
             } else {
-                viewer_content_area
+                viewer_root_area
             };
-
-            // Set viewport bounds to the actual canvas area before updating animations
-            graph_controller.viewport_state.viewport_bounds = canvas_area;
-
-            // Update animations with frame delta for smooth camera and cursor animations
-            graph_controller.update_animations(frame_delta);
 
             // Sidebar
             explorer_state.has_focus = focus_zone == FocusZone::Sidebar;
@@ -1334,87 +599,6 @@ pub fn view_block_group(
                 }
             }
 
-            let search_border_style = if search_state.focused {
-                Style::default()
-                    .fg(current_theme()[0x07])
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(current_theme()[0x05])
-            };
-            let search_value = if search_state.query.is_empty() {
-                Span::styled(
-                    "type a region such as chr1:20-30 (1-based)",
-                    Style::default()
-                        .fg(current_theme()[0x04])
-                        .add_modifier(Modifier::DIM),
-                )
-            } else {
-                Span::styled(
-                    search_state.query.clone(),
-                    Style::default().fg(current_theme()[0x05]),
-                )
-            };
-            let search_input = Paragraph::new(Line::from(vec![Span::raw(" "), search_value]))
-                .block(
-                    Block::bordered()
-                        .title("Region search (g) ")
-                        .border_style(search_border_style),
-                );
-            frame.render_widget(search_input, search_input_area);
-
-            let visible_search_matches = search_state.matches.len().min(5);
-            let search_dropdown_rows = if visible_search_matches > 0 {
-                visible_search_matches as u16 + 2
-            } else if search_error.is_some() && search_state.focused {
-                3
-            } else {
-                0
-            };
-            if search_state.focused && search_dropdown_rows > 0 {
-                let dropdown_items = if search_state.matches.is_empty() {
-                    vec![ListItem::new(Line::from(Span::styled(
-                        search_error
-                            .as_deref()
-                            .unwrap_or("no matching regions"),
-                        Style::default().fg(current_theme()[0x04]),
-                    )))]
-                } else {
-                    let window_start = search_match_window_start(
-                        search_state.selected_match,
-                        search_state.matches.len(),
-                    );
-                    search_state
-                        .matches
-                        .iter()
-                        .skip(window_start)
-                        .take(visible_search_matches)
-                        .enumerate()
-                        .map(|(index, search_match)| {
-                            let style = if search_state.selected_match
-                                == Some(index + window_start)
-                            {
-                                Style::default()
-                                    .fg(current_theme()[0x00])
-                                    .bg(current_theme()[0x07])
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(current_theme()[0x05])
-                            };
-                            ListItem::new(Line::from(Span::styled(
-                                format!(" {}", search_match.label),
-                                style,
-                            )))
-                        })
-                        .collect()
-                };
-                let dropdown = List::new(dropdown_items).block(
-                    Block::bordered()
-                        .title("Matches (↑↓, Enter)")
-                        .border_style(search_border_style),
-                );
-                frame.render_widget(dropdown, search_dropdown_area);
-            }
-
             // Render message bar if there are messages
             if let Some(area) = message_bar_area
                 && let Some(msg) = messages.latest()
@@ -1426,33 +610,23 @@ pub fn view_block_group(
             }
 
             // Status bar
-            let mut status_message = if search_state.focused {
-                "type region | *↑↓* choose match | *enter* go | *ctrl-u* clear | *esc* close"
-                    .to_string()
-            } else {
-                match focus_zone {
-                    FocusZone::Canvas => {
-                        if !graph_controller.is_cursor_visible() {
-                            "*drag* pan | *click* select | *↑↓←→* show cursor | *g* search".to_string()
-                        } else if graph_controller.cursor.is_coarse_mode() {
-                            "*←→↑↓* navigate by block | *enter* by character | *+/-* zoom | *p* path | *m* messages | *g* search".to_string()
-                        } else {
-                            "*←→↑↓* navigate by character | *enter* details | *+/-* zoom | *p* path | *m* messages | *g* search".to_string()
-                        }
+            let mut status_message = match focus_zone {
+                FocusZone::Canvas => {
+                    let tab_dest = if show_panel { "to panel" } else { "to sidebar" };
+                    if !graph_view_state.is_cursor_visible() {
+                        format!("*drag* pan | *click* select | *↑↓←→* show cursor | *tab* {tab_dest}")
+                    } else if graph_view_state.cursor.coarse_mode {
+                        format!("*←→↑↓* navigate by block | *enter* by character | *+/-* zoom | *p* path | *m* messages | *tab* {tab_dest}")
+                    } else {
+                        format!("*←→↑↓* navigate by character | *enter* details | *+/-* zoom | *p* path | *m* messages | *tab* {tab_dest}")
                     }
-                    FocusZone::Panel => match panel_mode {
-                        PanelMode::Messages => "*c* clear | *esc* close | *tab* to sidebar".to_string(),
-                        PanelMode::Details => "*esc* close | *tab* to sidebar".to_string(),
-                    },
-                    FocusZone::Sidebar => CollectionExplorer::get_status_line(),
                 }
+                FocusZone::Panel => match panel_mode {
+                    PanelMode::Messages => "*c* clear | *esc* close | *tab* to sidebar".to_string(),
+                    PanelMode::Details => "*esc* close | *tab* to sidebar".to_string(),
+                },
+                FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };
-            if let Some(error) = search_error.as_deref() {
-                status_message = format!("search: {error}");
-            }
-            if !search_state.focused && focus_zone != FocusZone::Canvas {
-                status_message.push_str(" | *g* search");
-            }
             status_message.push_str(" | *q* quit"); // Universal controls
             render_status_bar(frame, status_bar_area, &status_message);
 
@@ -1516,43 +690,13 @@ pub fn view_block_group(
 
                 render_with_optional_clear(frame, canvas_area, splash_area, true, splash_para);
             } else {
-                graph_controller.viewport_state.focus();
-
-                // Re-register overlay highlights before rendering. This reruns every frame
-                // because `overlays` can change between frames (file/group toggles,
-                // scroll-triggered reloads).
-                reapply_overlays(&mut graph_controller, &mut overlays, &mut annotation_colors);
-
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
-                let widget = create_gen_graph_widget(conn, workspace)
-                    .detail_level(graph_controller.get_detail_level())
-                    .style(canvas_style)
-                    .cursor();
-                frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
 
-                // Draw floating labels after the graph, then a single hint if any were hidden.
-                let detail_level = graph_controller.get_detail_level();
-                let any_hidden = draw_annotation_labels(
-                    frame.buffer_mut(),
-                    canvas_area,
-                    &graph_controller,
-                    &overlays,
-                );
-                if any_hidden {
-                    let note = if detail_level == VisualDetail::Full {
-                        " some annotations hidden due to space constraints "
-                    } else {
-                        " only annotations spanning a variant (edge) or filling a full node are shown "
-                    };
-                    let note_style =
-                        Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]);
-                    frame.buffer_mut().set_string(
-                        canvas_area.x,
-                        canvas_area.bottom().saturating_sub(1),
-                        note,
-                        note_style,
-                    );
-                }
+                let main_canvas_area = canvas_area;
+
+                let active_renderer = &graph_zoom_levels[graph_view_state.zoom_index].1;
+                let view = GraphView::new(&mut graph_engine, active_renderer).style(canvas_style);
+                frame.render_stateful_widget(view, main_canvas_area, &mut graph_view_state);
             }
 
             // Panel
@@ -1575,40 +719,22 @@ pub fn view_block_group(
 
                 let panel_text = match panel_mode {
                     PanelMode::Details => {
-                        use petgraph::visit::NodeIndexable;
-
                         let mut lines = vec![];
 
-                        if let Some(node_idx) = graph_controller.cursor.node_idx() {
-                            let graph_node = <&GenGraph as NodeIndexable>::from_index(
-                                &graph_controller.graph(),
-                                node_idx.index(),
-                            );
+                        if let Some(graph_node) = graph_view_state.cursor.node {
                             let node_id_short =
                                 graph_node.node_id.to_string().chars().take(12).collect::<String>();
-                            let block_spec = if graph_controller.get_detail_level()
-                                == VisualDetail::Full
-                            {
-                                let (frac_x, _) = graph_controller.cursor.fractional_pos();
-                                let block_width =
-                                    graph_node.sequence_end - graph_node.sequence_start;
-                                let pos_on_node = graph_node.sequence_start
-                                    + (frac_x * block_width as f64).round() as i64;
-                                format!(
-                                    "{}:{}-{} (cursor at {})",
-                                    node_id_short,
-                                    graph_node.sequence_start,
-                                    graph_node.sequence_end,
-                                    pos_on_node
-                                )
-                            } else {
-                                format!(
-                                    "{}:{}-{}",
-                                    node_id_short,
-                                    graph_node.sequence_start,
-                                    graph_node.sequence_end
-                                )
-                            };
+                            let (frac_x, _) = graph_view_state.cursor.fractional;
+                            let block_width = graph_node.sequence_end - graph_node.sequence_start;
+                            let pos_on_node = graph_node.sequence_start
+                                + (frac_x * block_width as f64).round() as i64;
+                            let block_spec = format!(
+                                "{}:{}-{} (cursor at {})",
+                                node_id_short,
+                                graph_node.sequence_start,
+                                graph_node.sequence_end,
+                                pos_on_node
+                            );
                             lines.push(Line::from(vec![
                                 Span::styled(
                                     "Block: ",
@@ -1666,73 +792,15 @@ pub fn view_block_group(
             }
         })?;
 
-        // After the first draw the viewport is populated. Load (or reload) annotation groups
-        // using the viewport node IDs so only on-screen segments are fetched.
-        let mut annotation_groups_loaded_after_draw = false;
-        if !annotation_groups_loaded && let Some(block_group) = current_block_group.as_ref() {
-            let node_ids = extract_viewport_node_ids(&graph_controller);
-            if !node_ids.is_empty() {
-                overlays.retain(
-                    |o| !matches!(&o.source, OverlaySource::Track(k) if k.starts_with("group:")),
-                );
-                explorer_state.active_annotation_groups.clear();
-                load_annotation_groups_for_viewport(
-                    AnnotationViewportRequest {
-                        conn,
-                        workspace,
-                        history_ref,
-                        block_group,
-                        node_ids: &node_ids,
-                    },
-                    &mut explorer_state,
-                    &mut overlays,
-                    &mut messages,
-                );
-                annotation_groups_loaded = true;
-                annotation_groups_loaded_after_draw = true;
-            }
-        }
-
-        // After the first draw the viewport is populated. Activate every available
-        // annotation file (one that resolves on disk) the same way DB-derived groups are
-        // auto-activated above; a file that fails to resolve is skipped rather than
-        // blocking the rest. Already-active files are left untouched here — panning past
-        // their loaded window is handled separately below.
-        if !annotation_files_loaded && let Some(block_group) = current_block_group.as_ref() {
-            let query_window =
-                current_view_coordinate_window(&graph_controller).map(expand_query_window);
-            if query_window.is_some() {
-                let context = AnnotationFileActivationContext {
-                    conn,
-                    history_ref,
-                    workspace,
-                    collection_name: &current_collection_name,
-                    sample_name: block_group.sample_name.as_str(),
-                    block_group_name: Some(&block_group.name),
-                    block_graph: &block_graph,
-                    query_window,
-                };
-                auto_activate_annotation_files_for_viewport(
-                    &context,
-                    &explorer.data.annotation_files,
-                    &mut explorer_state,
-                    &mut overlays,
-                    &mut annotation_file_index_available,
-                    &mut annotation_file_loaded_windows,
-                );
-                annotation_files_loaded = true;
-                annotation_groups_loaded_after_draw = true;
-            }
-        }
-
         // Update the graph controller if a new block group was selected.
         // This runs after terminal.draw() so the loading indicator is visible
         // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, workspace, new_block_group_id, history_ref)?;
-            // Update the graph controller
-            graph_controller = create_gen_graph_controller(block_graph.clone());
+            block_graph = BlockGroup::get_graph(conn, new_block_group_id, history_ref)?;
+            // Update the graph engine
+            (graph_engine, graph_zoom_levels, graph_view_state) =
+                create_gen_graph_engine(block_graph.clone(), conn);
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {
                 Ok(bg) => bg,
                 Err(err) => {
@@ -1750,52 +818,19 @@ pub fn view_block_group(
                 config_conn,
                 selected_sample,
                 current_block_group.as_ref(),
-                &current_collection_name,
+                collection_name,
                 history_ref,
             ) {
                 explorer.force_reload(&mut explorer_state);
-                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
-                explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
             }
-            overlays.clear();
-            annotation_file_index_available.clear();
-            annotation_file_loaded_windows.clear();
-            explorer_state.active_annotation_groups.clear();
-            annotation_groups_loaded = false;
-            // Files are re-activated fresh for the new block group by the auto-activation
-            // pass above (it runs again once `annotation_files_loaded` is reset), the same
-            // way groups are re-activated fresh on every block group switch.
-            explorer_state.active_annotation_files.clear();
-            annotation_files_loaded = false;
 
             is_loading = false;
-            search_state.clear_matches();
-            search_state.focused = false;
-            search_error = None;
             continue;
         }
 
-        // The overlays were populated after the frame was rendered. Draw them immediately
-        // instead of waiting for the next keyboard or mouse event to wake the idle viewer.
-        if annotation_groups_loaded_after_draw {
-            continue;
-        }
-
-        // If an animation is running, wake up after tick_rate to advance it.
-        // If the display is idle, block indefinitely — the next input event will wake us.
-        let wait = if graph_controller.is_animating() {
-            tick_rate
-                .checked_sub(last_tick.elapsed())
-                .unwrap_or(Duration::ZERO)
-        } else {
-            Duration::from_secs(3600)
-        };
-        let _ = crossterm::event::poll(wait);
-
-        // Update tick
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
-        }
+        // Rendering is event-driven (no animation to advance): block indefinitely until the
+        // next input event wakes us.
+        let _ = crossterm::event::poll(Duration::from_secs(3600));
     }
 
     Ok(())
@@ -1803,111 +838,60 @@ pub fn view_block_group(
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use gen_core::HashId;
+    use gen_graph::{GenGraph, GraphNode};
+    use gen_tui::{graph_view::GraphViewState, layout_engine::LayoutEngine};
 
-    use super::{
-        RegionSearchInputAction, RegionSearchState, focus_region_search, is_region_search_command,
-        refresh_region_search,
-    };
-    use crate::views::region_search::{resolve_region_search_matches, search_request_fixture};
+    use super::teleport_through_wormhole;
 
-    #[test]
-    fn test_region_search_state_handles_dropdown_selection_without_default() {
-        assert!(is_region_search_command(KeyCode::Char('g')));
-        assert!(!is_region_search_command(KeyCode::Char('/')));
-        assert!(!is_region_search_command(KeyCode::Tab));
-
-        let request = search_request_fixture();
-        let match_template = resolve_region_search_matches(&request.request(), "duplicate-gene")
-            .expect("should load a search match for state testing")
-            .into_iter()
-            .next()
-            .expect("fixture should provide a search match");
-        let matches = vec![match_template.clone(), match_template];
-
-        let mut state = RegionSearchState::default();
-        state.set_matches(matches);
-        assert_eq!(state.selected_match, None);
-        assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            RegionSearchInputAction::Ignored
-        ));
-        state.move_selection(1);
-        assert_eq!(state.selected_match, Some(0));
-        state.move_selection(1);
-        assert_eq!(state.selected_match, Some(1));
-        assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
-            RegionSearchInputAction::Changed
-        ));
-        assert_eq!(state.selected_match, None);
-        assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            RegionSearchInputAction::Ignored
-        ));
-        state.move_selection(1);
-        assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            RegionSearchInputAction::Selected(_)
-        ));
+    fn three_node_chain() -> (LayoutEngine<GenGraph>, [GraphNode; 3]) {
+        let nodes = ["left", "middle", "right"].map(|label| GraphNode {
+            node_id: HashId::convert_str(label),
+            sequence_start: 0,
+            sequence_end: 5,
+        });
+        let mut graph = GenGraph::new();
+        graph.add_edge(nodes[0], nodes[1], Vec::new());
+        graph.add_edge(nodes[1], nodes[2], Vec::new());
+        (LayoutEngine::new(graph), nodes)
     }
 
     #[test]
-    fn test_region_search_clear_action_empties_query_and_matches() {
-        let request = search_request_fixture();
-        let mut state = RegionSearchState {
-            query: "chr1:5-10".to_string(),
-            matches: resolve_region_search_matches(&request.request(), "chr1:5-10")
-                .expect("should resolve the clear-action fixture query"),
-            selected_match: Some(0),
-            focused: true,
-        };
-
-        assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
-            RegionSearchInputAction::Cleared
-        ));
-        assert!(state.query.is_empty());
-        assert!(state.matches.is_empty());
-        assert_eq!(state.selected_match, None);
-        assert!(state.focused);
-
-        state.query = "x".to_string();
-        state.matches = resolve_region_search_matches(&request.request(), "chr1:5-10")
-            .expect("should resolve the query before backspace clears it");
-        state.selected_match = Some(0);
-        assert!(matches!(
-            state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
-            RegionSearchInputAction::Cleared
-        ));
-        assert!(state.query.is_empty());
-        assert!(state.matches.is_empty());
-    }
-
-    #[test]
-    fn test_region_search_refocus_preserves_query_without_default_selection() {
-        let request = search_request_fixture();
-        let mut state = RegionSearchState {
-            query: "chr1:5-10".to_string(),
-            ..RegionSearchState::default()
-        };
-        state.set_matches(
-            resolve_region_search_matches(&request.request(), &state.query)
-                .expect("should resolve the preserved query"),
+    fn wormhole_entry_preserves_target_and_directional_fraction() {
+        let (mut predecessor_engine, predecessor_nodes) = three_node_chain();
+        let mut predecessor_state = GraphViewState::default();
+        teleport_through_wormhole(
+            &mut predecessor_engine,
+            &mut predecessor_state,
+            predecessor_nodes[1],
+            predecessor_nodes[0],
         );
-        state.selected_match = Some(0);
-        state.focused = false;
 
-        focus_region_search(&mut state);
-        assert_eq!(state.query, "chr1:5-10");
-        assert_eq!(state.selected_match, None);
-        assert!(state.matches.is_empty());
+        assert_eq!(predecessor_state.cursor.node, Some(predecessor_nodes[0]));
+        assert_eq!(predecessor_state.cursor.fractional, (1.0, 0.5));
+        assert!(predecessor_state.cursor.coarse_mode);
+        assert_eq!(
+            predecessor_state.wormhole_entry(),
+            Some(predecessor_nodes[0])
+        );
 
-        let mut search_error = None;
-        refresh_region_search(&mut state, &mut search_error, Some(&request.request()));
-        assert_eq!(state.query, "chr1:5-10");
-        assert_eq!(state.matches.len(), 1);
-        assert_eq!(state.selected_match, None);
-        assert!(search_error.is_none());
+        let (mut successor_engine, successor_nodes) = three_node_chain();
+        successor_engine
+            .activate_world_at(successor_nodes[2], 10, None)
+            .expect("should preload the successor's world");
+        let mut successor_state = GraphViewState::default();
+        successor_state.cursor.coarse_mode = false;
+        teleport_through_wormhole(
+            &mut successor_engine,
+            &mut successor_state,
+            successor_nodes[1],
+            successor_nodes[2],
+        );
+
+        assert_eq!(successor_state.cursor.node, Some(successor_nodes[2]));
+        assert_eq!(successor_state.cursor.fractional, (0.0, 0.5));
+        assert!(!successor_state.cursor.coarse_mode);
+        assert_eq!(successor_state.wormhole_entry(), Some(successor_nodes[2]));
     }
+
 }
