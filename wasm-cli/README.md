@@ -30,21 +30,44 @@ comment above the `wasm` target for the up-to-date version pins):
    ```
    The `wasm` Makefile target expects `micromamba` at `$(MICROMAMBA_DIR)`
    (defaults to `/opt/homebrew/Caskroom/miniforge/base`, i.e. a miniforge
-   install already has it) and prepends that to `PATH` itself — always build
-   through `make wasm`/`make wasm-test` rather than running `npm run build`
-   directly, or `postbuild:prepare-wasm` will fail with "Unable to find
-   micromamba" even when it's installed, since it won't be on `PATH`.
+   install already has it) and prepends that to `PATH` itself. If you only
+   have it via miniforge (not also `brew install`ed standalone), `npm run
+   build` run directly -- rather than through `make wasm`/`make wasm-test` --
+   won't find it on `PATH` and `postbuild:prepare-wasm` will fail with
+   "Unable to find micromamba" even though it's installed; either prefix
+   `PATH` the same way the Makefile does
+   (`PATH="$(MICROMAMBA_DIR):$PATH" npm run build`) or build through `make
+   wasm`/`make wasm-test` instead.
 
 If you only changed TypeScript/CSS/HTML under `wasm-cli/` (not the Rust
-`gen` binary itself), `cd wasm-cli && npm run build` is enough to refresh
-`dist/`; you don't need to rebuild the wasm `gen` binary or re-run
-`postbuild:prepare-wasm` for those changes to take effect. `npm run typecheck`
-type-checks without bundling.
+`gen` binary itself) and `wasm-cli/gen-wasm/` is already populated from a
+prior `make wasm`, `cd wasm-cli && npm run build` is enough to refresh
+`dist/` -- you don't need to rebuild the wasm `gen` binary itself. This does
+still re-run `postbuild:prepare-wasm` every time (npm always chains a
+`postbuild` script after `build`; there's no flag to skip it), so the
+`micromamba`-on-`PATH` requirement above still applies. `npm run typecheck`
+type-checks without bundling or needing `micromamba` at all.
 
 `npm run serve` (also what `make wasm-test` calls) does not auto-reload —
 restart it after every rebuild before testing, and hard-reload or
 unregister the page's service worker in the browser, since it aggressively
 caches `dist/` assets across reloads.
+
+## Scripting the terminal from the embedding page
+
+This page has no copy or links of its own for running specific commands (that context lives with
+whoever embeds it, e.g. GenHub's `/terminal` page), so it exposes a small `postMessage` contract
+instead, handled in `src/index.ts`'s `setupCommandRunner`:
+
+- **`{ type: 'gen-wasm-cli:ready' }`** — posted by this page to `window.parent` (target origin
+  `'*'`, since this page doesn't know the embedder's origin in advance) once the shell has started
+  and is ready to accept input. Wait for this before sending commands that should run
+  automatically as soon as the terminal loads; it's not needed before a click-triggered command,
+  since the reader can't click before the page has rendered anyway.
+- **`{ type: 'gen-wasm-cli:run-commands', commands: string[] }`** — sent by the embedding page to
+  this iframe's `contentWindow` to type and submit each command in turn, pausing briefly after
+  each is typed so the reader can read it before its output appears. Only accepted from
+  `window.parent` (this page has no notion of the embedder's origin to allowlist instead).
 
 ## Testing with Playwright
 
@@ -95,3 +118,9 @@ GenHub backend, you additionally need the genhub backend running
 its API server on `:5800` via `make wasm-backend`) — plain coreutils and
 local-only `gen` commands (`ls`, `cd`, `gen init`, etc.) don't need any of
 that.
+
+To test the `postMessage` contract from "Scripting the terminal from the
+embedding page" above (rather than typing directly into the terminal), serve
+`dist/` (`npm run serve`) and drive a small local harness page that embeds it
+in an iframe and posts `run-commands`/listens for `ready` the same way a real
+embedder would, instead of navigating Playwright to `:4501` directly.

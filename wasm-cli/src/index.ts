@@ -209,7 +209,7 @@ async function runDemo(): Promise<void> {
   resizeObserver.observe(targetDiv);
 
   setupUpload(contentsManager);
-  setupHelpLink(shell);
+  setupCommandRunner(shell);
   setupThemeToggle(term, shell, themeMode);
 }
 
@@ -251,23 +251,52 @@ function setupUpload(contentsManager: ContentsManager): void {
   });
 }
 
-const HELP_COMMAND = 'gen --help';
-// Gives the reader a moment to read the typed-out command before it runs, rather than having it
-// appear to execute instantly.
-const HELP_COMMAND_RUN_DELAY_MS = 900;
+// Gives the reader a moment to read a command out after it's typed, before it runs, rather than
+// having it appear to execute instantly.
+const COMMAND_TYPED_PAUSE_MS = 900;
+const RUN_COMMANDS_MESSAGE_TYPE = 'gen-wasm-cli:run-commands';
+const TERMINAL_READY_MESSAGE_TYPE = 'gen-wasm-cli:ready';
 
-// Types `gen --help` into the shell as though the reader had entered it themselves, pausing
-// before submitting it so newcomers can see the command before its output appears.
-function setupHelpLink(shell: GenShell): void {
-  const link = document.getElementById('help-link') as HTMLAnchorElement;
-  link.addEventListener('click', event => {
-    event.preventDefault();
-    void (async () => {
-      await shell.input(HELP_COMMAND);
-      await new Promise(resolve => setTimeout(resolve, HELP_COMMAND_RUN_DELAY_MS));
-      await shell.input('\r');
-    })();
+// Types each of `commands` into the shell as though the reader had entered it themselves, one at
+// a time, pausing after each before submitting it so newcomers can see the command before its
+// output appears. This shell does not support `&&`, so a multi-step demo has to be several
+// commands run in sequence rather than one compound command.
+async function runCommands(shell: GenShell, commands: string[]): Promise<void> {
+  for (const command of commands) {
+    await shell.input(command);
+    await new Promise(resolve => setTimeout(resolve, COMMAND_TYPED_PAUSE_MS));
+    await shell.input('\r');
+  }
+}
+
+// Lets the embedding page script this terminal via `postMessage` (see wasm-cli/README.md for the
+// message contract) rather than baking any particular command or trigger -- e.g. a link's
+// `onClick` -- into this page's own markup, since what to run and why is context the embedding
+// page has and this one doesn't.
+function setupCommandRunner(shell: GenShell): void {
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent) {
+      return;
+    }
+    const data = event.data as Record<string, unknown> | null;
+    if (data?.['type'] !== RUN_COMMANDS_MESSAGE_TYPE) {
+      return;
+    }
+    const commands = data['commands'];
+    if (!Array.isArray(commands) || !commands.every(command => typeof command === 'string')) {
+      return;
+    }
+    void runCommands(shell, commands as string[]);
   });
+  // Announces readiness so a page that wants to run commands as soon as the terminal loads (as
+  // opposed to in response to a click, once the reader is already looking at it) knows when
+  // sending them is safe -- the shell isn't accepting input until now. Broadcast with `'*'`
+  // rather than a specific origin: this message carries no sensitive data, and this page doesn't
+  // otherwise know the embedding page's origin in advance (it can be a different static-asset
+  // origin in production).
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: TERMINAL_READY_MESSAGE_TYPE }, '*');
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

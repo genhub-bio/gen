@@ -61,26 +61,11 @@ body {
 #intro-bar {
   flex: none;
   padding: 0.6em 0.8em;
-  font-family: sans-serif;
-  font-size: 0.9em;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1em;
+  align-items: center;
+  justify-content: flex-end;
   background-color: var(--gen-base01);
   color: var(--gen-base05);
-}
-
-#intro-bar p {
-  margin: 0;
-}
-
-#intro-bar code {
-  font-family: 'JetBrains Mono', monospace;
-}
-
-#intro-bar a {
-  color: var(--gen-base0d);
 }
 
 .theme-toggle {
