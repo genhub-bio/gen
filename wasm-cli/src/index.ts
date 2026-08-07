@@ -12,7 +12,7 @@ import { BrowserLoginBridge, splitOnBeginMessage } from './login_bridge';
 import { ServiceWorkerManager } from './service_worker_manager';
 import { buildShellEnvironment, buildTerminalOptions, TERMINAL_FONT_SIZE } from './terminal_setup';
 import type { ThemeMode } from './theme';
-import { base16PaletteForMode, selectThemeMode, xtermThemeForMode } from './theme';
+import { selectThemeMode, xtermThemeForMode } from './theme';
 import '../style/demo.css';
 
 const DRIVE_MOUNTPOINT = '/drive';
@@ -66,17 +66,14 @@ function initWebglAddon(term: Terminal): void {
   }
 }
 
-// Also called from `setupThemeToggle` whenever the reader flips the light/dark switch.
+// Also called from `setupThemeListener` whenever the embedding page's theme changes. Sets the
+// same `data-theme` attribute the inline script in `assets/index.html` sets before this bundle
+// even loads (see the comment there), so every themed element in `style/demo.css` -- not just
+// `<body>` -- picks up the change through its existing `var(--gen-base0X)` rules rather than
+// needing its own entry in an ad hoc list of element ids here.
 function applyThemeBackground(mode: ThemeMode): void {
-  const background = base16PaletteForMode(mode).base00;
+  document.documentElement.dataset.theme = mode;
   document.documentElement.style.colorScheme = mode;
-  document.body.style.backgroundColor = background;
-  for (const id of ['terminal-wrap', 'targetdiv']) {
-    const element = document.getElementById(id);
-    if (element) {
-      element.style.backgroundColor = background;
-    }
-  }
 }
 
 async function runDemo(): Promise<void> {
@@ -210,17 +207,26 @@ async function runDemo(): Promise<void> {
 
   setupUpload(contentsManager);
   setupCommandRunner(shell);
-  setupThemeToggle(term, shell, themeMode);
+  setupThemeListener(term, shell);
 }
 
-// Wires the intro-bar light/dark switch to live-update the terminal's rendered theme, the page
-// background, and the shell's `GEN_THEME` environment variable together, so all three always
-// agree on which flavor is active.
-function setupThemeToggle(term: Terminal, shell: GenShell, initialMode: ThemeMode): void {
-  const input = document.getElementById('theme-toggle-input') as HTMLInputElement;
-  input.checked = initialMode === 'light';
-  input.addEventListener('change', () => {
-    const mode: ThemeMode = input.checked ? 'light' : 'dark';
+// Live-updates the terminal's rendered theme, the page background, and the shell's `GEN_THEME`
+// environment variable together, so all three always agree on which flavor is active, in response
+// to a `gen-wasm-cli:set-theme` message from the embedding page (this terminal has no theme
+// control of its own -- see `selectThemeMode` in `theme.ts` for how the initial mode is picked).
+function setupThemeListener(term: Terminal, shell: GenShell): void {
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent) {
+      return;
+    }
+    const data = event.data as Record<string, unknown> | null;
+    if (data?.['type'] !== SET_THEME_MESSAGE_TYPE) {
+      return;
+    }
+    const mode = data['mode'];
+    if (mode !== 'light' && mode !== 'dark') {
+      return;
+    }
     applyThemeBackground(mode);
     term.options.theme = xtermThemeForMode(mode);
     void shell.themeChange(mode === 'dark');
@@ -256,6 +262,7 @@ function setupUpload(contentsManager: ContentsManager): void {
 const COMMAND_TYPED_PAUSE_MS = 900;
 const RUN_COMMANDS_MESSAGE_TYPE = 'gen-wasm-cli:run-commands';
 const TERMINAL_READY_MESSAGE_TYPE = 'gen-wasm-cli:ready';
+const SET_THEME_MESSAGE_TYPE = 'gen-wasm-cli:set-theme';
 
 // Types each of `commands` into the shell as though the reader had entered it themselves, one at
 // a time, pausing after each before submitting it so newcomers can see the command before its

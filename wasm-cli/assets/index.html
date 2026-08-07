@@ -3,15 +3,25 @@
 <head>
   <meta charset="utf-8" />
   <title>gen wasm demo</title>
+  <script>
+    // Sets `data-theme` before `bundle.js`'s stylesheet loads (via `style-loader`, injected at
+    // module-evaluation time) so the very first paint already uses the right Catppuccin flavor's
+    // page-background CSS variables (see `style/demo.css`), instead of flashing the OS's
+    // `prefers-color-scheme` default first and then jumping to the embedding page's theme once
+    // `applyThemeBackground` runs in `src/index.ts`. Keep this selection logic in sync with
+    // `selectThemeMode` in `src/theme.ts` -- it can't just call that function, since it has to run
+    // synchronously before the bundle that defines it is even requested.
+    (function () {
+      var theme = new URLSearchParams(window.location.search).get('theme');
+      if (theme !== 'light' && theme !== 'dark') {
+        theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
   <script src="bundle.js"></script>
 </head>
 <body>
-  <div id="intro-bar">
-    <label id="theme-toggle" class="theme-toggle" for="theme-toggle-input">
-      <input type="checkbox" id="theme-toggle-input" aria-label="Toggle light or dark theme" />
-      <span class="theme-toggle-track"><span class="theme-toggle-thumb"></span></span>
-    </label>
-  </div>
   <div id="upload-bar">
     <label for="upload-input">Add a file:</label>
     <input type="file" id="upload-input" />

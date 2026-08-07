@@ -1,8 +1,8 @@
 import type { ITheme } from '@xterm/xterm';
 
 // Narrow representation of which Catppuccin flavor is active for a terminal/shell session.
-// `selectThemeMode` picks the initial value at startup from the OS preference; the light/dark
-// toggle in the intro bar can switch it live afterward (see `setupThemeToggle` in `index.ts`).
+// `selectThemeMode` picks the initial value at startup; the embedding page can switch it live
+// afterward via `postMessage` (see `setupThemeListener` in `index.ts`).
 export type ThemeMode = 'light' | 'dark';
 
 // A Base16 (https://github.com/chriskempson/base16) palette: sixteen named hex colors shared by
@@ -103,10 +103,18 @@ export function base16ToXtermTheme(palette: Base16Palette): ITheme {
   };
 }
 
-// Picks the Catppuccin flavor for this session from the browser's current color-scheme
-// preference, as the initial value before the terminal is constructed. Not re-evaluated if the OS
-// preference changes later; use the theme toggle for that.
+// Picks the Catppuccin flavor for this session as the initial value before the terminal is
+// constructed. Prefers a `?theme=light|dark` query parameter -- set by the embedding page so this
+// terminal starts in step with its own theme rather than the browser/OS preference, which need
+// not agree with it (e.g. GenHub's theme is a manually-toggled, localStorage-persisted preference,
+// not `prefers-color-scheme`) -- and falls back to `prefers-color-scheme` when the page is opened
+// standalone (e.g. `make wasm-test`) without that parameter. Live changes after startup arrive via
+// `postMessage` instead (see `setupThemeListener` in `index.ts`).
 export function selectThemeMode(): ThemeMode {
+  const requested = new URLSearchParams(window.location.search).get('theme');
+  if (requested === 'light' || requested === 'dark') {
+    return requested;
+  }
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 

@@ -57,7 +57,7 @@ caches `dist/` assets across reloads.
 
 This page has no copy or links of its own for running specific commands (that context lives with
 whoever embeds it, e.g. GenHub's `/terminal` page), so it exposes a small `postMessage` contract
-instead, handled in `src/index.ts`'s `setupCommandRunner`:
+instead, handled in `src/index.ts`'s `setupCommandRunner`/`setupThemeListener`:
 
 - **`{ type: 'gen-wasm-cli:ready' }`** — posted by this page to `window.parent` (target origin
   `'*'`, since this page doesn't know the embedder's origin in advance) once the shell has started
@@ -68,6 +68,13 @@ instead, handled in `src/index.ts`'s `setupCommandRunner`:
   this iframe's `contentWindow` to type and submit each command in turn, pausing briefly after
   each is typed so the reader can read it before its output appears. Only accepted from
   `window.parent` (this page has no notion of the embedder's origin to allowlist instead).
+- **`{ type: 'gen-wasm-cli:set-theme', mode: 'light' | 'dark' }`** — sent by the embedding page to
+  this iframe's `contentWindow` to switch the terminal's rendered theme, page background, and the
+  shell's `GEN_THEME` environment variable together, in step with the embedder's own theme. This
+  page has no theme control of its own — it starts from a `?theme=light|dark` query parameter on
+  its `src` URL (falling back to `prefers-color-scheme` if omitted, e.g. when opened standalone via
+  `make wasm-test`) and only changes afterward in response to this message. Only accepted from
+  `window.parent`.
 
 ## Testing with Playwright
 
