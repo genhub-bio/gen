@@ -5,11 +5,9 @@ use gen_diff::{
     operations::{BlockGroupChangeKind, BlockGroupDiff},
 };
 use gen_graph::{GenGraph, GraphNode};
-use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
+use gen_tui::{LineStyle, graph_view::GraphViewState, plotter::PathStyle};
 use petgraph::Direction;
 use ratatui::style::Color;
-
-use crate::views::gen_graph_widget::GenGraphNodeSizer;
 
 #[derive(Clone)]
 pub struct DiffGraphComponent {
@@ -19,22 +17,22 @@ pub struct DiffGraphComponent {
     pub highlighted_edges: Vec<((GraphNode, GraphNode), Color)>,
 }
 
-/// Apply diff highlights (nodes and edges) to a graph controller.
+/// Apply diff highlights (nodes and edges) to a graph view's state.
 pub fn apply_diff_highlights(
-    controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+    view_state: &mut GraphViewState<GraphNode>,
     component: &DiffGraphComponent,
 ) {
     for &(node, color) in &component.highlighted_nodes {
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        controller.set_node_highlight(node, style);
+        view_state.set_node_highlight(node, style);
     }
     for &((src, target), color) in &component.highlighted_edges {
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        controller.set_edge_highlight((src, target), style);
+        view_state.set_edge_highlight((src, target), style);
     }
 }
 
