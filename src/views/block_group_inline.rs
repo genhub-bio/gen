@@ -1,40 +1,26 @@
 use std::{
-    collections::HashSet,
     io::{Error, Result},
     panic,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use gen_core::{HashId, Workspace};
-use gen_graph::GenGraph;
+use gen_core::HashId;
+use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
-    graph_controller::GraphController,
-    layout::VisualDetail,
+    graph_view::{GraphView, GraphViewState},
+    layout_engine::LayoutEngine,
     plotter::{LineStyle, PathStyle},
     theme::current_theme,
 };
 use ratatui::{
     TerminalOptions, Viewport,
     prelude::*,
-    style::Color,
     widgets::{Block, Borders},
 };
 
-use crate::views::{
-    annotation_groups::load_annotation_group_entries,
-    annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
-    block_group::extract_viewport_node_ids,
-    diff_graph::{DiffGraphComponent, apply_diff_highlights, build_diff_graph_component},
-    gen_graph_widget::{
-        GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
-    },
-    graph_overlay::{
-        AnnotationColorCache, GraphOverlay, group_track_key, has_path_overlay,
-        project_path_overlay_nodes, remove_path_overlay, replace_track_overlays, set_path_overlay,
-    },
-};
+use crate::views::gen_graph_widget::{self, DEFAULT_ZOOM_LEVEL, ZoomLevels, build_zoom_levels};
 
 /// Get path nodes for a path and map it to GraphNodes in the current graph
 fn get_path_nodes(
@@ -42,21 +28,11 @@ fn get_path_nodes(
     path: &Path,
     graph: &GenGraph,
 ) -> std::io::Result<Vec<gen_graph::GraphNode>> {
-    let path_blocks = path.coordinate_blocks(conn, None);
-
-    let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
-    if path_nodes.is_empty() {
-        return Err(Error::other(
-            "Path nodes not found in current graph state".to_string(),
-        ));
-    }
-
-    Ok(path_nodes)
+    crate::views::helpers::project_path_nodes(conn, path, graph).map_err(Error::other)
 }
 
 #[derive(Debug)]
 pub enum AppEvent {
-    Tick,
     KeyPress(crossterm::event::KeyEvent),
     Resize(u16, u16),
 }
@@ -65,30 +41,13 @@ pub trait EventSource {
     fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent>;
 }
 
-pub struct TickEventSource {
-    tick_rate: Duration,
-    last_tick: Instant,
-}
+/// Reads key/resize events straight from the terminal. Rendering is event-driven (no
+/// animation to advance), so this blocks on `poll` rather than waking at a fixed rate.
+pub struct CrosstermEventSource;
 
-impl TickEventSource {
-    pub fn new(tick_rate: Duration) -> Self {
-        Self {
-            tick_rate,
-            last_tick: Instant::now(),
-        }
-    }
-}
-
-impl EventSource for TickEventSource {
+impl EventSource for CrosstermEventSource {
     fn poll_next(&mut self, timeout: Duration) -> Option<AppEvent> {
-        let remaining = self
-            .tick_rate
-            .checked_sub(self.last_tick.elapsed())
-            .unwrap_or(Duration::ZERO);
-
-        let wait = remaining.min(timeout);
-
-        if event::poll(wait).unwrap_or(false) {
+        if event::poll(timeout).unwrap_or(false) {
             match event::read().unwrap() {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     return Some(AppEvent::KeyPress(k));
@@ -99,104 +58,46 @@ impl EventSource for TickEventSource {
                 _ => {}
             }
         }
-
-        if self.last_tick.elapsed() >= self.tick_rate {
-            self.last_tick = Instant::now();
-            return Some(AppEvent::Tick);
-        }
-
         None
     }
 }
 
 pub struct InlineGenGraphState<'a> {
-    controller: GraphController<GenGraph, GenGraphNodeSizer>,
-    conn: &'a GraphConnection,
-    workspace: &'a Workspace,
+    engine: LayoutEngine<GenGraph>,
+    zoom_levels: ZoomLevels<'a>,
+    view_state: GraphViewState<GraphNode>,
     paths: Vec<Vec<gen_graph::GraphNode>>,
-    block_group_id: Option<HashId>,
-    history_ref: Option<&'a str>,
-    /// Annotation and path overlays currently loaded, ready for highlight + label rendering.
-    overlays: Vec<GraphOverlay>,
-    annotation_colors: AnnotationColorCache,
-    annotation_groups_loaded: bool,
-    diff_component: Option<DiffGraphComponent>,
-}
-
-#[derive(Default)]
-struct InlineWidgetOptions<'a> {
-    block_group_id: Option<HashId>,
-    history_ref: Option<&'a str>,
-    diff_component: Option<DiffGraphComponent>,
 }
 
 impl<'a> InlineGenGraphState<'a> {
-    pub fn new(
-        graph: &GenGraph,
-        conn: &'a GraphConnection,
-        workspace: &'a Workspace,
-        block_group_id: Option<HashId>,
-        history_ref: Option<&'a str>,
-    ) -> Self {
-        let node_sizer = GenGraphNodeSizer;
-        let mut graph_controller = GraphController::new(graph.clone(), node_sizer);
-        graph_controller.set_detail_level(VisualDetail::Truncated);
-        graph_controller.show_cursor();
+    pub fn new(graph: &GenGraph, conn: &'a GraphConnection) -> Self {
+        let zoom_levels = build_zoom_levels(conn);
+        let engine = LayoutEngine::new(graph.clone());
+        let mut view_state = GraphViewState::default();
+        gen_graph_widget::apply_zoom_level(&mut view_state, DEFAULT_ZOOM_LEVEL, &zoom_levels);
+        view_state.show_cursor();
+        let paths = Vec::new();
         Self {
-            controller: graph_controller,
-            conn,
-            workspace,
-            paths: Vec::new(),
-            block_group_id,
-            history_ref,
-            overlays: Vec::new(),
-            annotation_colors: AnnotationColorCache::new(),
-            annotation_groups_loaded: false,
-            diff_component: None,
+            engine,
+            zoom_levels,
+            view_state,
+            paths,
         }
     }
 
     /// Add a path to the widget, starting from a Path object
     pub fn add_path(&mut self, path: &Path, conn: &'a GraphConnection) -> Result<()> {
-        let path_nodes = get_path_nodes(conn, path, self.controller.graph())?;
+        let path_nodes = get_path_nodes(conn, path, self.engine.graph())?;
         self.paths.push(path_nodes);
         Ok(())
     }
-
-    fn load_annotation_groups(&mut self, node_ids: &HashSet<HashId>) {
-        let (Some(block_group_id), conn) = (self.block_group_id, self.conn) else {
-            return;
-        };
-        let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id, self.history_ref) else {
-            return;
-        };
-        // Drop the annotation overlays but keep the path overlay across viewport reloads.
-        self.overlays
-            .retain(|overlay| overlay.path_nodes().is_some());
-        for entry in load_annotation_group_entries(conn, &block_group, self.history_ref) {
-            let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
-                conn,
-                workspace: self.workspace,
-                history_ref: self.history_ref,
-                current_block_group: &block_group,
-                entry: &entry,
-                node_ids,
-            }) else {
-                continue;
-            };
-            replace_track_overlays(&mut self.overlays, &group_track_key(&entry.id), entry_spans);
-        }
-    }
 }
 
-/// Display an inline widget for a generic GenGraph with interactive controls
+/// Display an inline GenGraph widget with interactive controls
 ///
 /// This function creates an interactive inline terminal widget that displays a GenGraph
 /// with full navigation and zoom controls. The widget appears inline in the terminal
 /// without taking over the entire screen.
-///
-/// Use [`show_inline_block_group_widget`] instead when the graph belongs to a `BlockGroup`,
-/// so that annotations can be loaded.
 ///
 /// # Controls
 /// * Arrow keys: Navigate cursor between nodes and pan the view
@@ -215,77 +116,36 @@ impl<'a> InlineGenGraphState<'a> {
 ///
 pub fn show_inline_gen_graph_widget(
     conn: &GraphConnection,
-    workspace: &Workspace,
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
 ) -> Result<bool> {
-    show_inline_widget(
-        conn,
-        workspace,
-        graph,
-        paths,
-        height,
-        InlineWidgetOptions::default(),
-    )
+    show_inline_widget(conn, graph, paths, height)
 }
 
-/// Display an inline sample diff using the standard added/removed highlights.
-pub fn show_inline_diff_graph_widget(
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    diff_graph: &gen_diff::graph::DiffGenGraph,
-    height: u16,
-) -> Result<bool> {
-    let component = build_diff_graph_component(diff_graph, String::new());
-    let graph = component.graph.clone();
-    show_inline_widget(
-        conn,
-        workspace,
-        &graph,
-        Vec::new(),
-        height,
-        InlineWidgetOptions {
-            diff_component: Some(component),
-            ..Default::default()
-        },
-    )
-}
-
-/// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
+/// Display an inline widget for a `BlockGroup`'s graph.
 ///
-/// See [`show_inline_gen_graph_widget`] for controls and return value.
+/// TODO(annotation-port): pre-unvendor-sugiyama this loaded annotation-group overlays via
+/// `load_annotation_groups`/`reapply_overlays`/`draw_annotation_labels` (main's #203 inline
+/// highlight rendering). That machinery was built on the deleted `GraphController`/`NodeSizer`
+/// and needs porting onto `LayoutEngine`/`GraphViewState` before it can be restored - for now
+/// this only renders the graph, with no annotation overlays.
 pub fn show_inline_block_group_widget(
     conn: &GraphConnection,
-    workspace: &Workspace,
     block_group_id: HashId,
     paths: Vec<Path>,
     height: u16,
     history_ref: Option<&str>,
 ) -> Result<bool> {
-    let graph = BlockGroup::get_graph(conn, workspace, &block_group_id, history_ref)
-        .map_err(Error::other)?;
-    show_inline_widget(
-        conn,
-        workspace,
-        &graph,
-        paths,
-        height,
-        InlineWidgetOptions {
-            block_group_id: Some(block_group_id),
-            history_ref,
-            ..Default::default()
-        },
-    )
+    let graph = BlockGroup::get_graph(conn, &block_group_id, history_ref).map_err(Error::other)?;
+    show_inline_widget(conn, &graph, paths, height)
 }
 
 fn show_inline_widget(
     conn: &GraphConnection,
-    workspace: &Workspace,
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
-    options: InlineWidgetOptions<'_>,
 ) -> Result<bool> {
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
@@ -295,111 +155,77 @@ fn show_inline_widget(
 
     match terminal_result {
         Ok(mut terminal) => {
-            let mut state = InlineGenGraphState::new(
-                graph,
-                conn,
-                workspace,
-                options.block_group_id,
-                options.history_ref,
-            );
-            state.diff_component = options.diff_component;
+            let mut state = InlineGenGraphState::new(graph, conn);
             for path in paths {
                 state.add_path(&path, conn)?;
             }
-            // Set up tick-based event loop for 60 FPS (16ms per frame)
-            let tick_rate = Duration::from_millis(16);
-            let mut events = TickEventSource::new(tick_rate);
-            let mut last_frame_time = Instant::now();
+            let mut events = CrosstermEventSource;
             let mut upgrade_requested = false;
 
+            terminal.draw(|frame| {
+                render_inline(frame, &mut state);
+            })?;
+
             loop {
-                // Process events with a reasonable timeout
-                if let Some(event) = events.poll_next(Duration::from_millis(250)) {
-                    match event {
-                        AppEvent::Tick => {
-                            // Calculate time delta since last frame
-                            let now = Instant::now();
-                            let frame_delta = now.duration_since(last_frame_time);
-                            last_frame_time = now;
+                // Rendering is event-driven (no animation to advance): block indefinitely
+                // until the next input event wakes us.
+                let Some(event) = events.poll_next(Duration::from_secs(3600)) else {
+                    continue;
+                };
 
-                            // Re-apply stored overlays before drawing.
-                            reapply_overlays(
-                                &mut state.controller,
-                                &mut state.overlays,
-                                &mut state.annotation_colors,
-                            );
-                            if let Some(diff_component) = &state.diff_component {
-                                apply_diff_highlights(&mut state.controller, diff_component);
+                match event {
+                    AppEvent::KeyPress(key) => {
+                        // Intercept quit signal and path highlighting
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                                break;
                             }
-
-                            // Draw the frame
-                            terminal.draw(|frame| {
-                                let area = frame.area();
-                                // Calculate the actual widget area first
-                                let main_layout = Layout::default()
-                                    .direction(Direction::Vertical)
-                                    .constraints([Constraint::Min(0), Constraint::Length(1)])
-                                    .split(area);
-                                let block = Block::default().borders(Borders::ALL);
-                                let inner_area = block.inner(main_layout[0]);
-
-                                // Set viewport bounds to the actual inner area before updating animations
-                                state.controller.viewport_state.viewport_bounds = inner_area;
-
-                                // Update animations with frame delta for smooth camera and cursor animations
-                                state.controller.update_animations(frame_delta);
-
-                                render_inline(frame, &mut state);
-                            })?;
-
-                            // After the first draw the viewport is populated. Load (or reload)
-                            // annotation groups using the viewport node IDs. On subsequent frames,
-                            // invalidate when the camera has moved far enough to change the node set.
-                            if state.controller.detect_motion() {
-                                state.annotation_groups_loaded = false;
+                            KeyCode::Char('f') => {
+                                upgrade_requested = true;
+                                break;
                             }
-                            if !state.annotation_groups_loaded {
-                                let node_ids = extract_viewport_node_ids(&state.controller);
-                                if !node_ids.is_empty() {
-                                    state.load_annotation_groups(&node_ids);
-                                    state.annotation_groups_loaded = true;
+                            KeyCode::Char('p') => {
+                                // Toggle path highlighting
+                                let path_style = PathStyle::new(current_theme()[0x09])
+                                    .with_line_style(LineStyle::Bold)
+                                    .with_merge_glyphs(true);
+
+                                if state.view_state.has_highlight(&path_style) {
+                                    state.view_state.clear_highlight(&path_style);
+                                } else if let Some(last_path) = state.paths.last() {
+                                    state
+                                        .view_state
+                                        .set_path_highlight(path_style, last_path.clone());
+                                } else {
+                                    eprintln!("No paths available for path highlighting");
                                 }
                             }
-                        }
-                        AppEvent::KeyPress(key) => {
-                            // Intercept quit signal and path highlighting
-                            match key.code {
-                                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
-                                    break;
-                                }
-                                KeyCode::Char('f') => {
-                                    upgrade_requested = true;
-                                    break;
-                                }
-                                KeyCode::Char('p') => {
-                                    // Toggle the path overlay; reapply_highlights repaints it.
-                                    if has_path_overlay(&state.overlays) {
-                                        remove_path_overlay(&mut state.overlays);
-                                    } else if let Some(nodes) = state.paths.last().cloned() {
-                                        let style = PathStyle::new(current_theme()[0x09])
-                                            .with_line_style(LineStyle::Bold)
-                                            .with_merge_glyphs(true);
-                                        set_path_overlay(&mut state.overlays, style, nodes);
-                                    } else {
-                                        eprintln!("No paths available for path highlighting");
-                                    }
-                                }
-                                _ => {
-                                    let _ = state.controller.handle_key_event(key);
-                                }
+                            KeyCode::Char('+') | KeyCode::Char('=') => {
+                                gen_graph_widget::zoom_in(
+                                    &mut state.view_state,
+                                    &state.zoom_levels,
+                                );
                             }
-                        }
-                        AppEvent::Resize(w, _h) => {
-                            // Update viewport width, but keep the fixed inline height
-                            state.controller.viewport_state.viewport_bounds.width = w;
+                            KeyCode::Char('-') => {
+                                gen_graph_widget::zoom_out(
+                                    &mut state.view_state,
+                                    &state.zoom_levels,
+                                );
+                            }
+                            _ => {
+                                let _ = state.view_state.handle_key_event(key);
+                            }
                         }
                     }
+                    AppEvent::Resize(_w, _h) => {
+                        // Width is picked up automatically from `frame.area()` on the
+                        // next render; the inline viewport's height stays fixed.
+                    }
                 }
+
+                terminal.draw(|frame| {
+                    render_inline(frame, &mut state);
+                })?;
             }
 
             // Final render without border -> capture the viewport area
@@ -446,94 +272,40 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
     // Render the border and content
     frame.render_widget(block, main_layout[0]);
 
-    // Set viewport bounds and focus for the current area
-    state.controller.viewport_state.viewport_bounds = inner_area;
-    state.controller.viewport_state.focus();
+    // Create the GenGraph view
+    let active_renderer = &state.zoom_levels[state.view_state.zoom_index].1;
+    let view = GraphView::new(&mut state.engine, active_renderer);
 
-    // Create the GenGraph widget with current level of detail
-    let detail_level = state.controller.get_detail_level();
-    let widget = create_gen_graph_widget(state.conn, state.workspace)
-        .detail_level(detail_level)
-        .cursor();
-
-    // Render the graph widget
-    frame.render_stateful_widget(widget, inner_area, &mut state.controller);
-
-    // Draw floating annotation labels after the graph.
-    let any_annotations_hidden = draw_annotation_labels(
-        frame.buffer_mut(),
-        inner_area,
-        &state.controller,
-        &state.overlays,
-    );
-
-    let hidden_legend = any_annotations_hidden.then(|| {
-        if detail_level == VisualDetail::Full {
-            "* some annotations hidden due to space constraints"
-        } else {
-            "* only variant(edge)-spanning or whole-node annotations shown"
-        }
-    });
-    draw_controls_help(frame, main_layout[1], state, hidden_legend);
+    // Render the graph view
+    frame.render_stateful_widget(view, inner_area, &mut state.view_state);
+    draw_controls_help(frame, main_layout[1], state);
 }
 
 /// Draw the final plot after the widget is done
 fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
-    let area = frame.area();
-    // Set viewport bounds and focus for the current area
-    state.controller.viewport_state.viewport_bounds =
-        area.offset(ratatui::layout::Offset { x: 0, y: -1 });
-    state.controller.viewport_state.blur();
+    let area = frame.area().offset(ratatui::layout::Offset { x: 0, y: -1 });
+    // The final render omits the cursor overlay.
+    state.view_state.hide_cursor();
 
-    // Create the GenGraph widget with current level of detail
-    let detail_level = state.controller.get_detail_level();
-    let widget = create_gen_graph_widget(state.conn, state.workspace).detail_level(detail_level);
+    // Create the GenGraph view
+    let active_renderer = &state.zoom_levels[state.view_state.zoom_index].1;
+    let view = GraphView::new(&mut state.engine, active_renderer);
 
-    // Render the graph widget
-    frame.render_stateful_widget(
-        widget,
-        area.offset(ratatui::layout::Offset { x: 0, y: -1 }),
-        &mut state.controller,
-    );
+    // Render the graph view
+    frame.render_stateful_widget(view, area, &mut state.view_state);
 }
 
-/// Draw the bottom controls line. When `hidden_legend` is set, it's right-aligned on the
-/// same line and the path-visibility shortcut is dropped to make room for it.
-fn draw_controls_help(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut InlineGenGraphState,
-    hidden_legend: Option<&str>,
-) {
-    let help_text = if hidden_legend.is_some() {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | q: Exit".to_string()
-    } else if has_path_overlay(&state.overlays) {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
-    } else {
+fn draw_controls_help(frame: &mut Frame, area: Rect, state: &mut InlineGenGraphState) {
+    let help_text = if state.view_state.highlights.styles.is_empty() {
         "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
+    } else {
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
     };
 
-    let buf = frame.buffer_mut();
-    buf.set_string(
-        area.x,
-        area.y,
-        &help_text,
-        Style::default().fg(Color::Yellow),
-    );
+    let paragraph =
+        ratatui::widgets::Paragraph::new(help_text).style(Style::default().fg(Color::Yellow));
 
-    if let Some(legend) = hidden_legend {
-        let help_width = help_text.chars().count() as u16;
-        let legend_width = legend.chars().count() as u16;
-        let legend_x = area.right().saturating_sub(legend_width);
-        if legend_x > area.x + help_width {
-            buf.set_string(
-                legend_x,
-                area.y,
-                legend,
-                Style::default().fg(current_theme()[0x09]),
-            );
-        }
-    }
+    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
@@ -542,12 +314,11 @@ mod tests {
     use petgraph::graphmap::DiGraphMap;
 
     use super::*;
-    use crate::{graph::GraphNode, test_helpers::setup_gen};
+    use crate::{graph::GraphNode, test_helpers::get_connection};
 
     #[test]
     fn test_inline_state_creation() {
-        let context = setup_gen();
-        let conn = context.graph().conn();
+        let conn = get_connection(None).expect("Failed to get test database connection");
         let mut graph = DiGraphMap::new();
 
         // Add a simple test node
@@ -558,7 +329,7 @@ mod tests {
         };
         graph.add_node(node);
 
-        let state = InlineGenGraphState::new(&graph, conn, context.workspace(), None, None);
-        assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
+        let state = InlineGenGraphState::new(&graph, &conn);
+        assert_eq!(state.view_state.zoom_index, DEFAULT_ZOOM_LEVEL);
     }
 }

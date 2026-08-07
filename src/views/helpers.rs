@@ -14,7 +14,7 @@ pub fn project_path_nodes(
     graph: &GenGraph,
 ) -> Result<Vec<GraphNode>, String> {
     let path_blocks = path
-        .blocks(conn)
+        .blocks(conn, None)
         .map_err(|err| format!("Failed to load path blocks: {err}"))?;
 
     let projected_path = project_path(graph, &path_blocks);
