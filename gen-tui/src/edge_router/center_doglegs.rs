@@ -186,10 +186,10 @@ mod tests {
         //                   node_3 (y=10)
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected>::default();
 
-        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 0), (1, 1)));
-        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 8), (1, 1)));
-        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 8), (1, 1)));
-        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 10), (1, 1)));
+        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0), (1, 1)));
+        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 8), (1, 1)));
+        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 8), (1, 1)));
+        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 10), (1, 1)));
 
         graph.add_edge(node_0, node_1, LayoutEdge::default());
         graph.add_edge(node_1, node_2, LayoutEdge::default());
@@ -212,10 +212,10 @@ mod tests {
         //                   node_3 (y=10)
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected>::default();
 
-        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 0), (1, 1)));
-        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 2), (1, 1)));
-        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 2), (1, 1)));
-        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 10), (1, 1)));
+        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0), (1, 1)));
+        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 2), (1, 1)));
+        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 2), (1, 1)));
+        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 10), (1, 1)));
 
         graph.add_edge(node_0, node_1, LayoutEdge::default());
         graph.add_edge(node_1, node_2, LayoutEdge::default());
@@ -238,10 +238,10 @@ mod tests {
         //                   node_0 (y=10)
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected>::default();
 
-        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 10), (1, 1)));
-        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 2), (1, 1)));
-        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 2), (1, 1)));
-        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 0), (1, 1)));
+        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 10), (1, 1)));
+        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 2), (1, 1)));
+        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 2), (1, 1)));
+        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0), (1, 1)));
 
         graph.add_edge(node_0, node_1, LayoutEdge::default());
         graph.add_edge(node_1, node_2, LayoutEdge::default());
@@ -264,10 +264,10 @@ mod tests {
         //                   node_0 (y=10)
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected>::default();
 
-        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 10), (1, 1)));
-        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 8), (1, 1)));
-        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 8), (1, 1)));
-        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 0), (1, 1)));
+        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 10), (1, 1)));
+        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 8), (1, 1)));
+        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 8), (1, 1)));
+        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0), (1, 1)));
 
         graph.add_edge(node_0, node_1, LayoutEdge::default());
         graph.add_edge(node_1, node_2, LayoutEdge::default());
@@ -287,13 +287,13 @@ mod tests {
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected>::default();
 
         // Dogleg nodes
-        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 0), (1, 1)));
-        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 2), (1, 1)));
-        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 2), (1, 1)));
-        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 10), (1, 1)));
+        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0), (1, 1)));
+        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 2), (1, 1)));
+        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 2), (1, 1)));
+        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 10), (1, 1)));
 
         // Obstacle node in the swept region (would be at y=5 after centering)
-        let obstacle = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 3, 5), (1, 1)));
+        let obstacle = graph.add_node(LayoutNode::routing(LocalPos::new_xy(3, 5), (1, 1)));
 
         graph.add_edge(node_0, node_1, LayoutEdge::default());
         graph.add_edge(node_1, node_2, LayoutEdge::default());
@@ -313,10 +313,10 @@ mod tests {
         // Test that already-centered doglegs are not modified
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected>::default();
 
-        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 0), (1, 1)));
-        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0, 5), (1, 1)));
-        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 5), (1, 1)));
-        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5, 10), (1, 1)));
+        let node_0 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0), (1, 1)));
+        let node_1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 5), (1, 1)));
+        let node_2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 5), (1, 1)));
+        let node_3 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(5, 10), (1, 1)));
 
         graph.add_edge(node_0, node_1, LayoutEdge::default());
         graph.add_edge(node_1, node_2, LayoutEdge::default());

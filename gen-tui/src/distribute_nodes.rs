@@ -1,10 +1,10 @@
-//! Horizontal chain redistribution for layout nodes.
+//! Global layout compaction for layout graphs.
 //!
-//! After the Sugiyama algorithm completes, nodes along horizontal edges may look
-//! out of place due to center-alignment. This module redistributes nodes along
-//! horizontal chains to improve visual spacing while respecting obstacles.
+//! Rebuilds routed coordinates with size-aware separation constraints.
+//!
+//! Aligned nodes move as rigid segments, and each segment is centered within its feasible range.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use petgraph::{
     Undirected,
@@ -13,12 +13,12 @@ use petgraph::{
     visit::{EdgeRef, IntoEdgeReferences},
 };
 
-use crate::layout::{LayoutEdge, LayoutNode, NodeRole};
+use crate::{
+    compaction::{AxisPlacement, Constraint, compact_axis_with_centering},
+    layout::{LayoutEdge, LayoutNode, NodeRole},
+};
 
-/// Asymmetric halves for a node dimension
-///   - `lo`: extent in the lower/negative direction from center
-///     For odd sizes, `lo` gets the extra cell.
-///   - `hi`: extent in the higher/positive direction from center
+/// Extents on either side of a discrete center; `lo` receives the extra cell for odd sizes.
 #[derive(Clone, Copy, Debug)]
 pub struct Halves {
     pub lo: i64, // lower/negative direction (left for x, down for y)
@@ -32,31 +32,7 @@ pub struct Interval {
     pub end: i64,   // inclusive
 }
 
-/// Result of optimizing a horizontal chain.
-#[derive(Debug)]
-pub enum ChainOptResult {
-    Optimized { new_x: Vec<i64> },
-    RevertToOriginal,
-}
-
-/// A horizontal chain represents a sequence of nodes connected by horizontal edges.
-/// Chains are split at Routing nodes.
-#[derive(Debug, Clone)]
-struct HorizontalChain {
-    /// Ordered node indices in the chain (left to right by x-coordinate)
-    nodes: Vec<NodeIndex>,
-    /// Y-coordinate of the chain (all nodes have same y)
-    y: i64,
-}
-
-/// Calculate asymmetric halves for a given dimension size.
-/// For odd sizes, the lower half (lo) is larger.
-/// Works for both width (x-axis) and height (y-axis).
-///
-/// Examples:
-/// - size=9 -> lo=5, hi=4
-/// - size=8 -> lo=4, hi=4
-/// - size=1 -> lo=1, hi=0
+/// Split a discrete size into lower and upper extents.
 pub fn halves(size: i64) -> Halves {
     Halves {
         lo: (size + 1) / 2,
@@ -72,608 +48,6 @@ pub fn base_step(width_i: i64, width_j: i64) -> i64 {
     hi.hi + hj.lo
 }
 
-/// Check if two intervals overlap.
-fn overlaps(a: Interval, b: Interval) -> bool {
-    a.start <= b.end && b.start <= a.end
-}
-
-/// Calculate the occupied interval for a node given its center x and width.
-fn occ_interval(center_x: i64, width: i64) -> Interval {
-    let h = halves(width);
-    Interval {
-        start: center_x - h.lo,
-        end: center_x + h.hi,
-    }
-}
-
-/// Calculate the minimal rightward shift needed to move a node's occupied interval
-/// past a forbidden interval.
-fn shift_right_to_avoid(protected: Interval, center_x: i64, width: i64) -> i64 {
-    let h = halves(width);
-    let min_center = protected.end + 1 + h.lo;
-    (min_center - center_x).max(0)
-}
-
-/// Identify all horizontal chains in the graph.
-/// A horizontal chain is a path of nodes connected by edges where all nodes
-/// have the same y-coordinate. Chains are split at Routing nodes.
-fn identify_chains(
-    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-) -> Vec<HorizontalChain> {
-    let mut chains = Vec::new();
-    let mut visited_edges: HashSet<(NodeIndex, NodeIndex)> = HashSet::new();
-
-    // Group nodes by y-coordinate
-    let mut y_groups: HashMap<i64, Vec<NodeIndex>> = HashMap::new();
-    for node_idx in graph.node_indices() {
-        if let Some(node) = graph.node_weight(node_idx) {
-            y_groups.entry(node.pos.y).or_default().push(node_idx);
-        }
-    }
-
-    // For each y-level, find horizontal edges
-    for (y, nodes_at_y) in y_groups {
-        let nodes_set: HashSet<NodeIndex> = nodes_at_y.iter().copied().collect();
-
-        // Find all horizontal edges at this y-level
-        let mut horizontal_edges: Vec<(NodeIndex, NodeIndex)> = Vec::new();
-        for node_idx in &nodes_at_y {
-            for edge in graph.edges(*node_idx) {
-                let source = edge.source();
-                let target = edge.target();
-
-                // Check if both endpoints are at the same y-coordinate
-                if nodes_set.contains(&source) && nodes_set.contains(&target) {
-                    let edge_pair = if source.index() < target.index() {
-                        (source, target)
-                    } else {
-                        (target, source)
-                    };
-
-                    if !visited_edges.contains(&edge_pair) {
-                        horizontal_edges.push(edge_pair);
-                        visited_edges.insert(edge_pair);
-                    }
-                }
-            }
-        }
-
-        // Build chains from horizontal edges using graph traversal
-        let mut edge_map: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
-        for (a, b) in &horizontal_edges {
-            edge_map.entry(*a).or_default().push(*b);
-            edge_map.entry(*b).or_default().push(*a);
-        }
-
-        let mut visited_nodes: HashSet<NodeIndex> = HashSet::new();
-
-        // DFS to find connected components
-        for start_node in &nodes_at_y {
-            if visited_nodes.contains(start_node) {
-                continue;
-            }
-            if !edge_map.contains_key(start_node) {
-                continue; // Isolated node, not part of any chain
-            }
-
-            // Find all nodes in this connected component
-            let mut component = Vec::new();
-            let mut stack = vec![*start_node];
-
-            while let Some(node) = stack.pop() {
-                if visited_nodes.contains(&node) {
-                    continue;
-                }
-                visited_nodes.insert(node);
-                component.push(node);
-
-                if let Some(neighbors) = edge_map.get(&node) {
-                    for &neighbor in neighbors {
-                        if !visited_nodes.contains(&neighbor) {
-                            stack.push(neighbor);
-                        }
-                    }
-                }
-            }
-
-            // Sort component by x-coordinate
-            component
-                .sort_by_key(|&idx| graph.node_weight(idx).map(|n| n.pos.x).unwrap_or(i64::MAX));
-
-            // Split the component at Routing nodes
-            let sub_chains = split_chain_at_routing_nodes(graph, &component);
-
-            for sub_chain in sub_chains {
-                if sub_chain.len() >= 2 {
-                    chains.push(HorizontalChain {
-                        nodes: sub_chain,
-                        y,
-                    });
-                }
-            }
-        }
-    }
-
-    chains
-}
-
-/// Split a chain at Routing nodes, duplicating routing nodes on both sides.
-fn split_chain_at_routing_nodes(
-    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    chain: &[NodeIndex],
-) -> Vec<Vec<NodeIndex>> {
-    let mut result = Vec::new();
-    let mut current_chain = Vec::new();
-
-    for &node_idx in chain {
-        if let Some(node) = graph.node_weight(node_idx) {
-            match node.role {
-                NodeRole::Routing => {
-                    // End current chain with routing node
-                    if !current_chain.is_empty() {
-                        current_chain.push(node_idx);
-                        result.push(current_chain.clone());
-                    }
-                    // Start new chain with routing node
-                    current_chain = vec![node_idx];
-                }
-                _ => {
-                    current_chain.push(node_idx);
-                }
-            }
-        }
-    }
-
-    // Add final chain
-    if !current_chain.is_empty() {
-        result.push(current_chain);
-    }
-
-    result
-}
-
-/// Find all obstacles (forbidden intervals) for a given horizontal chain.
-///
-/// Obstacles come from two sources:
-/// 1. Vertical edges that cross the horizontal line at y
-/// 2. Nodes whose bounding boxes intersect with the chain's envelope
-///
-/// The chain envelope is defined as the smallest rectangle spanning:
-/// - x: from leftmost to rightmost chain node
-/// - y: the chain's y-coordinate ± node_separation (to account for node heights)
-///
-/// For each obstacle, we protect the area with margins based on node_separation.
-fn find_obstacles(
-    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    chain_y: i64,
-    chain_nodes: &[NodeIndex],
-    node_separation: i64,
-) -> Vec<Interval> {
-    let mut obstacles = Vec::new();
-
-    // Build set of chain node indices for quick lookup
-    let chain_node_set: HashSet<NodeIndex> = chain_nodes.iter().copied().collect();
-
-    // Calculate the chain envelope (exact bounding box of chain nodes)
-    let (chain_x_min, chain_x_max, envelope_y_min, envelope_y_max) = {
-        let mut x_min = i64::MAX;
-        let mut x_max = i64::MIN;
-        let mut max_half_down = 0i64; // Maximum downward extent from center
-        let mut max_half_up = 0i64; // Maximum upward extent from center
-
-        for &node_idx in chain_nodes {
-            if let Some(node) = graph.node_weight(node_idx) {
-                x_min = x_min.min(node.pos.x);
-                x_max = x_max.max(node.pos.x);
-
-                // Calculate how far this node extends above/below its center
-                let h = halves(node.size.1 as i64);
-                max_half_down = max_half_down.max(h.lo); // downward in y
-                max_half_up = max_half_up.max(h.hi); // upward in y
-            }
-        }
-
-        // Envelope is just the actual extent of chain nodes
-        // node_separation is applied later when creating exclusion zones
-        (x_min, x_max, chain_y - max_half_down, chain_y + max_half_up)
-    };
-
-    // Find all vertical edges that cross this y-level
-    for edge in graph.edge_references() {
-        let source_idx = edge.source();
-        let target_idx = edge.target();
-
-        if let (Some(source_node), Some(target_node)) =
-            (graph.node_weight(source_idx), graph.node_weight(target_idx))
-        {
-            let x1 = source_node.pos.x;
-            let y1 = source_node.pos.y;
-            let x2 = target_node.pos.x;
-            let y2 = target_node.pos.y;
-
-            // Check if this is a vertical edge (same x-coordinate)
-            if x1 == x2 {
-                // Check if it crosses the chain's y-level
-                let (y_min, y_max) = if y1 < y2 { (y1, y2) } else { (y2, y1) };
-
-                if y_min < chain_y && chain_y < y_max {
-                    // Vertical edge crosses at x1 (= x2)
-                    // Protect the crossing cell and its neighbors
-                    obstacles.push(Interval {
-                        start: x1 - 1,
-                        end: x1 + 1,
-                    });
-                }
-            }
-            // Horizontal edges (y1 == y2) don't cross other horizontal lines
-            // Diagonal edges shouldn't exist in rectilinear layout
-        }
-    }
-
-    // Find all nodes (not in the chain) whose bounding boxes intersect the chain envelope
-    for node_idx in graph.node_indices() {
-        // Skip nodes that are part of the chain
-        if chain_node_set.contains(&node_idx) {
-            continue;
-        }
-
-        if let Some(node) = graph.node_weight(node_idx) {
-            // Calculate node's bounding box using halves for both dimensions
-            let node_h_width = halves(node.size.0 as i64);
-            let node_x_min = node.pos.x - node_h_width.lo;
-            let node_x_max = node.pos.x + node_h_width.hi;
-
-            let node_h_height = halves(node.size.1 as i64);
-            let node_y_min = node.pos.y - node_h_height.lo; // downward in y
-            let node_y_max = node.pos.y + node_h_height.hi; // upward in y
-
-            // Check if node's bounding box intersects the chain envelope
-            let x_intersects = node_x_max >= chain_x_min && node_x_min <= chain_x_max;
-            let y_intersects = node_y_max >= envelope_y_min && node_y_min <= envelope_y_max;
-
-            if x_intersects && y_intersects {
-                // Block the entire column at this node's x position ± node_separation
-                obstacles.push(Interval {
-                    start: node.pos.x - node_separation,
-                    end: node.pos.x + node_separation,
-                });
-            }
-        }
-    }
-
-    // Merge overlapping obstacles
-    if obstacles.is_empty() {
-        return obstacles;
-    }
-
-    obstacles.sort_by_key(|i| i.start);
-    let mut merged = vec![obstacles[0]];
-
-    for obstacle in obstacles.iter().skip(1) {
-        let last = merged.last_mut().unwrap();
-        if obstacle.start <= last.end + 1 {
-            // Overlapping or adjacent - merge
-            last.end = last.end.max(obstacle.end);
-        } else {
-            merged.push(*obstacle);
-        }
-    }
-
-    merged
-}
-
-/// Optimize a single horizontal chain by redistributing nodes to maximize
-/// the minimum gap between nodes while avoiding obstacles.
-fn optimize_chain_edge_gaps(
-    widths: &[i64],
-    orig_x: &[i64],
-    forbidden: &[Interval],
-    min_gap: i64,
-) -> ChainOptResult {
-    let n = widths.len();
-    if n < 2 || orig_x.len() != n {
-        return ChainOptResult::RevertToOriginal;
-    }
-
-    let x0 = orig_x[0];
-    let xn = orig_x[n - 1];
-
-    // Precompute base steps
-    let mut base: Vec<i64> = Vec::with_capacity(n - 1);
-    for i in 0..(n - 1) {
-        base.push(base_step(widths[i], widths[i + 1]));
-    }
-
-    let base_sum: i64 = base.iter().sum();
-    let span: i64 = xn - x0;
-    let g_total: i64 = span - base_sum;
-
-    if g_total < 0 {
-        return ChainOptResult::RevertToOriginal;
-    }
-
-    // Binary search for maximum minimum gap
-    let m = (n - 1) as i64;
-    let mut lo = min_gap; // Start from minimum configured gap
-    let mut hi = g_total / m;
-
-    let mut best_x: Option<Vec<i64>> = None;
-
-    while lo <= hi {
-        let mid = (lo + hi) / 2;
-        match feasible_with_min_gap(mid, widths, x0, xn, &base, g_total, forbidden) {
-            Some(x) => {
-                best_x = Some(x);
-                lo = mid + 1; // try larger t
-            }
-            None => {
-                hi = mid - 1;
-            }
-        }
-    }
-
-    match best_x {
-        Some(new_x) => ChainOptResult::Optimized { new_x },
-        None => ChainOptResult::RevertToOriginal,
-    }
-}
-
-/// Check if a given minimum gap `t` is feasible, and if so, return the positions.
-fn feasible_with_min_gap(
-    t: i64,
-    widths: &[i64],
-    x0: i64,
-    xn: i64,
-    base: &[i64],
-    g_total: i64,
-    forbidden: &[Interval],
-) -> Option<Vec<i64>> {
-    let n = widths.len();
-    let m = n - 1;
-
-    // Start with all gaps = t
-    let mut g: Vec<i64> = vec![t; m];
-    let mut slack: i64 = g_total - t * (m as i64);
-
-    if slack < 0 {
-        return None;
-    }
-
-    // Pass 1: left-to-right. Push nodes right to avoid obstacles.
-    let mut x = x0;
-    for i in 1..(n - 1) {
-        // Compute position based on current gaps
-        x += base[i - 1] + g[i - 1];
-
-        // Check for obstacle collisions and push right if needed
-        let mut dx_needed = 0i64;
-        loop {
-            let occ = occ_interval(x + dx_needed, widths[i]);
-            let mut hit: Option<Interval> = None;
-
-            for &f in forbidden {
-                if overlaps(occ, f) {
-                    hit = Some(f);
-                    break;
-                }
-                if f.start > occ.end {
-                    break; // sorted, no more overlaps possible
-                }
-            }
-
-            match hit {
-                None => break,
-                Some(f) => {
-                    let extra = shift_right_to_avoid(f, x + dx_needed, widths[i]);
-                    if extra == 0 {
-                        break;
-                    }
-                    dx_needed += extra;
-                }
-            }
-        }
-
-        if dx_needed > 0 {
-            if dx_needed > slack {
-                return None; // Not enough slack to push
-            }
-            slack -= dx_needed;
-            g[i - 1] += dx_needed;
-            x += dx_needed;
-        }
-    }
-
-    // Pass 2: allocate remaining slack right-to-left
-    // This makes left gaps smaller and right gaps larger, which is the
-    // opposite preference from node width allocation (where we prefer left-heavy).
-    // For gaps, we want smaller gaps on the left side.
-    while slack > 0 {
-        let mut placed = false;
-
-        // Iterate from right to left (reverse order)
-        for e in (0..m).rev() {
-            g[e] += 1;
-            if chain_is_legal(widths, x0, base, &g, forbidden) {
-                slack -= 1;
-                placed = true;
-                break; // restart from right
-            } else {
-                g[e] -= 1;
-            }
-        }
-
-        if !placed {
-            return None; // Cannot place remaining slack
-        }
-    }
-
-    // Build final positions
-    let mut xs: Vec<i64> = vec![0; n];
-    xs[0] = x0;
-    for i in 0..m {
-        xs[i + 1] = xs[i] + base[i] + g[i];
-    }
-
-    // Verify endpoint constraint
-    if xs[n - 1] != xn {
-        return None;
-    }
-
-    Some(xs)
-}
-
-/// Check if a chain configuration is legal (no overlaps with obstacles).
-fn chain_is_legal(
-    widths: &[i64],
-    x0: i64,
-    base: &[i64],
-    g: &[i64],
-    forbidden: &[Interval],
-) -> bool {
-    let n = widths.len();
-    let mut x = x0;
-
-    for i in 1..(n - 1) {
-        x += base[i - 1] + g[i - 1];
-        let occ = occ_interval(x, widths[i]);
-
-        for &f in forbidden {
-            if overlaps(occ, f) {
-                return false;
-            }
-            if f.start > occ.end {
-                break; // sorted, no more overlaps possible
-            }
-        }
-    }
-
-    true
-}
-
-/// Build a mapping from x-coordinates to Sugiyama layer indices.
-/// This is used to reassign layer fields after horizontal redistribution.
-fn build_x_to_layer_mapping(
-    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-) -> Vec<(i64, i32)> {
-    let mut x_to_layer: Vec<(i64, i32)> = Vec::new();
-
-    for node_idx in graph.node_indices() {
-        if let Some(node) = graph.node_weight(node_idx)
-            && let NodeRole::Data(_) = node.role
-            && let Some(layer) = node.layer
-        {
-            x_to_layer.push((node.pos.x, layer));
-        }
-    }
-
-    // Sort by x-coordinate for efficient lookup
-    x_to_layer.sort_by_key(|&(x, _layer)| x);
-
-    x_to_layer
-}
-
-/// Find the closest layer to a given x-coordinate.
-/// On distance ties, prefer the lower layer number.
-fn find_closest_layer(x_to_layer: &[(i64, i32)], target_x: i64) -> Option<i32> {
-    if x_to_layer.is_empty() {
-        return None;
-    }
-
-    // Find minimum by (distance, layer) - this ensures ties favor lower layer numbers
-    x_to_layer
-        .iter()
-        .map(|&(x, layer)| ((x - target_x).abs(), layer))
-        .min_by_key(|&(dist, layer)| (dist, layer))
-        .map(|(_, layer)| layer)
-}
-
-/// Redistribute nodes along horizontal chains in the layout graph.
-/// This should be called after make_rectilinear and before building the spatial index.
-///
-/// The `vertex_spacing` parameter defines the minimum gap that should be maintained
-/// between nodes, matching the spacing used elsewhere in the layout.
-pub fn redistribute_horizontal_chains(
-    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    vertex_spacing: f64,
-) {
-    // Build x-to-layer mapping before any redistribution
-    // This preserves the original Sugiyama layer assignments for cursor navigation
-    let x_to_layer = build_x_to_layer_mapping(graph);
-
-    let chains = identify_chains(graph);
-    let min_gap = vertex_spacing.round() as i64;
-
-    for chain in chains {
-        if chain.nodes.len() < 2 {
-            continue; // Need at least 2 nodes for redistribution
-        }
-
-        // Extract current positions and widths
-        let mut widths = Vec::new();
-        let mut orig_x = Vec::new();
-
-        for &node_idx in &chain.nodes {
-            if let Some(node) = graph.node_weight(node_idx) {
-                widths.push(node.size.0 as i64);
-                orig_x.push(node.pos.x);
-            }
-        }
-
-        // Find obstacles for this chain
-        let obstacles = find_obstacles(graph, chain.y, &chain.nodes, min_gap);
-
-        // Optimize the chain
-        match optimize_chain_edge_gaps(&widths, &orig_x, &obstacles, min_gap) {
-            ChainOptResult::Optimized { new_x } => {
-                // Update positions in graph
-                for (i, &node_idx) in chain.nodes.iter().enumerate() {
-                    if let Some(node) = graph.node_weight_mut(node_idx) {
-                        // Only update Data nodes, keep Routing nodes fixed
-                        match node.role {
-                            NodeRole::Data(_) if i > 0 && i < chain.nodes.len() - 1 => {
-                                log::trace!(
-                                    "  Node {} moved from x={} to x={}",
-                                    node_idx.index(),
-                                    node.pos.x,
-                                    new_x[i]
-                                );
-                                node.pos.x = new_x[i];
-
-                                // Snap layer to nearest pre-redistribution layer.
-                                // The visual position moves freely for aesthetics, but the layer
-                                // field (used for cursor navigation) is anchored to the closest
-                                // original Sugiyama column. Stacking partners that don't straddle
-                                // a column midpoint will share the same layer.
-                                if let Some(snapped_layer) =
-                                    find_closest_layer(&x_to_layer, new_x[i])
-                                {
-                                    node.layer = Some(snapped_layer);
-                                }
-                            }
-                            _ => {
-                                // Keep endpoints and routing nodes fixed
-                            }
-                        }
-                    }
-                }
-            }
-            ChainOptResult::RevertToOriginal => {
-                log::trace!(
-                    "Chain at y={} optimization failed, keeping original positions",
-                    chain.y
-                );
-            }
-        }
-    }
-}
-
-/// The axis along which [`compress_dead_space`] operates.
-#[derive(Clone, Copy, Debug)]
-enum CompressAxis {
-    X,
-    Y,
-}
-
 /// Compute the cells occupied by a node along one axis, matching the
 /// asymmetric extents of `BigRect::from_center_and_size`: even sizes extend
 /// one cell further in the positive direction.
@@ -684,106 +58,515 @@ fn occupied_extent(center: i64, size: i64) -> Interval {
     }
 }
 
-/// Remove dead space from the layout by shrinking oversized gaps between
-/// occupied bands down to `vertex_spacing`, on both axes.
-///
-/// The Brandes-Köpf coordinate assignment averages four extreme layouts. For
-/// dense graphs (e.g. layers connected all-to-all) the four layouts disagree
-/// strongly on block placement, and the average leaves large bands of empty
-/// space between nodes that no individual layout had. This pass scans each
-/// axis for bands of cells not covered by any node's bounding box and shrinks
-/// them to the configured spacing. Gaps at or below the spacing are never
-/// touched, and nothing is ever moved apart, so legitimate tight routing
-/// tracks are preserved.
-///
-/// Edges are drawn as segments between node positions, so shifting whole
-/// bands keeps the layout rectilinear: vertical and horizontal runs through a
-/// removed gap simply get shorter.
-///
-/// Note: this pass is complementary to, not redundant with, the edge router's
-/// `compress_graph` (see [`crate::edge_router::layout_graph_process`]). That
-/// pass is a local normalizer: per layer pair, label-aware, and bidirectional,
-/// meaning it may *expand* spacing so routing channels clear wide node labels.
-/// This pass is a global, shrink-only cleaner: it removes slack spanning the
-/// whole partition (e.g. Brandes-Köpf averaging artifacts) that no single
-/// layer pair can see. Removing either reintroduces distortions: without
-/// `compress_graph`, junctions can end up inside wide nodes; without this
-/// pass, dense graphs keep large dead bands.
-///
-/// In the layout pipeline this runs both before and after
-/// [`redistribute_horizontal_chains`]: before, because once nodes are
-/// re-centered along their chains they straddle inter-column gaps and block
-/// compression; after, because redistribution can vacate bands (e.g. a wide
-/// node moving out of an inflated column), reopening dead space.
-pub fn compress_dead_space(
-    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    vertex_spacing: f64,
-) {
-    let min_gap = (vertex_spacing.round() as i64).max(1);
-    compress_axis(graph, min_gap, CompressAxis::X);
-    compress_axis(graph, min_gap, CompressAxis::Y);
+/// The axis being solved. The "perpendicular" direction is the other axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Axis {
+    X,
+    Y,
 }
 
-fn compress_axis(
-    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
-    min_gap: i64,
-    axis: CompressAxis,
-) {
-    let extent = |node: &LayoutNode| match axis {
-        CompressAxis::X => occupied_extent(node.pos.x, node.size.0 as i64),
-        CompressAxis::Y => occupied_extent(node.pos.y, node.size.1 as i64),
-    };
-
-    let mut intervals: Vec<Interval> = graph.node_weights().map(extent).collect();
-    if intervals.is_empty() {
-        return;
-    }
-    intervals.sort_by_key(|interval| interval.start);
-
-    // Merge intervals whose gap is at most min_gap: those gaps cannot shrink,
-    // so the band boundary carries no shift change.
-    let mut bands: Vec<Interval> = vec![intervals[0]];
-    for interval in &intervals[1..] {
-        let last = bands.last_mut().unwrap();
-        if interval.start <= last.end + 1 + min_gap {
-            last.end = last.end.max(interval.end);
-        } else {
-            bands.push(*interval);
+impl Axis {
+    fn pos(self, node: &LayoutNode) -> i64 {
+        match self {
+            Axis::X => node.pos.x,
+            Axis::Y => node.pos.y,
         }
     }
 
-    // Accumulate the leftward shift for each band: every gap larger than
-    // min_gap is reduced to exactly min_gap.
-    let mut shifts: Vec<i64> = vec![0; bands.len()];
-    for i in 1..bands.len() {
-        let gap = bands[i].start - bands[i - 1].end - 1;
-        shifts[i] = shifts[i - 1] + (gap - min_gap);
+    fn perp_pos(self, node: &LayoutNode) -> i64 {
+        match self {
+            Axis::X => node.pos.y,
+            Axis::Y => node.pos.x,
+        }
     }
 
-    if *shifts.last().unwrap() == 0 {
+    fn size(self, node: &LayoutNode) -> i64 {
+        match self {
+            Axis::X => node.size.0 as i64,
+            Axis::Y => node.size.1 as i64,
+        }
+    }
+
+    fn perp_size(self, node: &LayoutNode) -> i64 {
+        match self {
+            Axis::X => node.size.1 as i64,
+            Axis::Y => node.size.0 as i64,
+        }
+    }
+
+    fn set_pos(self, node: &mut LayoutNode, value: i64) {
+        match self {
+            Axis::X => node.pos.x = value,
+            Axis::Y => node.pos.y = value,
+        }
+    }
+}
+
+/// A maximal rigid group of nodes sharing one coordinate on the solved axis:
+/// for x, a column connected by vertical edges; for y, a row connected by
+/// horizontal edges. The whole segment moves as one constraint item.
+struct AxisSegment {
+    /// Current coordinate on the solved axis, used to direct constraints.
+    pos: i64,
+}
+
+/// One collision-avoidance obstacle: either a real graph node or a
+/// pass-through wire (an edge lying entirely within one segment, spanning
+/// the perpendicular cells between its two same-coordinate endpoints).
+/// Always carries its own real extent — never a segment aggregate — so a
+/// wire only claims the specific perpendicular cells it actually occupies,
+/// and a node only claims its own size, never a whole row's tallest member.
+struct Obstacle {
+    seg_id: usize,
+    axis_pos: i64,
+    /// Center coordinate captured before iterative compaction starts.
+    incoming_axis_pos: i64,
+    /// Size on the solved axis: the node's real size, or 1 for a wire (an
+    /// edge line is one cell thick).
+    axis_size: i64,
+    /// Extent on the perpendicular axis: the node's own occupied extent, or
+    /// the wire's own line interval (not the whole segment's span).
+    perp: Interval,
+    /// True for data and wormhole nodes, which share the data-node spacing policies.
+    /// Pass-through wires, routing nodes, and pin nodes are routing obstacles.
+    is_data: bool,
+}
+
+/// Plain union-find over dense node ids, used to group nodes into segments.
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(len: usize) -> Self {
+        Self {
+            parent: (0..len).collect(),
+        }
+    }
+
+    fn find(&mut self, i: usize) -> usize {
+        if self.parent[i] != i {
+            let root = self.find(self.parent[i]);
+            self.parent[i] = root;
+        }
+        self.parent[i]
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra != rb {
+            self.parent[ra] = rb;
+        }
+    }
+}
+
+/// Solved placement for one axis: the segment id of every node plus the
+/// solver output for all segments.
+struct AxisSolution {
+    seg_of: HashMap<NodeIndex, usize>,
+    placement: AxisPlacement,
+}
+
+/// Transforms an incoming free-space gap into the gap to enforce.
+pub type GapSizer = fn(u64) -> u64;
+
+/// Gap transforms for both axes, split by the kinds of obstacle in a pair.
+///
+/// Each function receives the pair's incoming free-space gap, captured before iterative
+/// compaction, and returns the gap to enforce. `data_data_x`/`data_data_y` cover pairs of
+/// data nodes; `data_routing_*`/`routing_routing_*` cover pairs touching routing, pin,
+/// or wire obstacles. Wormhole nodes count as data nodes for policy selection.
+#[derive(Clone, Copy)]
+pub struct GapSizes {
+    pub data_data_x: GapSizer,
+    pub data_data_y: GapSizer,
+    pub data_routing_x: GapSizer,
+    pub data_routing_y: GapSizer,
+    pub routing_routing_x: GapSizer,
+    pub routing_routing_y: GapSizer,
+}
+
+impl Default for GapSizes {
+    fn default() -> Self {
+        Self {
+            data_data_x: |_| 1,
+            data_data_y: |_| 1,
+            data_routing_x: |_| 1,
+            data_routing_y: |_| 0,
+            routing_routing_x: |_| 1,
+            routing_routing_y: |_| 0,
+        }
+    }
+}
+
+impl GapSizes {
+    fn between(&self, axis: Axis, a_is_data: bool, b_is_data: bool) -> GapSizer {
+        match (axis, a_is_data && b_is_data, a_is_data || b_is_data) {
+            (Axis::X, true, _) => self.data_data_x,
+            (Axis::X, false, true) => self.data_routing_x,
+            (Axis::X, false, false) => self.routing_routing_x,
+            (Axis::Y, true, _) => self.data_data_y,
+            (Axis::Y, false, true) => self.data_routing_y,
+            (Axis::Y, false, false) => self.routing_routing_y,
+        }
+    }
+}
+
+/// Center-to-center minimum for an ordered obstacle pair.
+fn transform_distance(
+    gap_sizer: GapSizer,
+    lower_incoming_pos: i64,
+    lower_size: i64,
+    upper_incoming_pos: i64,
+    upper_size: i64,
+) -> i64 {
+    let base = base_step(lower_size, upper_size);
+    let base_gap = u64::try_from(base).expect("should have a nonnegative base step");
+    let incoming_center_distance = lower_incoming_pos.abs_diff(upper_incoming_pos);
+    let suggested_gap = incoming_center_distance.saturating_sub(base_gap);
+    let transformed_gap = gap_sizer(suggested_gap);
+    let transformed_gap =
+        i64::try_from(transformed_gap).expect("should fit transformed gap in layout coordinates");
+    base.checked_add(transformed_gap)
+        .expect("should fit constraint distance in layout coordinates")
+}
+
+/// Compact both axes until stable while enforcing the requested rendered gaps.
+///
+/// Alternating axes handles overlaps introduced by the preceding solve. Incoming coordinates
+/// remain the baseline for gap transforms, and data layers are re-snapped after each X solve.
+pub fn compact_layout(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    gaps: &GapSizes,
+) {
+    const MAX_ROUNDS: usize = 4;
+    let incoming_positions: HashMap<NodeIndex, (i64, i64)> = graph
+        .node_indices()
+        .map(|node_idx| {
+            let pos = graph[node_idx].pos;
+            (node_idx, (pos.x, pos.y))
+        })
+        .collect();
+    let mut previous: Option<Vec<(i64, i64)>> = None;
+    for _ in 0..MAX_ROUNDS {
+        compact_x(graph, gaps, &incoming_positions);
+        if let Some(solution) = solve_axis(graph, Axis::Y, gaps, &incoming_positions) {
+            apply_axis(graph, Axis::Y, &solution);
+        }
+
+        let current: Vec<(i64, i64)> = graph.node_weights().map(|n| (n.pos.x, n.pos.y)).collect();
+        if previous.as_ref() == Some(&current) {
+            break;
+        }
+        previous = Some(current);
+    }
+    snap_wormholes_to_neighbor(graph, gaps, &incoming_positions);
+}
+
+fn compact_x(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    gaps: &GapSizes,
+    incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
+) {
+    if let Some(solution) = solve_axis(graph, Axis::X, gaps, incoming_positions) {
+        apply_axis(graph, Axis::X, &solution);
+        snap_layers_to_anchor_columns(graph, &solution);
+    }
+}
+
+/// Build segments and constraints for one axis and run the centering solver.
+/// Returns `None` (leaving the graph untouched) if the graph is empty or the
+/// solver rejects the constraint system.
+fn solve_axis(
+    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    axis: Axis,
+    gaps: &GapSizes,
+    incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
+) -> Option<AxisSolution> {
+    let nodes: Vec<NodeIndex> = graph.node_indices().collect();
+    if nodes.is_empty() {
+        return None;
+    }
+    let dense_of: HashMap<NodeIndex, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(dense, &idx)| (idx, dense))
+        .collect();
+
+    // Group nodes connected by axis-aligned edges (equal coordinate on the
+    // solved axis) into rigid segments.
+    let mut uf = UnionFind::new(nodes.len());
+    for edge in graph.edge_references() {
+        let source = &graph[edge.source()];
+        let target = &graph[edge.target()];
+        if axis.pos(source) == axis.pos(target) {
+            uf.union(dense_of[&edge.source()], dense_of[&edge.target()]);
+        }
+    }
+
+    // Compress union-find roots into dense segment ids.
+    let mut seg_id_of_root: HashMap<usize, usize> = HashMap::new();
+    let mut seg_of: HashMap<NodeIndex, usize> = HashMap::new();
+    let mut segments: Vec<AxisSegment> = Vec::new();
+    let mut obstacles: Vec<Obstacle> = Vec::new();
+    for (dense, &node_idx) in nodes.iter().enumerate() {
+        let root = uf.find(dense);
+        let seg_id = *seg_id_of_root.entry(root).or_insert_with(|| {
+            segments.push(AxisSegment {
+                pos: axis.pos(&graph[node_idx]),
+            });
+            segments.len() - 1
+        });
+        seg_of.insert(node_idx, seg_id);
+
+        let node = &graph[node_idx];
+        let incoming_pos = incoming_positions[&node_idx];
+        obstacles.push(Obstacle {
+            seg_id,
+            axis_pos: axis.pos(node),
+            incoming_axis_pos: match axis {
+                Axis::X => incoming_pos.0,
+                Axis::Y => incoming_pos.1,
+            },
+            axis_size: axis.size(node),
+            perp: occupied_extent(axis.perp_pos(node), axis.perp_size(node)),
+            is_data: matches!(node.role, NodeRole::Data(_) | NodeRole::Wormhole(_)),
+        });
+    }
+
+    // Edge lines within a segment occupy the perpendicular cells between
+    // their endpoints (extent 1 on the solved axis — an edge line is one
+    // cell thick). Including them as their own obstacle, at their own real
+    // extent rather than the whole segment's, makes a vertical edge passing
+    // through a row act as an obstacle only where it actually runs (and
+    // symmetrically for horizontal edges crossing a column).
+    for edge in graph.edge_references() {
+        let source = &graph[edge.source()];
+        let target = &graph[edge.target()];
+        if axis.pos(source) != axis.pos(target) {
+            continue;
+        }
+        let a = occupied_extent(axis.perp_pos(source), axis.perp_size(source));
+        let b = occupied_extent(axis.perp_pos(target), axis.perp_size(target));
+        let line = Interval {
+            start: a.end.min(b.end) + 1,
+            end: a.start.max(b.start) - 1,
+        };
+        if line.start <= line.end {
+            let seg = seg_of[&edge.source()];
+            let incoming_pos = incoming_positions[&edge.source()];
+            obstacles.push(Obstacle {
+                seg_id: seg,
+                axis_pos: segments[seg].pos,
+                incoming_axis_pos: match axis {
+                    Axis::X => incoming_pos.0,
+                    Axis::Y => incoming_pos.1,
+                },
+                axis_size: 1,
+                perp: line,
+                is_data: false,
+            });
+        }
+    }
+
+    let mut constraints = collision_constraints(&obstacles, axis, gaps);
+
+    // Diagonal edges (routed directly rather than through rectilinear dummies)
+    // carry no spacing requirement, but their endpoint order on each axis must
+    // survive compaction.
+    for edge in graph.edge_references() {
+        let source = &graph[edge.source()];
+        let target = &graph[edge.target()];
+        if axis.pos(source) == axis.pos(target) || axis.perp_pos(source) == axis.perp_pos(target) {
+            continue;
+        }
+        let (lower, upper) = if axis.pos(source) < axis.pos(target) {
+            (edge.source(), edge.target())
+        } else {
+            (edge.target(), edge.source())
+        };
+        constraints.push(Constraint {
+            from: seg_of[&lower],
+            to: seg_of[&upper],
+            gap: 0,
+        });
+    }
+
+    match compact_axis_with_centering(0..segments.len(), &constraints) {
+        Ok(placement) => Some(AxisSolution { seg_of, placement }),
+        Err(error) => {
+            log::warn!("layout compaction failed on {axis:?} axis: {error:?}");
+            None
+        }
+    }
+}
+
+/// Group indices by transitive overlap of their perpendicular intervals.
+///
+/// Groups only prune candidate pairs; callers must still test direct overlap within a group.
+fn overlap_groups<T>(items: &[T], perp: impl Fn(&T) -> Interval) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| perp(&items[i]).start);
+
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut current_end = i64::MIN;
+    for i in order {
+        let interval = perp(&items[i]);
+        if !current.is_empty() && interval.start > current_end {
+            groups.push(std::mem::take(&mut current));
+            current_end = i64::MIN;
+        }
+        current_end = current_end.max(interval.end);
+        current.push(i);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+}
+
+/// Build pairwise constraints for obstacles whose perpendicular extents overlap.
+///
+/// Each gap combines the pair's rectangular minimum with its transformed incoming free space.
+fn collision_constraints(obstacles: &[Obstacle], axis: Axis, gaps: &GapSizes) -> Vec<Constraint> {
+    let mut constraints = Vec::new();
+    for group in overlap_groups(obstacles, |o| o.perp) {
+        for (rank, &i) in group.iter().enumerate() {
+            for &j in &group[rank + 1..] {
+                // A stable total order (axis position, then index) on every pair,
+                // not just a per-pair comparison, so the constraint graph — built
+                // from many overlapping pairs, not a single sorted chain — stays
+                // acyclic.
+                let (i, j) = if (obstacles[i].axis_pos, i) <= (obstacles[j].axis_pos, j) {
+                    (i, j)
+                } else {
+                    (j, i)
+                };
+                let (a, b) = (&obstacles[i], &obstacles[j]);
+                if a.seg_id == b.seg_id {
+                    continue;
+                }
+                if a.perp.start > b.perp.end || b.perp.start > a.perp.end {
+                    continue;
+                }
+                let gap = constraint_distance(gaps, axis, a, b);
+                constraints.push(Constraint {
+                    from: a.seg_id,
+                    to: b.seg_id,
+                    gap,
+                });
+            }
+        }
+    }
+    constraints
+}
+
+fn constraint_distance(gaps: &GapSizes, axis: Axis, lower: &Obstacle, upper: &Obstacle) -> i64 {
+    let gap_sizer = gaps.between(axis, lower.is_data, upper.is_data);
+    transform_distance(
+        gap_sizer,
+        lower.incoming_axis_pos,
+        lower.axis_size,
+        upper.incoming_axis_pos,
+        upper.axis_size,
+    )
+}
+
+/// Snap each degree-one wormhole beside its boundary after shared compaction settles.
+fn snap_wormholes_to_neighbor(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    gaps: &GapSizes,
+    incoming_positions: &HashMap<NodeIndex, (i64, i64)>,
+) {
+    let wormhole_indices: Vec<NodeIndex> = graph
+        .node_indices()
+        .filter(|&idx| matches!(graph[idx].role, NodeRole::Wormhole(_)))
+        .collect();
+    for wormhole_idx in wormhole_indices {
+        let Some(neighbor_idx) = graph.neighbors(wormhole_idx).next() else {
+            continue;
+        };
+        let distance = transform_distance(
+            gaps.data_routing_x,
+            incoming_positions[&wormhole_idx].0,
+            Axis::X.size(&graph[wormhole_idx]),
+            incoming_positions[&neighbor_idx].0,
+            Axis::X.size(&graph[neighbor_idx]),
+        );
+        let neighbor_x = graph[neighbor_idx].pos.x;
+        let side = if graph[wormhole_idx].pos.x <= neighbor_x {
+            -1
+        } else {
+            1
+        };
+        graph[wormhole_idx].pos.x = neighbor_x + side * distance;
+    }
+}
+
+/// Write the centered placement back into the graph.
+fn apply_axis(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    axis: Axis,
+    solution: &AxisSolution,
+) {
+    for node_idx in graph.node_indices().collect::<Vec<_>>() {
+        let seg = solution.seg_of[&node_idx];
+        let value = solution.placement.centered[&seg];
+        axis.set_pos(&mut graph[node_idx], value);
+    }
+}
+
+/// Re-snap the Sugiyama `layer` field of data nodes that were moved within
+/// horizontal slack. Fully-constrained columns (`low == high`) keep their
+/// layers and act as anchors; floating nodes adopt the layer of the nearest
+/// anchor column, preferring the lower layer on distance ties. This keeps
+/// cursor navigation consistent: vertical stacking partners that end up at
+/// the same x share the same layer.
+fn snap_layers_to_anchor_columns(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    solution: &AxisSolution,
+) {
+    let has_slack = |seg: usize| solution.placement.low[&seg] != solution.placement.high[&seg];
+
+    let mut anchors: Vec<(i64, i32)> = graph
+        .node_indices()
+        .filter(|idx| !has_slack(solution.seg_of[idx]))
+        .filter_map(|idx| {
+            let node = &graph[idx];
+            match node.role {
+                NodeRole::Data(_) => node.layer.map(|layer| (node.pos.x, layer)),
+                _ => None,
+            }
+        })
+        .collect();
+    if anchors.is_empty() {
         return;
     }
+    anchors.sort_unstable();
 
     for node_idx in graph.node_indices().collect::<Vec<_>>() {
-        let node = &mut graph[node_idx];
-        let center = match axis {
-            CompressAxis::X => node.pos.x,
-            CompressAxis::Y => node.pos.y,
-        };
-
-        // Find the band containing this node's center
-        let band_idx = bands.partition_point(|band| band.start <= center) - 1;
-
-        match axis {
-            CompressAxis::X => node.pos.x -= shifts[band_idx],
-            CompressAxis::Y => node.pos.y -= shifts[band_idx],
+        if !has_slack(solution.seg_of[&node_idx]) {
+            continue;
         }
+        let node = &mut graph[node_idx];
+        if !matches!(node.role, NodeRole::Data(_)) || node.layer.is_none() {
+            continue;
+        }
+        let snapped = anchors
+            .iter()
+            .map(|&(x, layer)| ((x - node.pos.x).abs(), layer))
+            .min_by_key(|&(dist, layer)| (dist, layer))
+            .map(|(_, layer)| layer);
+        node.layer = snapped;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{cross_coordinates::assign_cross_coordinates, geometry::LocalPos};
 
     #[test]
     fn test_halves() {
@@ -813,803 +596,68 @@ mod tests {
     }
 
     #[test]
-    fn test_overlaps() {
-        let a = Interval { start: 0, end: 5 };
-        let b = Interval { start: 3, end: 8 };
-        assert!(overlaps(a, b));
-
-        let a = Interval { start: 0, end: 5 };
-        let b = Interval { start: 6, end: 10 };
-        assert!(!overlaps(a, b));
-
-        let a = Interval { start: 0, end: 5 };
-        let b = Interval { start: 5, end: 10 };
-        assert!(overlaps(a, b)); // touching is overlapping
-    }
-
-    #[test]
-    fn test_occ_interval() {
-        let occ = occ_interval(10, 9);
-        assert_eq!(occ.start, 5); // 10 - lo(9) = 10 - 5
-        assert_eq!(occ.end, 14); // 10 + hi(9) = 10 + 4
-
-        let occ = occ_interval(10, 8);
-        assert_eq!(occ.start, 6); // 10 - lo(8) = 10 - 4
-        assert_eq!(occ.end, 14); // 10 + hi(8) = 10 + 4
-    }
-
-    #[test]
-    fn test_shift_right_to_avoid() {
-        let protected = Interval { start: 5, end: 10 };
-
-        // Already clear
-        let shift = shift_right_to_avoid(protected, 20, 9);
-        assert_eq!(shift, 0);
-    }
-
-    #[test]
-    fn test_simple_chain_optimization() {
-        // Test a simple 3-node chain with no obstacles
-        let widths = vec![8, 8, 8];
-        let orig_x = vec![0, 10, 20];
-        let forbidden = vec![];
-        let min_gap = 0; // No minimum gap for this test
-
-        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
-            ChainOptResult::Optimized { new_x } => {
-                assert_eq!(new_x.len(), 3);
-                assert_eq!(new_x[0], 0); // first endpoint fixed
-                assert_eq!(new_x[2], 20); // last endpoint fixed
-                // Middle node should be centered
-                assert_eq!(new_x[1], 10);
-            }
-            ChainOptResult::RevertToOriginal => {
-                panic!("Optimization should succeed for simple case");
-            }
-        }
-    }
-
-    #[test]
-    fn test_chain_with_obstacle() {
-        // Test a 3-node chain with an obstacle in the middle
-        let widths = vec![8, 8, 8];
-        let orig_x = vec![0, 20, 40];
-        // Obstacle at x=18-22
-        let forbidden = vec![Interval { start: 18, end: 22 }];
-        let min_gap = 0; // No minimum gap for this test
-
-        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
-            ChainOptResult::Optimized { new_x } => {
-                assert_eq!(new_x.len(), 3);
-                assert_eq!(new_x[0], 0); // first endpoint fixed
-                assert_eq!(new_x[2], 40); // last endpoint fixed
-
-                // Middle node should avoid the obstacle
-                let middle_occ = occ_interval(new_x[1], widths[1]);
-                for &obs in &forbidden {
-                    assert!(
-                        !overlaps(middle_occ, obs),
-                        "Middle node at {} (occupies [{}, {}]) overlaps obstacle [{}, {}]",
-                        new_x[1],
-                        middle_occ.start,
-                        middle_occ.end,
-                        obs.start,
-                        obs.end
-                    );
-                }
-            }
-            ChainOptResult::RevertToOriginal => {
-                panic!("Optimization should succeed with sufficient space");
-            }
-        }
-    }
-
-    #[test]
-    fn test_impossible_chain() {
-        // Test a chain where nodes are too wide for the available space
-        let widths = vec![20, 20, 20];
-        let orig_x = vec![0, 10, 20]; // Not enough space
-        let forbidden = vec![];
-        let min_gap = 0; // No minimum gap for this test
-
-        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
-            ChainOptResult::RevertToOriginal => {
-                // Expected - not enough space
-            }
-            ChainOptResult::Optimized { .. } => {
-                panic!("Should revert to original when impossible");
-            }
-        }
-    }
-
-    #[test]
-    fn test_rectilinear_vertical_obstacle() {
-        use crate::geometry::LocalPos;
-
-        // Create a simple graph with a vertical edge crossing a horizontal chain
+    fn iterative_rounds_reuse_the_incoming_baseline() {
+        let gaps = GapSizes {
+            data_data_x: |gap| gap.saturating_mul(2),
+            ..GapSizes::default()
+        };
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let left = graph.add_node(data_node(0, 0, 0, (3, 1), Some(0)));
+        let right = graph.add_node(data_node(1, 10, 0, (3, 1), Some(1)));
+        graph.add_edge(left, right, edge(0, 1));
 
-        let partition_idx = 0;
+        compact_layout(&mut graph, &gaps);
 
-        // Horizontal chain at y=10: nodes at x=0, 10, 20
-        let node_0 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(0),
-            LocalPos {
-                partition_idx,
-                x: 0,
-                y: 10,
-            },
-            (8, 3),
-            Some(1),
-        ));
-        let node_1 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(1),
-            LocalPos {
-                partition_idx,
-                x: 10,
-                y: 10,
-            },
-            (8, 3),
-            Some(1),
-        ));
-        let node_2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(2),
-            LocalPos {
-                partition_idx,
-                x: 20,
-                y: 10,
-            },
-            (8, 3),
-            Some(1),
-        ));
-
-        // Add horizontal edges
-        graph.add_edge(
-            node_0,
-            node_1,
-            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
-        );
-        graph.add_edge(
-            node_1,
-            node_2,
-            LayoutEdge::new(NodeIndex::new(1), NodeIndex::new(2)),
-        );
-
-        // Add a vertical edge that crosses the horizontal chain at x=15
-        let node_top = graph.add_node(LayoutNode::data(
-            NodeIndex::new(3),
-            LocalPos {
-                partition_idx,
-                x: 15,
-                y: 5,
-            },
-            (8, 3),
-            Some(0),
-        ));
-        let node_bottom = graph.add_node(LayoutNode::data(
-            NodeIndex::new(4),
-            LocalPos {
-                partition_idx,
-                x: 15,
-                y: 15,
-            },
-            (8, 3),
-            Some(2),
-        ));
-        graph.add_edge(
-            node_top,
-            node_bottom,
-            LayoutEdge::new(NodeIndex::new(3), NodeIndex::new(4)),
-        );
-
-        // Find obstacles for the horizontal chain at y=10
-        let node_separation = 1;
-        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1, node_2], node_separation);
-
-        // Should find one obstacle at x=15 (protected: 14, 15, 16)
-        assert_eq!(obstacles.len(), 1, "Should find exactly one obstacle");
-        assert_eq!(obstacles[0].start, 14, "Obstacle should protect x-1");
-        assert_eq!(obstacles[0].end, 16, "Obstacle should protect x+1");
+        assert_eq!(graph[left].pos.x.abs_diff(graph[right].pos.x), 17);
     }
 
     #[test]
-    fn test_minimum_gap_enforcement() {
-        // Test that the minimum gap constraint is respected
-        let widths = vec![8, 8, 8];
-        let orig_x = vec![0, 12, 40]; // Plenty of space
-        let forbidden = vec![];
-        let min_gap = 5; // Require at least 5 units between nodes
-
-        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
-            ChainOptResult::Optimized { new_x } => {
-                assert_eq!(new_x.len(), 3);
-                assert_eq!(new_x[0], 0); // first endpoint fixed
-                assert_eq!(new_x[2], 40); // last endpoint fixed
-
-                // Verify all gaps are at least min_gap
-                for i in 0..(widths.len() - 1) {
-                    let base = base_step(widths[i], widths[i + 1]);
-                    let actual_gap = new_x[i + 1] - new_x[i] - base;
-                    assert!(
-                        actual_gap >= min_gap,
-                        "Gap {} between nodes {} and {} is {} but should be at least {}",
-                        i,
-                        i,
-                        i + 1,
-                        actual_gap,
-                        min_gap
-                    );
-                }
-            }
-            ChainOptResult::RevertToOriginal => {
-                panic!("Optimization should succeed with sufficient space");
-            }
-        }
-    }
-
-    #[test]
-    fn test_minimum_gap_impossible() {
-        // Test that optimization fails when minimum gap cannot be satisfied
-        let widths = vec![8, 8, 8];
-        let orig_x = vec![0, 10, 20]; // Not enough space for large min_gap
-        let forbidden = vec![];
-        let min_gap = 10; // Require 10 units between nodes (impossible)
-
-        match optimize_chain_edge_gaps(&widths, &orig_x, &forbidden, min_gap) {
-            ChainOptResult::RevertToOriginal => {
-                // Expected - cannot satisfy minimum gap
-            }
-            ChainOptResult::Optimized { .. } => {
-                panic!("Should revert to original when minimum gap is impossible");
-            }
-        }
-    }
-
-    #[test]
-    fn test_horizontal_edges_not_obstacles() {
-        use crate::geometry::LocalPos;
-
-        // Nodes far from the chain should not create obstacles
-        // (no vertical edge crossings, no envelope intersection)
+    fn unconnected_wormhole_counts_as_data_for_gap_policy() {
+        let gaps = GapSizes {
+            data_data_x: |_| 2,
+            data_routing_x: |_| 0,
+            routing_routing_x: |_| 0,
+            ..GapSizes::default()
+        };
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
-
-        let partition_idx = 0;
-
-        // Horizontal chain at y=10
-        let node_0 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(0),
-            LocalPos {
-                partition_idx,
-                x: 0,
-                y: 10,
-            },
-            (8, 3),
-            Some(1),
-        ));
-        let node_1 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(1),
-            LocalPos {
-                partition_idx,
-                x: 10,
-                y: 10,
-            },
-            (8, 3),
-            Some(1),
-        ));
-
-        // Another horizontal edge at y=0 (far enough to not intersect envelope)
-        // Chain at y=10 with height=3 and node_separation=1 creates envelope [10-3, 10+3] = [7, 13]
-        // Nodes at y=0 with height=3 span [-1, 1], which does not intersect [7, 13]
-        let node_2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(2),
-            LocalPos {
-                partition_idx,
-                x: 5,
-                y: 0,
-            },
-            (8, 3),
-            Some(0),
-        ));
-        let node_3 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(3),
-            LocalPos {
-                partition_idx,
-                x: 15,
-                y: 0,
-            },
-            (8, 3),
-            Some(0),
-        ));
-
-        graph.add_edge(
-            node_0,
-            node_1,
-            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
-        );
-        graph.add_edge(
-            node_2,
-            node_3,
-            LayoutEdge::new(NodeIndex::new(2), NodeIndex::new(3)),
-        );
-
-        // Find obstacles for the horizontal chain at y=10
-        let node_separation = 1;
-        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1], node_separation);
-
-        // Horizontal edges don't cross, so no obstacles
-        assert_eq!(
-            obstacles.len(),
-            0,
-            "Horizontal edges should not create obstacles"
-        );
-    }
-
-    #[test]
-    fn test_layer_reassignment() {
-        use crate::geometry::LocalPos;
-
-        // Create a graph with nodes at different x positions representing different layers
-        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
-
-        let partition_idx = 0;
-
-        // Layer 0 nodes at x=0, 10
-        let _node_0 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(0),
-            LocalPos {
-                partition_idx,
-                x: 0,
-                y: 0,
-            },
-            (8, 3),
-            Some(0),
-        ));
-        let _node_1 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(1),
-            LocalPos {
-                partition_idx,
-                x: 10,
-                y: 0,
-            },
-            (8, 3),
-            Some(0),
-        ));
-
-        // Layer 1 nodes at x=20, 30
-        let _node_2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(2),
-            LocalPos {
-                partition_idx,
-                x: 20,
-                y: 5,
-            },
-            (8, 3),
-            Some(1),
-        ));
-        let _node_3 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(3),
-            LocalPos {
-                partition_idx,
-                x: 30,
-                y: 5,
-            },
-            (8, 3),
-            Some(1),
-        ));
-
-        // Layer 2 nodes at x=40, 50
-        let _node_4 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(4),
-            LocalPos {
-                partition_idx,
-                x: 40,
-                y: 10,
-            },
-            (8, 3),
-            Some(2),
-        ));
-        let _node_5 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(5),
-            LocalPos {
-                partition_idx,
-                x: 50,
-                y: 10,
-            },
-            (8, 3),
-            Some(2),
-        ));
-
-        // Build x-to-layer mapping
-        let x_to_layer = build_x_to_layer_mapping(&graph);
-
-        // Should have 6 unique x positions
-        assert_eq!(x_to_layer.len(), 6);
-
-        // Test finding closest layer for various x positions
-        assert_eq!(find_closest_layer(&x_to_layer, 0), Some(0)); // Exact match
-        assert_eq!(find_closest_layer(&x_to_layer, 5), Some(0)); // Closer to 0 than 10
-        assert_eq!(find_closest_layer(&x_to_layer, 15), Some(0)); // Equidistant to 10 and 20, prefer lower layer
-        assert_eq!(find_closest_layer(&x_to_layer, 25), Some(1)); // Closer to 20 or 30
-        assert_eq!(find_closest_layer(&x_to_layer, 35), Some(1)); // Equidistant to 30 and 40, prefer lower layer
-        assert_eq!(find_closest_layer(&x_to_layer, 45), Some(2)); // Closer to 40 or 50
-    }
-
-    #[test]
-    fn test_layer_reassignment_with_redistribution() {
-        use crate::geometry::LocalPos;
-
-        // Create a horizontal chain where nodes will be redistributed
-        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
-
-        let partition_idx = 0;
-
-        // Horizontal chain at y=10 with nodes from different original layers
-        // Node at x=0, layer 0 (endpoint)
-        let node_0 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(0),
-            LocalPos {
-                partition_idx,
-                x: 0,
-                y: 10,
-            },
-            (8, 3),
-            Some(0),
-        ));
-
-        // Node at x=10, originally layer 1
-        let node_1 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(1),
-            LocalPos {
-                partition_idx,
-                x: 10,
-                y: 10,
-            },
-            (8, 3),
-            Some(1),
-        ));
-
-        // Node at x=20, originally layer 2
-        let node_2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(2),
-            LocalPos {
-                partition_idx,
-                x: 20,
-                y: 10,
-            },
-            (8, 3),
-            Some(2),
-        ));
-
-        // Node at x=60, layer 3 (endpoint)
-        let node_3 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(3),
-            LocalPos {
-                partition_idx,
-                x: 60,
-                y: 10,
-            },
-            (8, 3),
-            Some(3),
-        ));
-
-        // Add horizontal edges to form a chain
-        graph.add_edge(
-            node_0,
-            node_1,
-            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
-        );
-        graph.add_edge(
-            node_1,
-            node_2,
-            LayoutEdge::new(NodeIndex::new(1), NodeIndex::new(2)),
-        );
-        graph.add_edge(
-            node_2,
-            node_3,
-            LayoutEdge::new(NodeIndex::new(2), NodeIndex::new(3)),
-        );
-
-        // Record original layers
-        let original_layer_node_1 = graph[node_1].layer;
-        let original_layer_node_2 = graph[node_2].layer;
-
-        // Run redistribution (this will spread nodes evenly)
-        redistribute_horizontal_chains(&mut graph, 1.0);
-
-        // After redistribution, interior nodes should have their layers reassigned
-        // based on their new x positions
-        // The nodes should be spread more evenly between 0 and 60
-        // Expected positions: node_0=0, node_1≈20, node_2≈40, node_3=60
-
-        // Check that interior nodes got their layers reassigned based on closest x
-        let new_layer_node_1 = graph[node_1].layer;
-        let new_layer_node_2 = graph[node_2].layer;
-
-        // node_1 moved to around x=20, which should map to layer 2 (closer to original x=20)
-        // node_2 moved to around x=40, which should map to layer 2 or 3
-
-        // The exact layer assignment depends on the redistribution, but we can verify
-        // that the layer field was updated (it should differ from original if nodes moved significantly)
-        println!(
-            "node_1: layer {:?} -> {:?}, x={}",
-            original_layer_node_1, new_layer_node_1, graph[node_1].pos.x
-        );
-        println!(
-            "node_2: layer {:?} -> {:?}, x={}",
-            original_layer_node_2, new_layer_node_2, graph[node_2].pos.x
-        );
-
-        // At minimum, verify that layers are still valid (0-3 range)
-        assert!(new_layer_node_1.unwrap() >= 0 && new_layer_node_1.unwrap() <= 3);
-        assert!(new_layer_node_2.unwrap() >= 0 && new_layer_node_2.unwrap() <= 3);
-    }
-
-    #[test]
-    fn test_node_intersection_creates_exclusion_zone() {
-        use crate::geometry::LocalPos;
-
-        // Test that nodes whose bounding boxes intersect with the chain envelope
-        // create exclusion zones, preventing chain nodes from being placed there
-        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
-
-        let partition_idx = 0;
-
-        // Horizontal chain at y=10: nodes at x=0, 30, 60
-        let node_0 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(0),
-            LocalPos {
-                partition_idx,
-                x: 0,
-                y: 10,
-            },
-            (8, 3),
-            Some(0),
-        ));
-        let node_1 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(1),
-            LocalPos {
-                partition_idx,
-                x: 30,
-                y: 10,
-            },
-            (8, 3),
-            Some(1),
-        ));
-        let node_2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(2),
-            LocalPos {
-                partition_idx,
-                x: 60,
-                y: 10,
-            },
-            (8, 3),
-            Some(2),
-        ));
-
-        // Add horizontal edges
-        graph.add_edge(
-            node_0,
-            node_1,
-            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
-        );
-        graph.add_edge(
-            node_1,
-            node_2,
-            LayoutEdge::new(NodeIndex::new(1), NodeIndex::new(2)),
-        );
-
-        // Add a node above the chain that intersects the envelope
-        // Chain is at y=10, chain nodes have height=3
-        // halves(3) = {lo: 2, hi: 1}, so envelope spans [10-2, 10+1] = [8, 11]
-        // This node at y=9 with height=3: halves(3) = {lo: 2, hi: 1}
-        // Node spans [9-2, 9+1] = [7, 10], which intersects envelope [8, 11]
-        let _blocking_node = graph.add_node(LayoutNode::data(
-            NodeIndex::new(3),
-            LocalPos {
-                partition_idx,
-                x: 20, // Between chain nodes 0 and 1
-                y: 9,  // Above but overlapping with the chain
-            },
-            (6, 3), // Width=6, Height=3
-            Some(0),
-        ));
-
-        // Add another node below the chain
-        // This node at y=11 with height=3 spans [11-2, 11+1] = [9, 12]
-        // Intersects envelope [8, 11]
-        let _blocking_node_2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(4),
-            LocalPos {
-                partition_idx,
-                x: 40, // Between chain nodes 1 and 2
-                y: 11, // Below but overlapping with the chain
-            },
-            (6, 3),
-            Some(2),
-        ));
-
-        // Find obstacles with node_separation=3
-        let node_separation = 3;
-        let obstacles = find_obstacles(&graph, 10, &[node_0, node_1, node_2], node_separation);
-
-        // Should find two obstacles - one for each blocking node
-        assert!(
-            obstacles.len() >= 2,
-            "Should find at least 2 obstacles from intersecting nodes, found {}",
-            obstacles.len()
-        );
-
-        // Verify that the blocking nodes created exclusion zones
-        // blocking_node at x=20 should create zone [20-3, 20+3] = [17, 23]
-        // blocking_node_2 at x=40 should create zone [40-3, 40+3] = [37, 43]
-        let has_obstacle_at_20 = obstacles.iter().any(|obs| obs.start <= 20 && 20 <= obs.end);
-        let has_obstacle_at_40 = obstacles.iter().any(|obs| obs.start <= 40 && 40 <= obs.end);
-
-        assert!(
-            has_obstacle_at_20,
-            "Should have exclusion zone around x=20 for blocking_node"
-        );
-        assert!(
-            has_obstacle_at_40,
-            "Should have exclusion zone around x=40 for blocking_node_2"
-        );
-    }
-
-    /// Demonstrates that nodes sharing a Sugiyama rank (vertical stacking partners) can
-    /// end up at different X coordinates after redistribution, splitting them into
-    /// separate CroppedGraph layers and breaking vertical navigation.
-    ///
-    /// Graph: 0→{1,2}, 1→3, 2→{3,4}, 3→5, 4→5  (subcombinatorial_dag)
-    ///
-    /// Sugiyama ranks: 0=rank0, 1=rank1, 2=rank1, 3=rank2, 4=rank2, 5=rank3
-    /// N3 and N4 are vertical stacking partners at rank 2.
-    ///
-    /// After redistribution the two horizontal chains:
-    ///   upper: [R, N1, N3, R]  and  lower: [R, N2, N4, R]
-    /// are optimized independently, so N3 and N4 can end up at different X values.
-    #[test]
-    fn test_stacking_partners_diverge_after_redistribution() {
-        use petgraph::{Undirected, stable_graph::StableGraph};
-
-        use crate::geometry::LocalPos;
-
-        // Manually build the post-edge-routing layout for subcombinatorial_dag.
-        // Positions below match what Sugiyama+edge-routing produces (all same rank
-        // nodes share the same X before redistribution):
-        //
-        //   X:  0    10    20    30
-        //   Y:  top chain:   R(0,5) - N1(10,5) - N3(20,5) - R(30,5)
-        //       bottom chain: R(0,-5) - N2(10,-5) - N4(20,-5) - R(30,-5)
-        //
-        // N3 and N4 both start at X=20 (same Sugiyama rank=2).
-
-        let partition_idx = 0usize;
-        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
-
-        // Upper chain routing endpoints (fixed)
-        let r_top_left = graph.add_node(LayoutNode::routing(
-            LocalPos::new_xy(partition_idx, 0, 5),
+        let boundary = graph.add_node(data_node(0, 0, 0, (1, 1), Some(0)));
+        let wormhole = graph.add_node(LayoutNode::new(
+            NodeRole::Wormhole(NodeIndex::new(1)),
+            LocalPos::new_xy(1, 0),
             (1, 1),
+            None,
         ));
-        let r_top_right = graph.add_node(LayoutNode::routing(
-            LocalPos::new_xy(partition_idx, 30, 5),
+
+        compact_layout(&mut graph, &gaps);
+
+        assert_eq!(graph[boundary].pos.x.abs_diff(graph[wormhole].pos.x), 3);
+    }
+
+    #[test]
+    fn connected_wormhole_stays_within_data_routing_x_of_routing_neighbor() {
+        let gaps = GapSizes {
+            data_routing_x: |_| 1,
+            routing_routing_x: |gap| gap,
+            ..GapSizes::default()
+        };
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let wormhole = graph.add_node(LayoutNode::new(
+            NodeRole::Wormhole(NodeIndex::new(1)),
+            LocalPos::new_xy(0, 0),
             (1, 1),
+            None,
         ));
+        let neighbor = graph.add_node(LayoutNode::routing(LocalPos::new_xy(100, 0), (1, 1)));
+        let vertical_anchor =
+            graph.add_node(LayoutNode::routing(LocalPos::new_xy(100, 10), (1, 1)));
+        let left_anchor = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 10), (1, 1)));
+        graph.add_edge(wormhole, neighbor, edge(0, 1));
+        graph.add_edge(neighbor, vertical_anchor, edge(0, 1));
+        graph.add_edge(left_anchor, vertical_anchor, edge(0, 1));
 
-        // Lower chain routing endpoints (fixed)
-        let r_bot_left = graph.add_node(LayoutNode::routing(
-            LocalPos::new_xy(partition_idx, 0, -5),
-            (1, 1),
-        ));
-        let r_bot_right = graph.add_node(LayoutNode::routing(
-            LocalPos::new_xy(partition_idx, 30, -5),
-            (1, 1),
-        ));
+        compact_layout(&mut graph, &gaps);
 
-        // N1 (rank=1) on upper chain at X=10 — note: only node at X=10,Y=5
-        let n1 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(1),
-            LocalPos::new_xy(partition_idx, 10, 5),
-            (5, 3),
-            Some(1),
-        ));
-        // N2 (rank=1) on lower chain at X=10 — vertical stacking partner of N1
-        let n2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(2),
-            LocalPos::new_xy(partition_idx, 10, -5),
-            (5, 3),
-            Some(1),
-        ));
-        // N3 (rank=2) on upper chain at X=20 — vertical stacking partner of N4
-        let n3 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(3),
-            LocalPos::new_xy(partition_idx, 20, 5),
-            (5, 3),
-            Some(2),
-        ));
-        // N4 (rank=2) on lower chain at X=20 — vertical stacking partner of N3
-        let n4 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(4),
-            LocalPos::new_xy(partition_idx, 20, -5),
-            (5, 3),
-            Some(2),
-        ));
-
-        // Upper horizontal chain edges
-        graph.add_edge(
-            r_top_left,
-            n1,
-            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
-        );
-        graph.add_edge(
-            n1,
-            n3,
-            LayoutEdge::new(NodeIndex::new(1), NodeIndex::new(3)),
-        );
-        graph.add_edge(
-            n3,
-            r_top_right,
-            LayoutEdge::new(NodeIndex::new(3), NodeIndex::new(5)),
-        );
-
-        // Lower horizontal chain edges
-        graph.add_edge(
-            r_bot_left,
-            n2,
-            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(2)),
-        );
-        graph.add_edge(
-            n2,
-            n4,
-            LayoutEdge::new(NodeIndex::new(2), NodeIndex::new(4)),
-        );
-        graph.add_edge(
-            n4,
-            r_bot_right,
-            LayoutEdge::new(NodeIndex::new(4), NodeIndex::new(5)),
-        );
-
-        // Verify precondition: N3 and N4 start at the same X (same Sugiyama rank)
-        assert_eq!(
-            graph[n3].pos.x, graph[n4].pos.x,
-            "N3 and N4 must start at same X"
-        );
-        let original_x = graph[n3].pos.x;
-        println!(
-            "Before redistribution: N3.x={}, N4.x={}",
-            graph[n3].pos.x, graph[n4].pos.x
-        );
-
-        // Run redistribution with a non-trivial span so nodes actually move
-        redistribute_horizontal_chains(&mut graph, 2.0);
-
-        let n3_x = graph[n3].pos.x;
-        let n4_x = graph[n4].pos.x;
-        println!("After redistribution:  N3.x={}, N4.x={}", n3_x, n4_x);
-        println!(
-            "N3.layer={:?}, N4.layer={:?}",
-            graph[n3].layer, graph[n4].layer
-        );
-
-        // Both moved from their original position (redistribution did something)
-        println!(
-            "N3 moved: {}, N4 moved: {}",
-            n3_x != original_x,
-            n4_x != original_x
-        );
-
-        // X positions may legitimately differ after redistribution — that is the whole point
-        // of the aesthetic spacing. What must be equal is the *layer* field: both N3 and N4
-        // started at X=20 (Sugiyama rank 2), so find_closest_layer maps their new positions
-        // back to rank 2 as long as they don't straddle the midpoint to rank 1.
-        let n3_layer = graph[n3].layer;
-        let n4_layer = graph[n4].layer;
-        assert_eq!(
-            n3_layer, n4_layer,
-            "Stacking partners N3 and N4 must share the same layer after redistribution \
-             (N3.x={} layer={:?}, N4.x={} layer={:?})",
-            n3_x, n3_layer, n4_x, n4_layer
-        );
+        assert_eq!(graph[wormhole].pos.x.abs_diff(graph[neighbor].pos.x), 2);
     }
 
     #[test]
@@ -1627,150 +675,200 @@ mod tests {
         assert_eq!((extent.start, extent.end), (10, 10));
     }
 
-    #[test]
-    fn test_compress_dead_space_shrinks_oversized_gap() {
-        use crate::geometry::LocalPos;
-
-        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
-
-        // Two rows of height 3 with centers 20 apart (occupied gap of 17 cells)
-        // and two columns of width 5 with centers 30 apart.
-        let top_left = graph.add_node(LayoutNode::data(
-            NodeIndex::new(0),
-            LocalPos::new_xy(0, 0, 0),
-            (5, 3),
-            Some(0),
-        ));
-        let bottom_right = graph.add_node(LayoutNode::data(
-            NodeIndex::new(1),
-            LocalPos::new_xy(0, 30, 20),
-            (5, 3),
-            Some(1),
-        ));
-
-        compress_dead_space(&mut graph, 1.0);
-
-        // X: occupied bands [-2,2] and [28,32] -> gap 25 shrinks to 1,
-        // so the second center moves from 30 to 6.
-        // Y: occupied bands [-1,1] and [19,21] -> gap 17 shrinks to 1,
-        // so the second center moves from 20 to 4.
-        assert_eq!(graph[top_left].pos.x, 0);
-        assert_eq!(graph[top_left].pos.y, 0);
-        assert_eq!(graph[bottom_right].pos.x, 6);
-        assert_eq!(graph[bottom_right].pos.y, 4);
+    fn data_node(
+        domain: usize,
+        x: i64,
+        y: i64,
+        size: (u64, u64),
+        layer: Option<i32>,
+    ) -> LayoutNode {
+        LayoutNode::data(NodeIndex::new(domain), LocalPos::new_xy(x, y), size, layer)
     }
 
-    #[test]
-    fn test_compress_dead_space_preserves_tight_gaps() {
-        use crate::geometry::LocalPos;
-
-        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
-
-        // Rows already at minimum spacing (centers 4 apart, height 3, gap 1)
-        let positions = [(0, 0), (0, 4), (0, 8)];
-        let nodes: Vec<_> = positions
-            .iter()
-            .enumerate()
-            .map(|(i, &(x, y))| {
-                graph.add_node(LayoutNode::data(
-                    NodeIndex::new(i),
-                    LocalPos::new_xy(0, x, y),
-                    (5, 3),
-                    Some(0),
-                ))
-            })
-            .collect();
-
-        compress_dead_space(&mut graph, 1.0);
-
-        for (node_idx, &(x, y)) in nodes.iter().zip(positions.iter()) {
-            assert_eq!(graph[*node_idx].pos.x, x, "tight layout must not move");
-            assert_eq!(graph[*node_idx].pos.y, y, "tight layout must not move");
-        }
+    fn edge(domain_a: usize, domain_b: usize) -> LayoutEdge {
+        LayoutEdge::new(NodeIndex::new(domain_a), NodeIndex::new(domain_b))
     }
 
-    /// Tests that a node's *layer* field is updated when redistribution shifts it
-    /// far enough to cross the midpoint between two original Sugiyama columns.
+    /// Miniature bypass-arc scenario: a wide node D rides an arc above a row
+    /// containing a wide grid node W.
     ///
-    /// Setup: two columns — x=10 (layer 1) and x=50 (layer 2) — established by
-    /// anchor nodes that sit at y=−30 and never participate in any chain.
-    /// A single-node chain [R(0) − N(10) − R(80)] is redistributed; the optimizer
-    /// centres N at x≈40, which is past the column midpoint (30) → layer snaps to 2.
+    /// ```text
+    ///   ╭──DDDDDD──╮
+    ///   │          │
+    ///   A WWWW...W B
+    /// ```
+    ///
+    /// Solved x positions: the corner columns are pinned by W through A/B —
+    /// both A/B and W are data nodes, so their pair gets the data-data X
+    /// floor (2) on top of base_step(1,21)=11, landing W's column 13 away on
+    /// each side — while D (routing-to-data, no floor) floats in [4, 21] and
+    /// must be centered at 12.
     #[test]
-    fn test_layer_changes_when_node_crosses_column_midpoint() {
-        use petgraph::{Undirected, stable_graph::StableGraph};
-
-        use crate::geometry::LocalPos;
-
-        let partition_idx = 0usize;
+    fn test_wide_node_centered_within_arc_slack() {
         let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
 
-        // Anchor nodes at y=−30 establish the column→layer mapping.
-        // Their y-envelope [−32, −29] never intersects the chain at y=0, so they
-        // are invisible to find_obstacles and don't affect redistribution.
-        let _anchor_l1 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(100),
-            LocalPos::new_xy(partition_idx, 10, -30),
-            (3, 3),
-            Some(1),
-        ));
-        let _anchor_l2 = graph.add_node(LayoutNode::data(
-            NodeIndex::new(101),
-            LocalPos::new_xy(partition_idx, 50, -30),
-            (3, 3),
-            Some(2),
-        ));
+        let c1 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0), (1, 1)));
+        let d = graph.add_node(data_node(0, 3, 0, (6, 1), Some(1)));
+        let c2 = graph.add_node(LayoutNode::routing(LocalPos::new_xy(25, 0), (1, 1)));
+        let a = graph.add_node(data_node(1, 0, 4, (1, 1), Some(0)));
+        let w = graph.add_node(data_node(2, 12, 4, (21, 1), Some(1)));
+        let b = graph.add_node(data_node(3, 25, 4, (1, 1), Some(2)));
 
-        // Single-node horizontal chain at y=0, spanning x in [0, 80].
-        // N starts at x=10 (column 1). The optimizer will centre it at x=40.
-        let r_left = graph.add_node(LayoutNode::routing(
-            LocalPos::new_xy(partition_idx, 0, 0),
-            (1, 1),
-        ));
-        let n = graph.add_node(LayoutNode::data(
-            NodeIndex::new(0),
-            LocalPos::new_xy(partition_idx, 10, 0),
-            (5, 3),
-            Some(1),
-        ));
-        let r_right = graph.add_node(LayoutNode::routing(
-            LocalPos::new_xy(partition_idx, 80, 0),
-            (1, 1),
-        ));
+        graph.add_edge(c1, d, edge(1, 0));
+        graph.add_edge(d, c2, edge(0, 3));
+        graph.add_edge(c1, a, edge(1, 1));
+        graph.add_edge(c2, b, edge(3, 3));
+        graph.add_edge(a, w, edge(1, 2));
+        graph.add_edge(w, b, edge(2, 3));
 
-        graph.add_edge(
-            r_left,
-            n,
-            LayoutEdge::new(NodeIndex::new(0), NodeIndex::new(1)),
-        );
-        graph.add_edge(
-            n,
-            r_right,
-            LayoutEdge::new(NodeIndex::new(1), NodeIndex::new(2)),
-        );
+        compact_layout(&mut graph, &GapSizes::default());
 
-        assert_eq!(graph[n].pos.x, 10, "N starts at x=10");
-        assert_eq!(graph[n].layer, Some(1), "N starts at layer 1");
+        assert_eq!(graph[a].pos.x, 0);
+        assert_eq!(graph[w].pos.x, 12);
+        assert_eq!(graph[b].pos.x, 24);
+        assert_eq!(graph[c2].pos.x, 24);
 
-        redistribute_horizontal_chains(&mut graph, 1.0);
+        // D floats in its slack range; centered placement is the midpoint.
+        assert_eq!(graph[d].pos.x, 11);
 
-        let new_x = graph[n].pos.x;
-        let new_layer = graph[n].layer;
-        println!("After redistribution: N.x={new_x}, N.layer={new_layer:?}");
+        // D occupies [9, 14]: 8 free cells on the left arc, 9 on the right —
+        // the 1-cell asymmetry is inherent to the odd total slack.
+        let extent = occupied_extent(graph[d].pos.x, 6);
+        let left_dashes = extent.start - graph[c1].pos.x - 1;
+        let right_dashes = graph[c2].pos.x - extent.end - 1;
+        assert!((left_dashes - right_dashes).abs() <= 2);
 
-        // N should have moved significantly from its original position.
-        assert_ne!(new_x, 10, "N must move from original x=10");
+        // Vertical dead space between the rows is compacted to min_gap.
+        assert_eq!(graph[c1].pos.y, 0);
+        assert_eq!(graph[a].pos.y, 2);
 
-        // The column midpoint between x=10 and x=50 is 30.
-        // N at x=40 is past that midpoint, so find_closest_layer returns layer 2.
-        assert!(
-            new_x > 30,
-            "N (x={new_x}) should have crossed the column midpoint at x=30"
-        );
-        assert_eq!(
-            new_layer,
-            Some(2),
-            "Layer must snap to 2 (closest column x=50) when N moves to x={new_x}"
-        );
+        // D had slack, so its layer snaps to the nearest anchor column (W).
+        assert_eq!(graph[d].layer, Some(1));
+    }
+
+    /// A row already at minimum spacing must not move.
+    #[test]
+    fn test_tight_row_unchanged() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        // Widths 5 with a requested data-data gap of 1: centers base_step(5,5)+1 = 6 apart.
+        let n0 = graph.add_node(data_node(0, 0, 0, (5, 1), Some(0)));
+        let n1 = graph.add_node(data_node(1, 6, 0, (5, 1), Some(1)));
+        let n2 = graph.add_node(data_node(2, 12, 0, (5, 1), Some(2)));
+        graph.add_edge(n0, n1, edge(0, 1));
+        graph.add_edge(n1, n2, edge(1, 2));
+
+        compact_layout(&mut graph, &GapSizes::default());
+
+        assert_eq!(graph[n0].pos.x, 0);
+        assert_eq!(graph[n1].pos.x, 6);
+        assert_eq!(graph[n2].pos.x, 12);
+        // No slack anywhere, so layers are untouched.
+        assert_eq!(graph[n1].layer, Some(1));
+    }
+
+    /// Oversized vertical gaps shrink to the minimum spacing.
+    #[test]
+    fn test_vertical_dead_space_removed() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        let top = graph.add_node(data_node(0, 0, 0, (1, 1), Some(0)));
+        let bottom = graph.add_node(data_node(1, 0, 10, (1, 1), Some(0)));
+        graph.add_edge(top, bottom, edge(0, 1));
+
+        compact_layout(&mut graph, &GapSizes::default());
+
+        assert_eq!(graph[top].pos.y, 0);
+        assert_eq!(graph[bottom].pos.y, 2);
+    }
+
+    /// A vertical edge passing through a row is an obstacle: the row's nodes
+    /// keep a width-aware distance from the crossing column.
+    #[test]
+    fn test_crossing_edge_blocks_row_nodes() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        // Vertical edge from (10, 0) to (10, 4) crossing the row at y=2.
+        let top = graph.add_node(data_node(0, 10, 0, (1, 1), Some(1)));
+        let bottom = graph.add_node(data_node(1, 10, 4, (1, 1), Some(1)));
+        graph.add_edge(top, bottom, edge(0, 1));
+
+        // Row at y=2: two nodes on either side of the crossing.
+        let left = graph.add_node(data_node(2, 0, 2, (5, 1), Some(0)));
+        let right = graph.add_node(data_node(3, 20, 2, (5, 1), Some(2)));
+        graph.add_edge(left, right, edge(2, 3));
+
+        compact_layout(&mut graph, &GapSizes::default());
+
+        // The crossing column must stay strictly between the row nodes with
+        // a one-cell clearance from each label: base_step(5,1)+1 = 4 from the
+        // left center and base_step(1,5)+1 = 4 to the right center.
+        let line_x = graph[top].pos.x;
+        assert_eq!(graph[top].pos.x, graph[bottom].pos.x, "edge stays vertical");
+        assert!(line_x - graph[left].pos.x >= 4);
+        assert!(graph[right].pos.x - line_x >= 4);
+    }
+
+    /// A diamond whose two middle-layer branches have very different heights. The size-aware
+    /// cross-coordinate assignment must (a) separate the branches by their real-height minimum,
+    /// not a unit-size gap, and (b) centre the shared source and sink on the midpoint between the
+    /// branches. A uniform-height diamond cannot distinguish this from a size-blind pass, which is
+    /// why the branches here are 5x9 and 5x3.
+    #[test]
+    fn test_cross_coordinates_center_between_uneven_branches() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        // Layer columns: source at x=0, the two branches at x=1, sink at x=2. Initial y only
+        // fixes the within-layer order (tall branch above short branch).
+        let source = graph.add_node(data_node(0, 0, 5, (5, 3), Some(0)));
+        let tall = graph.add_node(data_node(1, 1, 0, (5, 9), Some(1)));
+        let short = graph.add_node(data_node(2, 1, 20, (5, 3), Some(1)));
+        let sink = graph.add_node(data_node(3, 2, 5, (5, 3), Some(2)));
+
+        graph.add_edge(source, tall, edge(0, 1));
+        graph.add_edge(source, short, edge(0, 2));
+        graph.add_edge(tall, sink, edge(1, 3));
+        graph.add_edge(short, sink, edge(2, 3));
+
+        assign_cross_coordinates(&mut graph, 1);
+
+        // The branches keep their order and are separated by their real-height minimum step
+        // (base_step(9, 3) + min_gap = 6 + 1 = 7), well above the unit-size gap of 2.
+        let branch_gap = graph[short].pos.y - graph[tall].pos.y;
+        assert_eq!(branch_gap, base_step(9, 3) + 1);
+
+        // The source and sink centre on the midpoint between the two branches, and on each other.
+        // The true midpoint (0 + 7) / 2 = 3.5 is a half cell; round the same way the assignment
+        // does rather than truncating, since the branch gap here is odd by construction.
+        let midpoint = ((graph[tall].pos.y + graph[short].pos.y) as f64 / 2.0).round() as i64;
+        assert_eq!(graph[source].pos.y, midpoint);
+        assert_eq!(graph[sink].pos.y, midpoint);
+        assert_eq!(graph[source].pos.y, graph[sink].pos.y);
+    }
+
+    /// A long edge routed through a dummy stays straight even when a tall real node shares the
+    /// dummy's column: the dummy (top priority) holds the source-sink line and pushes the tall
+    /// node aside rather than bending toward it.
+    #[test]
+    fn test_cross_coordinates_straighten_long_edge_past_tall_node() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+
+        // source -> dummy -> sink is the only edge path; the tall node just occupies the middle
+        // column above nothing, so its only interaction is being displaced by the dummy.
+        let source = graph.add_node(data_node(0, 0, 0, (5, 3), Some(0)));
+        let dummy = graph.add_node(LayoutNode::routing(LocalPos::new_xy(1, 0), (1, 1)));
+        let tall = graph.add_node(data_node(1, 1, 10, (5, 15), Some(1)));
+        let sink = graph.add_node(data_node(2, 2, 0, (5, 3), Some(2)));
+
+        graph.add_edge(source, dummy, edge(0, 0));
+        graph.add_edge(dummy, sink, edge(0, 2));
+
+        assign_cross_coordinates(&mut graph, 1);
+
+        // The dummy keeps the source-sink edge straight: all three share one y.
+        assert_eq!(graph[source].pos.y, graph[dummy].pos.y);
+        assert_eq!(graph[dummy].pos.y, graph[sink].pos.y);
+        // The tall node kept the within-layer order (dummy above it) and was pushed clear.
+        assert!(graph[tall].pos.y > graph[dummy].pos.y);
     }
 }

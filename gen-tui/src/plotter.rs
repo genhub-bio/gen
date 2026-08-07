@@ -1,11 +1,10 @@
 // This module implements graph rendering using the ViewportGraph system.
-// All legacy rendering paths have been removed in favor of the unified ViewportGraph approach.
 
-use std::hash::Hash;
+use std::sync::Arc;
 
-use petgraph::visit::{
-    EdgeIndexable, GraphBase, IntoEdgeReferences, IntoNeighborsDirected, IntoNodeIdentifiers,
-    NodeCount, NodeIndexable, Visitable,
+use petgraph::{
+    graph::NodeIndex,
+    visit::{GraphBase, NodeIndexable},
 };
 use ratatui::{
     style::{Color, Style},
@@ -13,13 +12,22 @@ use ratatui::{
 };
 
 use crate::{
-    geometry::{BigRect, Point, WorldPos, WorldRect},
-    graph_controller::{GraphController, WorldBuffer},
-    graph_widget::{GraphWidget, NODE_GLYPH},
-    layout::{JunctionSymbol, NodeRole, VisualDetail},
+    geometry::{WorldPos, WorldRect},
+    graph_widget::NODE_GLYPH,
+    layout::{JunctionSymbol, NodeRole},
     theme::Theme,
-    viewport_graph::CroppedGraph,
+    viewport_graph::ViewportGraph,
+    viewport_state::WorldBuffer,
 };
+
+/// Number of world-x units between direction markers on a backward-edge bypass's main span.
+const ARROW_GAPS: i64 = 16;
+
+/// A main-span segment shorter than this (in world-x cells) gets no arrows at all, rather
+/// than one landing right against a pin - short segments are common right next to a pin (see
+/// `draw_arrows`), where there isn't enough run for a marker to read as "on the line" instead
+/// of "touching the box".
+const MIN_ARROW_SEGMENT_LENGTH: i64 = 3;
 
 /// Line style for path highlighting
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +50,8 @@ pub struct PathStyle {
     /// Whether to merge glyphs with base layer or replace them outright
     pub merge_glyphs: bool,
 }
+
+pub(crate) type CellHighlight = (WorldPos, (i64, i64), (i64, i64), PathStyle);
 
 impl PathStyle {
     /// Create a new PathStyle with default settings
@@ -66,267 +76,91 @@ impl PathStyle {
     }
 }
 
-// # Graph Rendering Architecture
-//
-// This module implements a three-layer graph rendering system that separates
-// concerns between domain data, partitioning infrastructure, and visual layout.
-//
-// ## Three-Layer Architecture
-//
-// ### Layer 1: Domain Graph (Original Data)
-// ```rust
-// DiGraphMap<GraphNode, GraphEdge>  // GenGraph
-// ```
-// - **Purpose**: Original database domain data
-// - **Contains**: `GraphNode { node_id, sequence_start, sequence_end, ... }`
-// - **Responsibility**: Pure domain logic and data storage
-// - **Used by**: Domain-specific operations, database queries, user interaction
-//
-// ### Layer 2: Partition System (Domain + Infrastructure + Management)
-// ```rust
-// PartitionTable<G> {
-//     partitions: Vec<Partition<G>>,       // Collection of partition graphs
-//     node_map: HashMap<G::NodeId, ...>,   // Cross-reference mapping
-//     inter_partition_edges: HashMap<...>, // Cross-partition connections
-// }
-//
-// // Each Partition contains:
-// StableGraph<PartitionNode<G>, PartitionEdge<G>>
-//
-// enum PartitionNode<G> {
-//     Data(G::NodeId),    // Wrapped domain node
-//     LeftStitch,         // Partition boundary markers
-//     RightStitch,
-// }
-// ```
-// - **Purpose**: Partitioning system with domain data + infrastructure + management
-// - **Contains**: Multiple partition graphs + stitching nodes + cross-partition mappings
-// - **Responsibility**: Graph virtualization, memory management, coordinate stitching
-// - **Used by**: Viewport management, layout algorithms, partition rendering
-//
-// ### Layer 3: Layout Graph (Positioning Only per Partition)
-// ```rust
-// StableGraph<LayoutNode, LayoutEdge>
-//
-// struct LayoutNode {
-//     pos: LayoutPos,           // X, Y coordinates
-//     size: (u64, u64),         // Width, height
-//     role: NodeRole,           // Reference back to original graph via NodeIndex
-// }
-//
-// enum NodeRole {
-//     Data(NodeIndex<u32>),    // NodeIndex from original graph (Layer 1)
-//                              // - GraphMap: converts to struct key (e.g., GraphNode)
-//                              // - DiGraph: converts to NodeIndex directly
-//     Routing(GlyphIndex),     // Layout-only routing nodes for edge routing
-// }
-// ```
-// - **Purpose**: Pure visual positioning and layout coordinates
-// - **Contains**: Coordinates, sizes, and direct references back to original graph
-// - **Responsibility**: Spatial arrangement and rendering coordinates
-// - **Used by**: Rendering engine, viewport calculations, hit testing
-//
-// ## Data Flow
-//
-// ```text
-// Domain Graph (Layer 1)
-//     ↓ [Partitioning Process]
-// Partition System (Layer 2)
-//     ↓ [Layout Algorithm per Partition]
-// Layout Graphs (Layer 3)
-//     ↓ [Rendering Pipeline]
-// Visual Output
-// ```
-//
-// ## Rendering Bridge
-//
-// The plot functions bridge these layers:
-// 1. **Layout Graph (Layer 3)**: Provides positioning (`LayoutNode.pos`, `LayoutNode.size`)
-// 2. **Partition Graph (Layer 3)**: Provides original graph references (`NodeRole::Data(original_node_index)`)
-// 3. **Domain Graph (Layer 1)**: Converts NodeIndex to NodeId via `NodeIndexable::from_index()`
-//    - For GraphMap (e.g., GenGraph): NodeId is the struct key (GraphNode)
-//    - For DiGraph: NodeId is the NodeIndex itself
-// 4. **Node Renderer**: Transforms domain data into visual representation
-//
-// This separation allows:
-// - **Domain-agnostic rendering**: Layout and rendering logic doesn't know about sequences
-// - **Flexible partitioning**: Can add infrastructure nodes without affecting domain logic
-// - **Reusable components**: Same rendering engine works for different domain viewers
-// - **Clean testing**: Each layer can be tested independently
-
-/// Traits for domain-specific node rendering within the three-layer architecture.
-///
-/// This trait enables domain-specific viewers (like `GenGraphViewer`) to customize
-/// how nodes are visually rendered while keeping the core graph rendering logic
-/// completely domain-agnostic.
-///
-/// # Architecture Role
-/// The `NodeSizer` and `NodeRenderer` sit at the boundary between the generic rendering
-/// engine and domain-specific visualization logic:
-/// - **Generic Engine**: Handles layout, viewport culling, coordinate transformation
-/// - **Domain Renderer**: Interprets node data and produces visual representation
-/// - **Domain Sizer**: Interprets node data and informs visual representation
-///
-/// # Data Flow
-/// 1. `plot_graph` finds visible nodes and extracts positioning (Layer 3)
-/// 2. `plot_graph` converts NodeIndex to NodeId using original graph (Layer 1)
-/// 3. `NodeRenderer::render_node` transforms domain data into pixels (Domain-specific)
-///
-/// The `NodeKey` type specifies how nodes are identified in that context.
-/// This could be a NodeIndex, node weight, or a combination etc.
-/// Trait for computing node label dimensions at different levels of detail
-pub trait NodeSizer<G>
+/// Domain-side trait bundling node sizing and rendering for a single, fixed
+/// level of detail. A widget or event loop picks which concrete `NodeRenderer`
+/// is active (e.g. per zoom level) and borrows it immutably for rendering.
+pub trait NodeRenderer<G>
 where
     G: GraphBase,
 {
-    /// Get the dimensions (width, height) for a node at a specific level of detail
-    fn get_node_size(&self, node: &G::NodeId, detail_level: VisualDetail) -> (u64, u64);
-
-    /// Return whether the cursor may select this node.
-    fn is_selectable(&self, _node: &G::NodeId) -> bool {
-        true
-    }
+    /// Get the dimensions (width, height) for a node.
+    fn get_node_size(&self, node: &G::NodeId) -> (u64, u64);
 
     /// Get default dimensions for dummy/routing nodes
     fn get_dummy_size(&self) -> (u64, u64) {
         (1, 1)
     }
 
-    /// Map a raw content column offset to the visual cell column it occupies at a
-    /// given level of detail.
-    ///
-    /// The default scales the column proportionally to how much the node shrinks at
-    /// this detail level: `raw_col * visual_width / full_width`, where `full_width` is
-    /// the node's width at `VisualDetail::Full` and `visual_width` is its width at
-    /// `detail_level` (both from `get_node_size`). This keeps a highlight inside the
-    /// visible cells for any node that scales uniformly. Nodes whose content collapses
-    /// non-uniformly (for example a truncated `AAAAA...BBBBB` display that folds
-    /// interior columns onto an ellipsis) override this.
-    fn map_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
-        let full_width = self.get_node_size(node, VisualDetail::Full).0 as i64;
-        if full_width <= 0 {
-            return raw_col;
-        }
-        let visual_width = self.get_node_size(node, detail_level).0 as i64;
-        raw_col * visual_width / full_width
-    }
+    /// Render a node in its allocated world area.
+    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId);
 }
 
-/// Blanket implementation for Box<T> where T implements NodeSizer
-impl<G, T> NodeSizer<G> for Box<T>
+/// Forward rendering through a boxed renderer.
+impl<G, T> NodeRenderer<G> for Box<T>
 where
     G: GraphBase,
-    T: NodeSizer<G> + ?Sized,
+    T: NodeRenderer<G> + ?Sized,
 {
-    fn get_node_size(&self, node: &G::NodeId, detail_level: VisualDetail) -> (u64, u64) {
-        (**self).get_node_size(node, detail_level)
+    fn get_node_size(&self, node: &G::NodeId) -> (u64, u64) {
+        (**self).get_node_size(node)
     }
 
     fn get_dummy_size(&self) -> (u64, u64) {
         (**self).get_dummy_size()
     }
 
-    fn is_selectable(&self, node: &G::NodeId) -> bool {
-        (**self).is_selectable(node)
-    }
-
-    fn map_column(&self, node: &G::NodeId, raw_col: i64, detail_level: VisualDetail) -> i64 {
-        (**self).map_column(node, raw_col, detail_level)
+    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
+        (**self).render_node(buffer, area, node_id);
     }
 }
 
-pub trait NodeRenderer<G>
+/// Forward rendering through a shared renderer.
+impl<G, T> NodeRenderer<G> for Arc<T>
 where
     G: GraphBase,
+    T: NodeRenderer<G> + ?Sized,
 {
-    /// Render a single node's visual representation.
-    ///
-    /// # Parameters
-    /// - `buffer`: World coordinate buffer writer for drawing to the viewport
-    /// - `area`: Screen rectangle allocated for this node (from layout graph)
-    /// - `node_id`: NodeId of the node in the original graph
-    /// - `detail_level`: Level of detail for rendering (matching NodeSizer trait)
-    fn render_node(
-        &mut self,
-        buffer: &mut WorldBuffer,
-        area: WorldRect,
-        node_id: &G::NodeId,
-        detail_level: VisualDetail,
-    );
+    fn get_node_size(&self, node: &G::NodeId) -> (u64, u64) {
+        (**self).get_node_size(node)
+    }
+
+    fn get_dummy_size(&self) -> (u64, u64) {
+        (**self).get_dummy_size()
+    }
+
+    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
+        (**self).render_node(buffer, area, node_id);
+    }
 }
 
-/// Plot a single layout (single partition) with a position offset
-///
-/// This is the main plotting function that bridges:
-/// - **Layout Graph** (Layer 3): Provides spatial positioning via `layout`
-/// - **Original Graph** (Layer 1): Provides NodeId conversion via `graph`
-/// - **Domain Renderer**: Transforms data into visual representation via `renderer`
-///
-/// # Parameters
-/// - `viewport_graph`: CroppedGraph containing only visible nodes and edges
-/// - `buffer`: World coordinate buffer writer for drawing to the viewport
-/// - `renderer`: Domain-specific rendering logic and data lookup
-/// - `original_graph`: Original graph for NodeIndex to NodeId conversion
-/// - `detail_level`: Level of detail for rendering
-pub fn plot_viewport_graph<R, G>(
-    viewport_graph: &CroppedGraph,
-    buffer: &mut WorldBuffer<'_>,
-    renderer: &mut R,
-    original_graph: &G,
-    detail_level: VisualDetail,
-    theme: &Theme,
-) where
-    R: NodeRenderer<G>,
-    G: GraphBase + NodeIndexable,
-{
-    plot_viewport_graph_with_highlights(
-        viewport_graph,
-        buffer,
-        renderer,
-        original_graph,
-        detail_level,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        theme,
-    )
+pub(crate) struct PlotDecorations<'a> {
+    pub node_highlights: &'a [(WorldPos, PathStyle)],
+    pub edge_highlights: &'a [((WorldPos, WorldPos), PathStyle)],
+    pub cell_highlights: &'a [CellHighlight],
+    pub lowlights: &'a [(WorldPos, WorldPos)],
+    pub node_lowlights: &'a [WorldPos],
 }
 
-/// Plot a single layout with path highlights
-///
-/// This is the main plotting function that bridges:
-/// - **Layout Graph** (Layer 3): Provides spatial positioning via `layout`
-/// - **Original Graph** (Layer 1): Provides NodeId conversion via `graph`
-/// - **Domain Renderer**: Transforms data into visual representation via `renderer`
-///
-/// # Parameters
-/// - `viewport_graph`: CroppedGraph containing only visible nodes and edges
-/// - `buffer`: World coordinate buffer writer for drawing to the viewport
-/// - `renderer`: Domain-specific rendering logic and data lookup
-/// - `original_graph`: Original graph for NodeIndex to NodeId conversion
-/// - `detail_level`: Level of detail for rendering
-/// - `node_highlights`: List of node positions to highlight with their styles
-/// - `edge_highlights`: List of edge segments to highlight with their styles
-/// - `theme`: Theme colors for rendering
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn plot_viewport_graph_with_highlights<R, G>(
-    viewport_graph: &CroppedGraph,
+/// Plot a viewport graph with resolved highlights and lowlights.
+pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
+    viewport_graph: &ViewportGraph,
     buffer: &mut WorldBuffer<'_>,
-    renderer: &mut R,
+    renderer: &V,
     original_graph: &G,
-    detail_level: VisualDetail,
-    node_highlights: &[(WorldPos, PathStyle)],
-    edge_highlights: &[((WorldPos, WorldPos), PathStyle)],
-    cell_highlights: &[(WorldPos, (i64, i64), (i64, i64), PathStyle)],
-    lowlights: &[(WorldPos, WorldPos)],
-    node_lowlights: &[WorldPos],
+    decorations: PlotDecorations<'_>,
     theme: &Theme,
 ) where
-    R: NodeRenderer<G>,
+    V: NodeRenderer<G>,
     G: GraphBase + NodeIndexable,
 {
+    let PlotDecorations {
+        node_highlights,
+        edge_highlights,
+        cell_highlights,
+        lowlights,
+        node_lowlights,
+    } = decorations;
+
     // Draw edges first so nodes appear on top
     for (source, target, bundle) in viewport_graph.edges() {
         // Check if edge is in any highlighted path
@@ -371,7 +205,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
             NodeRole::Data(domain_idx) => {
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
-                renderer.render_node(buffer, world_rect, &node_id, detail_level);
+                renderer.render_node(buffer, world_rect, &node_id);
 
                 // If lowlighted, dim the node background to theme[0x04].
                 // Applied before highlights so highlights take priority.
@@ -392,9 +226,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     }
                 }
 
-                // TODO: when multiple highlights cover this node, render the cell with an
-                // underline modifier instead of silently discarding earlier highlights.
-                // Detect via: node_highlights.iter().filter(|(pos,_)| pos == world_pos).count() > 1
+                // Check if this node is highlighted
                 let highlighted_style = node_highlights
                     .iter()
                     .filter(|(pos, _)| pos == world_pos)
@@ -450,7 +282,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     }
                 }
             }
-            NodeRole::Routing => {
+            NodeRole::Routing | NodeRole::Pin | NodeRole::Wormhole(_) => {
                 let edge_color = theme[0x05];
                 let base_glyph =
                     compute_junction_glyph(viewport_graph.neighbors(*world_pos), *world_pos);
@@ -482,7 +314,7 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                         .filter(|(_, s)| *s == style)
                         .cloned()
                         .collect();
-                    let highlight_graph = CroppedGraph::from_visual_edges(&active_edges);
+                    let highlight_graph = ViewportGraph::from_visual_edges(&active_edges);
                     let high_glyph =
                         compute_junction_glyph(highlight_graph.neighbors(*world_pos), *world_pos);
                     let ch = if style.merge_glyphs {
@@ -532,14 +364,25 @@ pub fn plot_viewport_graph_with_highlights<R, G>(
                     let color = if all_dim { theme[0x04] } else { edge_color };
                     (ch, color)
                 };
+
+                // Render each degree-one wormhole as a horizontal direction marker.
+                let character = if matches!(node.role, NodeRole::Wormhole(_)) {
+                    match viewport_graph.neighbors(*world_pos).next() {
+                        Some(neighbor) if neighbor.x > world_pos.x => '◁',
+                        Some(neighbor) if neighbor.x < world_pos.x => '▷',
+                        _ => character,
+                    }
+                } else {
+                    character
+                };
                 buffer.set_char_styled(*world_pos, character, Style::default().fg(fg_color));
             }
-            NodeRole::Stitch(_) => {
-                // Stitch nodes should have been replaced by actual content in ViewportGraph
-                // If we see one, it means there's no actual content at this position
-                buffer.set_char(*world_pos, '◆');
-            }
         }
+    }
+
+    // Mark the horizontal bypass of any rewired backward edge with direction arrows.
+    for &(source, target) in &viewport_graph.backward_edges {
+        draw_arrows(buffer, viewport_graph, source, target, ARROW_GAPS);
     }
 }
 
@@ -643,112 +486,86 @@ fn draw_edge_with_style(
 
             // Don't overwrite a vertical line with a horizontal one.
             // Vertical edges take priority at crossings (normal, heavy, and dashed).
-            if !matches!(buffer.get_char(pos), Some('│') | Some('┃') | Some('┊')) {
+            if !matches!(
+                buffer.get_char(pos),
+                Some('│') | Some('┃') | Some('┊') | Some('┆')
+            ) {
                 buffer.set_char_styled(pos, h_ch, style);
             }
         }
     }
 }
 
-/// Render any graph widget to string representation using TestBackend
+/// Place direction markers on the `left_pin -> right_pin` main-span segment(s) of a backward
+/// edge rewired onto pin nodes by `crawl::build_window_graph`. The loop's other two legs
+/// (`source -> right_pin`, `left_pin -> target`) are short excursions connecting a pin to its
+/// real endpoint, not the backward direction itself, so they are never marked.
 ///
-/// This is a domain-agnostic function that can work with any graph type and custom renderers.
-/// It replaces the functionality previously in GenGraphViewer::plot_to_string().
-pub fn plot_graph_to_string<G, S, R>(
-    controller: &mut GraphController<G, S>,
-    renderer: R,
-    detail_level: Option<VisualDetail>,
-    offset: Option<(i64, i64)>,
-    size: Option<(i64, i64)>,
-) -> Result<(String, u16, u16), String>
-where
-    G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
-    G::NodeId: Copy + Eq + Hash + Ord,
-    G::EdgeId: Clone,
-    for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
-        + IntoNodeIdentifiers<NodeId = G::NodeId>
-        + IntoEdgeReferences<NodeId = G::NodeId, EdgeId = G::EdgeId>
-        + IntoNeighborsDirected<NodeId = G::NodeId>,
-    S: NodeSizer<G>,
-    R: NodeRenderer<G>,
-{
-    use ratatui::{Terminal, backend::TestBackend};
+/// The main span always runs toward decreasing x (`◀`): a pin always floats to the extreme
+/// rank of its own window, so `right_pin` sits to the right of `left_pin` by construction,
+/// regardless of which part of the loop the current viewport happens to show.
+fn draw_arrows(
+    buffer: &mut WorldBuffer,
+    viewport_graph: &ViewportGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    gaps: i64,
+) {
+    // The main span may be split across several collinear segments that render as one
+    // continuous line: a pin with 2+ neighbors survives `prune_pin_stubs` re-roled to
+    // `Routing` (see `window_graph::WindowNode::Pin`) but, running after `simplify_graph`,
+    // is never merged back into its neighbors, leaving it as a permanent break point.
+    // Collect the segments first and compute a single margin from their combined span, so
+    // the marker grid stays aligned across segment boundaries instead of each segment
+    // centering itself.
+    let mut segments: Vec<(WorldPos, WorldPos)> = Vec::new();
+    let mut span: Option<(i64, i64)> = None;
+    for (seg_a, seg_b, bundle) in viewport_graph.edges() {
+        if seg_a.y != seg_b.y || !bundle.contains(&(source, target)) {
+            continue;
+        }
 
-    if let Some(s) = detail_level {
-        controller.set_detail_level(s);
+        let (lo, hi) = if seg_a.x <= seg_b.x {
+            (seg_a, seg_b)
+        } else {
+            (seg_b, seg_a)
+        };
+        // Only the main span gets arrows - the loop's two excursions are skipped entirely.
+        if !viewport_graph.backward_span_edges.contains(&(lo, hi)) {
+            continue;
+        }
+        segments.push((lo, hi));
+        span = Some(match span {
+            Some((min_x, max_x)) => (min_x.min(lo.x), max_x.max(hi.x)),
+            None => (lo.x, hi.x),
+        });
     }
 
-    // Get the bounding box of the entire graph
-    // (this will trigger loading of all partitions)
-    let bbox = controller.calculate_total_bounds()?;
-
-    // Crop to a camera of at most u16::MAX x u16::MAX
-    let mut crop_to = if let Some(size) = size {
-        BigRect::from_coords(0, 0, size.0 + 1, size.1 + 1)
-    } else {
-        BigRect::from_corners(
-            Point::new(0, 0),
-            Point::new(u16::MAX as i64, u16::MAX as i64),
-        )
+    let Some((min_x, max_x)) = span else {
+        return;
     };
 
-    // Place the camera in the bottom left corner of the bbox,
-    // and apply an offset if provided
-    if let Some(offset) = offset {
-        crop_to = crop_to.transform(|pos| pos + bbox.center() + offset);
-    } else {
-        crop_to = crop_to.transform(|pos| pos + bbox.center());
-    };
+    // Center the markers across the full span: split the leftover space (total
+    // length mod gaps) evenly between both ends, so the first/last arrow sits the
+    // same distance from its endpoint as every other arrow sits from its neighbor.
+    let margin = (max_x - min_x).rem_euclid(gaps) / 2;
 
-    // Perform the actual cropping
-    let intersection = bbox
-        .intersection(&crop_to)
-        .ok_or("Plot offset out of bounds")?;
-    let width = intersection.width() as u16;
-    let height = intersection.height() as u16;
-
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
-
-    // TODO: instead of using the center, use the origin of the partition
-    // that currently holds the camera center
-    let camera_center = intersection.center();
-    controller.viewport_state.camera_current = camera_center;
-    controller.viewport_state.camera_target = camera_center;
-    controller.viewport_state.viewport_bounds =
-        ratatui::layout::Rect::new(0, 0, width + 5, height + 5);
-    controller.viewport_state.focus();
-
-    // Render using the domain-agnostic graph widget
-    let result = terminal.draw(|f| {
-        let area = f.area();
-
-        // Update viewport bounds to match area
-        controller.viewport_state.viewport_bounds = area;
-
-        let current_detail_level = controller.get_detail_level();
-
-        // Create the domain-agnostic graph widget
-        let widget = GraphWidget::with_renderer(renderer).detail_level(current_detail_level);
-
-        f.render_stateful_widget(widget, area, controller);
-    });
-
-    result.map_err(|e| e.to_string())?;
-
-    // Convert buffer to string
-    let buffer = terminal.backend().buffer();
-    let mut result = String::new();
-
-    for y in 0..buffer.area().height {
-        for x in 0..buffer.area().width {
-            let cell = &buffer[(x, y)];
-            result.push(cell.symbol().chars().next().unwrap_or(' '));
+    for (lo, hi) in segments {
+        if hi.x - lo.x < MIN_ARROW_SEGMENT_LENGTH {
+            continue;
         }
-        if y < buffer.area().height - 1 {
-            result.push('\n');
+        let arrow = '◀';
+        for x in lo.x..=hi.x {
+            let pos = WorldPos::new(x, lo.y);
+            if (x - min_x - margin).rem_euclid(gaps) == 0
+                && matches!(
+                    buffer.get_char(pos),
+                    Some('─') | Some('━') | Some('┄') | Some('╌')
+                )
+                && let Some((_, style)) = buffer.get_char_styled(pos)
+            {
+                buffer.set_char_styled(pos, arrow, style);
+            }
         }
     }
-
-    Ok((result, width, height))
 }
