@@ -12,7 +12,7 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
-    layout_engine::LayoutEngine,
+    layout_engine::{LayoutEngine, WorldKey},
     plotter::{LineStyle, PathStyle},
     theme::current_theme,
 };
@@ -25,7 +25,7 @@ use ratatui::{
 use crate::views::{
     annotation_groups::load_annotation_group_entries,
     annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
-    block_group::extract_viewport_node_ids,
+    block_group::active_neighborhood_node_ids,
     gen_graph_widget::{
         self, DEFAULT_ZOOM_LEVEL, ZoomLevels, build_zoom_levels, draw_annotation_labels,
         reapply_overlays,
@@ -88,9 +88,10 @@ pub struct InlineGenGraphState<'a> {
     overlays: Vec<GraphOverlay>,
     annotation_colors: AnnotationColorCache,
     annotation_groups_loaded: bool,
-    /// Camera anchor the annotation groups were last loaded at, so a later pan/zoom (not
-    /// every frame) is what triggers a reload.
-    annotation_groups_camera: Option<(GraphNode, (i64, i64))>,
+    /// The active neighborhood the annotation groups were last loaded for - the crawled
+    /// neighborhood is already the deliberately-constrained local window, so a reload is
+    /// only needed when it changes (not on every pan/zoom within the same neighborhood).
+    annotation_groups_world: Option<WorldKey<GraphNode>>,
 }
 
 impl<'a> InlineGenGraphState<'a> {
@@ -117,7 +118,7 @@ impl<'a> InlineGenGraphState<'a> {
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
             annotation_groups_loaded: false,
-            annotation_groups_camera: None,
+            annotation_groups_world: None,
         }
     }
 
@@ -153,27 +154,24 @@ impl<'a> InlineGenGraphState<'a> {
     }
 }
 
-/// Reload annotation groups for the current viewport if the camera has moved since the
-/// last load (or nothing has been loaded yet). Returns whether a reload happened, so the
-/// caller knows to redraw immediately rather than waiting for the next input event.
+/// Reload annotation groups for the active crawled neighborhood if it has changed since
+/// the last load (or nothing has been loaded yet). Returns whether a reload happened, so
+/// the caller knows to redraw immediately rather than waiting for the next input event.
 fn maybe_reload_annotation_groups(state: &mut InlineGenGraphState) -> bool {
-    let current_camera = state
-        .view_state
-        .camera
-        .map(|camera| (camera.anchor, camera.anchor_screen));
-    if current_camera != state.annotation_groups_camera {
+    let current_world = state.engine.active_world_key();
+    if current_world != state.annotation_groups_world {
         state.annotation_groups_loaded = false;
     }
     if state.annotation_groups_loaded {
         return false;
     }
-    let node_ids = extract_viewport_node_ids(&state.view_state);
+    let node_ids = active_neighborhood_node_ids(&state.engine);
     if node_ids.is_empty() {
         return false;
     }
     state.load_annotation_groups(&node_ids);
     state.annotation_groups_loaded = true;
-    state.annotation_groups_camera = current_camera;
+    state.annotation_groups_world = current_world;
     true
 }
 

@@ -12,7 +12,7 @@ use gen_tui::{
     LineStyle,
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
-    layout_engine::LayoutEngine,
+    layout_engine::{LayoutEngine, WorldKey},
     plotter::PathStyle,
     theme::current_theme,
 };
@@ -86,25 +86,31 @@ fn get_block_group_path_nodes(
     crate::views::helpers::project_path_nodes(conn, &path, graph)
 }
 
-/// Node IDs present in the current viewport (excluding terminal start/end nodes).
-pub(crate) fn extract_viewport_node_ids(view_state: &GraphViewState<GraphNode>) -> HashSet<HashId> {
-    view_state
-        .frame
-        .ids()
+/// Node IDs in the currently active crawled neighborhood (excluding terminal start/end
+/// nodes) - the same deliberately-constrained local window `LayoutEngine` already
+/// subsets the graph to, so annotation loading has no need to subset any further by
+/// what happens to be on-screen right now.
+pub(crate) fn active_neighborhood_node_ids(engine: &LayoutEngine<GenGraph>) -> HashSet<HashId> {
+    let Some(world) = engine.active_world() else {
+        return HashSet::new();
+    };
+    world
+        .members()
         .map(|node| node.node_id)
         .filter(|&id| !is_start_node(id) && !is_end_node(id))
         .collect()
 }
 
-/// Compute the coordinate window (min sequence start, max sequence end) of visible blocks
-/// in the current viewport, using the view state's last-rendered frame.
-pub(crate) fn current_view_coordinate_window(
-    view_state: &GraphViewState<GraphNode>,
+/// Compute the coordinate window (min sequence start, max sequence end) spanned by the
+/// currently active crawled neighborhood.
+pub(crate) fn active_neighborhood_coordinate_window(
+    engine: &LayoutEngine<GenGraph>,
 ) -> Option<(i64, i64)> {
+    let world = engine.active_world()?;
     let mut start = i64::MAX;
     let mut end = i64::MIN;
 
-    for node in view_state.frame.ids() {
+    for node in world.members() {
         if is_start_node(node.node_id) || is_end_node(node.node_id) {
             continue;
         }
@@ -120,7 +126,7 @@ pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     (window.0.saturating_sub(span), window.1.saturating_add(span))
 }
 
-fn load_annotation_groups_for_viewport(
+fn load_annotation_groups_for_neighborhood(
     conn: &GraphConnection,
     history_ref: Option<&str>,
     block_group: &BlockGroup,
@@ -167,7 +173,7 @@ struct AnnotationToggleContext<'a> {
     collection_name: &'a str,
     current_block_group: Option<&'a BlockGroup>,
     block_graph: &'a GenGraph,
-    graph_view_state: &'a GraphViewState<GraphNode>,
+    graph_engine: &'a LayoutEngine<GenGraph>,
     explorer: &'a CollectionExplorer,
 }
 
@@ -188,8 +194,8 @@ fn handle_annotation_toggle_requests(
             if let Some(entry) = ctx.explorer.annotation_file_entry(&toggled_id)
                 && let Some(block_group) = ctx.current_block_group
             {
-                let query_window =
-                    current_view_coordinate_window(ctx.graph_view_state).map(expand_query_window);
+                let query_window = active_neighborhood_coordinate_window(ctx.graph_engine)
+                    .map(expand_query_window);
                 let node_filter: HashSet<HashId> =
                     ctx.block_graph.nodes().map(|node| node.node_id).collect();
                 let request = AnnotationFileTrackRequest {
@@ -236,7 +242,7 @@ fn handle_annotation_toggle_requests(
     if let Some(toggled_group) = explorer_state.annotation_group_toggle_requested.take() {
         if explorer_state.is_annotation_group_active(&toggled_group) {
             if let Some(block_group) = ctx.current_block_group {
-                let node_ids = extract_viewport_node_ids(ctx.graph_view_state);
+                let node_ids = active_neighborhood_node_ids(ctx.graph_engine);
                 let entry = ctx.explorer.annotation_group_entry(&toggled_group);
                 let spans = match entry.map(|entry| {
                     load_annotations_for_group(&AnnotationGroupTrackRequest {
@@ -461,9 +467,11 @@ pub fn view_block_group(
     bar.finish();
 
     let mut annotation_groups_loaded = false;
-    // Last camera anchor the annotation-group auto-load ran at, so a subsequent camera
-    // move (pan/zoom/wormhole) is what triggers a reload, not every frame.
-    let mut annotation_groups_camera: Option<(GraphNode, (i64, i64))> = None;
+    // The active neighborhood the annotation groups were last loaded for. The crawled
+    // neighborhood is already the deliberately-constrained local window, so a reload is
+    // only needed when it changes (block group switch, wormhole teleport into a
+    // different world) - not on every pan/zoom within the same neighborhood.
+    let mut annotation_groups_world: Option<WorldKey<GraphNode>> = None;
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -659,7 +667,7 @@ pub fn view_block_group(
                                     collection_name,
                                     current_block_group: current_block_group.as_ref(),
                                     block_graph: &block_graph,
-                                    graph_view_state: &graph_view_state,
+                                    graph_engine: &graph_engine,
                                     explorer: &explorer,
                                 },
                                 &mut explorer_state,
@@ -694,7 +702,7 @@ pub fn view_block_group(
                             collection_name,
                             current_block_group: current_block_group.as_ref(),
                             block_graph: &block_graph,
-                            graph_view_state: &graph_view_state,
+                            graph_engine: &graph_engine,
                             explorer: &explorer,
                         },
                         &mut explorer_state,
@@ -794,17 +802,14 @@ pub fn view_block_group(
             last_refresh = Instant::now();
         }
 
-        // Reload indexed annotation file tracks when the user scrolls past the loaded window.
-        // Annotation group reload piggybacks on the camera-motion signal: when the camera has
-        // moved since the last group load, invalidate and re-load for the new viewport.
+        // Reload indexed annotation file tracks when the crawled neighborhood has changed
+        // enough that the loaded window no longer covers it. Annotation group reload
+        // piggybacks on the same neighborhood-changed signal.
         if !is_loading
             && let Some(block_group) = current_block_group.as_ref()
-            && let Some(visible_window) = current_view_coordinate_window(&graph_view_state)
+            && let Some(visible_window) = active_neighborhood_coordinate_window(&graph_engine)
         {
-            let current_camera = graph_view_state
-                .camera
-                .map(|camera| (camera.anchor, camera.anchor_screen));
-            if current_camera != annotation_groups_camera {
+            if graph_engine.active_world_key() != annotation_groups_world {
                 annotation_groups_loaded = false;
             }
             let query_window = expand_query_window(visible_window);
@@ -1168,17 +1173,18 @@ pub fn view_block_group(
             }
         })?;
 
-        // After the first draw the viewport is populated. Load (or reload) annotation groups
-        // using the viewport node IDs so only on-screen segments are fetched.
+        // Load (or reload) annotation groups for the active crawled neighborhood - that
+        // neighborhood is already the deliberately-constrained local window, so this is
+        // the sole source for which segments to fetch (no further viewport subsetting).
         let mut annotation_groups_loaded_after_draw = false;
         if !annotation_groups_loaded && let Some(block_group) = current_block_group.as_ref() {
-            let node_ids = extract_viewport_node_ids(&graph_view_state);
+            let node_ids = active_neighborhood_node_ids(&graph_engine);
             if !node_ids.is_empty() {
                 overlays.retain(
                     |o| !matches!(&o.source, OverlaySource::Track(k) if k.starts_with("group:")),
                 );
                 explorer_state.active_annotation_groups.clear();
-                load_annotation_groups_for_viewport(
+                load_annotation_groups_for_neighborhood(
                     conn,
                     history_ref,
                     block_group,
@@ -1189,9 +1195,7 @@ pub fn view_block_group(
                 );
                 annotation_groups_loaded = true;
                 annotation_groups_loaded_after_draw = true;
-                annotation_groups_camera = graph_view_state
-                    .camera
-                    .map(|camera| (camera.anchor, camera.anchor_screen));
+                annotation_groups_world = graph_engine.active_world_key();
             }
         }
 
@@ -1233,12 +1237,12 @@ pub fn view_block_group(
             annotation_file_loaded_windows.clear();
             explorer_state.active_annotation_groups.clear();
             annotation_groups_loaded = false;
-            annotation_groups_camera = None;
+            annotation_groups_world = None;
             if let Some(block_group) = current_block_group.as_ref() {
                 let node_filter: HashSet<HashId> =
                     block_graph.nodes().map(|node| node.node_id).collect();
                 let query_window =
-                    current_view_coordinate_window(&graph_view_state).map(expand_query_window);
+                    active_neighborhood_coordinate_window(&graph_engine).map(expand_query_window);
                 for entry in &explorer.data.annotation_files {
                     let id = entry.file_addition.id;
                     if !explorer_state.is_annotation_file_active(&id) {
