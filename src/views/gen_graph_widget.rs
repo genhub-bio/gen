@@ -655,18 +655,46 @@ fn extract_backward_edges(graph: &mut GenGraph) -> Vec<(GraphNode, GraphNode)> {
 /// # Returns
 /// The engine, zoom table, and view state ready to be passed to `GraphView::new`/rendered.
 pub fn create_gen_graph_engine<'a, S: SequenceSource + Clone + 'a>(
-    mut graph: GenGraph,
+    graph: GenGraph,
     source: S,
 ) -> (
     LayoutEngine<GenGraph>,
     ZoomLevels<'a>,
     GraphViewState<GraphNode>,
 ) {
+    build_gen_graph_engine(graph, build_zoom_levels(source))
+}
+
+/// Like [`create_gen_graph_engine`], but for a `Send + Sync + 'static` sequence source
+/// (e.g. `PathSequenceSource`), producing a zoom table that itself is `Send + Sync` - for
+/// callers (the Jupyter widget's `#[pyclass]`) that must store the table as a field of a
+/// type pyo3 requires to be `Send + Sync`.
+pub fn create_send_sync_gen_graph_engine<S: SequenceSource + Clone + Send + Sync + 'static>(
+    graph: GenGraph,
+    source: S,
+) -> (
+    LayoutEngine<GenGraph>,
+    SendSyncZoomLevels,
+    GraphViewState<GraphNode>,
+) {
+    build_gen_graph_engine(graph, build_send_sync_zoom_levels(source))
+}
+
+/// Shared body of [`create_gen_graph_engine`]/[`create_send_sync_gen_graph_engine`]: dims
+/// pruned edges and inaccessible nodes, starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
+/// free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
+fn build_gen_graph_engine<R>(
+    mut graph: GenGraph,
+    levels: Vec<(VisualDetail, R, GapSizes)>,
+) -> (
+    LayoutEngine<GenGraph>,
+    Vec<(VisualDetail, R, GapSizes)>,
+    GraphViewState<GraphNode>,
+) {
     collapse_reverse_complement_edges(&mut graph);
     let backward_edges = extract_backward_edges(&mut graph);
     let pruned = compute_pruned_edges(&graph);
     let inaccessible = compute_inaccessible_nodes(&graph, &pruned);
-    let levels = build_zoom_levels(source);
     let engine = if backward_edges.is_empty() {
         LayoutEngine::new(graph)
     } else {
@@ -684,6 +712,30 @@ pub fn create_gen_graph_engine<'a, S: SequenceSource + Clone + 'a>(
     view_state.hide_cursor();
 
     (engine, levels, view_state)
+}
+
+/// The slice and local offset (0-based, within that slice's block) at the
+/// midpoint of a locus's total sequence length. `None` for an empty locus.
+pub fn locus_midpoint(locus: &GraphLocus) -> Option<(GraphNodeSlice, usize)> {
+    let total: usize = locus
+        .slices
+        .iter()
+        .map(|slice| slice.end - slice.start)
+        .sum();
+    if total == 0 {
+        return None;
+    }
+    let half = total / 2;
+    let mut consumed = 0;
+    for (index, slice) in locus.slices.iter().enumerate() {
+        let len = slice.end - slice.start;
+        let is_last = index == locus.slices.len() - 1;
+        if consumed + len > half || is_last {
+            return Some((*slice, slice.start + (half - consumed)));
+        }
+        consumed += len;
+    }
+    None
 }
 
 /// Compute the screen-space bounding corners of the matched region in a `GraphLocus`,

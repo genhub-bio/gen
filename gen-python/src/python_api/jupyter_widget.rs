@@ -4,7 +4,7 @@ use std::{
 };
 
 use r#gen::{
-    get_connection_for_branch,
+    get_connection,
     views::{
         annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
@@ -18,8 +18,8 @@ use r#gen::{
         },
         block_group::{current_view_coordinate_window, expand_query_window},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
-            draw_annotation_labels, reapply_overlays,
+            self, PathSequenceSource, SendSyncZoomLevels, create_send_sync_gen_graph_engine,
+            draw_annotation_labels, locus_midpoint, reapply_overlays,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
@@ -28,8 +28,8 @@ use r#gen::{
     },
 };
 use gen_annotations::projection::annotation_segments;
-use gen_core::{HashId, Workspace, is_end_node, is_start_node};
-use gen_graph::GenGraph;
+use gen_core::{HashId, is_end_node, is_start_node};
+use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
@@ -37,10 +37,13 @@ use gen_models::{
     history::dolt::active_branch,
 };
 use gen_tui::{
-    LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
-    plotter::PathStyle, theme::current_theme,
+    LineStyle,
+    graph_view::{GraphView, GraphViewState},
+    layout::VisualDetail,
+    layout_engine::LayoutEngine,
+    plotter::PathStyle,
+    theme::current_theme,
 };
-use petgraph::{graph::NodeIndex, visit::NodeIndexable};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 use ratatui::{
     buffer::Buffer,
@@ -258,11 +261,10 @@ fn sort_key_longest_first(span: &AnnotationSpan) -> i64 {
 struct GraphPage {
     name: String,
     db_path: PathBuf,
-    // Viewer callbacks reopen connections and must keep the plotted graph's branch.
-    branch: Option<String>,
-    workspace: Workspace,
     pub(crate) block_group_id: Option<HashId>,
-    controller: GraphController<GenGraph, GenGraphNodeSizer>,
+    engine: LayoutEngine<GenGraph>,
+    zoom_levels: SendSyncZoomLevels,
+    view_state: GraphViewState<GraphNode>,
     /// Annotation and path overlays. The path (added by `show_path`, removed by
     /// `hide_path`/`clear_highlights`) is just another overlay, so it survives
     /// zoom/detail changes the same way the annotation overlays do.
@@ -293,10 +295,7 @@ struct FileTrack {
 struct PageRef {
     name: String,
     db_path: PathBuf,
-    branch: String,
-    workspace: Workspace,
     block_group_id: HashId,
-    show_history: bool,
 }
 
 /// One page of a `PyGraphController`: either already loaded, or pending lazy
@@ -317,24 +316,16 @@ impl Page {
 }
 
 impl GraphPage {
-    fn new(
-        name: String,
-        db_path: PathBuf,
-        workspace: Workspace,
-        mut graph: GenGraph,
-        show_history: bool,
-    ) -> Self {
-        if !show_history {
-            BlockGroup::prune_graph(&mut graph);
-        }
-        let controller = create_gen_graph_controller(graph);
+    fn new(name: String, db_path: PathBuf, graph: GenGraph) -> Self {
+        let source = PathSequenceSource::new(db_path.clone());
+        let (engine, zoom_levels, view_state) = create_send_sync_gen_graph_engine(graph, source);
         Self {
             name,
             db_path,
-            branch: None,
-            workspace,
             block_group_id: None,
-            controller,
+            engine,
+            zoom_levels,
+            view_state,
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
             annotation_groups_loaded: false,
@@ -343,12 +334,11 @@ impl GraphPage {
     }
 
     fn open_conn(&self) -> PyResult<GraphConnection> {
-        get_connection_for_branch(&self.db_path, self.branch.as_deref())
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+        get_connection(&self.db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     fn all_node_ids(&self) -> HashSet<HashId> {
-        self.controller
+        self.engine
             .graph()
             .nodes()
             .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
@@ -373,7 +363,6 @@ impl GraphPage {
             .ok_or_else(|| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
-            workspace: &self.workspace,
             history_ref: None,
             current_block_group: &current_block_group,
             entry: &entry,
@@ -431,12 +420,7 @@ impl GraphPage {
     fn track_accent_base(&self) -> usize {
         self.overlays
             .iter()
-            .filter(|overlay| {
-                !matches!(
-                    overlay.source,
-                    OverlaySource::Adhoc | OverlaySource::Search | OverlaySource::Path
-                )
-            })
+            .filter(|overlay| !matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path))
             .count()
     }
 
@@ -462,7 +446,9 @@ impl GraphPage {
     /// depends on the current detail level, so a zoom/detail change alone can change the result.
     fn reapply(&mut self) {
         reapply_overlays(
-            &mut self.controller,
+            &self.engine,
+            &mut self.view_state,
+            &self.zoom_levels,
             &mut self.overlays,
             &mut self.annotation_colors,
         );
@@ -523,7 +509,7 @@ impl GraphPage {
     }
 
     fn navigate_to_span(&mut self, span: &AnnotationSpan, center: bool) {
-        let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) else {
+        let Some(locus) = graph_locus_from_annotation_span(span, self.engine.graph()) else {
             return;
         };
         let Some(position) = PyGraphLocus::from_locus(locus).target_position(center) else {
@@ -556,13 +542,20 @@ impl GraphPage {
 
         // Draw overlay labels after the graph, then a single hint if any were hidden.
         // Midpoints are recomputed each render because the viewport may have changed.
-        let detail_level = self.controller.get_detail_level();
-        let any_hidden = draw_annotation_labels(buf, graph_area, &self.controller, &self.overlays);
+        let detail_level = self.zoom_levels[self.view_state.zoom_index].0;
+        let any_hidden = draw_annotation_labels(
+            buf,
+            graph_area,
+            &self.engine,
+            &self.view_state,
+            &self.zoom_levels,
+            &self.overlays,
+        );
         if any_hidden {
             let note = if detail_level == VisualDetail::Full {
                 " some annotations hidden due to space constraints "
             } else {
-                " only annotations spanning a variant (edge) or filling a full node are shown "
+                " some annotations hidden in truncated view "
             };
             let theme = current_theme();
             let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
@@ -577,9 +570,21 @@ impl GraphPage {
         Ok(())
     }
 
+    /// Jump straight to the first zoom level matching `detail`.
+    fn set_detail_level(&mut self, detail: VisualDetail) {
+        let Some(index) = self
+            .zoom_levels
+            .iter()
+            .position(|(level, _, _)| *level == detail)
+        else {
+            return;
+        };
+        gen_graph_widget::apply_zoom_level(&mut self.view_state, index, &self.zoom_levels);
+    }
+
     fn resolve_color(&mut self, color: Option<&str>) -> PyResult<Color> {
         match color {
-            None => Ok(self.controller.next_accent_color()),
+            None => Ok(self.view_state.next_accent_color()),
             Some(s) => match s {
                 "red" => Ok(Color::Red),
                 "green" => Ok(Color::Green),
@@ -657,60 +662,57 @@ impl GraphPage {
                 )));
             }
         };
-        self.controller.set_detail_level(level);
+        self.set_detail_level(level);
         Ok(())
     }
 
     pub fn truncate_sequences(&mut self) {
-        self.controller.set_detail_level(VisualDetail::Truncated);
+        self.set_detail_level(VisualDetail::Truncated);
     }
 
     pub fn full_sequences(&mut self) {
-        self.controller.set_detail_level(VisualDetail::Full);
+        self.set_detail_level(VisualDetail::Full);
     }
 
     pub fn minimize_sequences(&mut self) {
-        self.controller.set_detail_level(VisualDetail::Minimal);
+        self.set_detail_level(VisualDetail::Minimal);
     }
 
     fn zoom_in(&mut self) {
-        self.controller.zoom_in();
+        gen_graph_widget::zoom_in(&mut self.view_state, &self.zoom_levels);
     }
 
     fn zoom_out(&mut self) {
-        self.controller.zoom_out();
+        gen_graph_widget::zoom_out(&mut self.view_state, &self.zoom_levels);
     }
 
     fn handle_click(&mut self, col: u16, row: u16) -> bool {
-        self.controller.handle_click(col, row)
+        self.view_state.handle_click(col, row)
     }
 
     fn move_by(&mut self, dx: i16, dy: i16) {
-        self.controller.move_by_terminal(dx, dy);
-        self.controller.sync_cursor_to_closest_node();
+        self.view_state.move_by_terminal(dx, dy);
+        self.view_state.rebase_camera_to_closest_node();
     }
 
     fn go_to_pos(&mut self, position: &PyPosition, center: bool) {
         // A position keeps its node offset across edits, so find the block it falls in now.
-        let Some((block, local_offset)) = position.locate(self.controller.graph()) else {
+        let Some((block, local_offset)) = position.locate(self.engine.graph()) else {
             return;
         };
-        self.controller.set_detail_level(VisualDetail::Full);
+        self.set_detail_level(VisualDetail::Full);
 
-        // Find the partition this block is on, load it and anchor it
-        let Ok((partition_idx, _)) = self
-            .controller
-            .partition_controller
-            .partition_table
-            .find_node(&block)
-        else {
+        // Build (or reactivate) the crawled neighbourhood window anchored on this block.
+        let node_budget = self
+            .engine
+            .neighborhood_node_budget(self.view_state.last_area_width() as usize);
+        if self
+            .engine
+            .activate_world_at(block, node_budget, None)
+            .is_err()
+        {
             return;
-        };
-        let _ = self.controller.ensure_partition_loaded(partition_idx);
-        let _ = self.controller.set_anchor_partition(partition_idx);
-
-        // Go to node works with an index, not a raw GraphNode
-        let domain_idx = NodeIndex::new(NodeIndexable::to_index(self.controller.graph(), block));
+        }
 
         // The cursor is positioned using normalized coordinates between 0 and 1,
         // relative to the area in which the node (block) is represented in the plot.
@@ -721,11 +723,11 @@ impl GraphPage {
             0.0
         };
 
-        self.controller.go_to_node(domain_idx, (frac_x, 0.5));
+        self.view_state.go_to_node(block, (frac_x, 0.5));
         if !center {
-            self.controller.queue_snap_left();
+            self.view_state.queue_snap_left();
         }
-        self.controller.hide_cursor();
+        self.view_state.hide_cursor();
     }
 
     /// Highlight the path of nodes covered by `match_obj` in the given colour.
@@ -774,11 +776,8 @@ impl GraphPage {
     ///
     /// Raises
     /// RuntimeError
-    ///     If no sequence graph is associated with this widget, if no path
-    ///     exists for the sequence graph, or if the path cannot be traced
-    ///     through the plotted graph. A path copied before later edits runs
-    ///     through nodes the default view prunes; plot with
-    ///     ``show_history=True`` to keep them.
+    ///     If no sequence graph is associated with this widget, or if no path
+    ///     exists for the sequence graph.
     /// ValueError
     ///     If ``color`` is not a recognised colour name or CSS hex string.
     pub fn show_path(&mut self, color: Option<&str>) -> PyResult<()> {
@@ -793,8 +792,8 @@ impl GraphPage {
 
         let path = BlockGroup::get_current_path(&conn, &block_group_id, None)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let path_blocks = path.coordinate_blocks(&conn, None);
-        let path_nodes = project_path_overlay_nodes(self.controller.graph(), &path_blocks);
+        let path_blocks = path.blocks(&conn, None).unwrap_or_default();
+        let path_nodes = project_path_overlay_nodes(self.engine.graph(), &path_blocks);
 
         if path_nodes.is_empty() {
             return Err(PyRuntimeError::new_err(
@@ -947,12 +946,65 @@ impl GraphPage {
         }
         // Keep ad hoc/search highlights and the path; drop everything
         // added via a track or `add_annotation`, then repaint what remains.
-        self.overlays.retain(|overlay| {
-            matches!(
-                overlay.source,
-                OverlaySource::Adhoc | OverlaySource::Search | OverlaySource::Path
-            )
+        self.overlays
+            .retain(|overlay| matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path));
+        self.reapply();
+    }
+    /// Add annotations rendered directly on the graph canvas.
+    /// Annotations are tinted with an accent colour and labelled below their span.
+    pub fn add_annotation(
+        &mut self,
+        annotations: Vec<PyRef<PyAnnotation>>,
+        track_name: Option<String>,
+    ) {
+        let existing_color = track_name.as_deref().and_then(|name| {
+            self.overlays
+                .iter()
+                .find_map(|overlay| match &overlay.source {
+                    OverlaySource::Annotation(existing) if existing == name => {
+                        Some(overlay.style.color)
+                    }
+                    _ => None,
+                })
         });
+        let color = existing_color.unwrap_or_else(|| self.view_state.next_accent_color());
+        let style = PathStyle::new(color)
+            .with_line_style(LineStyle::Bold)
+            .with_merge_glyphs(true);
+        let source = match &track_name {
+            Some(name) => OverlaySource::Annotation(name.clone()),
+            None => OverlaySource::Adhoc,
+        };
+        for annotation in &annotations {
+            self.overlays.push(GraphOverlay {
+                content: OverlayContent::Span(annotation_to_span(annotation)),
+                source: source.clone(),
+                style,
+            });
+        }
+        self.reapply();
+    }
+
+    /// Return a JSON list of annotation names currently loaded (from
+    /// `add_annotation`; annotations loaded as part of a track keep their own
+    /// name here too, separately from the track's name).
+    pub fn get_annotation_names(&self) -> PyResult<String> {
+        let mut seen = std::collections::HashSet::new();
+        let names: Vec<&str> = self
+            .overlays
+            .iter()
+            .filter_map(|o| o.span().map(|s| s.name.as_str()))
+            .filter(|n| !n.is_empty() && seen.insert(*n))
+            .collect();
+        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Remove all overlays whose annotation name matches `name`, regardless of
+    /// which track (if any) they belong to. If the same name was added more
+    /// than once, every copy is removed.
+    pub fn remove_annotation(&mut self, name: &str) {
+        self.overlays
+            .retain(|overlay| overlay.span().is_none_or(|span| span.name != name));
         self.reapply();
     }
 }
@@ -1088,7 +1140,7 @@ impl GraphPage {
 
 /// Build an eagerly-loaded `GraphPage` for a `PySequenceGraph`, loading its
 /// graph and auto-loading any stored annotation groups.
-fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<GraphPage> {
+fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
     let context = sg.context.clone().ok_or_else(|| {
         PyRuntimeError::new_err(
             "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
@@ -1099,25 +1151,16 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> P
         .path()
         .map(PathBuf::from)
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-    let graph = BlockGroup::get_graph(graph_conn, context.workspace(), &sg.id, None)
-        .map_err(block_group_err_to_pyerr)?;
-    let mut page = GraphPage::new(
-        sg.name.clone(),
-        db_path,
-        context.workspace().clone(),
-        graph,
-        show_history,
-    );
-    page.branch = Some(
-        active_branch(graph_conn).map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
-    );
+    let graph =
+        BlockGroup::get_graph(graph_conn, &sg.id, None).map_err(block_group_err_to_pyerr)?;
+    let mut page = GraphPage::new(sg.name.clone(), db_path, graph);
     page.block_group_id = Some(sg.id);
     Ok(page)
 }
 
 /// Capture the information needed to lazily build a page for `sg` later,
 /// without holding a live (non-`Send`) database handle in the meantime.
-fn page_ref_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<PageRef> {
+fn page_ref_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<PageRef> {
     let context = sg.context.clone().ok_or_else(|| {
         PyRuntimeError::new_err(
             "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
@@ -1132,11 +1175,7 @@ fn page_ref_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyRe
     Ok(PageRef {
         name: sg.name.clone(),
         db_path,
-        branch: active_branch(context.graph().conn())
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
-        workspace: context.workspace().clone(),
         block_group_id: sg.id,
-        show_history,
     })
 }
 
@@ -1171,44 +1210,28 @@ pub struct PyGraphController {
 
 impl PyGraphController {
     /// Wrap a single, already-loaded graph as a one-page controller.
-    pub fn new(
-        db_path: PathBuf,
-        workspace: Workspace,
-        graph: GenGraph,
-        show_history: bool,
-    ) -> Self {
+    pub fn new(db_path: PathBuf, graph: GenGraph) -> Self {
         Self {
             pages: vec![Page::Loaded(Box::new(GraphPage::new(
                 String::new(),
                 db_path,
-                workspace,
                 graph,
-                show_history,
             )))],
             current_index: 0,
         }
     }
 
     /// Build a single-page controller for `sg`, loading its graph eagerly.
-    ///
-    /// `show_history` keeps retired edit-site and pruned edges (and the nodes
-    /// only they reach) in the graph, dimmed, instead of removing them.
-    pub(crate) fn for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<Self> {
+    pub(crate) fn for_sequence_graph(sg: &PySequenceGraph) -> PyResult<Self> {
         Ok(Self {
-            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(
-                sg,
-                show_history,
-            )?))],
+            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(sg)?))],
             current_index: 0,
         })
     }
 
     /// Build a multi-page controller paging through every sequence graph in
     /// `block_groups`. Each page's graph is loaded lazily on first visit.
-    pub(crate) fn for_sample(
-        block_groups: &[PySequenceGraph],
-        show_history: bool,
-    ) -> PyResult<Self> {
+    pub(crate) fn for_sample(block_groups: &[PySequenceGraph]) -> PyResult<Self> {
         if block_groups.is_empty() {
             return Err(PyRuntimeError::new_err(
                 "Sample has no sequence graphs to plot",
@@ -1216,7 +1239,7 @@ impl PyGraphController {
         }
         let pages = block_groups
             .iter()
-            .map(|sg| page_ref_for_sequence_graph(sg, show_history).map(Page::Pending))
+            .map(|sg| page_ref_for_sequence_graph(sg).map(Page::Pending))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(Self {
             pages,
@@ -1227,20 +1250,12 @@ impl PyGraphController {
     fn active(&mut self) -> PyResult<&mut GraphPage> {
         let page = &mut self.pages[self.current_index];
         if let Page::Pending(page_ref) = page {
-            let conn = get_connection_for_branch(&page_ref.db_path, Some(&page_ref.branch))
+            let conn = get_connection(&page_ref.db_path)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            let graph =
-                BlockGroup::get_graph(&conn, &page_ref.workspace, &page_ref.block_group_id, None)
-                    .map_err(block_group_err_to_pyerr)?;
-            let mut loaded = GraphPage::new(
-                page_ref.name.clone(),
-                page_ref.db_path.clone(),
-                page_ref.workspace.clone(),
-                graph,
-                page_ref.show_history,
-            );
+            let graph = BlockGroup::get_graph(&conn, &page_ref.block_group_id, None)
+                .map_err(block_group_err_to_pyerr)?;
+            let mut loaded = GraphPage::new(page_ref.name.clone(), page_ref.db_path.clone(), graph);
             loaded.block_group_id = Some(page_ref.block_group_id);
-            loaded.branch = Some(page_ref.branch.clone());
             *page = Page::Loaded(Box::new(loaded));
         }
         match page {
@@ -1385,11 +1400,8 @@ impl PyGraphController {
     ///
     /// Raises
     /// RuntimeError
-    ///     If no sequence graph is associated with this widget, if no path
-    ///     exists for the sequence graph, or if the path cannot be traced
-    ///     through the plotted graph. A path copied before later edits runs
-    ///     through nodes the default view prunes; plot with
-    ///     ``show_history=True`` to keep them.
+    ///     If no sequence graph is associated with this widget, or if no path
+    ///     exists for the sequence graph.
     /// ValueError
     ///     If ``color`` is not a recognised colour name or CSS hex string.
     #[pyo3(signature = (color=None))]
@@ -1658,9 +1670,9 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("test DB must be file-backed");
         let (bg_id, _) = setup_block_group(graph_handle.conn());
-        let graph = BlockGroup::get_graph(graph_handle.conn(), ctx.workspace(), &bg_id, None)
+        let graph = BlockGroup::get_graph(graph_handle.conn(), &bg_id, None)
             .map_err(crate::python_api::utils::block_group_err_to_pyerr)?;
-        let mut ctrl = PyGraphController::new(db_path, ctx.workspace().clone(), graph, true);
+        let mut ctrl = PyGraphController::new(db_path, graph);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
