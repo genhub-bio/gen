@@ -8,6 +8,7 @@ use std::{
 };
 
 use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
+use indexmap::IndexMap;
 use opendal::{blocking, services};
 use rusqlite::{
     Row, ToSql, named_params, params,
@@ -188,8 +189,12 @@ pub struct AssetRef {
 
 pub struct Assets;
 
-enum AssetView {
+/// Selects whether an asset-history query preserves every version or the final workspace view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssetView {
+    /// Retains every local asset version in the selected history.
     Cumulative,
+    /// Retains only the asset selected for each logical path at the upper commit.
     Materialized,
 }
 
@@ -307,23 +312,36 @@ impl AssetRef {
         Ok(())
     }
 
-    fn get_assets_at(
+    /// Returns assets grouped by commit.
+    ///
+    /// Commits are in history order with commits without assets having an empty vector.
+    pub fn get_assets_by_commit(
         conn: &GraphConnection,
         from_hash: Option<&DoltHashId>,
         to_hash: Option<&DoltHashId>,
         view: AssetView,
-    ) -> Result<Vec<Self>, QueryError> {
-        let (ancestry_boundary, history_depth, view_query) = match view {
+    ) -> Result<IndexMap<DoltHashId, Vec<Self>>, QueryError> {
+        let (ancestry_boundary, view_query) = match view {
             AssetView::Cumulative => (
                 "AND (:from_hash IS NULL OR ancestry.commit_hash <> :from_hash)",
-                "",
-                "SELECT id, uri, file_type, checksum, size, role, logical_path, name, created_on \
-                 FROM asset_versions \
-                 ORDER BY logical_path, id",
+                "SELECT bounded_ancestry.commit_hash, \
+                        asset_versions.id, \
+                        asset_versions.uri, \
+                        asset_versions.file_type, \
+                        asset_versions.checksum, \
+                        asset_versions.size, \
+                        asset_versions.role, \
+                        asset_versions.logical_path, \
+                        asset_versions.name, \
+                        asset_versions.created_on \
+                 FROM bounded_ancestry \
+                 LEFT JOIN asset_versions \
+                   ON asset_versions.introduction_commit = bounded_ancestry.commit_hash \
+                 ORDER BY bounded_ancestry.depth DESC, \
+                          asset_versions.id",
             ),
             AssetView::Materialized => (
                 "",
-                ", MAX(bounded_ancestry.depth) AS introduction_depth",
                 ", /* Keep only assets present at the upper bound, then rank each logical path by \
                       its introduction order in first-parent history. Null paths remain \
                       independent because they are partitioned by asset ID. */ \
@@ -344,10 +362,22 @@ impl AssetRef {
                      ) AS current_assets \
                        ON current_assets.id = asset_versions.id \
                  ) \
-                 SELECT id, uri, file_type, checksum, size, role, logical_path, name, created_on \
-                 FROM materialized_assets \
-                 WHERE materialized_rank = 1 \
-                 ORDER BY logical_path, id",
+                 SELECT bounded_ancestry.commit_hash, \
+                        materialized_assets.id, \
+                        materialized_assets.uri, \
+                        materialized_assets.file_type, \
+                        materialized_assets.checksum, \
+                        materialized_assets.size, \
+                        materialized_assets.role, \
+                        materialized_assets.logical_path, \
+                        materialized_assets.name, \
+                        materialized_assets.created_on \
+                 FROM bounded_ancestry \
+                 LEFT JOIN materialized_assets \
+                  ON materialized_assets.introduction_commit = bounded_ancestry.commit_hash \
+                  AND materialized_assets.materialized_rank = 1 \
+                 ORDER BY bounded_ancestry.depth DESC, \
+                          materialized_assets.id",
             ),
         };
         let query = format!(
@@ -379,8 +409,8 @@ impl AssetRef {
                      ), \
                      /* Start Dolt's history walk at the upper bound, join the selected commits to \
                         its repeated table snapshots, keep local files, and collapse each immutable \
-                        asset ID. Materialized queries also record the oldest depth in the full walk \
-                        as the version's introduction order on the selected ref. */ \
+                        asset ID. SQLite associates the bare commit hash with the row supplying \
+                        MAX(depth), identifying the version's introduction in first-parent history. */ \
                      asset_versions AS ( \
                          SELECT historical_assets.id, \
                                 historical_assets.uri, \
@@ -390,8 +420,9 @@ impl AssetRef {
                                 historical_assets.role, \
                                 historical_assets.logical_path, \
                                 historical_assets.name, \
-                                historical_assets.created_on \
-                                {history_depth} \
+                                historical_assets.created_on, \
+                                bounded_ancestry.commit_hash AS introduction_commit, \
+                                MAX(bounded_ancestry.depth) AS introduction_depth \
                          FROM bounded_ancestry \
                          JOIN dolt_history_gen_asset_refs( \
                              COALESCE(:to_hash, dolt_hashof('HEAD')) \
@@ -402,14 +433,63 @@ impl AssetRef {
                      ) \
                      {view_query}"
         );
-        Self::try_query(
-            conn,
-            &query,
+        let mut statement = conn.prepare(&query)?;
+        let rows = statement.query_map(
             named_params! {
                 ":from_hash": from_hash,
                 ":to_hash": to_hash,
             },
-        )
+            |row| {
+                let id = row.get::<_, Option<HashId>>("id")?;
+                let asset = if let Some(id) = id {
+                    Some(Self {
+                        id,
+                        uri: row.get("uri")?,
+                        file_type: row.get("file_type")?,
+                        checksum: row.get("checksum")?,
+                        size: row.get("size")?,
+                        role: row.get("role")?,
+                        logical_path: row.get("logical_path")?,
+                        name: row.get("name")?,
+                        created_on: row.get("created_on")?,
+                    })
+                } else {
+                    None
+                };
+                Ok((row.get::<_, DoltHashId>("commit_hash")?, asset))
+            },
+        )?;
+        let mut assets_by_commit = IndexMap::<DoltHashId, Vec<Self>>::new();
+        for row in rows {
+            let (commit_hash, asset) = row?;
+            let assets = assets_by_commit.entry(commit_hash).or_default();
+            if let Some(asset) = asset {
+                assets.push(asset);
+            }
+        }
+        Ok(assets_by_commit)
+    }
+
+    // Returns an array of assets between two commit ranges for a given view type.
+    //
+    // Cumulative views include assets that have been replaced by more recent versions.
+    // Materialized view is the newest asset (as defined by closest to to_hash).
+    fn get_assets_at(
+        conn: &GraphConnection,
+        from_hash: Option<&DoltHashId>,
+        to_hash: Option<&DoltHashId>,
+        view: AssetView,
+    ) -> Result<Vec<Self>, QueryError> {
+        let mut assets = Self::get_assets_by_commit(conn, from_hash, to_hash, view)?
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
+        assets.sort_by(|left, right| {
+            left.logical_path
+                .cmp(&right.logical_path)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(assets)
     }
 
     /// Returns every local asset reference present in an inclusive commit range.
@@ -1596,7 +1676,7 @@ mod tests {
     mod asset_history {
         use gen_core::{DoltHashId, HashId, Sha256Hash};
 
-        use super::{AssetRef, AssetRole};
+        use super::{AssetRef, AssetRole, AssetView};
         use crate::{
             db::{DbContext, GraphConnection},
             history::dolt::{checkout, commit_all, create_branch},
@@ -1615,6 +1695,7 @@ mod tests {
             second_alpha: AssetRef,
             beta: AssetRef,
             zeta: AssetRef,
+            first_commit: DoltHashId,
             second_commit: DoltHashId,
             deletion_commit: DoltHashId,
             latest_commit: DoltHashId,
@@ -1653,7 +1734,8 @@ mod tests {
                 AssetRef::create(conn, &zeta).expect("should insert zeta asset");
                 AssetRef::create(conn, &first_alpha).expect("should insert first alpha asset");
                 AssetRef::create(conn, &remote_asset).expect("should insert remote asset");
-                commit_all(conn, "add first assets").expect("should commit first assets");
+                let first_commit =
+                    commit_all(conn, "add first assets").expect("should commit first assets");
 
                 let second_alpha = AssetRef {
                     id: HashId::convert_str("second-alpha"),
@@ -1690,6 +1772,7 @@ mod tests {
                     second_alpha,
                     beta,
                     zeta,
+                    first_commit,
                     second_commit,
                     deletion_commit,
                     latest_commit,
@@ -1883,6 +1966,58 @@ mod tests {
                 AssetRef::get_cumulative_assets_at(fixture.conn(), None, None)
                     .expect("should read full history through HEAD"),
                 expected
+            );
+        }
+
+        #[test]
+        fn test_assets_by_commit_orders_commits_and_preserves_empty_entries() {
+            let fixture = AssetHistoryFixture::new();
+            let assets_by_commit = AssetRef::get_assets_by_commit(
+                fixture.conn(),
+                Some(&fixture.first_commit),
+                Some(&fixture.latest_commit),
+                AssetView::Cumulative,
+            )
+            .expect("should group assets by introduction commit");
+            let assets = sorted_assets(
+                assets_by_commit
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+
+            assert_eq!(
+                assets,
+                AssetRef::get_cumulative_assets_at(
+                    fixture.conn(),
+                    Some(&fixture.first_commit),
+                    Some(&fixture.latest_commit),
+                )
+                .expect("should preserve the cumulative asset-only view")
+            );
+            assert_eq!(
+                assets_by_commit.keys().copied().collect::<Vec<_>>(),
+                vec![
+                    fixture.first_commit,
+                    fixture.second_commit,
+                    fixture.deletion_commit,
+                    fixture.latest_commit,
+                ]
+            );
+            assert_eq!(
+                assets_by_commit
+                    .get(&fixture.second_commit)
+                    .expect("should contain second commit")
+                    .as_slice(),
+                core::slice::from_ref(&fixture.second_alpha)
+            );
+            assert!(
+                assets_by_commit
+                    .get(&fixture.deletion_commit)
+                    .expect("should contain deletion commit")
+                    .is_empty(),
+                "commits without introduced assets should retain empty entries"
             );
         }
     }

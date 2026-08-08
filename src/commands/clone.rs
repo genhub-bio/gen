@@ -27,7 +27,7 @@ pub fn execute(url: &str, parent: &Workspace) -> Result<(), Box<dyn std::error::
         let canonical_url = canonical_remote_url(url)?;
         let remote = Remote::create(&config, "origin", &canonical_url)?;
         Defaults::set_default_remote(&config, Some("origin"))?;
-        let branch = clone_into_workspace(&remote, &workspace)?;
+        let branch = clone_into_workspace(&config, &remote, &workspace)?;
         RemoteBranch::set_remote_validated(&config, &branch, Some("origin"))?;
         Defaults::set_current_branch(&config, Some(&branch))?;
         println!("Cloned {canonical_url} into {}.", destination.display());

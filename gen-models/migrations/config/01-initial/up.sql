@@ -12,6 +12,30 @@ CREATE TABLE remotes (
     url TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE remote_operations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    remote_name TEXT NOT NULL,
+    branch_name TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK(operation IN ('clone', 'pull')),
+    from_commit TEXT,
+    assets_transfer_checkpoint TEXT,
+    to_commit TEXT,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    failed_at TEXT,
+    CHECK(completed_at IS NULL OR failed_at IS NULL),
+    CHECK(completed_at IS NULL OR (
+        to_commit IS NOT NULL
+        AND assets_transfer_checkpoint IS NOT NULL
+        AND assets_transfer_checkpoint = to_commit
+    )),
+    FOREIGN KEY(remote_name) REFERENCES remotes(name) ON DELETE CASCADE
+) STRICT;
+
+CREATE UNIQUE INDEX remote_operations_pending
+ON remote_operations(remote_name, branch_name)
+WHERE completed_at IS NULL AND failed_at IS NULL;
+
 CREATE TABLE remote_branch (
    remote_name TEXT,
    name TEXT,

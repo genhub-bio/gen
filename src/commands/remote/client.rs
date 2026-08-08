@@ -26,7 +26,7 @@
 
 use std::{env, io};
 
-use gen_core::HashId;
+use gen_core::{DoltHashId, HashId};
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, RequestBuilder},
@@ -148,9 +148,16 @@ pub struct CapabilityResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct AssetTransferRequest<'branch> {
+pub struct AssetTransferRequest<'request> {
+    /// The complete remote operation whose asset phase is being requested.
     pub operation: RemoteOperation,
-    pub branch: &'branch str,
+    /// The branch whose reachable assets should be transferred.
+    pub branch: &'request str,
+    /// The lower commit boundary, whose reachable assets are excluded. This is
+    /// the commit we are currently at.
+    pub from_commit: Option<&'request DoltHashId>,
+    /// The inclusive upper commit boundary for the operation.
+    pub to_commit: Option<&'request DoltHashId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
