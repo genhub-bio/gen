@@ -46,7 +46,9 @@ jobs:
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
           manylinux: auto
           container: quay.io/pypa/manylinux_2_28_x86_64:latest
+          sccache: true
           before-script-linux: |
+            uv tool install "sccache>=0.10.0"
             yum install -y epel-release
             yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig mold
             cargo install capnpc --version ^0.24 --locked
