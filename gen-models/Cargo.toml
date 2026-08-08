@@ -29,7 +29,7 @@ itertools = "0.14.0"
 noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "fasta", "gff", "gtf", "tabix", "vcf"] }
 opendal = { version = "0.56", features = ["blocking", "services-fs", "services-http", "services-s3", "services-gcs", "services-azblob"] }
 petgraph = "0.6.5"
-rusqlite = { package = "rusqdoltlite", version = "0.40.16", features = ["bundled", "array", "limits", "fallible_uint", "backup"] }
+rusqlite = { package = "rusqdoltlite", version = "0.40.16", features = ["bundled", "array", "limits", "fallible_uint", "backup", "uuid"] }
 rusqlite_migration = { package = "rusqdoltlite_migration", version = "2.6.4" , features = ["from-directory"]}
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
@@ -39,6 +39,7 @@ thiserror = "2.0.12"
 tokio = { version = "1.52.1", features = ["rt-multi-thread"] }
 tempfile = "3.20.0"
 url = "2.5.0"
+uuid = "1.18.1"
 indexmap = "2.11.3"
 anyhow = "1.0.100"
 tracing = { version = "0.1.41", optional = true }

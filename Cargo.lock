@@ -1760,6 +1760,7 @@ dependencies = [
  "tui-widget-list",
  "url",
  "url-parse",
+ "uuid",
  "webbrowser",
  "zip",
 ]
@@ -1864,6 +1865,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -4771,6 +4773,7 @@ dependencies = [
  "libdoltlite-sys",
  "smallvec",
  "sqlite-wasm-rs",
+ "uuid",
 ]
 
 [[package]]

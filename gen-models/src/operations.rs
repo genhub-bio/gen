@@ -27,6 +27,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::{
     assets::{
@@ -641,13 +642,15 @@ impl RemoteBranch {
     }
 }
 
-/// A remote read operation whose graph and asset phases must complete together.
+/// A remote operation whose graph and asset phases must complete together.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteOperationKind {
     /// Initializes a workspace from a remote repository.
     Clone,
     /// Advances an existing local branch from a remote repository.
     Pull,
+    /// Advances a remote branch from the local repository.
+    Push,
 }
 
 impl RemoteOperationKind {
@@ -655,6 +658,7 @@ impl RemoteOperationKind {
         match self {
             Self::Clone => "clone",
             Self::Pull => "pull",
+            Self::Push => "push",
         }
     }
 }
@@ -664,12 +668,13 @@ impl FromSql for RemoteOperationKind {
         value.as_str().map(|operation| match operation {
             "clone" => Self::Clone,
             "pull" => Self::Pull,
+            "push" => Self::Push,
             _ => unreachable!("remote operation should satisfy its database constraint"),
         })
     }
 }
 
-/// Tracks the commit range for a pull or clone until all local assets are verified.
+/// Tracks a remote operation until its graph and asset phases are complete.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteOperationRecord {
     /// Config database row identifier.
@@ -686,6 +691,8 @@ pub struct RemoteOperationRecord {
     pub assets_transfer_checkpoint: Option<DoltHashId>,
     /// Destination graph commit whose assets must be transferred.
     pub to_commit: Option<DoltHashId>,
+    /// GenHub push lease retained by a pending operation.
+    pub transfer_id: Option<Uuid>,
     /// Time at which the operation began.
     pub started_at: String,
     /// Time at which both graph and asset transfer completed.
@@ -708,6 +715,7 @@ impl Query for RemoteOperationRecord {
             from_commit: row.get("from_commit").unwrap(),
             assets_transfer_checkpoint: row.get("assets_transfer_checkpoint").unwrap(),
             to_commit: row.get("to_commit").unwrap(),
+            transfer_id: row.get("transfer_id").unwrap(),
             started_at: row.get("started_at").unwrap(),
             completed_at: row.get("completed_at").unwrap(),
             failed_at: row.get("failed_at").unwrap(),
@@ -729,8 +737,9 @@ impl RemoteOperationRecord {
                 "SELECT * FROM remote_operations \
                  WHERE remote_name = ?1 AND branch_name = ?2 \
                    AND completed_at IS NULL AND failed_at IS NULL \
+                   AND (operation = ?3 OR operation = 'clone' AND ?3 = 'pull') \
                  ORDER BY id LIMIT 1",
-                params![remote_name, branch_name],
+                params![remote_name, branch_name, operation.as_str()],
                 |row| Ok(Self::process_row(row)),
             )
             .optional()?;
@@ -763,7 +772,27 @@ impl RemoteOperationRecord {
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
-    /// Records the desired end commit an operation is tracking.
+    /// Returns the local branch commit from before the operation for conflict detection.
+    pub const fn from_commit(&self) -> Option<&DoltHashId> {
+        self.from_commit.as_ref()
+    }
+
+    /// Returns the last commit whose complete asset batch was verified locally.
+    pub const fn assets_transfer_checkpoint(&self) -> Option<&DoltHashId> {
+        self.assets_transfer_checkpoint.as_ref()
+    }
+
+    /// Returns the graph commit already transferred by a pending operation.
+    pub const fn to_commit(&self) -> Option<&DoltHashId> {
+        self.to_commit.as_ref()
+    }
+
+    /// Returns the GenHub push lease retained by a pending operation.
+    pub const fn transfer_id(&self) -> Option<Uuid> {
+        self.transfer_id
+    }
+
+    /// Records the graph commit whose assets must be hydrated by this operation.
     pub fn set_destination(
         &mut self,
         conn: &ConfigConnection,
@@ -789,6 +818,22 @@ impl RemoteOperationRecord {
             params![commit, self.id],
         )?;
         self.assets_transfer_checkpoint = Some(*commit);
+        Ok(())
+    }
+
+    /// Records the successful push graph transfer and its capability-scoped lease.
+    pub fn set_push_destination(
+        &mut self,
+        conn: &ConfigConnection,
+        to_commit: &DoltHashId,
+        transfer_id: Uuid,
+    ) -> SQLResult<()> {
+        conn.execute(
+            "UPDATE remote_operations SET to_commit = ?1, transfer_id = ?2 WHERE id = ?3",
+            params![to_commit, transfer_id, self.id],
+        )?;
+        self.to_commit = Some(*to_commit);
+        self.transfer_id = Some(transfer_id);
         Ok(())
     }
 
@@ -1115,6 +1160,7 @@ mod tests {
     #[cfg(test)]
     mod remote_operations {
         use gen_core::DoltHashId;
+        use uuid::Uuid;
 
         use crate::{
             operations::{Remote, RemoteOperationKind, RemoteOperationRecord},
@@ -1256,6 +1302,45 @@ mod tests {
             let failed = RemoteOperationRecord::get_by_id(config, &operation.id, None)
                 .expect("should refetch failed clone operation");
             assert!(failed.failed_at.is_some(), "failed_at should be set");
+        }
+
+        #[test]
+        fn test_push_operation_resumes_transfer_lease() {
+            let context = setup_gen();
+            let config = context.config().conn();
+            Remote::create(config, "origin", "https://example.com/repo")
+                .expect("should create remote");
+            let destination_commit = DoltHashId([3_u8; 20]);
+            let transfer_id = Uuid::from_u128(7);
+            let mut operation = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Push,
+                None,
+            )
+            .expect("should begin push operation");
+            operation
+                .set_push_destination(config, &destination_commit, transfer_id)
+                .expect("should record push destination and lease");
+
+            let mut resumed = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Push,
+                None,
+            )
+            .expect("should resume push operation");
+
+            assert_eq!(resumed.to_commit(), Some(&destination_commit));
+            assert_eq!(resumed.transfer_id(), Some(transfer_id));
+            resumed
+                .advance_assets_transfer_checkpoint(config, &destination_commit)
+                .expect("should record completed push assets");
+            resumed
+                .complete(config)
+                .expect("should complete push operation");
         }
     }
 
