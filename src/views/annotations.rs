@@ -898,20 +898,30 @@ mod tests {
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 };
+                stream
+                    .set_nonblocking(false)
+                    .expect("should configure test HTTP stream");
                 let mut request = [0; 1024];
                 let length = stream.read(&mut request).expect("should read request");
                 let request = String::from_utf8_lossy(&request[..length]);
                 if request.starts_with("GET ") {
                     served_get_count += 1;
-                    write!(
+                    let response = write!(
                         stream,
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         contents.len()
                     )
-                    .expect("should write response headers");
-                    stream
-                        .write_all(&contents)
-                        .expect("should write response body");
+                    .and_then(|()| stream.write_all(&contents));
+                    if let Err(error) = response {
+                        assert!(
+                            matches!(
+                                error.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionReset
+                            ),
+                            "should only fail when the range probe disconnects: {error}"
+                        );
+                    }
                 } else {
                     write!(
                         stream,

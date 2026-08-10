@@ -1147,7 +1147,7 @@ mod tests {
         let nodes = Node::query(conn, "select * from nodes;", rusqlite::params!());
         assert_eq!(nodes.len(), 5);
 
-        let second_update = update_with_vcf(
+        let _second_update = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -1199,7 +1199,7 @@ mod tests {
         let nodes = Node::query(conn, "select * from nodes;", rusqlite::params!());
         assert_eq!(nodes.len(), 8);
 
-        let second_update = update_with_vcf(
+        let _second_update = update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
