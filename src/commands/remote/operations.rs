@@ -32,12 +32,12 @@
 //! GenHub. For an HTTP(S) repository remote, GenHub can return presigned URLs for the complete
 //! branch asset history. Gen uses the previous and destination commits to transfer only newly
 //! required versions. Push verifies each selected local file against its recorded checksum before
-//! uploading it with an HTTP PUT. Clone and pull download each selected file to a temporary path
-//! and verify its checksum. Only the asset version selected by the destination commit's
-//! materialized view is moved to its logical workspace path. Superseded versions are retained
-//! under `.gen/assets` using checksum-derived names. Stored `file://` paths are also resolved as
-//! safe workspace-relative paths, including `.gen/outside_root` paths used to represent inputs
-//! that originally came from outside the workspace.
+//! uploading it with an HTTP PUT. Clone and pull download and checksum-verify each selected file
+//! into `.gen/assets`. Only the asset version selected by the destination commit's materialized
+//! view is copied from that versioned store to its logical workspace path. Superseded versions
+//! remain only under `.gen/assets` using checksum-derived names. Stored `file://` paths are also
+//! resolved as safe workspace-relative paths, including `.gen/outside_root` paths used to
+//! represent inputs that originally came from outside the workspace.
 //!
 //! Pull records the branch commit from before the Dolt operation so downloads can
 //! distinguish a clean old version from a local modification. If the destination still
@@ -51,7 +51,7 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    fs,
+    fs::{self, OpenOptions},
     io::{self, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
 };
@@ -72,7 +72,11 @@ use gen_models::{
     operations::{Defaults, Remote, RemoteBranch, calculate_file_checksum},
 };
 use md5::Md5;
-use reqwest::blocking::{Body, Client};
+use reqwest::{
+    StatusCode,
+    blocking::{Body, Client, Response},
+    header::{CONTENT_RANGE, RANGE},
+};
 use rusqlite::Error as SqlError;
 use sha2::{Digest as _, Sha256};
 use url::Url;
@@ -373,27 +377,238 @@ fn conflict_destination_path(
     unreachable!("conflict suffix space should not be exhausted")
 }
 
-/// On downloading an asset, if it is a file we compare the hash on disk to the hashes of the
-/// asset from previous updates. If it matches the remote hash, we replace it locally assuming it's
-/// a natural evolution. If the hash is unknown, we download the file and mark it as a conflict via a
-/// .conflict extension. Historical assets that are not materialized at the destination commit are
-/// stored in `.gen/assets` so they cannot replace the current workspace file.
-fn download_asset(
+/// Returns the stable sibling path used while an asset is being written.
+///
+/// HTTP downloads intentionally reuse this path across invocations so interrupted transfers can
+/// resume. Copies from the versioned store also stage here so a failed copy does not truncate the
+/// logical destination.
+fn temporary_path(destination_path: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let file_name = destination_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Asset destination has no file name: {}",
+                destination_path.display()
+            )
+        })?;
+    Ok(destination_path.with_file_name(format!("{file_name}.tmp")))
+}
+
+/// Confirms that a partial response begins exactly after the bytes already staged on disk.
+///
+/// A response is never appended unless this check passes; otherwise the downloader restarts from
+/// byte zero so a server that ignores or mishandles ranges cannot corrupt the staged asset.
+fn content_range_starts_at(response: &Response, expected_start: u64) -> bool {
+    response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes "))
+        .and_then(|value| value.split_once('-'))
+        .and_then(|(start, _)| start.parse::<u64>().ok())
+        == Some(expected_start)
+}
+
+/// Streams a response directly to the durable staged file without buffering the asset in memory.
+///
+/// Partial bytes are deliberately left in place when the stream fails so the next invocation can
+/// resume them. `append` is true only after validating the response's `Content-Range`.
+fn stream_asset_response_to_staged_file(
+    response: &mut Response,
+    staged_path: &Path,
+    append: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut staged_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(staged_path)?;
+    io::copy(response, &mut staged_file)?;
+    staged_file.flush()?;
+    staged_file.sync_all()?;
+    Ok(())
+}
+
+/// Completes or resumes one HTTP asset download in its durable staged file.
+///
+/// [`download_to_versioned_store`] owns the final rename into `.gen/assets`; this function owns
+/// only the HTTP range protocol. It appends a valid partial response, overwrites the staged file
+/// when a server ignores `Range` and returns a complete response, and retries once from byte zero
+/// after an invalid partial response or a resumed checksum mismatch.
+fn download_to_staged_path(
+    client: &Client,
+    asset: &AssetRef,
+    url: &str,
+    staged_path: &Path,
+    expected_checksum: &Sha256Hash,
+) -> Result<(), Box<dyn Error>> {
+    let mut resume_offset = staged_path
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    // Size is only a cheap hint. It avoids hashing a known-partial multi-gigabyte file before
+    // resuming, while the checksum remains authoritative whenever the staged size could be final.
+    let staged_size_could_be_complete = asset
+        .size
+        .and_then(|size| u64::try_from(size).ok())
+        .is_none_or(|expected_size| expected_size == resume_offset);
+    if resume_offset > 0
+        && staged_size_could_be_complete
+        && calculate_file_checksum(staged_path).is_ok_and(|checksum| checksum == *expected_checksum)
+    {
+        return Ok(());
+    }
+
+    loop {
+        let mut request = client.get(url);
+        if resume_offset > 0 {
+            request = request.header(RANGE, format!("bytes={resume_offset}-"));
+        }
+        let mut response = request.send().map_err(|error| error.without_url())?;
+        let append = resume_offset > 0
+            && response.status() == StatusCode::PARTIAL_CONTENT
+            && content_range_starts_at(&response, resume_offset);
+        let invalid_partial_response = resume_offset > 0
+            && (response.status() == StatusCode::RANGE_NOT_SATISFIABLE
+                || (response.status() == StatusCode::PARTIAL_CONTENT && !append));
+        if invalid_partial_response {
+            fs::remove_file(staged_path)?;
+            resume_offset = 0;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(format!(
+                "Asset {} download failed with HTTP {}",
+                asset.id,
+                response.status()
+            )
+            .into());
+        }
+
+        stream_asset_response_to_staged_file(&mut response, staged_path, append)?;
+        if calculate_file_checksum(staged_path)? == *expected_checksum {
+            return Ok(());
+        }
+        if append {
+            fs::remove_file(staged_path)?;
+            resume_offset = 0;
+            continue;
+        }
+
+        fs::remove_file(staged_path)?;
+        return Err(format!("Downloaded asset {} failed checksum validation", asset.id).into());
+    }
+}
+
+/// Ensures that an HTTP asset exists under its checksum-derived `.gen/assets` path.
+///
+/// [`download_asset`] calls this storage phase before considering the logical workspace path. The
+/// returned boolean reports whether this call published new bytes; the returned file is always
+/// checksum-verified. No logical file is read or written here.
+fn download_to_versioned_store(
     client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
-    previous_assets: &HashMap<HashId, AssetRef>,
-    // `None` stores a historical version under `.gen/assets` instead of its recorded logical path.
-    destination_logical_path: Option<&str>,
     url: &str,
+) -> Result<(PathBuf, bool), Box<dyn Error>> {
+    let expected_checksum = asset_checksum(asset)?;
+    let versioned_path =
+        materialization_destination_path(workspace, &asset.uri, Some(&expected_checksum), None)?;
+    if versioned_path.exists()
+        && calculate_file_checksum(&versioned_path)
+            .is_ok_and(|checksum| checksum == expected_checksum)
+    {
+        return Ok((versioned_path, false));
+    }
+
+    let asset_dir = versioned_path.parent().ok_or_else(|| {
+        format!(
+            "Versioned asset path has no parent: {}",
+            versioned_path.display()
+        )
+    })?;
+    fs::create_dir_all(asset_dir)?;
+    let staged_path = temporary_path(&versioned_path)?;
+    download_to_staged_path(client, asset, url, &staged_path, &expected_checksum)?;
+    if versioned_path.exists() {
+        fs::remove_file(&versioned_path)?;
+    }
+    fs::rename(&staged_path, &versioned_path)?;
+    Ok((versioned_path, true))
+}
+
+/// Copies a verified versioned asset to another path through a synced staged file.
+///
+/// [`materialize_versioned_asset`] uses this for logical and conflict files. The `file://` remote
+/// transport also uses it when moving checksum-addressed versions between workspace stores.
+fn copy_versioned_asset(
+    versioned_path: &Path,
+    destination_path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let parent = destination_path.parent().ok_or_else(|| {
+        format!(
+            "Asset destination has no parent: {}",
+            destination_path.display()
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let staged_path = temporary_path(destination_path)?;
+    let result = (|| {
+        let mut staged_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&staged_path)?;
+        let mut versioned_file = fs::File::open(versioned_path)?;
+        io::copy(&mut versioned_file, &mut staged_file)?;
+        staged_file.flush()?;
+        staged_file.sync_all()?;
+        drop(staged_file);
+        fs::rename(&staged_path, destination_path)?;
+        Ok::<(), Box<dyn Error>>(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staged_path);
+    }
+    result
+}
+
+/// Applies a verified versioned asset to the workspace without overwriting unknown local content.
+///
+/// HTTP downloads and `file://` copies call this only after the checksum-addressed version exists.
+/// Historical versions have no logical destination and remain solely in `.gen/assets`; selected
+/// versions replace a known prior version or are copied beside an unknown local file as a conflict.
+fn materialize_versioned_asset(
+    workspace: &Workspace,
+    asset: &AssetRef,
+    previous_assets: &HashMap<HashId, AssetRef>,
+    destination_logical_path: Option<&str>,
+    versioned_path: &Path,
+    versioned_file_created: bool,
 ) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
     let expected_checksum = asset_checksum(asset)?;
+    let Some(destination_logical_path) = destination_logical_path else {
+        return Ok(if versioned_file_created {
+            DownloadAssetOutcome::Downloaded
+        } else {
+            DownloadAssetOutcome::Unchanged
+        });
+    };
     let destination_path = materialization_destination_path(
         workspace,
         &asset.uri,
         Some(&expected_checksum),
-        destination_logical_path,
+        Some(destination_logical_path),
     )?;
+    if destination_path == versioned_path {
+        return Ok(if versioned_file_created {
+            DownloadAssetOutcome::Downloaded
+        } else {
+            DownloadAssetOutcome::Unchanged
+        });
+    }
     if destination_path.exists()
         && calculate_file_checksum(&destination_path)
             .is_ok_and(|checksum| checksum == expected_checksum)
@@ -410,64 +625,72 @@ fn download_asset(
         false
     };
     let has_conflict = existing_checksum.is_some() && !intended_change;
-    if let Some(parent) = destination_path.parent() {
-        fs::create_dir_all(parent)?;
+    if has_conflict {
+        let (conflict_path, already_downloaded) =
+            conflict_destination_path(&destination_path, &expected_checksum)?;
+        if !already_downloaded {
+            copy_versioned_asset(versioned_path, &conflict_path)?;
+        }
+        return Ok(DownloadAssetOutcome::Conflict(conflict_path));
     }
-    let file_name = destination_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("asset");
-    let temporary_path = destination_path.with_file_name(format!(".{file_name}.{}.part", asset.id));
-    let result = (|| {
-        let mut response = client
-            .get(url)
-            .send()
-            .map_err(|error| error.without_url())?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Asset {} download failed with HTTP {}",
-                asset.id,
-                response.status()
-            )
-            .into());
-        }
-        let mut file = fs::File::create(&temporary_path)?;
-        io::copy(&mut response, &mut file)?;
-        file.flush()?;
-        drop(file);
-        if calculate_file_checksum(&temporary_path)? != expected_checksum {
-            return Err(format!("Downloaded asset {} failed checksum validation", asset.id).into());
-        }
 
-        if has_conflict {
-            let (conflict_path, already_downloaded) =
-                conflict_destination_path(&destination_path, &expected_checksum)?;
-            if already_downloaded {
-                fs::remove_file(&temporary_path)?;
-            } else {
-                fs::rename(&temporary_path, &conflict_path)?;
-            }
-            return Ok(DownloadAssetOutcome::Conflict(conflict_path));
-        }
-
-        if destination_path.exists() {
-            fs::remove_file(&destination_path)?;
-        }
-        fs::rename(&temporary_path, &destination_path)?;
-        Ok::<DownloadAssetOutcome, Box<dyn Error>>(DownloadAssetOutcome::Downloaded)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
-    }
-    result
+    copy_versioned_asset(versioned_path, &destination_path)?;
+    Ok(DownloadAssetOutcome::Downloaded)
 }
 
-/// Transfers the asset versions needed to move from `previous_hash` to the selected branch state.
+/// Runs the HTTP asset pipeline: versioned storage first, optional materialization second.
 ///
-/// GenHub may advertise the branch's complete asset history, so this function filters those URLs
-/// to versions absent from the previous state. The cumulative view supplies that transfer delta
-/// and the checksums used for conflict detection, while the materialized view decides which of the
-/// selected versions belongs at its logical workspace path instead of under `.gen/assets`.
+/// [`transfer_assets`] calls this for each clone or pull URL returned by GenHub. Keeping the phases
+/// ordered here prevents an already-current logical file from bypassing `.gen/assets` population.
+fn download_asset(
+    client: &Client,
+    workspace: &Workspace,
+    asset: &AssetRef,
+    previous_assets: &HashMap<HashId, AssetRef>,
+    // `None` stores a historical version under `.gen/assets` instead of its recorded logical path.
+    destination_logical_path: Option<&str>,
+    url: &str,
+) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
+    let (versioned_path, versioned_file_created) =
+        download_to_versioned_store(client, workspace, asset, url)?;
+    materialize_versioned_asset(
+        workspace,
+        asset,
+        previous_assets,
+        destination_logical_path,
+        &versioned_path,
+        versioned_file_created,
+    )
+}
+
+/// Reports a conflict returned by [`materialize_versioned_asset`] using workspace-relative paths.
+fn warn_asset_conflict(
+    workspace: &Workspace,
+    asset: &AssetRef,
+    destination_logical_path: Option<&str>,
+    conflict_path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let destination_path = materialization_destination_path(
+        workspace,
+        &asset.uri,
+        asset.checksum.as_ref(),
+        destination_logical_path,
+    )?;
+    eprintln!(
+        "Warning: remote asset conflicts with the local file at {}. The local file was preserved and the remote version was written to {}. Choose the correct version before continuing.",
+        destination_path.display(),
+        conflict_path.display()
+    );
+    Ok(())
+}
+
+/// Transfers the asset versions needed after a graph clone, pull, or push.
+///
+/// The CLI orchestration calls this after Dolt transfers graph history. It derives the asset delta
+/// between `previous_hash` and the destination branch, asks GenHub for transfer URLs, uploads local
+/// versions for push, and sends clone/pull downloads through [`download_asset`]. The cumulative
+/// asset view supplies history and conflict checksums; the materialized view selects the one version
+/// per logical path that is additionally copied out of `.gen/assets`.
 fn transfer_assets(
     graph: &GraphConnection,
     workspace: &Workspace,
@@ -479,12 +702,6 @@ fn transfer_assets(
     if remote.url.starts_with("file://") {
         return Ok(Vec::new());
     }
-    let repository = RepositoryRemote::parse(&remote.url)?;
-    let response = acquire_asset_transfers(
-        &repository,
-        &AssetTransferRequest { operation, branch },
-        login_origin,
-    )?;
 
     let commit_hash = hash_of(graph, branch)?;
     let current_assets: HashMap<_, _> =
@@ -511,6 +728,12 @@ fn transfer_assets(
         .filter(|(id, _)| !previous_assets.contains_key(id))
         .map(|(id, asset)| (*id, asset.clone()))
         .collect();
+    let repository = RepositoryRemote::parse(&remote.url)?;
+    let response = acquire_asset_transfers(
+        &repository,
+        &AssetTransferRequest { operation, branch },
+        login_origin,
+    )?;
     let client = Client::new();
     let mut upload_receipts = Vec::new();
     for transfer in response.assets {
@@ -544,17 +767,12 @@ fn transfer_assets(
                     destination_logical_path,
                     &transfer.url,
                 )? {
-                    let destination_path = materialization_destination_path(
+                    warn_asset_conflict(
                         workspace,
-                        &asset.uri,
-                        asset.checksum.as_ref(),
+                        &asset,
                         destination_logical_path,
+                        &conflict_path,
                     )?;
-                    eprintln!(
-                        "Warning: remote asset conflicts with the local file at {}. The local file was preserved and the remote version was written to {}. Choose the correct version before continuing.",
-                        destination_path.display(),
-                        conflict_path.display()
-                    );
                 }
             }
         }
@@ -776,13 +994,14 @@ mod tests {
         fs,
         io::{Cursor, Read as _, Write as _},
         net::TcpListener,
+        path::PathBuf,
         sync::Mutex,
         thread,
     };
 
     use gen_core::config::Workspace;
     use gen_models::{
-        assets::{AssetRef, AssetRole, LocalAssetUri},
+        assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
         db::GraphConnection,
         history::dolt::{commit_all, hash_of, remote_rows, remove_remote},
@@ -795,8 +1014,8 @@ mod tests {
 
     use super::{
         DownloadAssetOutcome, RemoteOperation, canonical_remote_url, clone_destination_name,
-        download_asset, execute_push, file_graph_url, resolve_remote, run_graph_transfer,
-        transfer_assets,
+        copy_versioned_asset, download_asset, download_to_versioned_store, execute_push,
+        file_graph_url, resolve_remote, run_graph_transfer, temporary_path, transfer_assets,
     };
     use crate::{get_config_connection, get_connection};
 
@@ -1040,6 +1259,71 @@ mod tests {
         (format!("http://{address}/asset"), handle)
     }
 
+    fn serve_resumable_asset(
+        contents: &[u8],
+        resume_offset: usize,
+    ) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind asset server");
+        let address = listener
+            .local_addr()
+            .expect("should read asset server address");
+        let contents = contents.to_vec();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("should accept asset request");
+            let mut request = [0_u8; 4096];
+            let read = stream
+                .read(&mut request)
+                .expect("should read asset request");
+            let body = &contents[resume_offset..];
+            write!(
+                stream,
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {resume_offset}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                contents.len() - 1,
+                contents.len(),
+                body.len()
+            )
+            .expect("should write partial asset response headers");
+            stream
+                .write_all(body)
+                .expect("should write partial asset response body");
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+        (format!("http://{address}/asset"), handle)
+    }
+
+    fn versioned_asset_path(workspace: &Workspace, asset: &AssetRef) -> PathBuf {
+        materialization_destination_path(workspace, &asset.uri, asset.checksum.as_ref(), None)
+            .expect("should resolve versioned asset path")
+    }
+
+    fn serve_transfer_response(response_body: String) -> (Remote, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind transfer server");
+        let address = listener
+            .local_addr()
+            .expect("should read transfer server address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("should accept transfer request");
+            let mut request = [0_u8; 8192];
+            let read = stream
+                .read(&mut request)
+                .expect("should read transfer request");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            )
+            .expect("should write transfer response");
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        });
+        (
+            Remote {
+                name: "origin".to_string(),
+                url: format!("http://{address}/api/repos/alice/example"),
+            },
+            server,
+        )
+    }
+
     struct EnvironmentGuard {
         name: &'static str,
         previous: Option<OsString>,
@@ -1063,6 +1347,8 @@ mod tests {
         }
     }
 
+    // This ensures we don't overwrite files the user has in their workspace that are unknown. This prevents
+    // destructive actions against unstaged files.
     #[test]
     fn test_download_asset_preserves_an_untracked_workspace_file() {
         let temp = tempdir().expect("should create workspace");
@@ -1089,8 +1375,16 @@ mod tests {
         assert_eq!(outcome, DownloadAssetOutcome::Conflict(conflict.clone()));
         assert_eq!(fs::read(&destination).unwrap(), b"local untracked\n");
         assert_eq!(fs::read(conflict).unwrap(), remote_contents);
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &remote_asset))
+                .expect("should read versioned remote asset"),
+            remote_contents,
+            "remote asset should be retained before creating a conflict copy"
+        );
     }
 
+    // If a file has been updated on the remote, and the local file is one that belongs to an older revision,
+    // assert that we replace the file with the newer one.
     #[test]
     fn test_download_asset_replaces_an_unchanged_tracked_file() {
         let temp = tempdir().expect("should create workspace");
@@ -1118,9 +1412,102 @@ mod tests {
 
         assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
         assert_eq!(fs::read(&destination).unwrap(), remote_contents);
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &remote_asset))
+                .expect("should read versioned remote asset"),
+            remote_contents,
+            "updated asset should be retained before logical materialization"
+        );
         assert!(!temp.path().join("reference.fa.conflict").exists());
     }
 
+    // Ensure that if a file exists in the logical path, we still download to versioned storage if it is
+    // missing there.
+    #[test]
+    fn test_download_asset_populates_versioned_store_when_logical_path_exists() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let remote_contents = b"current version\n";
+        let remote_asset = test_asset(remote_contents, "reference.fa", 1);
+        fs::write(temp.path().join("reference.fa"), remote_contents)
+            .expect("should write current logical file");
+        let (url, server) = serve_asset(remote_contents);
+
+        let outcome = download_asset(
+            &Client::new(),
+            &workspace,
+            &remote_asset,
+            &HashMap::new(),
+            remote_asset.logical_path.as_deref(),
+            &url,
+        )
+        .expect("should retain matching asset before returning unchanged");
+        server.join().expect("asset server should finish");
+
+        assert_eq!(
+            outcome,
+            DownloadAssetOutcome::Unchanged,
+            "matching logical asset should remain unchanged"
+        );
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &remote_asset))
+                .expect("should read versioned remote asset"),
+            remote_contents,
+            "matching logical asset should still be populated in versioned storage"
+        );
+    }
+
+    #[test]
+    fn test_download_to_versioned_store_resumes_partial_asset_file() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let remote_contents = b"resumable remote asset\n";
+        let remote_asset = test_asset(remote_contents, "reference.fa", 1);
+        let versioned_path = versioned_asset_path(&workspace, &remote_asset);
+        fs::create_dir_all(
+            versioned_path
+                .parent()
+                .expect("should resolve versioned asset directory"),
+        )
+        .expect("should create versioned asset directory");
+        let staged_path =
+            temporary_path(&versioned_path).expect("should resolve staged asset path");
+        let resume_offset = 10;
+        fs::write(&staged_path, &remote_contents[..resume_offset])
+            .expect("should seed partial asset download");
+        let (url, server) = serve_resumable_asset(remote_contents, resume_offset);
+
+        let (downloaded_path, downloaded) =
+            download_to_versioned_store(&Client::new(), &workspace, &remote_asset, &url)
+                .expect("should resume partial versioned asset download");
+        let request = server.join().expect("asset server should finish");
+
+        assert!(downloaded, "resumed asset should be reported as downloaded");
+        assert_eq!(
+            downloaded_path, versioned_path,
+            "download should resolve to versioned asset path"
+        );
+        assert_eq!(
+            fs::read(&versioned_path).expect("should read resumed versioned asset"),
+            remote_contents,
+            "resumed versioned asset should contain the complete verified content"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("\r\nrange: bytes={resume_offset}-\r\n")),
+            "resume request should begin after the staged bytes"
+        );
+        assert!(
+            !staged_path.exists(),
+            "successful atomic rename should remove the staged path"
+        );
+    }
+
+    // Conflict detection accepts any known version before the pull, so an older clean
+    // checkout can still advance without a false conflict.
     #[test]
     fn test_download_asset_replaces_any_known_previous_version() {
         let temp = tempdir().expect("should create workspace");
@@ -1153,6 +1540,9 @@ mod tests {
         assert!(!temp.path().join("reference.fa.conflict").exists());
     }
 
+    // If a file has been edited locally and the user pulls remote changes, ensure
+    // that the newer version ends up in versioned storage while presenting a .conflict file to the user
+    // at the logical path
     #[test]
     fn test_download_asset_preserves_a_dirty_tracked_file() {
         let temp = tempdir().expect("should create workspace");
@@ -1182,8 +1572,76 @@ mod tests {
         assert_eq!(outcome, DownloadAssetOutcome::Conflict(conflict.clone()));
         assert_eq!(fs::read(&destination).unwrap(), b"local edits\n");
         assert_eq!(fs::read(conflict).unwrap(), remote_contents);
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &remote_asset))
+                .expect("should read versioned remote asset"),
+            remote_contents,
+            "conflicting remote asset should be retained in versioned storage"
+        );
     }
 
+    // Ensure that if the staged download is corrupt, it does not end up in the versioned storage or logical path
+    #[test]
+    fn test_download_asset_rejects_invalid_checksum_before_saving() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let remote_asset = test_asset(b"expected version\n", "reference.fa", 1);
+        let (url, server) = serve_asset(b"tampered version\n");
+
+        let error = download_asset(
+            &Client::new(),
+            &workspace,
+            &remote_asset,
+            &HashMap::new(),
+            remote_asset.logical_path.as_deref(),
+            &url,
+        )
+        .expect_err("should reject an asset with the wrong checksum");
+        server.join().expect("asset server should finish");
+
+        assert!(
+            error.to_string().contains("failed checksum validation"),
+            "checksum mismatch should be reported"
+        );
+        assert!(
+            !versioned_asset_path(&workspace, &remote_asset).exists(),
+            "invalid download should not populate versioned storage"
+        );
+        assert!(
+            !temporary_path(&versioned_asset_path(&workspace, &remote_asset))
+                .expect("should resolve staged asset path")
+                .exists(),
+            "invalid complete download should remove its staged asset"
+        );
+        assert!(
+            !temp.path().join("reference.fa").exists(),
+            "invalid download should not create a logical file"
+        );
+    }
+
+    // Ensure that if there is an issue with the versioned file (such as it being deleted), if it is attempted
+    // to be copied to a logical path, it fails
+    #[test]
+    fn test_copy_versioned_asset_preserves_destination_when_copy_fails() {
+        let temp = tempdir().expect("should create workspace");
+        let missing_versioned_path = temp.path().join("missing-versioned.fa");
+        let destination_path = temp.path().join("reference.fa");
+        fs::write(&destination_path, b"previous logical bytes\n")
+            .expect("should write previous logical asset");
+
+        copy_versioned_asset(&missing_versioned_path, &destination_path)
+            .expect_err("should reject a missing versioned asset");
+
+        assert_eq!(
+            fs::read(destination_path).expect("should read preserved logical asset"),
+            b"previous logical bytes\n",
+            "failed copy should preserve the previous logical asset"
+        );
+    }
+
+    // This ensures that we only request and pull assets that we don't already have by requesting versions
+    // after the commit hash prior to the pull.
     #[test]
     fn test_pull_transfers_only_assets_after_previous_hash() {
         let temp = tempdir().expect("should create transfer workspace");
@@ -1205,11 +1663,6 @@ mod tests {
         commit_all(&graph, "add current asset").expect("should commit current asset");
 
         let (current_url, asset_server) = serve_asset(current_contents);
-        let transfer_listener =
-            TcpListener::bind("127.0.0.1:0").expect("should bind transfer server");
-        let transfer_address = transfer_listener
-            .local_addr()
-            .expect("should read transfer server address");
         let response_body = json!({
             "assets": [
                 {
@@ -1220,26 +1673,7 @@ mod tests {
             ]
         })
         .to_string();
-        let transfer_server = thread::spawn(move || {
-            let (mut stream, _) = transfer_listener
-                .accept()
-                .expect("should accept transfer request");
-            let mut request = [0_u8; 8192];
-            let read = stream
-                .read(&mut request)
-                .expect("should read transfer request");
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                response_body.len()
-            )
-            .expect("should write transfer response");
-            String::from_utf8_lossy(&request[..read]).into_owned()
-        });
-        let remote = Remote {
-            name: "origin".to_string(),
-            url: format!("http://{transfer_address}/api/repos/alice/example"),
-        };
+        let (remote, transfer_server) = serve_transfer_response(response_body);
 
         transfer_assets(
             &graph,
@@ -1259,6 +1693,92 @@ mod tests {
         assert_eq!(
             fs::read(temp.path().join("reference.fa")).unwrap(),
             current_contents
+        );
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &current_asset))
+                .expect("should read versioned current asset"),
+            current_contents,
+            "pull should retain the current asset before materialization"
+        );
+    }
+
+    // Ensure that clone retains every historical version in `.gen/assets` while materializing only the
+    // version selected at the cloned branch head.
+    #[test]
+    fn test_clone_retains_history_and_materializes_only_current_asset() {
+        let temp = tempdir().expect("should create transfer workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let graph = get_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve graph database path"),
+        )
+        .expect("should open graph database");
+        let historical_contents = b"historical version\n";
+        let historical_asset = test_asset(historical_contents, "reference.fa", 1);
+        AssetRef::create(&graph, &historical_asset).expect("should insert historical asset");
+        commit_all(&graph, "add historical asset").expect("should commit historical asset");
+        let current_contents = b"current version\n";
+        let current_asset = test_asset(current_contents, "reference.fa", 2);
+        AssetRef::create(&graph, &current_asset).expect("should insert current asset");
+        commit_all(&graph, "add current asset").expect("should commit current asset");
+
+        let (historical_url, historical_server) = serve_asset(historical_contents);
+        let (current_url, current_server) = serve_asset(current_contents);
+        let response_body = json!({
+            "assets": [
+                { "id": historical_asset.id, "url": historical_url },
+                { "id": current_asset.id, "url": current_url }
+            ]
+        })
+        .to_string();
+        let (remote, transfer_server) = serve_transfer_response(response_body);
+
+        transfer_assets(
+            &graph,
+            &workspace,
+            &remote,
+            RemoteOperation::Clone,
+            "main",
+            None,
+        )
+        .expect("should transfer clone assets");
+        let transfer_request = transfer_server
+            .join()
+            .expect("transfer server should finish");
+        historical_server
+            .join()
+            .expect("historical asset server should finish");
+        current_server
+            .join()
+            .expect("current asset server should finish");
+
+        assert!(
+            transfer_request.contains("\"operation\":\"clone\""),
+            "asset transfer request should identify the clone operation"
+        );
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &historical_asset))
+                .expect("should read versioned historical asset"),
+            historical_contents,
+            "clone should retain the historical asset in versioned storage"
+        );
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &current_asset))
+                .expect("should read versioned current asset"),
+            current_contents,
+            "clone should retain the selected current asset in versioned storage"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("reference.fa"))
+                .expect("should read materialized current asset"),
+            current_contents,
+            "clone should materialize only the selected current version"
+        );
+        assert!(
+            !temp.path().join("reference.fa.conflict").exists(),
+            "clean clone should not create a conflict file"
         );
     }
 

@@ -97,6 +97,7 @@ cargo-llvm-cov = "0.8.5"
 cargo-deny = "0.19.0"
 more-asserts = "0.3.1"
 insta = "1.43.1"
+rusqlite = { package = "rusqdoltlite", version = "0.40.14", features = ["remote"] }
 
 [profile.release]
 opt-level = "s"
