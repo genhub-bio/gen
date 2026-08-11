@@ -44,6 +44,14 @@ being downloaded in full when the server supports range requests. Otherwise,
 the file is streamed into the cache and reused locally. Run `gen cache-clear` to
 remove the cache. Local repository files and `.gen/assets` are not affected.
 
+# FASTA import
+
+Use `gen import fasta <path-or-uri> --shallow` to keep sequence content in an
+asset rather than the graph database. Local assets are read from their immutable
+repository copy; remote assets remain remote. Supply known FASTA indexes with a
+repeatable `--index <path-or-uri>` option. For example, a BGZF FASTA can use both
+`--index reference.fa.gz.fai` and `--index reference.fa.gz.gzi`.
+
 # View diff
 
 Compare two commits or branches with:

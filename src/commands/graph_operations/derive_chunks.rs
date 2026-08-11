@@ -173,6 +173,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         context

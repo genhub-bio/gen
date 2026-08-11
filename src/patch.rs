@@ -1047,6 +1047,7 @@ mod tests {
             "default",
             "foo",
             false,
+            &[],
         )
         .expect("should import fasta fixture");
         commit_operation_summary(&context, &operation_summary)

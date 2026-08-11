@@ -104,6 +104,7 @@ fn opendal_file_addition_error(err: opendal::Error) -> FileAdditionError {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AssetRole {
     Input,
+    SequenceIndex,
     Annotation,
     AnnotationIndex,
     Other(String),
@@ -113,6 +114,7 @@ impl AssetRole {
     pub fn as_str(&self) -> &str {
         match self {
             AssetRole::Input => "input",
+            AssetRole::SequenceIndex => "sequence-index",
             AssetRole::Annotation => "annotation",
             AssetRole::AnnotationIndex => "annotation-index",
             AssetRole::Other(role) => role.as_str(),
@@ -124,6 +126,7 @@ impl From<&str> for AssetRole {
     fn from(role: &str) -> Self {
         match role {
             "input" => AssetRole::Input,
+            "sequence-index" => AssetRole::SequenceIndex,
             "annotation" => AssetRole::Annotation,
             "annotation-index" => AssetRole::AnnotationIndex,
             other => AssetRole::Other(other.to_string()),
@@ -135,6 +138,7 @@ impl From<String> for AssetRole {
     fn from(role: String) -> Self {
         match role.as_str() {
             "input" => AssetRole::Input,
+            "sequence-index" => AssetRole::SequenceIndex,
             "annotation" => AssetRole::Annotation,
             "annotation-index" => AssetRole::AnnotationIndex,
             _ => AssetRole::Other(role),

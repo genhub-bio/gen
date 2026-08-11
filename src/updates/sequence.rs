@@ -323,6 +323,7 @@ mod tests {
             &collection,
             "simple",
             false,
+            &[],
         )
         .unwrap();
         add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
@@ -392,6 +393,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let operation_summary = update_with_sequence(
@@ -455,6 +457,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -514,6 +517,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -578,6 +582,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -648,6 +653,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -712,6 +718,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -776,6 +783,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -839,6 +847,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -900,6 +909,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         add_annotation(

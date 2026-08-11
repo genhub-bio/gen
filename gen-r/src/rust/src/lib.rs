@@ -1151,6 +1151,7 @@ impl Repository {
             &collection_name,
             &sample,
             shallow,
+            &[],
         ) {
             Ok(operation_summary) => {
                 end_transactions(&self.context, &operation_summary).map_err(Error::Other)?;
@@ -1198,6 +1199,7 @@ impl Repository {
             &collection_name,
             &reference,
             shallow,
+            &[],
         ) {
             Ok(operation_summary) => {
                 end_transactions(&self.context, &operation_summary).map_err(Error::Other)?;
