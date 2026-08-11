@@ -264,12 +264,13 @@ fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &Ge
 /// lineage. Single listing route shared by `SequenceGraph` and `Repository`.
 fn list_annotation_records(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: &HashId,
     collection_name: &str,
     sample_name: &str,
     name: &str,
 ) -> std::result::Result<List, Error> {
-    let graph = BlockGroup::get_graph(conn, block_group_id, None)
+    let graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)
         .map_err(|e| Error::Other(e.to_string()))?;
     let annotations = Annotation::query_with_lineage(conn, collection_name, sample_name, name)
         .map_err(|e| Error::Other(e.to_string()))?;
@@ -568,6 +569,7 @@ enum TrackSpec {
 
 fn load_tracks_from_specs(
     conn: &GraphConnection,
+    workspace: &Workspace,
     controller: &GraphController<GenGraph, GenGraphNodeSizer>,
     sequence_graph_id: &HashId,
     tracks_json: &str,
@@ -601,6 +603,7 @@ fn load_tracks_from_specs(
                     };
                     let request = AnnotationGroupTrackRequest {
                         conn,
+                        workspace,
                         history_ref: None,
                         current_block_group: &bg,
                         entry: &entry,
@@ -615,6 +618,7 @@ fn load_tracks_from_specs(
                 let display_name = name.as_deref().unwrap_or(&path);
                 tracks.push(load_annotation_file_as_track(
                     conn,
+                    workspace,
                     sequence_graph_id,
                     &path,
                     display_name,
@@ -629,6 +633,7 @@ fn load_tracks_from_specs(
 
 fn load_annotation_file_as_track(
     conn: &GraphConnection,
+    workspace: &Workspace,
     sequence_graph_id: &HashId,
     file_path: &str,
     display_name: &str,
@@ -652,6 +657,7 @@ fn load_annotation_file_as_track(
                 .and_then(|f| {
                     translate_gff(
                         conn,
+                        workspace,
                         &bg.collection_name,
                         sample_name,
                         None,
@@ -664,7 +670,16 @@ fn load_annotation_file_as_track(
             "bed" => File::open(file_path)
                 .ok()
                 .and_then(|f| {
-                    translate_bed(conn, &bg.collection_name, sample_name, None, f, &mut buffer).ok()
+                    translate_bed(
+                        conn,
+                        workspace,
+                        &bg.collection_name,
+                        sample_name,
+                        None,
+                        f,
+                        &mut buffer,
+                    )
+                    .ok()
                 })
                 .is_some(),
             _ => false,
@@ -1108,7 +1123,8 @@ impl Repository {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let nid = hash_id_from_string(&node_id).map_err(Error::Other)?;
-        let sequences = Node::get_sequences_by_node_ids(conn, &[nid], None);
+        let sequences =
+            Node::get_sequences_by_node_ids(conn, self.context.workspace(), &[nid], None);
         let seq = sequences
             .get(&nid)
             .ok_or_else(|| Error::Other(format!("Node with id {nid} not found")))?;
@@ -1766,6 +1782,7 @@ impl Repository {
         .map_err(Error::Other)?;
         r#gen::exports::fasta::export_fasta(
             self.context.graph().conn(),
+            self.context.workspace(),
             &collection_name,
             nullable_string_to_option(sample).as_deref(),
             &PathBuf::from(&filename),
@@ -1789,6 +1806,7 @@ impl Repository {
         .map_err(Error::Other)?;
         r#gen::exports::gfa::export_gfa(
             self.context.graph().conn(),
+            self.context.workspace(),
             &collection_name,
             &PathBuf::from(&filename),
             &sample,
@@ -1815,6 +1833,7 @@ impl Repository {
         })?);
         r#gen::exports::genbank::export_genbank(
             self.context.graph().conn(),
+            self.context.workspace(),
             &collection_name,
             &sample,
             writer,
@@ -1875,9 +1894,14 @@ impl Repository {
                 .collect()
         };
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, &bg.id, None)
+            let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg.id, None)
                 .map_err(|e| Error::Other(e.to_string()))?;
-            let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+            let matcher = GenGraphMatcher::new_with_sequence_kind(
+                conn,
+                self.context.workspace(),
+                graph,
+                kind,
+            );
             let index = SeedIndex::build(&matcher, k as usize, normalized);
             let path = index_dir.join(format!("{}.bin", bg.id));
             let bytes = index
@@ -1914,9 +1938,14 @@ impl Repository {
             .join("search_index");
         let mut results = Vec::new();
         for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, &bg.id, None)
+            let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg.id, None)
                 .map_err(|e| Error::Other(e.to_string()))?;
-            let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+            let matcher = GenGraphMatcher::new_with_sequence_kind(
+                conn,
+                self.context.workspace(),
+                graph,
+                kind,
+            );
             let index_path = index_dir.join(format!("{}.bin", bg.id));
             let index = fs::read(&index_path)
                 .ok()
@@ -2052,7 +2081,14 @@ impl Repository {
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let bg = BlockGroup::get_by_id(conn, &bg_id, None)
             .map_err(|e| Error::Other(format!("Block group not found: {e}")))?;
-        list_annotation_records(conn, &bg.id, &bg.collection_name, &bg.sample_name, &bg.name)
+        list_annotation_records(
+            conn,
+            self.context.workspace(),
+            &bg.id,
+            &bg.collection_name,
+            &bg.sample_name,
+            &bg.name,
+        )
     }
 
     fn render_frame(
@@ -2067,8 +2103,8 @@ impl Repository {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph =
-            BlockGroup::get_graph(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
+        let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg_id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
@@ -2077,7 +2113,13 @@ impl Repository {
         let area = Rect::new(0, 0, cols as u16, rows as u16);
         let mut buf = Buffer::empty(area);
 
-        let tracks = load_tracks_from_specs(conn, &controller, &bg_id, &tracks_json);
+        let tracks = load_tracks_from_specs(
+            conn,
+            self.context.workspace(),
+            &controller,
+            &bg_id,
+            &tracks_json,
+        );
 
         // Parse the caller-supplied color map: id_hex → Some(color) to use that
         // color, None to hide the annotation entirely. Empty map means use the
@@ -2122,7 +2164,7 @@ impl Repository {
         apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;
 
         // Render graph with highlights applied.
-        let renderer = GenGraphNodeRenderer::new(conn);
+        let renderer = GenGraphNodeRenderer::new(conn, self.context.workspace());
         GraphWidget::with_renderer(renderer).render(area, &mut buf, &mut controller);
 
         // Draw floating labels after the graph, then a single hint if any were hidden.
@@ -2154,8 +2196,8 @@ impl Repository {
     ) -> std::result::Result<bool, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph =
-            BlockGroup::get_graph(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
+        let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg_id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
@@ -2268,6 +2310,7 @@ impl SequenceGraph {
         let conn = self.context.graph().conn();
         fasta_export(
             conn,
+            self.context.workspace(),
             &self.collection_name,
             Some(&self.sample_name),
             &PathBuf::from(&filename),
@@ -2284,6 +2327,7 @@ impl SequenceGraph {
         let conn = self.context.graph().conn();
         gfa_export(
             conn,
+            self.context.workspace(),
             &self.collection_name,
             &PathBuf::from(&filename),
             &self.sample_name,
@@ -2299,8 +2343,15 @@ impl SequenceGraph {
             File::create(&filename)
                 .map_err(|e| Error::Other(format!("Failed to create file '{filename}': {e}")))?,
         );
-        genbank_export(conn, &self.collection_name, &self.sample_name, writer, None)
-            .map_err(|e| Error::Other(format!("GenBank export failed: {e}")))
+        genbank_export(
+            conn,
+            self.context.workspace(),
+            &self.collection_name,
+            &self.sample_name,
+            writer,
+            None,
+        )
+        .map_err(|e| Error::Other(format!("GenBank export failed: {e}")))
     }
 
     fn build_index(&self, sequence_kind: String, k: i32) -> std::result::Result<(), Error> {
@@ -2314,9 +2365,10 @@ impl SequenceGraph {
             .join("search_index");
         fs::create_dir_all(&index_dir)
             .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
-        let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+        let graph = BlockGroup::get_graph(conn, self.context.workspace(), &self.id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let matcher =
+            GenGraphMatcher::new_with_sequence_kind(conn, self.context.workspace(), graph, kind);
         let index = SeedIndex::build(&matcher, k as usize, normalized);
         let path = index_dir.join(format!("{}.bin", self.id));
         let bytes = index
@@ -2328,9 +2380,10 @@ impl SequenceGraph {
     fn search(&self, query: String, sequence_kind: String) -> std::result::Result<List, Error> {
         let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
         let conn = self.context.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
-        let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+        let graph = BlockGroup::get_graph(conn, self.context.workspace(), &self.id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let matcher =
+            GenGraphMatcher::new_with_sequence_kind(conn, self.context.workspace(), graph, kind);
         let index_dir = self
             .context
             .workspace()
@@ -2373,7 +2426,8 @@ impl SequenceGraph {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let nid = hash_id_from_string(&node_id).map_err(Error::Other)?;
-        let sequences = Node::get_sequences_by_node_ids(conn, &[nid], None);
+        let sequences =
+            Node::get_sequences_by_node_ids(conn, self.context.workspace(), &[nid], None);
         let seq = sequences
             .get(&nid)
             .ok_or_else(|| Error::Other(format!("Node with id {nid} not found")))?;
@@ -2462,8 +2516,8 @@ impl SequenceGraph {
 
     fn to_dict(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(|e| Error::Other(e.to_string()))?;
+        let graph = BlockGroup::get_graph(conn, self.context.workspace(), &self.id, None)
+            .map_err(|e| Error::Other(e.to_string()))?;
 
         let nodes = graph
             .nodes()
@@ -2517,6 +2571,7 @@ impl SequenceGraph {
         let conn = self.context.graph().conn();
         list_annotation_records(
             conn,
+            self.context.workspace(),
             &self.id,
             &self.collection_name,
             &self.sample_name,
@@ -2600,11 +2655,11 @@ impl SequenceGraph {
             let label = self.name.clone();
             if let Some(start) = start {
                 run_translation_operation(&self.context, &label, || {
-                    translate_from_path(conn, &bg_id, start, tr_params)
+                    translate_from_path(conn, self.context.workspace(), &bg_id, start, tr_params)
                 })?
             } else {
                 run_translation_operation(&self.context, &label, || {
-                    translate_block_group(conn, &bg_id, tr_params)
+                    translate_block_group(conn, self.context.workspace(), &bg_id, tr_params)
                 })?
             }
         } else if let Some(name) = robj_scalar_string(&region) {
@@ -2615,7 +2670,13 @@ impl SequenceGraph {
             if path.is_some() {
                 let coordinate = start.unwrap_or(0);
                 run_translation_operation(&self.context, &name, || {
-                    translate_from_path(conn, &bg_id, coordinate, tr_params)
+                    translate_from_path(
+                        conn,
+                        self.context.workspace(),
+                        &bg_id,
+                        coordinate,
+                        tr_params,
+                    )
                 })?
             } else {
                 let annotation = Annotation::query_with_lineage(
@@ -2635,7 +2696,13 @@ impl SequenceGraph {
                 })?;
 
                 run_translation_operation(&self.context, &name, || {
-                    translate_annotation(conn, &annotation, Some(&bg_id), tr_params)
+                    translate_annotation(
+                        conn,
+                        self.context.workspace(),
+                        &annotation,
+                        Some(&bg_id),
+                        tr_params,
+                    )
                 })?
             }
         } else if let Some(id) = gen_annotation_record_id(&region)? {
@@ -2643,7 +2710,13 @@ impl SequenceGraph {
                 .ok_or_else(|| Error::Other(format!("Annotation with id '{id}' not found")))?;
             let label = annotation.name.clone();
             run_translation_operation(&self.context, &label, || {
-                translate_annotation(conn, &annotation, Some(&bg_id), tr_params)
+                translate_annotation(
+                    conn,
+                    self.context.workspace(),
+                    &annotation,
+                    Some(&bg_id),
+                    tr_params,
+                )
             })?
         } else {
             return Err(Error::Other(

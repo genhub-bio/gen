@@ -1,4 +1,6 @@
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
+use std::sync::OnceLock;
+
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand, Workspace};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -13,6 +15,17 @@ use gen_models::{
     sequence::Sequence,
 };
 use rusqlite::Connection;
+use tempfile::tempdir;
+
+pub fn test_workspace() -> &'static Workspace {
+    static WORKSPACE: OnceLock<Workspace> = OnceLock::new();
+
+    WORKSPACE.get_or_init(|| {
+        let workspace = Workspace::new(tempdir().expect("should create test directory").keep());
+        workspace.ensure_gen_dir();
+        workspace
+    })
+}
 
 pub fn get_connection() -> GraphConnection {
     let mut conn = Connection::open_in_memory().expect("should open in-memory database");
@@ -190,5 +203,6 @@ pub fn setup_test_data(conn: &GraphConnection) {
         preserve_edge: false,
     };
 
-    BlockGroup::insert_change(conn, &change).expect("should apply variant change");
+    BlockGroup::insert_change(conn, test_workspace(), &change)
+        .expect("should apply variant change");
 }

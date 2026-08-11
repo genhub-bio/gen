@@ -1,6 +1,6 @@
 pub use gen_core::region::Region;
 use gen_core::{
-    HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
+    HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_terminal,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
 use gen_graph::{GraphNode, GraphNodePosition};
@@ -467,6 +467,7 @@ impl ResolvedGenRegion {
     pub fn intervaltree(
         &self,
         conn: &GraphConnection,
+        workspace: &Workspace,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, GenRegionError> {
         match self.kind {
             ResolvedRegionKind::Path => {
@@ -490,6 +491,7 @@ impl ResolvedGenRegion {
             }
             ResolvedRegionKind::BlockGroup => Ok(BlockGroup::intervaltree_for(
                 conn,
+                workspace,
                 &self.block_group.id,
                 self.remove_ambiguous_positions,
             )?),
@@ -499,11 +501,12 @@ impl ResolvedGenRegion {
     pub fn find_graph_positions(
         &self,
         conn: &GraphConnection,
+        workspace: &Workspace,
         start_offset: i64,
         end_offset: i64,
     ) -> Result<Self, gen_graph::GraphError> {
         let (start_positions, end_positions) =
-            self.compute_graph_positions(conn, start_offset, end_offset)?;
+            self.compute_graph_positions(conn, workspace, start_offset, end_offset)?;
         let mut region = self.clone();
         region.start_anchors = Some(start_positions);
         region.end_anchors = Some(end_positions);
@@ -513,6 +516,7 @@ impl ResolvedGenRegion {
     fn compute_graph_positions(
         &self,
         conn: &GraphConnection,
+        workspace: &Workspace,
         start_offset: i64,
         end_offset: i64,
     ) -> Result<
@@ -523,7 +527,7 @@ impl ResolvedGenRegion {
         gen_graph::GraphError,
     > {
         let interval_tree = self
-            .intervaltree(conn)
+            .intervaltree(conn, workspace)
             .map_err(|_| gen_graph::GraphError::NoPath)?;
         let filtered: Vec<(std::ops::Range<i64>, gen_core::NodeIntervalBlock)> = interval_tree
             .iter()
@@ -540,16 +544,16 @@ impl ResolvedGenRegion {
             interval_tree: tree,
             block_group_id: self.block_group.id,
         };
-        let start_anchor = resolved.resolve_anchor(self.start, conn)?;
-        let end_anchor = resolved.resolve_anchor(self.end, conn)?;
+        let start_anchor = resolved.resolve_anchor(self.start, conn, workspace)?;
+        let end_anchor = resolved.resolve_anchor(self.end, conn, workspace)?;
 
         let start_positions =
             crate::graph::find_offset(&mut graph, &start_anchor, start_offset, |g, nid| {
-                crate::graph::expand(conn, g, &self.block_group.id, nid)
+                crate::graph::expand(conn, workspace, g, &self.block_group.id, nid)
             })?;
         let end_positions =
             crate::graph::find_offset(&mut graph, &end_anchor, end_offset, |g, nid| {
-                crate::graph::expand(conn, g, &self.block_group.id, nid)
+                crate::graph::expand(conn, workspace, g, &self.block_group.id, nid)
             })?;
 
         Ok((start_positions, end_positions))
@@ -562,6 +566,7 @@ impl ResolvedGenRegion {
     pub fn plan_edges(
         &self,
         conn: &GraphConnection,
+        workspace: &Workspace,
         change: &BlockGroupChange,
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
@@ -571,7 +576,7 @@ impl ResolvedGenRegion {
                 let tree = match tree {
                     Some(tree) => tree,
                     None => {
-                        local_tree = IntervalTreeSource::intervaltree(self, conn)?;
+                        local_tree = IntervalTreeSource::intervaltree(self, conn, workspace)?;
                         &local_tree
                     }
                 };
@@ -613,7 +618,7 @@ impl ResolvedGenRegion {
                 (start_positions, end_positions)
             } else {
                 let resolved = self
-                    .find_graph_positions(conn, 0, 0)
+                    .find_graph_positions(conn, workspace, 0, 0)
                     .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))?;
                 (
                     resolved.start_anchors.expect("should have start anchors"),
@@ -701,8 +706,9 @@ impl IntervalTreeSource for ResolvedGenRegion {
     fn intervaltree(
         &self,
         conn: &GraphConnection,
+        workspace: &Workspace,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
-        ResolvedGenRegion::intervaltree(self, conn)
+        ResolvedGenRegion::intervaltree(self, conn, workspace)
             .map_err(|err| BlockGroupError::ChangeOutOfBounds(err.to_string()))
     }
 }
@@ -713,7 +719,7 @@ mod tests {
     use crate::{
         annotations::Annotation,
         block_group::{BlockGroup, PathCache},
-        test_helpers::{get_connection, setup_block_group},
+        test_helpers::{get_connection, setup_block_group, test_workspace},
     };
 
     fn setup_targets() -> (
@@ -1467,7 +1473,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "within", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
-            let resolved = region.find_graph_positions(&conn, 2, 2).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), 2, 2)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
@@ -1488,7 +1496,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "fwd", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
-            let resolved = region.find_graph_positions(&conn, 5, 5).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), 5, 5)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
@@ -1509,7 +1519,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "bwd", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
-            let resolved = region.find_graph_positions(&conn, -5, -5).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), -5, -5)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
@@ -1530,7 +1542,11 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "oob", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 7, 7);
 
-            assert!(region.find_graph_positions(&conn, 100, 100).is_err());
+            assert!(
+                region
+                    .find_graph_positions(&conn, test_workspace(), 100, 100)
+                    .is_err()
+            );
         }
 
         #[test]
@@ -1540,7 +1556,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "start", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 0, 0);
 
-            let resolved = region.find_graph_positions(&conn, 12, 12).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), 12, 12)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
@@ -1561,7 +1579,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "end", 0, 15);
             let region = make_region(bg, acc, 0, 15, 15, 14, 14);
 
-            let resolved = region.find_graph_positions(&conn, -14, -14).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), -14, -14)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
@@ -1582,7 +1602,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "acc-within", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 2, 2);
 
-            let resolved = region.find_graph_positions(&conn, 1, 1).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), 1, 1)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
@@ -1603,7 +1625,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "acc-fwd", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 3, 3);
 
-            let resolved = region.find_graph_positions(&conn, 5, 5).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), 5, 5)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
@@ -1624,7 +1648,9 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "acc-bwd", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 1, 1);
 
-            let resolved = region.find_graph_positions(&conn, -4, -4).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), -4, -4)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 1);
@@ -1645,7 +1671,11 @@ mod tests {
             let acc = create_accession(&conn, bg_id, "acc-oob", 5, 10);
             let region = make_region(bg, acc, 5, 10, 5, 2, 2);
 
-            assert!(region.find_graph_positions(&conn, 100, 100).is_err());
+            assert!(
+                region
+                    .find_graph_positions(&conn, test_workspace(), 100, 100)
+                    .is_err()
+            );
         }
 
         #[test]
@@ -1657,7 +1687,9 @@ mod tests {
             let region = make_region(bg, acc, 3, 6, 3, 0, 0);
 
             // Backward 3 from TTT offset 0 → should find AAA and GGG at offset 0
-            let resolved = region.find_graph_positions(&conn, -3, -3).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), -3, -3)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 2);
@@ -1682,7 +1714,9 @@ mod tests {
             let region = make_region(bg, acc, 3, 6, 3, 2, 2);
 
             // Forward 3 from TTT offset 2 → should find CCC and ATC at offset 2
-            let resolved = region.find_graph_positions(&conn, 3, 3).unwrap();
+            let resolved = region
+                .find_graph_positions(&conn, test_workspace(), 3, 3)
+                .unwrap();
             let start_pos = resolved.start_anchors.as_ref().unwrap();
             let end_pos = resolved.end_anchors.as_ref().unwrap();
             assert_eq!(start_pos.len(), 2);
@@ -1713,7 +1747,7 @@ mod tests {
             let aaa_region = make_region(bg.clone(), aaa_acc, 0, 3, 3, 2, 2);
 
             let from_aaa = aaa_region
-                .find_graph_positions(&fixture.conn, 2, 2)
+                .find_graph_positions(&fixture.conn, test_workspace(), 2, 2)
                 .unwrap();
             assert_eq!(
                 position_set(&from_aaa.start_anchors.unwrap()),
@@ -1734,7 +1768,7 @@ mod tests {
             let ttt_region = make_region(bg, ttt_acc, 5, 8, 3, 0, 0);
 
             let from_ttt = ttt_region
-                .find_graph_positions(&fixture.conn, -2, -2)
+                .find_graph_positions(&fixture.conn, test_workspace(), -2, -2)
                 .unwrap();
             assert_eq!(
                 position_set(&from_ttt.start_anchors.unwrap()),
@@ -1759,7 +1793,9 @@ mod tests {
             );
             let region = make_region(bg, acc, 0, 3, 3, 1, 1);
 
-            let positions = region.find_graph_positions(&fixture.conn, 1, 1).unwrap();
+            let positions = region
+                .find_graph_positions(&fixture.conn, test_workspace(), 1, 1)
+                .unwrap();
             assert_eq!(
                 position_set(&positions.start_anchors.unwrap()),
                 HashSet::from([(HashId::convert_str("node-aaa"), 2)])
@@ -1780,7 +1816,9 @@ mod tests {
             );
             let region = make_region(bg, acc, 0, 3, 3, 2, 2);
 
-            let positions = region.find_graph_positions(&fixture.conn, 6, 6).unwrap();
+            let positions = region
+                .find_graph_positions(&fixture.conn, test_workspace(), 6, 6)
+                .unwrap();
             assert_eq!(
                 position_set(&positions.start_anchors.unwrap()),
                 HashSet::from([

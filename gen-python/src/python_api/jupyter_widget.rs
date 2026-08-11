@@ -25,7 +25,7 @@ use r#gen::{
     },
 };
 use gen_annotations::projection::annotation_segments;
-use gen_core::{HashId, is_end_node, is_start_node};
+use gen_core::{HashId, Workspace, is_end_node, is_start_node};
 use gen_graph::GenGraph;
 use gen_models::{
     annotations::{Annotation, AnnotationError},
@@ -268,6 +268,7 @@ fn sort_key_longest_first(span: &AnnotationSpan) -> i64 {
 struct GraphPage {
     name: String,
     db_path: PathBuf,
+    workspace: Workspace,
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     /// Annotation and path overlays. The path (added by `show_path`, removed by
@@ -286,6 +287,7 @@ struct GraphPage {
 struct PageRef {
     name: String,
     db_path: PathBuf,
+    workspace: Workspace,
     block_group_id: HashId,
 }
 
@@ -307,13 +309,14 @@ impl Page {
 }
 
 impl GraphPage {
-    fn new(name: String, db_path: PathBuf, graph: GenGraph) -> Self {
+    fn new(name: String, db_path: PathBuf, workspace: Workspace, graph: GenGraph) -> Self {
         let mut controller = GraphController::new(graph, GenGraphNodeSizer);
         controller.set_detail_level(VisualDetail::Truncated);
         controller.hide_cursor();
         Self {
             name,
             db_path,
+            workspace,
             block_group_id: None,
             controller,
             overlays: Vec::new(),
@@ -352,6 +355,7 @@ impl GraphPage {
             .ok_or_else(|| AnnotationError::DatabaseError(rusqlite::Error::QueryReturnedNoRows))?;
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
+            workspace: &self.workspace,
             history_ref: None,
             current_block_group: &current_block_group,
             entry: &entry,
@@ -513,7 +517,7 @@ impl GraphPage {
         self.reapply();
         {
             let conn = self.open_conn()?;
-            let renderer = GenGraphNodeRenderer::new(&conn);
+            let renderer = GenGraphNodeRenderer::new(&conn, &self.workspace);
             GraphWidget::with_renderer(renderer).render(graph_area, buf, &mut self.controller);
         }
 
@@ -740,7 +744,7 @@ impl GraphPage {
 
         let path = BlockGroup::get_current_path(&conn, &block_group_id, None)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let path_blocks = path.blocks(&conn, None).unwrap_or_default();
+        let path_blocks = path.coordinate_blocks(&conn, None);
         let path_nodes = project_path_overlay_nodes(self.controller.graph(), &path_blocks);
 
         if path_nodes.is_empty() {
@@ -825,6 +829,7 @@ impl GraphPage {
             let translate_result: Result<(), String> = match ext.as_str() {
                 "gff" | "gff3" => translate_gff(
                     &conn,
+                    &self.workspace,
                     &bg.collection_name,
                     sample,
                     None,
@@ -837,6 +842,7 @@ impl GraphPage {
                 .map_err(|e| e.to_string()),
                 "bed" => translate_bed(
                     &conn,
+                    &self.workspace,
                     &bg.collection_name,
                     sample,
                     None,
@@ -1089,9 +1095,9 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
         .path()
         .map(PathBuf::from)
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-    let graph =
-        BlockGroup::get_graph(graph_conn, &sg.id, None).map_err(block_group_err_to_pyerr)?;
-    let mut page = GraphPage::new(sg.name.clone(), db_path, graph);
+    let graph = BlockGroup::get_graph(graph_conn, context.workspace(), &sg.id, None)
+        .map_err(block_group_err_to_pyerr)?;
+    let mut page = GraphPage::new(sg.name.clone(), db_path, context.workspace().clone(), graph);
     page.block_group_id = Some(sg.id);
     Ok(page)
 }
@@ -1113,6 +1119,7 @@ fn page_ref_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<PageRef> {
     Ok(PageRef {
         name: sg.name.clone(),
         db_path,
+        workspace: context.workspace().clone(),
         block_group_id: sg.id,
     })
 }
@@ -1148,11 +1155,12 @@ pub struct PyGraphController {
 
 impl PyGraphController {
     /// Wrap a single, already-loaded graph as a one-page controller.
-    pub fn new(db_path: PathBuf, graph: GenGraph) -> Self {
+    pub fn new(db_path: PathBuf, workspace: Workspace, graph: GenGraph) -> Self {
         Self {
             pages: vec![Page::Loaded(Box::new(GraphPage::new(
                 String::new(),
                 db_path,
+                workspace,
                 graph,
             )))],
             current_index: 0,
@@ -1190,9 +1198,15 @@ impl PyGraphController {
         if let Page::Pending(page_ref) = page {
             let conn = get_connection(&page_ref.db_path)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            let graph = BlockGroup::get_graph(&conn, &page_ref.block_group_id, None)
-                .map_err(block_group_err_to_pyerr)?;
-            let mut loaded = GraphPage::new(page_ref.name.clone(), page_ref.db_path.clone(), graph);
+            let graph =
+                BlockGroup::get_graph(&conn, &page_ref.workspace, &page_ref.block_group_id, None)
+                    .map_err(block_group_err_to_pyerr)?;
+            let mut loaded = GraphPage::new(
+                page_ref.name.clone(),
+                page_ref.db_path.clone(),
+                page_ref.workspace.clone(),
+                graph,
+            );
             loaded.block_group_id = Some(page_ref.block_group_id);
             *page = Page::Loaded(Box::new(loaded));
         }
@@ -1514,9 +1528,9 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("test DB must be file-backed");
         let (bg_id, _) = setup_block_group(graph_handle.conn());
-        let graph = BlockGroup::get_graph(graph_handle.conn(), &bg_id, None)
+        let graph = BlockGroup::get_graph(graph_handle.conn(), ctx.workspace(), &bg_id, None)
             .map_err(crate::python_api::utils::block_group_err_to_pyerr)?;
-        let mut ctrl = PyGraphController::new(db_path, graph);
+        let mut ctrl = PyGraphController::new(db_path, ctx.workspace().clone(), graph);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }

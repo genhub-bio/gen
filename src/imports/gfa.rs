@@ -370,7 +370,7 @@ pub fn import_gfa(
     let bar = progress_bar.add(get_progress_bar(None));
     bar.set_message("Breaking cycles");
     let message_bar = progress_bar.add(get_message_bar());
-    let graph = BlockGroup::get_graph(conn, &block_group.id, None)?;
+    let graph = BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)?;
     let mut undirected_graph: UnGraphMap<GraphNode, GraphEdge> = UnGraphMap::new();
     for node in graph.nodes() {
         undirected_graph.add_node(node);
@@ -527,7 +527,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn, None);
+        let result = path.sequence(conn, context.workspace(), None);
         assert_eq!(result.unwrap(), "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
@@ -558,7 +558,13 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["AAAATTTTGGGGCCCC".to_string()])
@@ -585,7 +591,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn, None);
+        let result = path.sequence(conn, context.workspace(), None);
         assert_eq!(result.unwrap(), "ACCTACAAATTCAAAC");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
@@ -609,7 +615,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn, None);
+        let result = path.sequence(conn, context.workspace(), None);
         assert_eq!(result.unwrap(), "TATGCCAGCTGCGAATA");
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
@@ -636,7 +642,7 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn, None);
+        let result = path.sequence(conn, context.workspace(), None);
         let big_part = "TGCTAGCTACTAGTGAAAGAGGAGAAATACTAGATGGCTTCCTCCGAAGACGTTATCAAAGAGTTCATGCGTTTCAAAGTTCGTATGGAAGGTTCCGTTAACGGTCACGAGTTCGAAATCGAAGGTGAAGGTGAAGGTCGTCCGTACGAAGGTACCCAGACCGCTAAACTGAAAGTTACCAAAGGTGGTCCGCTGCCGTTCGCTTGGGACATCCTGTCCCCGCAGTTCCAGTACGGTTCCAAAGCTTACGTTAAACACCCGGCTGACATCCCGGACTACCTGAAACTGTCCTTCCCGGAAGGTTTCAAATGGGAACGTGTTATGAACTTCGAAGACGGTGGTGTTGTTACCGTTACCCAGGACTCCTCCCTGCAAGACGGTGAGTTCATCTACAAAGTTAAACTGCGTGGTACCAACTTCCCGTCCGACGGTCCGGTTATGCAGAAAAAAACCATGGGTTGGGAAGCTTCCACCGAACGTATGTACCCGGAAGACGGTGCTCTGAAAGGTGAAATCAAAATGCGTCTGAAACTGAAAGACGGTGGTCACTACGACGCTGAAGTTAAAACCACCTACATGGCTAAAAAACCGGTTCAGCTGCCGGGTGCTTACAAAACCGACATCAAACTGGACATCACCTCCCACAACGAAGACTACACCATCGTTGAACAGTACGAACGTGCTGAAGGTCGTCACTCCACCGGTGCTTAATAACGCTGATAGTGCTAGTGTAGATCGCTACTAGAGCCAGGCATCAAATAAAACGAAAGGCTCAGTCGAAAGACTGGGCCTTTCGTTTTATCTGTTGTTTGTCGGTGAACGCTCTCTACTAGAGTCACACTGGCTCACCTTCGGGTGGGCCTTTCTGCGTTTATATACTAGAAGCGGCCGCTGCAGGCTTCCTCGCTCACTGACTCGCTGCGCTCGGTCGTTCGGCTGCGGCGAGCGGTATCAGCTCACTCAAAGGCGGTAATACGGTTATCCACAGAATCAGGGGATAACGCAGGAAAGAACATGTGAGCAAAAGGCCAGCAAAAGGCCAGGAACCGTAAAAAGGCCGCGTTGCTGGCGTTTTTCCATAGGCTCCGCCCCCCTGACGAGCATCACAAAAATCGACGCTCAAGTCAGAGGTGGCGAAACCCGACAGGACTATAAAGATACCAGGCGTTTCCCCCTGGAAGCTCCCTCGTGCGCTCTCCTGTTCCGACCCTGCCGCTTACCGGATACCTGTCCGCCTTTCTCCCTTCGGGAAGCGTGGCGCTTTCTCATAGCTCACGCTGTAGGTATCTCAGTTCGGTGTAGGTCGTTCGCTCCAAGCTGGGCTGTGTGCACGAACCCCCCGTTCAGCCCGACCGCTGCGCCTTATCCGGTAACTATCGTCTTGAGTCCAACCCGGTAAGACACGACTTATCGCCACTGGCAGCAGCCACTGGTAACAGGATTAGCAGAGCGAGGTATGTAGGCGGTGCTACAGAGTTCTTGAAGTGGTGGCCTAACTACGGCTACACTAGAAGGACAGTATTTGGTATCTGCGCTCTGCTGAAGCCAGTTACCTTCGGAAAAAGAGTTGGTAGCTCTTGATCCGGCAAACAAACCACCGCTGGTAGCGGTGGTTTTTTTGTTTGCAAGCAGCAGATTACGCGCAGAAAAAAAGGATCTCAAGAAGATCCTTTGATCTTTTCTACGGGGTCTGACGCTCAGTGGAACGAAAACTCACGTTAAGGGATTTTGGTCATGAGATTATCAAAAAGGATCTTCACCTAGATCCTTTTAAATTAAAAATGAAGTTTTAAATCAATCTAAAGTATATATGAGTAAACTTGGTCTGACAGTTACCAATGCTTAATCAGTGAGGCACCTATCTCAGCGATCTGTCTATTTCGTTCATCCATAGTTGCCTGACTCCCCGTCGTGTAGATAACTACGATACGGGAGGGCTTACCATCTGGCCCCAGTGCTGCAATGATACCGCGAGACCCACGCTCACCGGCTCCAGATTTATCAGCAATAAACCAGCCAGCCGGAAGGGCCGAGCGCAGAAGTGGTCCTGCAACTTTATCCGCCTCCATCCAGTCTATTAATTGTTGCCGGGAAGCTAGAGTAAGTAGTTCGCCAGTTAATAGTTTGCGCAACGTTGTTGCCATTGCTACAGGCATCGTGGTGTCACGCTCGTCGTTTGGTATGGCTTCATTCAGCTCCGGTTCCCAACGATCAAGGCGAGTTACATGATCCCCCATGTTGTGCAAAAAAGCGGTTAGCTCCTTCGGTCCTCCGATCGTTGTCAGAAGTAAGTTGGCCGCAGTGTTATCACTCATGGTTATGGCAGCACTGCATAATTCTCTTACTGTCATGCCATCCGTAAGATGCTTTTCTGTGACTGGTGAGTACTCAACCAAGTCATTCTGAGAATAGTGTATGCGGCGACCGAGTTGCTCTTGCCCGGCGTCAATACGGGATAATACCGCGCCACATAGCAGAACTTTAAAAGTGCTCATCATTGGAAAACGTTCTTCGGGGCGAAAACTCTCAAGGATCTTACCGCTGTTGAGATCCAGTTCGATGTAACCCACTCGTGCACCCAACTGATCTTCAGCATCTTTTACTTTCACCAGCGTTTCTGGGTGAGCAAAAACAGGAAGGCAAAATGCCGCAAAAAAGGGAATAAGGGCGACACGGAAATGTTGAATACTCATACTCTTCCTTTTTCAATATTATTGAAGCATTTATCAGGGTTATTGTCTCATGAGCGGATACATATTTGAATGTATTTAGAAAAATAAACAAATAGGGGTTCCGCGCACATTTCCCCGAAAAGTGCCACCTGACGTCTAAGAAACCATTATTATCATGACATTAACCTATAAAAATAGGCGTATCACGAGGCAGAATTTCAGATAAAAAAAATCCTTAGCTTTCGCTAAGGATGATTTCTGGAATTCGCGGCCGCATCTAGAG";
         let expected_sequence_parts = vec![
             "T",
@@ -711,7 +717,13 @@ mod tests {
                 }
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(all_sequences.len(), 1024);
         assert_eq!(all_sequences, expected_sequences);
 
@@ -736,10 +748,16 @@ mod tests {
         )[0]
         .clone();
 
-        let result = path.sequence(conn, None);
+        let result = path.sequence(conn, context.workspace(), None);
         assert_eq!(result.unwrap(), "AA");
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(all_sequences, HashSet::from_iter(vec!["AA".to_string()]));
 
         let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
@@ -757,7 +775,13 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["AAACCCTTTGGGACTCTA".to_string()])
@@ -777,7 +801,13 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec!["TTTGGGACTCTAAAACCC".to_string()])

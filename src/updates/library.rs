@@ -202,6 +202,7 @@ fn update_graph_with_library(
             ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {
                 update_graph_native_library(
                     conn,
+                    context.workspace(),
                     new_sample_name,
                     &target_region,
                     &target_block_group,
@@ -311,7 +312,7 @@ fn update_path_library(
     )?;
 
     let resolved_with_positions = resolved_region
-        .find_graph_positions(conn, 0, 0)
+        .find_graph_positions(conn, context.workspace(), 0, 0)
         .map_err(UpdateWithLibraryError::from)?;
     let splice_point = &resolved_with_positions.start_anchors.unwrap()[0];
     let location_accession = create_location_accession(conn, target_block_group.id, splice_point)?;
@@ -383,13 +384,14 @@ fn update_path_library(
 
 fn update_graph_native_library(
     conn: &gen_models::db::GraphConnection,
+    workspace: &gen_core::Workspace,
     new_sample_name: &str,
     resolved_region: &ResolvedGenRegion,
     target_block_group: &BlockGroup,
     parts_list: Vec<Vec<SequencePart>>,
 ) -> Result<(), UpdateWithLibraryError> {
     let resolved = resolved_region
-        .find_graph_positions(conn, 0, 0)
+        .find_graph_positions(conn, workspace, 0, 0)
         .map_err(UpdateWithLibraryError::from)?;
     let start_positions = resolved.start_anchors.as_ref().unwrap();
     let end_positions = resolved.end_anchors.as_ref().unwrap();
@@ -552,7 +554,13 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -610,7 +618,13 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -623,7 +637,7 @@ mod tests {
 
         let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
         assert_eq!(
-            path.sequence(conn, None).unwrap(),
+            path.sequence(conn, context.workspace(), None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
         );
         assert_eq!(
@@ -677,7 +691,13 @@ mod tests {
 
         let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_group.id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATAAAACGATCGATCGGGAACACACAGAGA".to_string(),
@@ -727,7 +747,13 @@ mod tests {
 
         let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_group.id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGAAAAAGGAACACACAGAGA".to_string(),
@@ -784,7 +810,13 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences
@@ -834,7 +866,13 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", "new sample", None);
         let block_group = &block_groups[0];
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -893,7 +931,13 @@ mod tests {
                 expected_sequences.push(seq);
             }
         }
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             expected_sequences

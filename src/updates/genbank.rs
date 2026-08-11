@@ -214,7 +214,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    BlockGroup::insert_change(conn, &change).unwrap();
+                    BlockGroup::insert_change(conn, context.workspace(), &change).unwrap();
                 }
             }
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),
@@ -379,12 +379,16 @@ mod tests {
             let f = reader::parse_file(&path).unwrap();
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
-            let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(conn, &block_group_id, false)
-                    .unwrap()
-                    .iter()
-                    .map(|s| s.to_lowercase())
-                    .collect();
+            let sequences: HashSet<String> = BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap()
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
             let unchanged_seq = get_unmodified_sequence();
             assert!(sequences.contains(&mod_seq));
             assert!(sequences.contains(&unchanged_seq));
@@ -432,12 +436,16 @@ mod tests {
 
             let f = reader::parse_file(&path).unwrap();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
-            let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(conn, &block_group_id, false)
-                    .unwrap()
-                    .iter()
-                    .map(|s| s.to_lowercase())
-                    .collect();
+            let sequences: HashSet<String> = BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap()
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
             let unchanged_seq = get_unmodified_sequence();
             assert!(sequences.contains(&unchanged_seq));
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
@@ -446,12 +454,16 @@ mod tests {
             // we have a new blockgroup called deletion that uses the same base sequence but
             // has a deletion in it.
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
-            let sequences: HashSet<String> =
-                BlockGroup::get_all_sequences(conn, &block_group_id, false)
-                    .unwrap()
-                    .iter()
-                    .map(|s| s.to_lowercase())
-                    .collect();
+            let sequences: HashSet<String> = BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap()
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
             let mod_seq = str::from_utf8(&f[1].seq).unwrap().to_string();
             assert!(sequences.contains(&unchanged_seq));
             assert!(sequences.contains(&mod_seq));

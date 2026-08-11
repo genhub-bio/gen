@@ -11,7 +11,7 @@ use std::{
 
 use gb_io::{self, seq::Location};
 use gen_annotations::projection::{AnnotationSegment, project_annotation_segments};
-use gen_core::{Strand, is_terminal, path::PathBlock, range::Range};
+use gen_core::{Strand, Workspace, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
@@ -254,6 +254,7 @@ fn get_path_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<GraphNode>
 
 pub fn export_genbank(
     conn: &GraphConnection,
+    workspace: &Workspace,
     collection_name: &str,
     sample_name: &str,
     writer: impl Write,
@@ -280,13 +281,13 @@ pub fn export_genbank(
     for block_group in block_groups.iter() {
         let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
         let path_blocks = path
-            .blocks(conn, history_ref)?
+            .coordinate_blocks(conn, history_ref)
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
         let mut seq = gb_io::seq::Seq::empty();
         seq.name = Some(block_group.name.clone());
-        seq.seq = path.sequence(conn, history_ref)?.into_bytes();
+        seq.seq = path.sequence(conn, workspace, history_ref)?.into_bytes();
         export_annotations(
             conn,
             &path,
@@ -297,7 +298,7 @@ pub fn export_genbank(
         )?;
 
         // Identify the node traversal corresponding to our path.
-        let graph = BlockGroup::get_graph(conn, &block_group.id, history_ref)?;
+        let graph = BlockGroup::get_graph(conn, workspace, &block_group.id, history_ref)?;
         let path_nodes = get_path_nodes(&graph, &path_blocks);
         let path_node_set: HashSet<&GraphNode> = HashSet::from_iter(&path_nodes);
         let mut node_it = path_nodes.iter().peekable();
@@ -331,7 +332,12 @@ pub fn export_genbank(
 
                     let mut sequence = String::new();
                     for sub_node in sub_path.iter() {
-                        let seqs = Node::get_sequences_by_node_ids(conn, &[sub_node.node_id], None);
+                        let seqs = Node::get_sequences_by_node_ids(
+                            conn,
+                            workspace,
+                            &[sub_node.node_id],
+                            None,
+                        );
                         let seq = &seqs[&sub_node.node_id];
                         sequence.push_str(
                             &seq.get_sequence(sub_node.sequence_start, sub_node.sequence_end)?,
@@ -543,8 +549,7 @@ mod tests {
         sample_name: &str,
     ) {
         let blocks = path
-            .blocks(conn, None)
-            .unwrap()
+            .coordinate_blocks(conn, None)
             .into_iter()
             .filter(|block| !is_terminal(block.node_id))
             .collect::<Vec<_>>();
@@ -615,7 +620,15 @@ mod tests {
         )
         .unwrap();
         let mut output = Vec::new();
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output, None).unwrap();
+        export_genbank(
+            conn,
+            context.workspace(),
+            "",
+            Sample::DEFAULT_NAME,
+            &mut output,
+            None,
+        )
+        .unwrap();
         compare_genbanks(&path, &output);
     }
 
@@ -644,7 +657,15 @@ mod tests {
         )
         .unwrap();
         let mut output = Vec::new();
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output, None).unwrap();
+        export_genbank(
+            conn,
+            context.workspace(),
+            "",
+            Sample::DEFAULT_NAME,
+            &mut output,
+            None,
+        )
+        .unwrap();
         compare_genbanks(&path, &output);
     }
 
@@ -673,7 +694,15 @@ mod tests {
         )
         .unwrap();
         let mut output = Vec::new();
-        export_genbank(conn, "", Sample::DEFAULT_NAME, &mut output, None).unwrap();
+        export_genbank(
+            conn,
+            context.workspace(),
+            "",
+            Sample::DEFAULT_NAME,
+            &mut output,
+            None,
+        )
+        .unwrap();
         compare_genbanks(&path, &output);
     }
 
@@ -702,7 +731,15 @@ mod tests {
         .unwrap();
 
         let mut output = Vec::new();
-        export_genbank(conn, "fixtures", "puc19-export", &mut output, None).unwrap();
+        export_genbank(
+            conn,
+            context.workspace(),
+            "fixtures",
+            "puc19-export",
+            &mut output,
+            None,
+        )
+        .unwrap();
 
         let parsed = reader::parse_slice(&output).unwrap();
         let features = &parsed[0].features;
@@ -830,7 +867,7 @@ mod tests {
         );
 
         let mut output = Vec::new();
-        export_genbank(conn, "test", "test", &mut output, None).unwrap();
+        export_genbank(conn, context.workspace(), "test", "test", &mut output, None).unwrap();
 
         let parsed = reader::parse_slice(&output).unwrap();
         let features = &parsed[0].features;
@@ -957,7 +994,7 @@ mod tests {
         .unwrap();
 
         let mut output = Vec::new();
-        export_genbank(conn, "test", "test", &mut output, None).unwrap();
+        export_genbank(conn, context.workspace(), "test", "test", &mut output, None).unwrap();
 
         let exported_text = String::from_utf8(output).unwrap();
         assert!(
@@ -995,6 +1032,7 @@ mod tests {
         let mut historical_output = Vec::new();
         export_genbank(
             conn,
+            context.workspace(),
             "test",
             "test",
             &mut historical_output,
@@ -1009,8 +1047,15 @@ mod tests {
             .collect::<HashSet<_>>();
 
         let mut current_output = Vec::new();
-        export_genbank(conn, "test", "test", &mut current_output, None)
-            .expect("should export current GenBank");
+        export_genbank(
+            conn,
+            context.workspace(),
+            "test",
+            "test",
+            &mut current_output,
+            None,
+        )
+        .expect("should export current GenBank");
         let current_labels = reader::parse_slice(&current_output)
             .expect("should parse current GenBank")
             .into_iter()
