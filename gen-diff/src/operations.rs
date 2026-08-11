@@ -1416,6 +1416,7 @@ mod tests {
 
         let reconstructed_blocks = Edge::blocks_from_edges(
             graph_conn,
+            context.workspace(),
             &block_group.id,
             &reconstructed_edges,
             Some(&target_ref),
@@ -1425,6 +1426,7 @@ mod tests {
             BlockGroupEdge::edges_for_block_group(graph_conn, &block_group.id, Some(&target_ref));
         let target_blocks = Edge::blocks_from_edges(
             graph_conn,
+            context.workspace(),
             &block_group.id,
             &target_edges,
             Some(&target_ref),

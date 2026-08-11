@@ -300,6 +300,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         )?;
                         match show_inline_block_group_widget(
                             graph_conn,
+                            db_context.workspace(),
                             bg.id,
                             vec![current_path],
                             clamp_inline_view_height(height),
@@ -358,7 +359,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             if diff.operations.is_empty() {
                 println!("No differences found between {source_ref} and {target_ref}.");
             } else {
-                view_diff(graph_conn, &diff)?;
+                view_diff(graph_conn, db_context.workspace(), &diff)?;
             }
             Ok(())
         }
@@ -379,6 +380,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let mut bed_file = File::open(bed)?;
                 Ok(translate::bed::translate_bed(
                     graph_conn,
+                    db_context.workspace(),
                     collection_name,
                     sample.as_str(),
                     None,
@@ -391,6 +393,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let mut gff_file = BufReader::new(File::open(gff)?);
                 Ok(translate::gff::translate_gff(
                     graph_conn,
+                    db_context.workspace(),
                     collection_name,
                     sample.as_str(),
                     None,
@@ -705,8 +708,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .ensure_search_index()
                 .map_err(|_| "No .gen directory found. Run 'gen init' first.")?;
             for bg in block_groups {
-                let graph = BlockGroup::get_graph(graph_conn, &bg.id, None)?;
-                let matcher = GenGraphMatcher::new(graph_conn, graph);
+                let graph =
+                    BlockGroup::get_graph(graph_conn, db_context.workspace(), &bg.id, None)?;
+                let matcher = GenGraphMatcher::new(graph_conn, db_context.workspace(), graph);
                 let index = SeedIndex::build(&matcher, kmer_size, true);
                 let path = index_dir.join(format!("{}.bin", bg.id));
                 index.save_to_path(&path).map_err(|e| anyhow!("{e}"))?;
@@ -757,8 +761,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let query_bytes = query.as_bytes();
             println!("sample\tgraph\tblocks\toffset");
             for bg in block_groups {
-                let graph = BlockGroup::get_graph(graph_conn, &bg.id, None)?;
-                let matcher = GenGraphMatcher::new(graph_conn, graph);
+                let graph =
+                    BlockGroup::get_graph(graph_conn, db_context.workspace(), &bg.id, None)?;
+                let matcher = GenGraphMatcher::new(graph_conn, db_context.workspace(), graph);
                 let matches = index_dir
                     .as_ref()
                     .and_then(|dir| {
@@ -870,7 +875,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 })?;
             let path =
                 BlockGroup::get_current_path(graph_conn, &block_group.id, history_ref.as_deref())?;
-            let sequence = path.sequence(graph_conn, history_ref.as_deref())?;
+            let sequence =
+                path.sequence(graph_conn, db_context.workspace(), history_ref.as_deref())?;
             if end_coordinate == -1 {
                 end_coordinate = sequence.len() as i64;
             }
@@ -892,6 +898,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             });
             gfa_sample_diff(
                 graph_conn,
+                db_context.workspace(),
                 collection_name,
                 &PathBuf::from(gfa),
                 sample1.as_str(),

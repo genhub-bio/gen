@@ -3,7 +3,7 @@ use std::{
     path::Path,
 };
 
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     db::GraphConnection, locus::GraphLocus, node::Node, sequence::reverse_complement,
@@ -148,24 +148,24 @@ impl GenGraphMatcher {
     ///
     /// Batch-loads all full node sequences up front. No further database access
     /// occurs during matching.
-    pub fn new(conn: &GraphConnection, graph: GenGraph) -> Self {
-        Self::new_with_sequence_kind(conn, graph, SequenceKind::Dna)
+    pub fn new(conn: &GraphConnection, workspace: &Workspace, graph: GenGraph) -> Self {
+        Self::new_with_sequence_kind(conn, workspace, graph, SequenceKind::Dna)
     }
 
     /// Build a single-stranded DNA matcher from a database connection and graph.
     ///
     /// Batch-loads all full node sequences up front. No further database access
     /// occurs during matching.
-    pub fn new_ssdna(conn: &GraphConnection, graph: GenGraph) -> Self {
-        Self::new_with_sequence_kind(conn, graph, SequenceKind::SsDna)
+    pub fn new_ssdna(conn: &GraphConnection, workspace: &Workspace, graph: GenGraph) -> Self {
+        Self::new_with_sequence_kind(conn, workspace, graph, SequenceKind::SsDna)
     }
 
     /// Build a protein matcher from a database connection and graph.
     ///
     /// Batch-loads all full node sequences up front. No further database access
     /// occurs during matching.
-    pub fn new_protein(conn: &GraphConnection, graph: GenGraph) -> Self {
-        Self::new_with_sequence_kind(conn, graph, SequenceKind::Protein)
+    pub fn new_protein(conn: &GraphConnection, workspace: &Workspace, graph: GenGraph) -> Self {
+        Self::new_with_sequence_kind(conn, workspace, graph, SequenceKind::Protein)
     }
 
     /// Build a matcher from a database connection, graph, and sequence kind.
@@ -174,6 +174,7 @@ impl GenGraphMatcher {
     /// occurs during matching.
     pub fn new_with_sequence_kind(
         conn: &GraphConnection,
+        workspace: &Workspace,
         graph: GenGraph,
         sequence_kind: SequenceKind,
     ) -> Self {
@@ -185,7 +186,7 @@ impl GenGraphMatcher {
         };
 
         let mut node_sequences: HashMap<HashId, Vec<u8>> =
-            Node::get_sequences_by_node_ids(conn, &node_ids, None)
+            Node::get_sequences_by_node_ids(conn, workspace, &node_ids, None)
                 .into_iter()
                 .map(|(node_id, seq)| {
                     (
@@ -784,8 +785,14 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
-        GenGraphMatcher::new(conn, graph)
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            None,
+        )
+        .unwrap();
+        GenGraphMatcher::new(conn, ctx.workspace(), graph)
     }
 
     fn build_ssdna_matcher() -> GenGraphMatcher {
@@ -793,8 +800,14 @@ mod tests {
         let conn = ctx.graph().conn();
         let _ = Collection::create(conn, "test");
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
-        GenGraphMatcher::new_ssdna(conn, graph)
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            None,
+        )
+        .unwrap();
+        GenGraphMatcher::new_ssdna(conn, ctx.workspace(), graph)
     }
 
     fn test_protein_matcher() -> GenGraphMatcher {
@@ -802,8 +815,14 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
-        GenGraphMatcher::new_protein(conn, graph)
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            None,
+        )
+        .unwrap();
+        GenGraphMatcher::new_protein(conn, ctx.workspace(), graph)
     }
 
     fn test_exact_matcher() -> GenGraphMatcher {
@@ -811,8 +830,14 @@ mod tests {
         let conn = ctx.graph().conn();
         Collection::create(conn, "test").unwrap();
         let (block_group_id, _path) = setup_block_group(conn);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
-        GenGraphMatcher::new_with_sequence_kind(conn, graph, SequenceKind::Exact)
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            None,
+        )
+        .unwrap();
+        GenGraphMatcher::new_with_sequence_kind(conn, ctx.workspace(), graph, SequenceKind::Exact)
     }
 
     #[test]

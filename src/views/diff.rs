@@ -69,7 +69,11 @@ enum DiffPanel {
     Graph,
 }
 
-pub fn view_diff(conn: &GraphConnection, diff: &OperationDiff) -> Result<(), io::Error> {
+pub fn view_diff(
+    conn: &GraphConnection,
+    workspace: &gen_core::Workspace,
+    diff: &OperationDiff,
+) -> Result<(), io::Error> {
     let samples = collect_samples(&diff.diff_graph);
 
     if samples.is_empty() {
@@ -160,7 +164,7 @@ pub fn view_diff(conn: &GraphConnection, diff: &OperationDiff) -> Result<(), io:
             f.render_widget(graph_block, main[1]);
 
             let canvas_style = Style::default().bg(current_theme()[0x00]);
-            let widget = create_gen_graph_widget(conn)
+            let widget = create_gen_graph_widget(conn, workspace)
                 .detail_level(graph_controller.get_detail_level())
                 .style(canvas_style)
                 .cursor();

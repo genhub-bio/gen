@@ -39,6 +39,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let file = File::create(PathBuf::from(cmd.path))?;
     export_genbank(
         conn,
+        context.workspace(),
         name,
         cmd.sample.as_str(),
         file,

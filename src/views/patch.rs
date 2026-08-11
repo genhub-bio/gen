@@ -122,7 +122,11 @@ where
     R: Read + Seek,
 {
     let prepared = prepare_patch_view(source_context, reader)?;
-    view_diff(prepared.context.graph().conn(), &prepared.diff)?;
+    view_diff(
+        prepared.context.graph().conn(),
+        prepared.context.workspace(),
+        &prepared.diff,
+    )?;
     Ok(())
 }
 

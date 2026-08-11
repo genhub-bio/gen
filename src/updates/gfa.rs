@@ -93,7 +93,7 @@ pub fn update_with_gfa(
             .collect::<Vec<String>>()
             .join("");
         for existing_path in existing_paths.iter() {
-            if existing_path.sequence(conn, None)? == path_sequence {
+            if existing_path.sequence(conn, context.workspace(), None)? == path_sequence {
                 existing_path_ids_by_new_path_name.insert(path.name.clone(), existing_path.id);
             }
         }
@@ -120,7 +120,7 @@ pub fn update_with_gfa(
             .collect::<Vec<String>>()
             .join("");
         for existing_path in existing_paths.iter() {
-            if existing_path.sequence(conn, None)? == walk_sequence {
+            if existing_path.sequence(conn, context.workspace(), None)? == walk_sequence {
                 existing_path_ids_by_new_path_name.insert(walk_name.clone(), existing_path.id);
             }
         }
@@ -546,7 +546,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -596,7 +602,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }

@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use gen_core::{HashId, is_terminal, strand::Strand};
+use gen_core::{HashId, Workspace, is_terminal, strand::Strand};
 use gen_graph::{GenGraph, project_path};
 use gen_models::{
     block_group::BlockGroup,
@@ -49,6 +49,7 @@ pub enum GfaExportError {
 
 pub fn export_gfa(
     conn: &GraphConnection,
+    workspace: &Workspace,
     collection_name: &str,
     filename: &PathBuf,
     sample_name: &str,
@@ -73,9 +74,14 @@ pub fn export_gfa(
     for block_group in sample_block_groups {
         let block_group_edges =
             BlockGroupEdge::edges_for_block_group(conn, &block_group.id, history_ref);
-        for mut block in
-            Edge::blocks_from_edges(conn, &block_group.id, &block_group_edges, history_ref)
-                .map_err(|source| GfaExportError::Edge { source })?
+        for mut block in Edge::blocks_from_edges(
+            conn,
+            workspace,
+            &block_group.id,
+            &block_group_edges,
+            history_ref,
+        )
+        .map_err(|source| GfaExportError::Edge { source })?
         {
             if seen_blocks.insert((block.node_id, block.start, block.end)) {
                 block.id = blocks.len() as i64;
@@ -249,12 +255,7 @@ fn get_paths(
         };
         let sample_name = block_group.sample_name;
 
-        let path_blocks =
-            path.blocks(conn, None)
-                .map_err(|source| GfaExportError::PathForName {
-                    path_name: path.name.clone(),
-                    source,
-                })?;
+        let path_blocks = path.coordinate_blocks(conn, None);
         let projected_path = project_path(graph, &path_blocks);
 
         if !projected_path.is_empty() {
@@ -502,7 +503,13 @@ mod tests {
         )
         .unwrap();
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            false,
+        )
+        .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -510,6 +517,7 @@ mod tests {
 
         export_gfa(
             conn,
+            context.workspace(),
             collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -528,13 +536,22 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
 
         let paths = Path::query_for_collection(conn, "test collection 2");
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].sequence(conn, None).unwrap(), "AAAATTTTGGGGCCCC");
+        assert_eq!(
+            paths[0].sequence(conn, context.workspace(), None).unwrap(),
+            "AAAATTTTGGGGCCCC"
+        );
     }
 
     #[test]
@@ -593,9 +610,15 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, collection, "deleted");
-        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            None,
+        )
+        .unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
-        let sequences = Node::get_sequences_by_node_ids(conn, &node_ids, None);
+        let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {
             sequences[&node.node_id]
                 .get_sequence(node.sequence_start, node.sequence_end)
@@ -632,7 +655,16 @@ mod tests {
         );
         let temp_dir = tempdir().expect("should create a temporary directory");
         let gfa_path = temp_dir.path().join("front-deletion.gfa");
-        export_gfa(conn, collection, &gfa_path, "deleted", None, None).unwrap();
+        export_gfa(
+            conn,
+            context.workspace(),
+            collection,
+            &gfa_path,
+            "deleted",
+            None,
+            None,
+        )
+        .unwrap();
         let gfa_lines = fs::read_to_string(&gfa_path)
             .expect("should read the exported GFA")
             .lines()
@@ -680,7 +712,15 @@ mod tests {
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("missing.gfa");
 
-        let result = export_gfa(conn, "missing", &gfa_path, Sample::DEFAULT_NAME, None, None);
+        let result = export_gfa(
+            conn,
+            context.workspace(),
+            "missing",
+            &gfa_path,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        );
 
         assert!(matches!(
             result,
@@ -697,12 +737,27 @@ mod tests {
         let conn = context.graph().conn();
 
         let (bg_id, _path) = setup_block_group(conn);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &bg_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &bg_id,
+            false,
+        )
+        .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("split.gfa");
 
-        export_gfa(conn, "test", &gfa_path, "test", 5, None).unwrap();
+        export_gfa(
+            conn,
+            context.workspace(),
+            "test",
+            &gfa_path,
+            "test",
+            5,
+            None,
+        )
+        .unwrap();
 
         let _ = import_gfa(
             &context,
@@ -714,11 +769,23 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
 
-        let graph = BlockGroup::get_graph(conn, &block_group2.id, None).unwrap();
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            None,
+        )
+        .unwrap();
         let graph_nodes = graph
             .nodes()
             .filter_map(|node| {
@@ -729,7 +796,8 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let node_sequences = Node::get_sequences_by_node_ids(conn, &graph_nodes, None);
+        let node_sequences =
+            Node::get_sequences_by_node_ids(conn, context.workspace(), &graph_nodes, None);
         assert!(node_sequences.len() > 1);
         for sequence in node_sequences.values() {
             assert!(
@@ -751,7 +819,13 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            false,
+        )
+        .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -759,6 +833,7 @@ mod tests {
 
         export_gfa(
             conn,
+            context.workspace(),
             &collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -776,7 +851,13 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -792,7 +873,13 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            false,
+        )
+        .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -800,6 +887,7 @@ mod tests {
 
         export_gfa(
             conn,
+            context.workspace(),
             &collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -817,7 +905,13 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "anderson promoters 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -833,7 +927,13 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group_id,
+            false,
+        )
+        .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
@@ -841,6 +941,7 @@ mod tests {
 
         export_gfa(
             conn,
+            context.workspace(),
             &collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -858,7 +959,13 @@ mod tests {
         let block_group2 = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
     }
@@ -897,7 +1004,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        BlockGroup::insert_change(conn, &change).unwrap();
+        BlockGroup::insert_change(conn, crate::test_helpers::test_workspace(), &change).unwrap();
 
         let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
         let mut node_ids = HashSet::new();
@@ -938,7 +1045,16 @@ mod tests {
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let mut gfa_path = PathBuf::from(temp_dir.path());
         gfa_path.push("intermediate.gfa");
-        export_gfa(conn, "test", &gfa_path, "test", None, None).unwrap();
+        export_gfa(
+            conn,
+            context.workspace(),
+            "test",
+            &gfa_path,
+            "test",
+            None,
+            None,
+        )
+        .unwrap();
         let _ = import_gfa(
             &context,
             &gfa_path,

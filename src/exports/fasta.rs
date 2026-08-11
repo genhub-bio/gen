@@ -1,5 +1,6 @@
 use std::{fs::File, path::PathBuf};
 
+use gen_core::Workspace;
 use gen_models::{
     block_group::{BlockGroup, BlockGroupError},
     collection::Collection,
@@ -22,6 +23,7 @@ pub enum FastaExportError {
 
 pub fn export_fasta(
     conn: &GraphConnection,
+    workspace: &Workspace,
     collection_name: &str,
     sample_name: Option<&str>,
     filename: &PathBuf,
@@ -40,8 +42,9 @@ pub fn export_fasta(
         let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
 
         let definition = fasta::record::Definition::new(block_group.name, None);
-        let sequence =
-            fasta::record::Sequence::from(path.sequence(conn, history_ref)?.into_bytes());
+        let sequence = fasta::record::Sequence::from(
+            path.sequence(conn, workspace, history_ref)?.into_bytes(),
+        );
         let record = fasta::Record::new(definition, sequence);
 
         writer.write_record(&record)?;
@@ -84,7 +87,15 @@ mod tests {
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
-        export_fasta(conn, &collection, None, &filename, None).unwrap();
+        export_fasta(
+            conn,
+            context.workspace(),
+            &collection,
+            None,
+            &filename,
+            None,
+        )
+        .unwrap();
 
         let mut fasta_reader = fasta::io::reader::Builder
             .build_from_path(filename)
@@ -140,7 +151,15 @@ mod tests {
 
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
-        export_fasta(conn, &collection, Some("child sample"), &filename, None).unwrap();
+        export_fasta(
+            conn,
+            context.workspace(),
+            &collection,
+            Some("child sample"),
+            &filename,
+            None,
+        )
+        .unwrap();
 
         let mut fasta_reader = fasta::io::reader::Builder
             .build_from_path(filename)

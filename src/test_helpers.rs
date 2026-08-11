@@ -1,4 +1,4 @@
-use std::{fmt::Debug, fs, io::Write, ops::Add};
+use std::{fmt::Debug, fs, io::Write, ops::Add, sync::OnceLock};
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
@@ -46,6 +46,16 @@ pub fn create_bg(
 use intervaltree::IntervalTree;
 use rusqlite::Connection;
 use tempfile::tempdir;
+
+pub fn test_workspace() -> &'static Workspace {
+    static WORKSPACE: OnceLock<Workspace> = OnceLock::new();
+
+    WORKSPACE.get_or_init(|| {
+        let workspace = Workspace::new(tempdir().expect("should create test directory").keep());
+        workspace.ensure_gen_dir();
+        workspace
+    })
+}
 
 pub fn get_connection<'a>(
     db_path: impl Into<Option<&'a str>>,

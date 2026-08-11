@@ -19,6 +19,7 @@ impl PyRepository {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         export_fasta(
             conn,
+            self.context.workspace(),
             &collection,
             sample.as_deref(),
             &PathBuf::from(&filename),
@@ -40,6 +41,7 @@ impl PyRepository {
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         export_gfa(
             conn,
+            self.context.workspace(),
             &collection,
             &PathBuf::from(&filename),
             &sample,
@@ -62,7 +64,14 @@ impl PyRepository {
         let writer = fs::File::create(&filename).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create '{}': {e}", filename))
         })?;
-        export_genbank(conn, &collection, &sample, writer, None)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
+        export_genbank(
+            conn,
+            self.context.workspace(),
+            &collection,
+            &sample,
+            writer,
+            None,
+        )
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
     }
 }

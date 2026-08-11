@@ -1,4 +1,4 @@
-use std::{fmt::Debug, fs, ops::Add};
+use std::{fmt::Debug, fs, ops::Add, sync::OnceLock};
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
@@ -99,6 +99,16 @@ pub fn setup_gen_on_disk() -> DbContext {
     let graph_conn = get_connection(workspace.graph_db_path().unwrap().to_str().unwrap()).unwrap();
     let config_conn = get_config_connection(workspace.gen_db_path().unwrap().to_str()).unwrap();
     DbContext::new(workspace, graph_conn, config_conn).unwrap()
+}
+
+pub fn test_workspace() -> &'static Workspace {
+    static WORKSPACE: OnceLock<Workspace> = OnceLock::new();
+
+    WORKSPACE.get_or_init(|| {
+        let workspace = Workspace::new(tempdir().unwrap().keep());
+        workspace.ensure_gen_dir();
+        workspace
+    })
 }
 
 pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {

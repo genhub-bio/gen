@@ -38,6 +38,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .unwrap_or_else(|| get_default_collection(config_conn));
     export_fasta(
         conn,
+        context.workspace(),
         name,
         Some(cmd.sample.as_str()),
         &PathBuf::from(cmd.path),
