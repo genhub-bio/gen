@@ -1695,6 +1695,7 @@ mod tests {
                 &role,
                 Some(logical_path),
                 None,
+                None,
             ),
             uri,
             file_type: "text".to_string(),
@@ -1704,6 +1705,7 @@ mod tests {
             logical_path: Some(logical_path.to_string()),
             name: None,
             created_on,
+            upstream_asset_ref_id: None,
         }
     }
 

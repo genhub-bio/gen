@@ -186,6 +186,7 @@ pub fn commit_operation_summary(
                 role: AssetRole::Input,
                 logical_path: Some(logical_path.as_str()),
                 name: Some(operation_file.filename.as_str()),
+                upstream_asset_ref_id: None,
             },
         )
         .collect::<Vec<_>>();
@@ -207,6 +208,7 @@ pub(crate) struct OperationAssetRecord<'a> {
     pub role: AssetRole,
     pub logical_path: Option<&'a str>,
     pub name: Option<&'a str>,
+    pub upstream_asset_ref_id: Option<&'a HashId>,
 }
 
 #[cfg_attr(
@@ -243,6 +245,7 @@ pub(crate) fn track_operation_assets(
             &asset.role,
             asset.logical_path,
             asset.name,
+            asset.upstream_asset_ref_id,
         );
         let asset_ref = AssetRef {
             id: asset_ref_id,
@@ -254,6 +257,7 @@ pub(crate) fn track_operation_assets(
             logical_path: asset.logical_path.map(str::to_string),
             name: asset.name.map(str::to_string),
             created_on,
+            upstream_asset_ref_id: asset.upstream_asset_ref_id.copied(),
         };
         AssetRef::create(graph_conn, &asset_ref)?;
         OperationAsset::create(
@@ -339,6 +343,7 @@ pub fn add_files_operation(
                 role: AssetRole::Input,
                 logical_path: Some(file_path.as_str()),
                 name: Some(filename.as_str()),
+                upstream_asset_ref_id: None,
             },
         )
         .collect::<Vec<_>>();

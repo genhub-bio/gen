@@ -1430,6 +1430,7 @@ mod tests {
             logical_path: Some("inputs/reference.fa".to_string()),
             name: Some("reference.fa".to_string()),
             created_on: 1,
+            upstream_asset_ref_id: None,
         };
         OperationLog::create(graph_conn, &operation_log).expect("should create operation log");
         AssetRef::create(graph_conn, &local_asset).expect("should create local asset");
@@ -1477,6 +1478,7 @@ mod tests {
             logical_path: Some("inputs/reference.fa".to_string()),
             name: Some("reference.fa".to_string()),
             created_on: 1,
+            upstream_asset_ref_id: None,
         };
         OperationLog::create(graph_conn, &operation_log).expect("should create operation log");
         AssetRef::create(graph_conn, &remote_asset).expect("should create remote asset");
