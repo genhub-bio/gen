@@ -17,13 +17,13 @@
 //!
 //! A repository remote URL and an asset URI have separate meanings here. A repository
 //! `file://` remote points directly to another Dolt database (or a workspace containing
-//! `.gen/default.db`), so graph operations use that path without contacting GenHub and
-//! no separate asset-byte transfer is attempted. An HTTP(S) repository remote stores its
-//! canonical GenHub URL in config. Before each graph operation, Gen requests a scoped,
-//! short-lived transfer capability, installs the returned URL as the graph database's
-//! Dolt remote, performs the operation, and restores the canonical URL. An authorization
-//! failure is retried once with a fresh capability. Failure to restore the canonical URL
-//! is reported as a warning because the graph transfer may already have succeeded.
+//! `.gen/default.db`), so graph operations use that path without contacting GenHub and asset bytes
+//! are copied directly between the workspaces. An HTTP(S) repository remote stores its canonical
+//! GenHub URL in config. Before each graph operation, Gen requests a scoped, short-lived transfer
+//! capability, installs the returned URL as the graph database's Dolt remote, performs the
+//! operation, and restores the canonical URL. An authorization failure is retried once with a
+//! fresh capability. Failure to restore the canonical URL is reported as a warning because the
+//! graph transfer may already have succeeded.
 //!
 //! Assets referenced by the transferred branch are handled after the graph operation.
 //! Only asset records whose URI uses the `file://` scheme represent file bytes managed by
@@ -104,6 +104,50 @@ fn file_graph_url(remote_url: &str) -> Result<String, Box<dyn Error>> {
     Url::from_file_path(&path)
         .map(String::from)
         .map_err(|_| format!("Invalid file remote path: {}", path.display()).into())
+}
+
+/// Resolves a `file://` repository remote to the Gen workspace that owns its asset store.
+///
+/// Graph transfer uses [`file_graph_url`] to address the Dolt database itself. Asset transfer uses
+/// the surrounding workspace so [`copy_to_versioned_store`] can reach `.gen/assets` on both sides.
+fn file_remote_workspace(remote_url: &str) -> Result<Workspace, Box<dyn Error>> {
+    let parsed = Url::parse(remote_url)?;
+    let path = parsed
+        .to_file_path()
+        .map_err(|_| format!("Invalid file remote URL: {remote_url}"))?;
+    let repo_root = if path.extension().and_then(|extension| extension.to_str()) == Some("db") {
+        let gen_dir = path.parent().ok_or_else(|| {
+            format!(
+                "File remote database has no parent directory: {}",
+                path.display()
+            )
+        })?;
+        if gen_dir.file_name().and_then(|name| name.to_str()) != Some(".gen") {
+            return Err(format!(
+                "File remote database is not inside a Gen workspace: {}",
+                path.display()
+            )
+            .into());
+        }
+        gen_dir.parent().ok_or_else(|| {
+            format!(
+                "File remote .gen directory has no workspace root: {}",
+                gen_dir.display()
+            )
+        })?
+    } else {
+        &path
+    };
+    let workspace = Workspace::new(repo_root);
+    let resolved_root = workspace.repo_root()?;
+    if resolved_root != repo_root {
+        return Err(format!(
+            "File remote is not a Gen workspace root: {}",
+            repo_root.display()
+        )
+        .into());
+    }
+    Ok(workspace)
 }
 
 fn transfer_url(
@@ -539,6 +583,60 @@ fn download_to_versioned_store(
     Ok((versioned_path, true))
 }
 
+/// Copies one checksum-addressed version between two `file://` remote workspaces.
+///
+/// [`transfer_file_remote_assets`] calls this in either direction after graph transfer. It verifies
+/// the source before copying, reuses an already-valid destination, and verifies newly copied bytes
+/// before allowing materialization.
+fn copy_to_versioned_store(
+    source_workspace: &Workspace,
+    destination_workspace: &Workspace,
+    asset: &AssetRef,
+) -> Result<(PathBuf, bool), Box<dyn Error>> {
+    let expected_checksum = asset_checksum(asset)?;
+    let source_path = materialization_destination_path(
+        source_workspace,
+        &asset.uri,
+        Some(&expected_checksum),
+        None,
+    )?;
+    let source_checksum = calculate_file_checksum(&source_path).map_err(|error| {
+        format!(
+            "Unable to read versioned asset {} at {}: {error}",
+            asset.id,
+            source_path.display()
+        )
+    })?;
+    if source_checksum != expected_checksum {
+        return Err(format!(
+            "Versioned asset {} at {} does not match its recorded checksum",
+            asset.id,
+            source_path.display()
+        )
+        .into());
+    }
+
+    let destination_path = materialization_destination_path(
+        destination_workspace,
+        &asset.uri,
+        Some(&expected_checksum),
+        None,
+    )?;
+    if destination_path.exists()
+        && calculate_file_checksum(&destination_path)
+            .is_ok_and(|checksum| checksum == expected_checksum)
+    {
+        return Ok((destination_path, false));
+    }
+
+    copy_versioned_asset(&source_path, &destination_path)?;
+    if calculate_file_checksum(&destination_path)? != expected_checksum {
+        fs::remove_file(&destination_path)?;
+        return Err(format!("Copied asset {} failed checksum validation", asset.id).into());
+    }
+    Ok((destination_path, true))
+}
+
 /// Copies a verified versioned asset to another path through a synced staged file.
 ///
 /// [`materialize_versioned_asset`] uses this for logical and conflict files. The `file://` remote
@@ -684,12 +782,64 @@ fn warn_asset_conflict(
     Ok(())
 }
 
+/// Executes the asset portion of a `file://` clone, pull, or push.
+///
+/// [`transfer_assets`] supplies the graph-derived version delta. Push copies those versions into
+/// the remote store; clone and pull copy them locally and then call [`materialize_versioned_asset`]
+/// only for the versions selected at the destination branch head.
+fn transfer_file_remote_assets(
+    workspace: &Workspace,
+    remote: &Remote,
+    operation: RemoteOperation,
+    assets: &HashMap<HashId, AssetRef>,
+    materialized_asset_ids: &HashSet<HashId>,
+    previous_assets: &HashMap<HashId, AssetRef>,
+) -> Result<(), Box<dyn Error>> {
+    if assets.is_empty() {
+        return Ok(());
+    }
+    let remote_workspace = file_remote_workspace(&remote.url)?;
+    for asset in assets.values() {
+        match operation {
+            RemoteOperation::Push => {
+                copy_to_versioned_store(workspace, &remote_workspace, asset)?;
+            }
+            RemoteOperation::Clone | RemoteOperation::Pull => {
+                let destination_logical_path = if materialized_asset_ids.contains(&asset.id) {
+                    asset.logical_path.as_deref()
+                } else {
+                    None
+                };
+                let (versioned_path, versioned_file_created) =
+                    copy_to_versioned_store(&remote_workspace, workspace, asset)?;
+                if let DownloadAssetOutcome::Conflict(conflict_path) = materialize_versioned_asset(
+                    workspace,
+                    asset,
+                    previous_assets,
+                    destination_logical_path,
+                    &versioned_path,
+                    versioned_file_created,
+                )? {
+                    warn_asset_conflict(
+                        workspace,
+                        asset,
+                        destination_logical_path,
+                        &conflict_path,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Transfers the asset versions needed after a graph clone, pull, or push.
 ///
 /// The CLI orchestration calls this after Dolt transfers graph history. It derives the asset delta
-/// between `previous_hash` and the destination branch, asks GenHub for transfer URLs, uploads local
-/// versions for push, and sends clone/pull downloads through [`download_asset`]. The cumulative
-/// asset view supplies history and conflict checksums; the materialized view selects the one version
+/// between `previous_hash` and the destination branch, then dispatches `file://` transfers to
+/// [`transfer_file_remote_assets`] or asks GenHub for HTTP transfer URLs. Push uploads local
+/// versions; HTTP clone and pull send downloads through [`download_asset`]. The cumulative asset
+/// view supplies history and conflict checksums, while the materialized view selects the one version
 /// per logical path that is additionally copied out of `.gen/assets`.
 fn transfer_assets(
     graph: &GraphConnection,
@@ -699,7 +849,12 @@ fn transfer_assets(
     branch: &str,
     previous_hash: Option<&DoltHashId>,
 ) -> Result<Vec<AssetUploadReceipt>, Box<dyn Error>> {
-    if remote.url.starts_with("file://") {
+    let has_asset_table = graph.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'gen_asset_refs')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_asset_table {
         return Ok(Vec::new());
     }
 
@@ -728,6 +883,18 @@ fn transfer_assets(
         .filter(|(id, _)| !previous_assets.contains_key(id))
         .map(|(id, asset)| (*id, asset.clone()))
         .collect();
+    if remote.url.starts_with("file://") {
+        transfer_file_remote_assets(
+            workspace,
+            remote,
+            operation,
+            &assets,
+            &materialized_asset_ids,
+            &previous_assets,
+        )?;
+        return Ok(Vec::new());
+    }
+
     let repository = RepositoryRemote::parse(&remote.url)?;
     let response = acquire_asset_transfers(
         &repository,
