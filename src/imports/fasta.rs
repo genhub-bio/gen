@@ -466,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_fasta_shallow() {
+    fn test_add_fasta_shallow_uses_immutable_asset() {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
