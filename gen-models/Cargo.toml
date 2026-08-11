@@ -24,6 +24,7 @@ capnp = { version = "0.24" }
 include_dir = "0.7.4"
 chrono = "0.4.40"
 fallible-streaming-iterator = "0.1.9"
+flate2 = "1.1.0"
 intervaltree = "0.2.7"
 itertools = "0.14.0"
 noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "fasta", "gff", "gtf", "tabix", "vcf"] }

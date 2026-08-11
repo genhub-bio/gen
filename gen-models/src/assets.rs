@@ -276,6 +276,55 @@ impl Query for OperationAsset {
 }
 
 impl AssetRef {
+    /// Return the versioned store path for an asset.
+    ///
+    /// Logical paths describe the materialized workspace view and can point at a newer version.
+    /// Sequence readers use this path so they cannot follow repository metadata outside the
+    /// repository or silently switch to another asset version.
+    pub fn versioned_store_path(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<PathBuf, FileAdditionError> {
+        let checksum = self.checksum.ok_or_else(|| {
+            FileAdditionError::ChecksumError(format!(
+                "asset {} has no checksum for repository lookup",
+                self.id
+            ))
+        })?;
+        let repo_root = LocalAssetUri::canonicalize_or_normalize(&workspace.repo_root()?);
+        let asset_path = workspace
+            .asset_dir()?
+            .join(<dyn AssetUri>::from_uri(&self.uri).hashed_filename(&checksum));
+        if !asset_path.exists() {
+            return Err(FileAdditionError::FileNotFound(
+                asset_path.display().to_string(),
+            ));
+        }
+        let resolved_path = LocalAssetUri::canonicalize_or_normalize(&asset_path);
+        if !resolved_path.starts_with(&repo_root) {
+            return Err(FileAdditionError::PathOutsideRepo {
+                path: resolved_path,
+                repo_root,
+            });
+        }
+        Ok(resolved_path)
+    }
+
+    /// Opens the asset identified by this reference.
+    ///
+    /// Local references resolve through the repository's content-addressed asset store. Remote
+    /// references retain their URI and are opened lazily through the configured storage backend.
+    pub fn reader(&self, workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError> {
+        if LocalAssetUri::is_local_path_or_file_uri(&self.uri) {
+            let asset_path = self.versioned_store_path(workspace)?;
+            return OpenDalLocation::from_absolute_path(&asset_path)
+                .map_err(opendal_file_addition_error)?
+                .reader();
+        }
+
+        <dyn AssetUri>::from_uri(&self.uri).reader(workspace)
+    }
+
     pub fn id_hash(
         uri: &str,
         file_type: &str,
@@ -299,6 +348,37 @@ impl AssetRef {
             identity.push_str(&upstream_asset_ref_id.to_string());
         }
         HashId(calculate_hash(&identity))
+    }
+
+    pub(crate) fn from_file_addition(
+        file_addition: &FileAddition,
+        role: AssetRole,
+        logical_path: Option<&str>,
+        name: Option<&str>,
+        upstream_asset_ref_id: Option<&HashId>,
+        created_on: i64,
+    ) -> Self {
+        let file_type = file_addition.file_type.as_str();
+        Self {
+            id: Self::id_hash(
+                &file_addition.asset_uri,
+                file_type,
+                file_addition.checksum.as_ref(),
+                &role,
+                logical_path,
+                name,
+                upstream_asset_ref_id,
+            ),
+            uri: file_addition.asset_uri.clone(),
+            file_type: file_type.to_string(),
+            checksum: file_addition.checksum,
+            size: None,
+            role,
+            logical_path: logical_path.map(str::to_string),
+            name: name.map(str::to_string),
+            created_on,
+            upstream_asset_ref_id: upstream_asset_ref_id.copied(),
+        }
     }
 
     pub fn create(conn: &GraphConnection, asset_ref: &AssetRef) -> rusqlite::Result<()> {

@@ -98,7 +98,7 @@ impl Node {
 
     pub fn get_sequences_by_node_ids(
         conn: &GraphConnection,
-        _workspace: &Workspace,
+        workspace: &Workspace,
         node_ids: &[HashId],
         history_ref: Option<&str>,
     ) -> HashMap<HashId, Sequence> {
@@ -108,8 +108,9 @@ impl Node {
             .map(|node| (node.id, node.sequence_hash))
             .collect::<HashMap<HashId, Sha256Hash>>();
         let sequences_by_hash: HashMap<Sha256Hash, Sequence> = HashMap::from_iter(
-            <Sequence as Query>::query_by_ids(
+            Sequence::query_by_ids(
                 conn,
+                workspace,
                 &sequence_hashes_by_node_id
                     .values()
                     .cloned()

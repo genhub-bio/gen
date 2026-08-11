@@ -1845,6 +1845,7 @@ dependencies = [
  "capnp",
  "chrono",
  "fallible-streaming-iterator",
+ "flate2",
  "gen-capnp-schemas",
  "gen-core",
  "gen-graph",

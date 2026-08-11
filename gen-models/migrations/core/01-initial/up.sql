@@ -12,8 +12,9 @@ CREATE TABLE sequences (
   sequence_type TEXT NOT NULL,
   sequence TEXT NOT NULL,
   name TEXT NOT NULL,
-  file_path TEXT NOT NULL,
-  length INTEGER NOT NULL
+  asset_ref_id BLOB,
+  length INTEGER NOT NULL,
+  FOREIGN KEY(asset_ref_id) REFERENCES gen_asset_refs(id)
 ) STRICT;
 
 CREATE TABLE nodes (
@@ -300,6 +301,6 @@ INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_acce
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('Domestic cat', 'NC_018741.3', 'CM001396.3', 'chrX', 'X');
 INSERT INTO reference_aliases (reference_name, refseq_accession_id, genbank_accession_id, ucsc_id, ensembl_id) values ('Domestic cat', 'NC_001700.1', '', 'chrM', 'MT');
 
-INSERT INTO sequences (hash, sequence_type, sequence, name, file_path, "length") values (X'84d6adbd5395281933fe41e877d3a7f02a3b1990a65be1901b2c91fc685e083b', "OTHER", "start-node-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "", "", 64), (X'1c7dfc64977b0838af0762d7333dcb64c175b15e65a70099ec38f46bf1a15ea3', "OTHER", "end-node-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "", "", 64);
+INSERT INTO sequences (hash, sequence_type, sequence, name, asset_ref_id, "length") values (X'84d6adbd5395281933fe41e877d3a7f02a3b1990a65be1901b2c91fc685e083b', "OTHER", "start-node-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "", NULL, 64), (X'1c7dfc64977b0838af0762d7333dcb64c175b15e65a70099ec38f46bf1a15ea3', "OTHER", "end-node-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "", NULL, 64);
 INSERT INTO nodes (id, sequence_hash) values (X'84d6adbd5395281933fe41e877d3a7f0', X'84d6adbd5395281933fe41e877d3a7f02a3b1990a65be1901b2c91fc685e083b');
 INSERT INTO nodes (id, sequence_hash) values (X'1c7dfc64977b0838af0762d7333dcb64', X'1c7dfc64977b0838af0762d7333dcb64c175b15e65a70099ec38f46bf1a15ea3');
