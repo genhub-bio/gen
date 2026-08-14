@@ -2752,10 +2752,10 @@ mod remotes {
         );
     }
 
-    // A `file://` clone must materialize the branch-head file at its logical path; pull must
-    // replace that path while retaining both checksum-addressed versions.
+    // Ensure that file:// clones + pulls: download all required versioned files and materialize the correct
+    // assets at logical paths.
     #[test]
-    fn test_pull_from_file_remote_populates_versioned_assets() {
+    fn test_clone_and_pull_from_file_remote_populates_versioned_assets() {
         let remote_repo_dir = tempdir().expect("should create temp remote repo directory");
         let clone_parent_dir = tempdir().expect("should create temp clone parent directory");
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
