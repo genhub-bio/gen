@@ -2763,8 +2763,8 @@ mod remotes {
         );
     }
 
-    // End-to-end acceptance: HTTP clone must materialize the branch-head file at its logical path;
-    // pull must replace that path while retaining both checksum-addressed versions.
+    // Ensure that http clones + pulls: download all required versioned files and materialize the correct
+    // assets at logical paths.
     #[test]
     fn test_clone_and_pull_from_http_remote_populate_versioned_assets() {
         let source_repo_dir = tempdir().expect("should create source repository directory");
@@ -2776,6 +2776,7 @@ mod remotes {
         let source_fasta_path = source_repo_dir.path().join(logical_path);
         let updated_fasta = b">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGATTT\n";
 
+        // This is setting up a source repository and then setting up a local server to use
         assert_success(
             &run_gen(source_repo_dir.path(), &["init"]),
             "source gen init should succeed",
@@ -2811,9 +2812,11 @@ mod remotes {
             .expect("should open source graph database");
         add_remote(&source_graph, "integration", &graph_url)
             .expect("should add integration graph remote");
+        // This is the push that populates our server assets with the local source repo.
         push(&source_graph, "integration", "main").expect("should seed remote graph");
         drop(source_graph);
 
+        // Now, we assert that on cloning from the server we get all the versioned assets + materialized assets
         let payloads = Arc::new(Mutex::new(managed_asset_payloads(source_repo_dir.path())));
         let (repository_url, server_stop, server) =
             serve_http_repository(&graph_url, Arc::clone(&payloads));
@@ -2822,6 +2825,7 @@ mod remotes {
             "clone from HTTP remote should succeed",
         );
         let cloned_repo_path = clone_parent_dir.path().join("example");
+        // We use this later to verify that we've updated stuff from a pull
         let cloned_assets_before_pull = asset_store_contents(&cloned_repo_path);
         assert_asset_store_matches(source_repo_dir.path(), &cloned_repo_path);
         assert_materialized_assets_match(
@@ -2832,6 +2836,7 @@ mod remotes {
         let cloned_fasta_before_pull = fs::read(cloned_repo_path.join(logical_path))
             .expect("HTTP clone should materialize the original FASTA");
 
+        // Now we update the source repo, push it, and verify that on pulling changes we get the new files.
         fs::write(&source_fasta_path, updated_fasta)
             .expect("should update the source logical FASTA");
         assert_success(
