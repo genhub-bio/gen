@@ -17,13 +17,13 @@
 //!
 //! A repository remote URL and an asset URI have separate meanings here. A repository
 //! `file://` remote points directly to another Dolt database (or a workspace containing
-//! `.gen/default.db`), so graph operations use that path without contacting GenHub and asset bytes
-//! are copied directly between the workspaces. An HTTP(S) repository remote stores its canonical
-//! GenHub URL in config. Before each graph operation, Gen requests a scoped, short-lived transfer
-//! capability, installs the returned URL as the graph database's Dolt remote, performs the
-//! operation, and restores the canonical URL. An authorization failure is retried once with a
-//! fresh capability. Failure to restore the canonical URL is reported as a warning because the
-//! graph transfer may already have succeeded.
+//! `.gen/default.db`), so graph operations use that path directly and transfers happen
+//! directly between the workspaces. For an HTTP(S) repository remote, Gen requests a scoped,
+//! short-lived transfer capability, installs the returned URL as the graph database's Dolt
+//! remote, performs the operation, and restores the canonical URL. An authorization failure
+//! is retried once with a fresh capability. Failure to restore the canonical URL is reported
+//! as a warning because the graph transfer may already have succeeded and will be replaced on
+//! the next attempt.
 //!
 //! Assets referenced by the transferred branch are handled after the graph operation.
 //! Only asset records whose URI uses the `file://` scheme represent file bytes managed by
@@ -849,15 +849,6 @@ fn transfer_assets(
     branch: &str,
     previous_hash: Option<&DoltHashId>,
 ) -> Result<Vec<AssetUploadReceipt>, Box<dyn Error>> {
-    let has_asset_table = graph.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'gen_asset_refs')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !has_asset_table {
-        return Ok(Vec::new());
-    }
-
     let commit_hash = hash_of(graph, branch)?;
     let current_assets: HashMap<_, _> =
         AssetRef::get_cumulative_assets_at(graph, previous_hash, Some(&commit_hash))?

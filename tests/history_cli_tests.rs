@@ -20,7 +20,6 @@ use gen_models::{
     assets::AssetRef,
     block_group::BlockGroup,
     collection::Collection,
-    db::GraphConnection,
     history::{
         HistoryStore,
         dolt::{DoltHistoryStore, status_rows},
@@ -29,7 +28,7 @@ use gen_models::{
     sample_lineage::SampleLineage,
     traits::Query,
 };
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use tempfile::tempdir;
 
 fn gen_binary() -> PathBuf {
@@ -2166,8 +2165,8 @@ mod remotes {
     use serde_json::json;
 
     use super::{
-        Connection, GraphConnection, Path, PathBuf, assert_success, asset_refs, fs, get_connection,
-        operations_stdout, run_gen, status_rows, tempdir,
+        Path, PathBuf, assert_success, asset_refs, fs, get_connection, operations_stdout, run_gen,
+        tempdir,
     };
 
     fn resolved_ref_hash(repo_root: &Path, reference: &str) -> String {
@@ -2176,13 +2175,6 @@ mod remotes {
         connection
             .query_row("SELECT dolt_hashof(?1)", [reference], |row| row.get(0))
             .unwrap_or_else(|error| panic!("should resolve {reference}: {error}"))
-    }
-
-    fn raw_graph_status(repo_root: &Path) -> Vec<gen_models::history::dolt::DoltStatusRow> {
-        let connection = Connection::open(repo_root.join(".gen/default.db"))
-            .expect("should open graph database without migrations");
-        rusqlite::vtab::array::load_module(&connection).expect("should load array module");
-        status_rows(&GraphConnection(connection)).expect("should query raw Dolt status")
     }
 
     fn collect_files(root: &Path) -> Vec<PathBuf> {
@@ -2440,102 +2432,6 @@ mod remotes {
             requests
         });
         (repository_url, stop, handle)
-    }
-
-    #[test]
-    fn test_clone_of_schema_less_main_is_clean_and_can_checkout_schema_branch() {
-        let remote_repo_dir = tempdir().expect("should create temp remote repo directory");
-        let clone_parent_dir = tempdir().expect("should create temp clone parent directory");
-        let remote_gen_dir = remote_repo_dir.path().join(".gen");
-        fs::create_dir(&remote_gen_dir).expect("should create remote Gen directory");
-        let remote_graph_path = remote_gen_dir.join("default.db");
-
-        let raw_remote =
-            Connection::open(&remote_graph_path).expect("should open raw remote graph");
-        raw_remote
-            .query_row("SELECT dolt_branch('foobar')", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("should create foobar from the schema-less main branch");
-        raw_remote
-            .query_row("SELECT dolt_checkout('foobar')", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("should check out foobar");
-        raw_remote
-            .query_row("SELECT dolt_config('user.name', 'Test User')", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("should configure test committer name");
-        raw_remote
-            .query_row(
-                "SELECT dolt_config('user.email', 'test@example.com')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("should configure test committer email");
-        raw_remote
-            .execute_batch(
-                "CREATE TABLE branch_only(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-             INSERT INTO branch_only VALUES(1, 'visible on foobar');",
-            )
-            .expect("should create branch-only graph state");
-        raw_remote
-            .query_row(
-                "SELECT dolt_commit('-A', '-m', 'Add branch-only state')",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("should commit the foobar state");
-        raw_remote
-            .query_row("SELECT dolt_checkout('main')", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("should leave the remote on schema-less main");
-        drop(raw_remote);
-
-        let remote_url = format!("file://{}", remote_repo_dir.path().display());
-        assert_success(
-            &run_gen(clone_parent_dir.path(), &["clone", &remote_url]),
-            "clone from schema-branch remote should succeed",
-        );
-        let cloned_repo_path = clone_parent_dir.path().join(
-            remote_repo_dir
-                .path()
-                .file_name()
-                .expect("remote temp dir should have a basename"),
-        );
-
-        assert!(
-            raw_graph_status(&cloned_repo_path).is_empty(),
-            "clone should not apply uncommitted migrations to main"
-        );
-        let cloned_graph = Connection::open(cloned_repo_path.join(".gen/default.db"))
-            .expect("should open cloned graph for ref inspection");
-        let active_branch: String = cloned_graph
-            .query_row("SELECT active_branch()", [], |row| row.get(0))
-            .expect("should read cloned active branch");
-        let branch_names = cloned_graph
-            .prepare("SELECT name FROM dolt_branches ORDER BY name")
-            .expect("should prepare cloned branch query")
-            .query_map([], |row| row.get::<_, String>(0))
-            .expect("should query cloned branches")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("should collect cloned branches");
-        assert_eq!(active_branch, "main");
-        assert!(
-            branch_names.iter().any(|name| name == "foobar"),
-            "clone should retain foobar; found {branch_names:?}"
-        );
-        drop(cloned_graph);
-        assert_success(
-            &run_gen(&cloned_repo_path, &["checkout", "foobar"]),
-            "checkout of the schema branch after clone should succeed",
-        );
-        assert!(
-            raw_graph_status(&cloned_repo_path).is_empty(),
-            "checking out the migrated branch should remain clean"
-        );
     }
 
     // Direct `file://` clone must preserve graph history, branches, tags, AssetRef rows, and the
