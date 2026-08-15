@@ -2145,6 +2145,26 @@ mod branch_history {
 }
 
 mod remotes {
+    use std::{
+        collections::HashMap,
+        io::{Read as _, Write as _},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread::{self, JoinHandle},
+        time::Duration,
+    };
+
+    use gen_core::config::Workspace;
+    use gen_models::{
+        assets::{Assets, LocalAssetUri, materialization_destination_path},
+        history::dolt::{add_remote, push},
+    };
+    use rusqlite::RemoteServer;
+    use serde_json::json;
+
     use super::{
         Connection, GraphConnection, Path, PathBuf, assert_success, asset_refs, fs, get_connection,
         operations_stdout, run_gen, status_rows, tempdir,
@@ -2180,6 +2200,104 @@ mod remotes {
         files
     }
 
+    fn asset_store_contents(repo_root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let asset_dir = repo_root.join(".gen/assets");
+        let mut assets = collect_files(&asset_dir)
+            .into_iter()
+            .map(|path| {
+                let relative_path = path
+                    .strip_prefix(&asset_dir)
+                    .expect("should store assets beneath .gen/assets")
+                    .to_path_buf();
+                let contents = fs::read(&path).expect("should read stored asset");
+                (relative_path, contents)
+            })
+            .collect::<Vec<_>>();
+        assets.sort_by(|left, right| left.0.cmp(&right.0));
+        assets
+    }
+
+    fn assert_asset_store_matches(source_repo_root: &Path, destination_repo_root: &Path) {
+        let source_assets = asset_store_contents(source_repo_root);
+        assert!(
+            !source_assets.is_empty(),
+            "source repository should contain versioned assets"
+        );
+        assert_eq!(
+            asset_store_contents(destination_repo_root),
+            source_assets,
+            "remote transfer should copy every versioned asset with its checksum-derived filename"
+        );
+    }
+
+    fn materialized_asset_contents(repo_root: &Path) -> Vec<(String, Vec<u8>)> {
+        let workspace = Workspace::new(repo_root);
+        let connection = get_connection(repo_root.join(".gen/default.db"))
+            .expect("should open graph database for materialized assets");
+        let mut assets = Assets::get_branch_assets(&connection, "main")
+            .expect("should resolve materialized assets at main")
+            .into_values()
+            .filter(|asset| LocalAssetUri::is_file_uri(&asset.uri))
+            .map(|asset| {
+                let logical_path = asset
+                    .logical_path
+                    .clone()
+                    .expect("materialized local asset should have a logical path");
+                let versioned_path = materialization_destination_path(
+                    &workspace,
+                    &asset.uri,
+                    asset.checksum.as_ref(),
+                    None,
+                )
+                .expect("should resolve versioned asset path");
+                let materialized_path = materialization_destination_path(
+                    &workspace,
+                    &asset.uri,
+                    asset.checksum.as_ref(),
+                    Some(&logical_path),
+                )
+                .expect("should resolve logical asset path");
+                let versioned_contents = fs::read(&versioned_path).unwrap_or_else(|error| {
+                    panic!("should read {}: {error}", versioned_path.display())
+                });
+                let materialized_contents = fs::read(&materialized_path).unwrap_or_else(|error| {
+                    panic!("should read {}: {error}", materialized_path.display())
+                });
+                assert_eq!(
+                    materialized_contents,
+                    versioned_contents,
+                    "{} should contain the branch-head version stored at {}",
+                    materialized_path.display(),
+                    versioned_path.display()
+                );
+                (logical_path, versioned_contents)
+            })
+            .collect::<Vec<_>>();
+        assets.sort_by(|left, right| left.0.cmp(&right.0));
+        assets
+    }
+
+    fn assert_materialized_assets_match(
+        source_repo_root: &Path,
+        destination_repo_root: &Path,
+        expected_logical_paths: &[&str],
+    ) {
+        let source_assets = materialized_asset_contents(source_repo_root);
+        let actual_logical_paths = source_assets
+            .iter()
+            .map(|(logical_path, _)| logical_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_logical_paths, expected_logical_paths,
+            "source branch head should expose the expected logical asset paths"
+        );
+        assert_eq!(
+            materialized_asset_contents(destination_repo_root),
+            source_assets,
+            "remote transfer should materialize the same branch-head paths and contents"
+        );
+    }
+
     fn assert_remote_asset_is_not_materialized(repo_root: &Path) {
         let repo_asset_path = repo_root.join("simple.gff");
         assert!(
@@ -2194,6 +2312,150 @@ mod remotes {
             asset_cache_files.is_empty(),
             "remote transfer should keep .gen/assets as an empty cache until materialization is requested: {asset_cache_files:?}"
         );
+    }
+
+    fn managed_asset_payloads(repo_root: &Path) -> HashMap<String, Vec<u8>> {
+        let workspace = Workspace::new(repo_root);
+        asset_refs(repo_root)
+            .into_iter()
+            .filter(|asset| LocalAssetUri::is_file_uri(&asset.uri))
+            .map(|asset| {
+                let versioned_path = materialization_destination_path(
+                    &workspace,
+                    &asset.uri,
+                    asset.checksum.as_ref(),
+                    None,
+                )
+                .expect("should resolve versioned asset path");
+                let contents = fs::read(&versioned_path).unwrap_or_else(|error| {
+                    panic!(
+                        "should read versioned asset {} at {}: {error}",
+                        asset.id,
+                        versioned_path.display()
+                    )
+                });
+                (asset.id.to_string(), contents)
+            })
+            .collect()
+    }
+
+    fn request_content_length(headers: &str) -> usize {
+        headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).expect("should read HTTP request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let body_start = header_end + 4;
+            let headers = String::from_utf8_lossy(&request[..body_start]);
+            if request.len() >= body_start + request_content_length(&headers) {
+                break;
+            }
+        }
+        String::from_utf8(request).expect("HTTP request should be UTF-8")
+    }
+
+    fn write_http_response(stream: &mut TcpStream, status: &str, body: &[u8]) {
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("should write HTTP response headers");
+        stream
+            .write_all(body)
+            .expect("should write HTTP response body");
+    }
+
+    fn serve_http_repository(
+        graph_url: &str,
+        payloads: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    ) -> (String, Arc<AtomicBool>, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind mock GenHub server");
+        listener
+            .set_nonblocking(true)
+            .expect("should make mock GenHub server nonblocking");
+        let address = listener
+            .local_addr()
+            .expect("should read mock GenHub address");
+        let origin = format!("http://{address}");
+        let repository_url = format!("{origin}/api/repos/alice/example");
+        let graph_url = graph_url.to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            while !server_stop.load(Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("should accept mock GenHub request: {error}"),
+                };
+                let request = read_http_request(&mut stream);
+                let request_line = request.lines().next().unwrap_or_default();
+                let response = if request_line.contains("/remote-capability ") {
+                    json!({
+                        "remote_url": graph_url,
+                        "expires_at": "2030-01-01T00:00:00Z",
+                        "default_branch": "main"
+                    })
+                    .to_string()
+                    .into_bytes()
+                } else if request_line.contains("/asset-transfers ") {
+                    let payloads = payloads.lock().expect("should lock asset payloads");
+                    let mut asset_ids = payloads.keys().cloned().collect::<Vec<_>>();
+                    asset_ids.sort();
+                    json!({
+                        "assets": asset_ids
+                            .into_iter()
+                            .map(|id| json!({
+                                "id": id,
+                                "url": format!("{origin}/assets/{id}")
+                            }))
+                            .collect::<Vec<_>>()
+                    })
+                    .to_string()
+                    .into_bytes()
+                } else if let Some(asset_id) = request_line
+                    .strip_prefix("GET /assets/")
+                    .and_then(|path| path.split_once(' ').map(|(asset_id, _)| asset_id))
+                {
+                    let payloads = payloads.lock().expect("should lock asset payloads");
+                    let Some(contents) = payloads.get(asset_id) else {
+                        write_http_response(&mut stream, "404 Not Found", b"");
+                        requests.push(request);
+                        continue;
+                    };
+                    contents.clone()
+                } else {
+                    panic!("unexpected mock GenHub request: {request_line}");
+                };
+                write_http_response(&mut stream, "200 OK", &response);
+                requests.push(request);
+            }
+            requests
+        });
+        (repository_url, stop, handle)
     }
 
     #[test]
@@ -2499,6 +2761,146 @@ mod remotes {
             !dirty_marker_exists,
             "push should transfer only committed history, not dirty working-tree changes"
         );
+    }
+
+    // Ensure that http clones + pulls: download all required versioned files and materialize the correct
+    // assets at logical paths.
+    #[test]
+    fn test_clone_and_pull_from_http_remote_populate_versioned_assets() {
+        let source_repo_dir = tempdir().expect("should create source repository directory");
+        let clone_parent_dir = tempdir().expect("should create clone parent directory");
+        let server_root_dir = tempdir().expect("should create Dolt server root directory");
+        let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_fixture_path = fixtures_dir.join("simple.fa");
+        let logical_path = "inputs/simple.fa";
+        let source_fasta_path = source_repo_dir.path().join(logical_path);
+        let updated_fasta = b">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGATTT\n";
+
+        // This is setting up a source repository and then setting up a local server to use
+        assert_success(
+            &run_gen(source_repo_dir.path(), &["init"]),
+            "source gen init should succeed",
+        );
+        fs::create_dir_all(
+            source_fasta_path
+                .parent()
+                .expect("source FASTA should have a parent directory"),
+        )
+        .expect("should create source input directory");
+        fs::copy(&fasta_fixture_path, &source_fasta_path)
+            .expect("should copy FASTA into the source workspace");
+        assert_success(
+            &run_gen(
+                source_repo_dir.path(),
+                &[
+                    "import",
+                    "fasta",
+                    logical_path,
+                    "--name",
+                    "test-collection",
+                    "--sample",
+                    "test-sample",
+                ],
+            ),
+            "source fasta import should succeed",
+        );
+
+        let dolt_server =
+            RemoteServer::start(server_root_dir.path()).expect("should start Dolt remote server");
+        let graph_url = dolt_server.database_url("repository.db");
+        let source_graph = get_connection(source_repo_dir.path().join(".gen/default.db"))
+            .expect("should open source graph database");
+        add_remote(&source_graph, "integration", &graph_url)
+            .expect("should add integration graph remote");
+        // This is the push that populates our server assets with the local source repo.
+        push(&source_graph, "integration", "main").expect("should seed remote graph");
+        drop(source_graph);
+
+        // Now, we assert that on cloning from the server we get all the versioned assets + materialized assets
+        let payloads = Arc::new(Mutex::new(managed_asset_payloads(source_repo_dir.path())));
+        let (repository_url, server_stop, server) =
+            serve_http_repository(&graph_url, Arc::clone(&payloads));
+        assert_success(
+            &run_gen(clone_parent_dir.path(), &["clone", &repository_url]),
+            "clone from HTTP remote should succeed",
+        );
+        let cloned_repo_path = clone_parent_dir.path().join("example");
+        // We use this later to verify that we've updated stuff from a pull
+        let cloned_assets_before_pull = asset_store_contents(&cloned_repo_path);
+        assert_asset_store_matches(source_repo_dir.path(), &cloned_repo_path);
+        assert_materialized_assets_match(
+            source_repo_dir.path(),
+            &cloned_repo_path,
+            &[logical_path],
+        );
+        let cloned_fasta_before_pull = fs::read(cloned_repo_path.join(logical_path))
+            .expect("HTTP clone should materialize the original FASTA");
+
+        // Now we update the source repo, push it, and verify that on pulling changes we get the new files.
+        fs::write(&source_fasta_path, updated_fasta)
+            .expect("should update the source logical FASTA");
+        assert_success(
+            &run_gen(
+                source_repo_dir.path(),
+                &[
+                    "add-file",
+                    logical_path,
+                    "--message",
+                    "update-fasta-after-http-clone",
+                ],
+            ),
+            "source FASTA update should succeed",
+        );
+        let source_graph = get_connection(source_repo_dir.path().join(".gen/default.db"))
+            .expect("should reopen source graph database");
+        push(&source_graph, "integration", "main").expect("should update remote graph");
+        drop(source_graph);
+        *payloads.lock().expect("should lock asset payloads") =
+            managed_asset_payloads(source_repo_dir.path());
+
+        assert_success(
+            &run_gen(&cloned_repo_path, &["pull"]),
+            "pull from HTTP remote should succeed",
+        );
+        assert!(
+            asset_store_contents(&cloned_repo_path).len() > cloned_assets_before_pull.len(),
+            "HTTP pull should add the newly committed versioned asset"
+        );
+        assert_asset_store_matches(source_repo_dir.path(), &cloned_repo_path);
+        assert_materialized_assets_match(
+            source_repo_dir.path(),
+            &cloned_repo_path,
+            &[logical_path],
+        );
+        let cloned_fasta_after_pull = fs::read(cloned_repo_path.join(logical_path))
+            .expect("HTTP pull should materialize the updated FASTA");
+        assert_eq!(cloned_fasta_after_pull, updated_fasta);
+        assert_ne!(
+            cloned_fasta_after_pull, cloned_fasta_before_pull,
+            "pull should replace the logical path with its branch-head version"
+        );
+        assert!(
+            asset_store_contents(&cloned_repo_path)
+                .iter()
+                .any(|(_, contents)| contents == &cloned_fasta_before_pull),
+            "the superseded FASTA should remain available only by its versioned filename"
+        );
+
+        server_stop.store(true, Ordering::Release);
+        let requests = server.join().expect("mock GenHub server should finish");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("\"operation\":\"clone\"")),
+            "HTTP workflow should request clone assets"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("\"operation\":\"pull\"")),
+            "HTTP workflow should request pull assets"
+        );
+        drop(dolt_server);
     }
 
     #[test]
