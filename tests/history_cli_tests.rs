@@ -1262,6 +1262,145 @@ mod revision_views {
         )
     }
 
+    fn setup_repo_with_branch_asset(repo_root: &Path) -> (PathBuf, Vec<u8>, Vec<u8>) {
+        let logical_path = PathBuf::from("inputs/reference.fa");
+        let absolute_path = repo_root.join(&logical_path);
+        let main_contents = b">reference\nAAAACCCC\n".to_vec();
+        let feature_contents = b">reference\nTTTTGGGG\n".to_vec();
+
+        assert_success(&run_gen(repo_root, &["init"]), "gen init should succeed");
+        fs::create_dir_all(
+            absolute_path
+                .parent()
+                .expect("asset should have a parent directory"),
+        )
+        .expect("should create asset input directory");
+        fs::write(&absolute_path, &main_contents).expect("should write main asset contents");
+        assert_success(
+            &run_gen(
+                repo_root,
+                &[
+                    "import",
+                    "fasta",
+                    logical_path
+                        .to_str()
+                        .expect("should encode logical asset path"),
+                    "--name",
+                    "test-collection",
+                    "--sample",
+                    "test-sample",
+                ],
+            ),
+            "main fasta import should succeed",
+        );
+        assert_success(
+            &run_gen(repo_root, &["checkout", "--branch", "feature"]),
+            "feature branch creation should succeed",
+        );
+        fs::write(&absolute_path, &feature_contents).expect("should write feature asset contents");
+        assert_success(
+            &run_gen(
+                repo_root,
+                &[
+                    "add-file",
+                    logical_path
+                        .to_str()
+                        .expect("should encode logical asset path"),
+                    "--message",
+                    "feature asset version",
+                ],
+            ),
+            "feature asset addition should succeed",
+        );
+
+        (logical_path, main_contents, feature_contents)
+    }
+
+    #[test]
+    fn test_checkout_materializes_each_branch_asset_version() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (logical_path, main_contents, feature_contents) =
+            setup_repo_with_branch_asset(repo_dir.path());
+        let absolute_path = repo_dir.path().join(&logical_path);
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "main"]),
+            "checkout main should succeed",
+        );
+        assert_eq!(
+            fs::read(&absolute_path).expect("should read main materialized asset"),
+            main_contents,
+            "checkout should restore the version selected by main"
+        );
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "feature"]),
+            "checkout feature should succeed",
+        );
+        assert_eq!(
+            fs::read(&absolute_path).expect("should read feature materialized asset"),
+            feature_contents,
+            "checkout should restore the version selected by feature"
+        );
+    }
+
+    #[test]
+    fn test_checkout_current_branch_rematerializes_missing_asset() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (logical_path, _, feature_contents) = setup_repo_with_branch_asset(repo_dir.path());
+        let absolute_path = repo_dir.path().join(&logical_path);
+        fs::remove_file(&absolute_path).expect("should remove the materialized feature asset");
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "feature"]),
+            "re-checkout of feature should succeed",
+        );
+        assert_eq!(
+            fs::read(&absolute_path).expect("should read rematerialized feature asset"),
+            feature_contents,
+            "re-checking out the current branch should restore a missing logical file"
+        );
+    }
+
+    #[test]
+    fn test_checkout_preserves_unknown_file_and_writes_conflict() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (logical_path, main_contents, feature_contents) =
+            setup_repo_with_branch_asset(repo_dir.path());
+        let absolute_path = repo_dir.path().join(&logical_path);
+        let local_contents = b">reference\nLOCAL-EDIT\n";
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "main"]),
+            "checkout main should succeed",
+        );
+        assert_eq!(
+            fs::read(&absolute_path).expect("should read main materialized asset"),
+            main_contents,
+            "main should be materialized before creating the local edit"
+        );
+        fs::write(&absolute_path, local_contents).expect("should write unknown local contents");
+
+        let checkout = run_gen(repo_dir.path(), &["checkout", "feature"]);
+        assert_success(&checkout, "checkout with an asset conflict should succeed");
+        assert_eq!(
+            fs::read(&absolute_path).expect("should read preserved local asset"),
+            local_contents,
+            "checkout should not overwrite unknown local contents"
+        );
+        let conflict_path = absolute_path.with_file_name("reference.fa.conflict");
+        assert_eq!(
+            fs::read(&conflict_path).expect("should read checked-out conflict version"),
+            feature_contents,
+            "checkout should write the selected branch version beside the local file"
+        );
+        let stderr = String::from_utf8_lossy(&checkout.stderr);
+        assert!(
+            stderr.contains("requested asset version conflicts"),
+            "checkout should explain the preserved conflict: {stderr}"
+        );
+    }
+
     #[test]
     fn test_checkout_switches_branch_specific_graph_state() {
         let repo_dir = tempdir().expect("should create temp repo directory");
@@ -2526,16 +2665,18 @@ mod remotes {
         );
     }
 
-    // A `file://` push must copy committed versioned assets into the remote store so a later clone
-    // can recover them, without transferring unrelated uncommitted graph changes.
+    // A `file://` push must copy committed versioned assets without touching the remote workspace;
+    // an explicit checkout there can then materialize its branch before a later clone recovers it.
     #[test]
     fn test_push_to_file_remote_and_clone_preserves_versioned_assets() {
         let local_repo_dir = tempdir().expect("should create temp local repo directory");
         let remote_repo_dir = tempdir().expect("should create temp remote repo directory");
         let clone_parent_dir = tempdir().expect("should create temp clone parent directory");
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
-        let fasta_path = fixtures_dir.join("simple.fa");
+        let fasta_fixture_path = fixtures_dir.join("simple.fa");
         let gff_path = fixtures_dir.join("simple.gff");
+        let logical_path = "inputs/simple.fa";
+        let local_fasta_path = local_repo_dir.path().join(logical_path);
 
         assert_success(
             &run_gen(local_repo_dir.path(), &["init"]),
@@ -2545,13 +2686,21 @@ mod remotes {
             &run_gen(remote_repo_dir.path(), &["init"]),
             "remote gen init should succeed",
         );
+        fs::create_dir_all(
+            local_fasta_path
+                .parent()
+                .expect("local FASTA should have a parent directory"),
+        )
+        .expect("should create local input directory");
+        fs::copy(&fasta_fixture_path, &local_fasta_path)
+            .expect("should copy FASTA into the local workspace");
         assert_success(
             &run_gen(
                 local_repo_dir.path(),
                 &[
                     "import",
                     "fasta",
-                    fasta_path.to_str().expect("should encode fasta path"),
+                    logical_path,
                     "--name",
                     "test-collection",
                     "--sample",
@@ -2602,6 +2751,20 @@ mod remotes {
             resolved_ref_hash(local_repo_dir.path(), "origin/main"),
             resolved_ref_hash(local_repo_dir.path(), "main"),
             "post-push fetch should update the accepted tracking ref"
+        );
+        let remote_fasta_path = remote_repo_dir.path().join(logical_path);
+        assert!(
+            !remote_fasta_path.exists(),
+            "push should not materialize files in the destination workspace"
+        );
+        assert_success(
+            &run_gen(remote_repo_dir.path(), &["checkout", "main"]),
+            "remote checkout main should materialize pushed assets",
+        );
+        assert_eq!(
+            fs::read(&remote_fasta_path).expect("should read remote materialized FASTA"),
+            fs::read(&local_fasta_path).expect("should read local logical FASTA"),
+            "the remote should materialize the pushed branch-head asset"
         );
 
         assert_success(

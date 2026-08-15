@@ -360,7 +360,7 @@ fn upload_asset(
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum DownloadAssetOutcome {
+pub(crate) enum DownloadAssetOutcome {
     Unchanged,
     Downloaded,
     Conflict(PathBuf),
@@ -675,10 +675,11 @@ fn copy_versioned_asset(
 
 /// Applies a verified versioned asset to the workspace without overwriting unknown local content.
 ///
-/// HTTP downloads and `file://` copies call this only after the checksum-addressed version exists.
-/// Historical versions have no logical destination and remain solely in `.gen/assets`; selected
-/// versions replace a known prior version or are copied beside an unknown local file as a conflict.
-fn materialize_versioned_asset(
+/// HTTP downloads and `file://` copies pass the path produced by their storage phase. Checkout
+/// resolves that same checksum-addressed path before calling this function. Historical versions
+/// have no logical destination and remain solely in `.gen/assets`; selected versions replace a
+/// known prior version or are copied beside unknown local content as a conflict.
+pub(crate) fn materialize_versioned_asset(
     workspace: &Workspace,
     asset: &AssetRef,
     previous_assets: &HashMap<HashId, AssetRef>,
@@ -687,6 +688,14 @@ fn materialize_versioned_asset(
     versioned_file_created: bool,
 ) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
     let expected_checksum = asset_checksum(asset)?;
+    if !versioned_path.is_file() {
+        return Err(format!(
+            "Cannot materialize asset {} because its versioned file is missing: {}",
+            asset.id,
+            versioned_path.display()
+        )
+        .into());
+    }
     let Some(destination_logical_path) = destination_logical_path else {
         return Ok(if versioned_file_created {
             DownloadAssetOutcome::Downloaded
@@ -713,10 +722,11 @@ fn materialize_versioned_asset(
     {
         return Ok(DownloadAssetOutcome::Unchanged);
     }
-    let existing_checksum = destination_path
-        .exists()
-        .then(|| calculate_file_checksum(&destination_path))
-        .transpose()?;
+    let existing_checksum = if destination_path.exists() {
+        Some(calculate_file_checksum(&destination_path)?)
+    } else {
+        None
+    };
     let intended_change = if let Some(checksum) = existing_checksum.as_ref() {
         destination_matches_previous_asset(workspace, &destination_path, checksum, previous_assets)?
     } else {
@@ -762,7 +772,7 @@ fn download_asset(
 }
 
 /// Reports a conflict returned by [`materialize_versioned_asset`] using workspace-relative paths.
-fn warn_asset_conflict(
+pub(crate) fn warn_asset_conflict(
     workspace: &Workspace,
     asset: &AssetRef,
     destination_logical_path: Option<&str>,
@@ -775,7 +785,7 @@ fn warn_asset_conflict(
         destination_logical_path,
     )?;
     eprintln!(
-        "Warning: remote asset conflicts with the local file at {}. The local file was preserved and the remote version was written to {}. Choose the correct version before continuing.",
+        "Warning: the requested asset version conflicts with the local file at {}. The local file was preserved and the requested version was written to {}. Choose the correct version before continuing.",
         destination_path.display(),
         conflict_path.display()
     );
