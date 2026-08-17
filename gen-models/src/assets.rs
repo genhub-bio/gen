@@ -377,10 +377,10 @@ impl AssetRef {
                                 WHERE commit_hash = :from_hash \
                             ) \
                      ), \
-                     /* Join the selected commits to Dolt's repeated table snapshots, keep local \
-                        files, and collapse each immutable asset ID. Materialized queries also \
-                        record the oldest depth in the full walk as the version's introduction \
-                        order on the selected ref. */ \
+                     /* Start Dolt's history walk at the upper bound, join the selected commits to \
+                        its repeated table snapshots, keep local files, and collapse each immutable \
+                        asset ID. Materialized queries also record the oldest depth in the full walk \
+                        as the version's introduction order on the selected ref. */ \
                      asset_versions AS ( \
                          SELECT historical_assets.id, \
                                 historical_assets.uri, \
@@ -393,7 +393,9 @@ impl AssetRef {
                                 historical_assets.created_on \
                                 {history_depth} \
                          FROM bounded_ancestry \
-                         JOIN dolt_history_gen_asset_refs AS historical_assets \
+                         JOIN dolt_history_gen_asset_refs( \
+                             COALESCE(:to_hash, dolt_hashof('HEAD')) \
+                         ) AS historical_assets \
                            ON historical_assets.commit_hash = bounded_ancestry.commit_hash \
                          WHERE historical_assets.uri LIKE 'file://%' \
                          GROUP BY historical_assets.id \
@@ -1597,7 +1599,7 @@ mod tests {
         use super::{AssetRef, AssetRole};
         use crate::{
             db::{DbContext, GraphConnection},
-            history::dolt::commit_all,
+            history::dolt::{checkout, commit_all, create_branch},
             test_helpers::setup_gen,
         };
 
@@ -1750,6 +1752,46 @@ mod tests {
                 )
                 .expect("should materialize deletion commit"),
                 vec![fixture.second_alpha.clone(), fixture.zeta.clone()]
+            );
+        }
+
+        #[test]
+        fn test_materialized_assets_at_reads_non_current_branch_by_hash() {
+            let context = setup_gen();
+            let conn = context.graph().conn();
+            let main_asset = AssetRef {
+                id: HashId::convert_str("main-asset"),
+                uri: "file://assets/main.fa".to_string(),
+                file_type: "fasta".to_string(),
+                checksum: Some(Sha256Hash::convert_str("main-checksum")),
+                size: Some(4),
+                role: AssetRole::Input,
+                logical_path: Some("reference.fa".to_string()),
+                name: Some("reference.fa".to_string()),
+                created_on: 1,
+            };
+            AssetRef::create(conn, &main_asset).expect("should insert main asset");
+            commit_all(conn, "add main asset").expect("should commit main asset");
+            create_branch(conn, "feature").expect("should create feature branch");
+            checkout(conn, "feature").expect("should checkout feature branch");
+
+            let feature_asset = AssetRef {
+                id: HashId::convert_str("feature-asset"),
+                uri: "file://assets/feature.fa".to_string(),
+                checksum: Some(Sha256Hash::convert_str("feature-checksum")),
+                created_on: 2,
+                ..main_asset
+            };
+            AssetRef::create(conn, &feature_asset).expect("should insert feature asset");
+            let feature_commit =
+                commit_all(conn, "add feature asset").expect("should commit feature asset");
+            checkout(conn, "main").expect("should restore main branch");
+
+            assert_eq!(
+                AssetRef::get_materialized_assets_at(conn, None, Some(&feature_commit))
+                    .expect("should read assets from the non-current feature commit"),
+                vec![feature_asset],
+                "the history range should start at the requested feature commit"
             );
         }
 

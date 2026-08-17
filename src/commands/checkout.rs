@@ -15,7 +15,6 @@ use crate::{
     commands::remote::operations::{
         DownloadAssetOutcome, materialize_versioned_asset, warn_asset_conflict,
     },
-    get_raw_connection,
     history::ensure_clean_working_set,
 };
 
@@ -45,20 +44,6 @@ fn materialize_checked_out_assets(
         }
     }
     Ok(())
-}
-
-fn materialize_branch_head_assets(
-    workspace: &Workspace,
-    branch: &str,
-    previous_assets: &HashMap<HashId, AssetRef>,
-) -> Result<(), Box<dyn Error>> {
-    // The published DoltLite history table starts its walk at the connection's branch even when
-    // its rows are joined to an explicit hash. Attach a fresh connection to the requested branch,
-    // then keep asset selection bounded by that branch's exact head.
-    let graph = get_raw_connection(workspace.graph_db_path()?)?;
-    connect_branch(&graph, branch)?;
-    let commit_hash = hash_of(&graph, branch)?;
-    materialize_checked_out_assets(&graph, workspace, &commit_hash, previous_assets)
 }
 
 pub fn execute(
@@ -91,7 +76,8 @@ pub fn execute(
             .map_err(|error| format!("Failed to check out branch '{name}': {error}"))?;
         Defaults::set_current_branch(config, Some(name))
             .map_err(|error| format!("Failed to save current branch '{name}': {error}"))?;
-        materialize_branch_head_assets(workspace, name, &previous_assets)?;
+        let commit_hash = hash_of(graph, name)?;
+        materialize_checked_out_assets(graph, workspace, &commit_hash, &previous_assets)?;
     } else if let Some(hash_name) = hash {
         if branch_exists(graph, hash_name)? {
             println!("Checking out branch {hash_name}");
@@ -99,7 +85,8 @@ pub fn execute(
                 .map_err(|error| format!("Failed to check out branch '{hash_name}': {error}"))?;
             Defaults::set_current_branch(config, Some(hash_name))
                 .map_err(|error| format!("Failed to save current branch '{hash_name}': {error}"))?;
-            materialize_branch_head_assets(workspace, hash_name, &previous_assets)?;
+            let commit_hash = hash_of(graph, hash_name)?;
+            materialize_checked_out_assets(graph, workspace, &commit_hash, &previous_assets)?;
         } else {
             let commit_hash =
                 history_store.resolve_operation_hash(&CommitRef(hash_name.to_string()))?;
