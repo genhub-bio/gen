@@ -53,6 +53,9 @@ pub fn execute(
     branch: Option<&str>,
     hash: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
+    // We want to connect to the current branch here instead of the branch we are checking out. This lets us
+    // track and record the current state of assets prior to the checkout, so we can distinguish whether
+    // a file should be replaced or if it needs to be preserved as a conflict.
     if let Some(current_branch) = Defaults::get_current_branch(config)
         && branch_exists(graph, &current_branch)?
     {
@@ -60,8 +63,6 @@ pub fn execute(
     }
     let history_store = DoltHistoryStore::new(graph);
     ensure_clean_working_set(&history_store, "checkout")?;
-    // Keep every version reachable from the current checkout so the materializer can distinguish
-    // a tracked version it may replace from unknown local content it must preserve.
     let previous_assets = AssetRef::get_cumulative_assets_at(graph, None, None)?
         .into_iter()
         .map(|asset| (asset.id, asset))

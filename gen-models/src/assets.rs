@@ -1757,6 +1757,8 @@ mod tests {
 
         #[test]
         fn test_materialized_assets_at_reads_non_current_branch_by_hash() {
+            // Test that when querying assets, the join will work when querying for commits that are not
+            // on the main branch.
             let context = setup_gen();
             let conn = context.graph().conn();
             let main_asset = AssetRef {

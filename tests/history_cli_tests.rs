@@ -2665,8 +2665,9 @@ mod remotes {
         );
     }
 
-    // A `file://` push must copy committed versioned assets without touching the remote workspace;
-    // an explicit checkout there can then materialize its branch before a later clone recovers it.
+    // A `file://` push must copy committed versioned assets without touching the remote workspace (
+    // we just push stuff to .gen/assets, and do not materialize files in the workspace). An explicit
+    // checkout there can then materialize files.
     #[test]
     fn test_push_to_file_remote_and_clone_preserves_versioned_assets() {
         let local_repo_dir = tempdir().expect("should create temp local repo directory");
