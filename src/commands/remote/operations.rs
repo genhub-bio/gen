@@ -39,12 +39,14 @@
 //! resolved as safe workspace-relative paths, including `.gen/outside_root` paths used to
 //! represent inputs that originally came from outside the workspace.
 //!
-//! Network operations are journaled as graph-first distributed operations in the config database.
-//! Clone and pull downloads persist an asset checkpoint after each complete first-parent commit
-//! batch, so a retry resumes after the last verified batch even when Dolt already advanced the
-//! graph. A push retry retains the successful graph capability's transfer ID so GenHub recognizes
-//! the existing lease and releases it only after asset completion. A branch with no successful
-//! operation requests its complete reachable asset history once.
+//! Clones, pushes, and pulls are distributed operations where the graph database is sync'd and
+//! then the assets are transfered. Thus, an asset transfer can fail and need to be resumed. We
+//! track the state of asset transfers and checkpoint after each commit is successfully transfered.
+//! When the entire commit range has been transfered, we mark the operation as complete. For pushes,
+//! a server provides a transfer ID and expiry that serve as a lease. Gen persists both so an
+//! interrupted asset phase can reuse an active lease, while an expired lease triggers fresh graph
+//! authorization. The lease restricts uploads to a single client and is released after assets are
+//! uploaded.
 //!
 //! Pull records the branch commit from before the Dolt operation so downloads can
 //! distinguish a clean old version from a local modification. If the destination still
@@ -64,15 +66,17 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose};
+use chrono::Utc;
 use crc32c::crc32c_append;
 use gen_core::{
     DoltHashId, HashId, Sha256Hash,
     config::{DEFAULT_GRAPH_DB_NAME, Workspace},
+    errors::{ConfigError, ConnectionError},
 };
 use gen_models::{
     assets::{AssetRef, AssetView, LocalAssetUri, materialization_destination_path},
     db::{ConfigConnection, GraphConnection},
-    errors::QueryError,
+    errors::{QueryError, RemoteError as ModelRemoteError},
     history::dolt::{
         active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull, push,
         push_force, remote_rows, set_remote_url,
@@ -98,8 +102,8 @@ use crate::{
     commands::remote::{
         client::{
             AssetTransferCompletionRequest, AssetTransferRequest, AssetUploadReceipt,
-            CapabilityRequest, RemoteOperation, RepositoryRemote, acquire_asset_transfers,
-            acquire_capability, complete_asset_transfers,
+            CapabilityRequest, RemoteClientError, RemoteOperation, RepositoryRemote,
+            acquire_asset_transfers, acquire_capability, complete_asset_transfers,
         },
         login_origin,
     },
@@ -163,9 +167,15 @@ fn file_remote_workspace(remote_url: &str) -> Result<Workspace, Box<dyn Error>> 
     Ok(workspace)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PushTransferLease {
+    transfer_id: Uuid,
+    expires_at: i64,
+}
+
 struct GraphTransferAuthorization {
     remote_url: String,
-    transfer_id: Option<Uuid>,
+    push_lease: Option<PushTransferLease>,
 }
 
 fn transfer_authorization(
@@ -177,7 +187,7 @@ fn transfer_authorization(
     if remote.url.starts_with("file://") {
         return Ok(GraphTransferAuthorization {
             remote_url: file_graph_url(&remote.url)?,
-            transfer_id: None,
+            push_lease: None,
         });
     }
     let repository = RepositoryRemote::parse(&remote.url)?;
@@ -187,9 +197,13 @@ fn transfer_authorization(
         force,
     };
     let capability = acquire_capability(&repository, &request, login_origin)?;
+    let push_lease = (operation == RemoteOperation::Push).then_some(PushTransferLease {
+        transfer_id: capability.transfer_id,
+        expires_at: capability.expires_at.timestamp(),
+    });
     Ok(GraphTransferAuthorization {
         remote_url: capability.remote_url,
-        transfer_id: Some(capability.transfer_id),
+        push_lease,
     })
 }
 
@@ -257,7 +271,7 @@ fn run_graph_transfer(
     branch: &str,
     force: bool,
     mut transfer: impl FnMut() -> Result<(), SqlError>,
-) -> Result<Option<Uuid>, Box<dyn Error>> {
+) -> Result<Option<PushTransferLease>, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
         let authorization = transfer_authorization(remote, operation, Some(branch), force)?;
         ensure_graph_remote(graph, &remote.name, &authorization.remote_url)?;
@@ -274,7 +288,7 @@ fn run_graph_transfer(
         match transfer() {
             Ok(()) => {
                 restore_canonical_url(graph, remote);
-                return Ok(authorization.transfer_id);
+                return Ok(authorization.push_lease);
             }
             Err(error) if attempt == 0 && is_authorization_error(&error) => {
                 last_error = Some(error);
@@ -1144,29 +1158,67 @@ pub fn clone_into_workspace(
     Ok(branch)
 }
 
+/// Errors that can occur while pushing a branch to a remote repository.
+#[derive(Debug, thiserror::Error)]
+pub enum RemotePushError {
+    /// The workspace paths could not be resolved.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// A config or graph database connection could not be opened.
+    #[error(transparent)]
+    Connection(#[from] ConnectionError),
+    /// A local database operation failed.
+    #[error(transparent)]
+    Database(#[from] SqlError),
+    /// The configured remote is invalid or could not be updated.
+    #[error(transparent)]
+    Remote(#[from] ModelRemoteError),
+    /// A GenHub request failed.
+    #[error(transparent)]
+    Client(#[from] RemoteClientError),
+    /// The remote could not be selected from the command and repository configuration.
+    #[error("Unable to resolve push remote: {0}")]
+    RemoteResolution(#[source] Box<dyn Error>),
+    /// Dolt could not transfer the graph branch.
+    #[error("Graph transfer failed: {0}")]
+    GraphTransfer(#[source] Box<dyn Error>),
+    /// The branch's assets could not be transferred.
+    #[error("Asset transfer failed: {0}")]
+    AssetTransfer(#[source] Box<dyn Error>),
+    /// A successful GenHub graph push did not return its push lease.
+    #[error("GenHub push did not return a transfer ID")]
+    MissingTransferId,
+    /// A pending push has only part of its persisted transfer lease metadata.
+    #[error("Pending push metadata for branch '{branch}' has an incomplete transfer lease")]
+    IncompleteTransferLease { branch: String },
+}
+
 pub fn execute_push(
     workspace: &Workspace,
     explicit_remote: Option<&str>,
     explicit_branch: Option<&str>,
     force: bool,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), RemotePushError> {
     let config = get_config_connection(Some(workspace.gen_db_path()?))?;
     let intended_branch = Defaults::get_current_branch(&config);
     let graph = get_connection_for_branch(workspace.graph_db_path()?, intended_branch.as_deref())?;
     let persisted_branch = connect_persisted_branch(&graph, &config)?;
-    let branch = explicit_branch
-        .map(str::to_string)
-        .or(persisted_branch)
-        .unwrap_or(active_branch(&graph)?);
-    let remote = resolve_remote(&config, explicit_remote, &branch)?;
+    let branch = if let Some(explicit_branch) = explicit_branch {
+        explicit_branch.to_string()
+    } else if let Some(persisted_branch) = persisted_branch {
+        persisted_branch
+    } else {
+        active_branch(&graph)?
+    };
+    let remote = resolve_remote(&config, explicit_remote, &branch)
+        .map_err(RemotePushError::RemoteResolution)?;
     // A missing or stale tracking ref only makes the transfer conservatively include more assets.
     // Force pushes cannot use the tracking ref as a lower bound because they may replace history.
     let tracking_ref = format!("{}/{branch}", remote.name);
     let previous_hash = (!force)
         .then(|| hash_of(&graph, &tracking_ref).ok())
         .flatten();
-    let mut push_operation = None;
-    let transfer_id = if remote.url.starts_with("file://") {
+    let mut push_context = if remote.url.starts_with("file://") {
         run_graph_transfer(
             &graph,
             &remote,
@@ -1174,7 +1226,8 @@ pub fn execute_push(
             &branch,
             force,
             || push_graph_branch(&graph, &remote.name, &branch, force),
-        )?;
+        )
+        .map_err(RemotePushError::GraphTransfer)?;
         None
     } else {
         let mut operation = RemoteOperationRecord::begin_or_resume(
@@ -1185,17 +1238,21 @@ pub fn execute_push(
             previous_hash.as_ref(),
         )?;
         let destination_hash = hash_of(&graph, &branch)?;
-        let transfer_id = match (operation.to_commit(), operation.transfer_id()) {
-            (Some(recorded_destination), Some(transfer_id)) => {
-                if recorded_destination != &destination_hash {
-                    return Err(format!(
-                        "Cannot resume the pending push for branch '{branch}' because its local head changed after the graph transfer"
-                    )
-                    .into());
+        let transfer_lease = match (
+            operation.to_commit.as_ref(),
+            operation.transfer_id,
+            operation.transfer_expires_at,
+        ) {
+            (Some(recorded_destination), Some(transfer_id), Some(expires_at))
+                if recorded_destination == &destination_hash
+                    && expires_at > Utc::now().timestamp() =>
+            {
+                PushTransferLease {
+                    transfer_id,
+                    expires_at,
                 }
-                transfer_id
             }
-            (None, None) => {
+            (Some(_), Some(_), Some(_)) | (None, None, None) => {
                 let graph_transfer = run_graph_transfer(
                     &graph,
                     &remote,
@@ -1204,35 +1261,38 @@ pub fn execute_push(
                     force,
                     || push_graph_branch(&graph, &remote.name, &branch, force),
                 );
-                let transfer_id = match graph_transfer {
-                    Ok(Some(transfer_id)) => transfer_id,
+                let transfer_lease = match graph_transfer {
+                    Ok(Some(transfer_lease)) => transfer_lease,
                     Ok(None) => {
-                        return Err("GenHub push did not return a transfer ID".into());
+                        return Err(RemotePushError::MissingTransferId);
                     }
                     Err(error) => {
-                        if let Err(metadata_error) = operation.fail(&config) {
+                        if operation.to_commit.is_none()
+                            && let Err(metadata_error) = operation.fail(&config)
+                        {
                             eprintln!(
                                 "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
                             );
                         }
-                        return Err(error);
+                        return Err(RemotePushError::GraphTransfer(error));
                     }
                 };
-                operation.set_push_destination(&config, &destination_hash, transfer_id)?;
-                transfer_id
+                operation.set_push_destination(
+                    &config,
+                    &destination_hash,
+                    transfer_lease.transfer_id,
+                    transfer_lease.expires_at,
+                )?;
+                transfer_lease
             }
             _ => {
-                return Err(format!(
-                    "Pending push metadata for branch '{branch}' has an incomplete transfer lease"
-                )
-                .into());
+                return Err(RemotePushError::IncompleteTransferLease { branch });
             }
         };
-        push_operation = Some(operation);
-        Some(transfer_id)
+        Some((operation, transfer_lease, destination_hash))
     };
-    let assets_transfer_checkpoint = if let Some(operation) = push_operation.as_ref() {
-        operation.assets_transfer_checkpoint()
+    let assets_transfer_checkpoint = if let Some((operation, _, _)) = push_context.as_ref() {
+        operation.assets_transfer_checkpoint.as_ref()
     } else {
         previous_hash.as_ref()
     };
@@ -1247,24 +1307,20 @@ pub fn execute_push(
             previous_hash: previous_hash.as_ref(),
         },
         |_| Ok(()),
-    )?;
-    if let Some(operation) = push_operation.as_mut() {
+    )
+    .map_err(RemotePushError::AssetTransfer)?;
+    if let Some((operation, transfer_lease, destination_hash)) = push_context.as_mut() {
         let repository = RepositoryRemote::parse(&remote.url)?;
-        let transfer_id = transfer_id.expect("should retain the GenHub push transfer ID");
         complete_asset_transfers(
             &repository,
             &AssetTransferCompletionRequest {
-                transfer_id,
+                transfer_id: transfer_lease.transfer_id,
                 branch: &branch,
                 assets: &upload_receipts,
             },
             login_origin,
         )?;
-        let destination_hash = operation
-            .to_commit()
-            .copied()
-            .expect("should retain the pushed graph destination");
-        operation.advance_assets_transfer_checkpoint(&config, &destination_hash)?;
+        operation.advance_assets_transfer_checkpoint(&config, destination_hash)?;
         operation.complete(&config)?;
     }
     if let Err(error) = run_graph_transfer(
@@ -1396,6 +1452,7 @@ mod tests {
         thread,
     };
 
+    use chrono::Utc;
     use gen_core::{DoltHashId, HashId, config::Workspace};
     use gen_models::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
@@ -1414,10 +1471,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AssetTransferRange, DownloadAssetOutcome, RemoteOperation, canonical_remote_url,
-        clone_destination_name, copy_versioned_asset, download_asset, download_to_versioned_store,
-        execute_pull, execute_push, file_graph_url, get_remaining_assets_to_transfer,
-        resolve_remote, run_graph_transfer, temporary_path, transfer_assets,
+        AssetTransferRange, DownloadAssetOutcome, PushTransferLease, RemoteOperation,
+        canonical_remote_url, clone_destination_name, copy_versioned_asset, download_asset,
+        download_to_versioned_store, execute_pull, execute_push, file_graph_url,
+        get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer, temporary_path,
+        transfer_assets,
     };
     use crate::{get_config_connection, get_connection, get_raw_connection};
 
@@ -2756,7 +2814,7 @@ mod tests {
             url: format!("http://{address}/api/repos/alice/example"),
         };
         let mut attempts = 0;
-        let transfer_id = run_graph_transfer(
+        let transfer_lease = run_graph_transfer(
             &graph,
             &remote,
             RemoteOperation::Push,
@@ -2778,7 +2836,13 @@ mod tests {
         server.join().expect("capability server should finish");
 
         assert_eq!(attempts, 2);
-        assert_eq!(transfer_id, Some(RETRIED_TRANSFER_ID));
+        assert_eq!(
+            transfer_lease,
+            Some(PushTransferLease {
+                transfer_id: RETRIED_TRANSFER_ID,
+                expires_at: 1_893_456_000,
+            })
+        );
         let remotes = remote_rows(&graph).expect("should read restored canonical URL");
         assert!(
             remotes
@@ -2992,6 +3056,271 @@ mod tests {
             )
             .expect("should count pending operations");
         assert_eq!(pending_operations, 0);
+    }
+
+    #[test]
+    fn test_push_retry_pushes_advanced_head_with_new_transfer_lease() {
+        // This tests that if we have a resumed push, but have commited work since the last failed push, the to_commit recorded
+        // as the end state of the push is advanced to the current head commit.
+        let _environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind capability server");
+        let address = listener
+            .local_addr()
+            .expect("should read capability server address");
+        let temp = tempdir().expect("should create advanced push retry directory");
+        let remote_graph = temp.path().join("remote.db");
+        let transfer_url = format!("file://{}", remote_graph.display());
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for request_index in 0..7 {
+                let (mut stream, _) = listener.accept().expect("should accept GenHub request");
+                let mut request = [0_u8; 8192];
+                let read = stream
+                    .read(&mut request)
+                    .expect("should read GenHub request");
+                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                match request_index {
+                    0 | 3 | 6 => {
+                        let transfer_id = if request_index == 0 {
+                            TEST_TRANSFER_ID
+                        } else {
+                            RETRIED_TRANSFER_ID
+                        };
+                        let body = format!(
+                            "{{\"remote_url\":\"{transfer_url}\",\
+                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                             \"default_branch\":\"main\",\
+                             \"transfer_id\":\"{transfer_id}\"}}"
+                        );
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write capability response");
+                    }
+                    1 | 4 => {
+                        let body = "{\"assets\":[]}";
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write asset response");
+                    }
+                    2 => {
+                        let body = "asset verification unavailable";
+                        write!(
+                            stream,
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write failed completion response");
+                    }
+                    5 => {
+                        stream
+                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                            .expect("should write completion response");
+                    }
+                    _ => unreachable!("request index should be covered"),
+                }
+            }
+            requests
+        });
+
+        let workspace = Workspace::new(temp.path().join("local"));
+        workspace.ensure_gen_dir();
+        let config = get_config_connection(Some(workspace.gen_db_path().unwrap()))
+            .expect("should open push config");
+        let graph = get_connection(workspace.graph_db_path().unwrap()).expect("should open graph");
+        Collection::create(&graph, "push-retry-fixture").expect("should create push fixture");
+        let original_destination =
+            commit_all(&graph, "push retry fixture").expect("should commit push retry fixture");
+        Remote::create(
+            &config,
+            "origin",
+            &format!("http://{address}/api/repos/alice/example"),
+        )
+        .expect("should configure origin");
+        Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        drop(graph);
+
+        execute_push(&workspace, None, None, false)
+            .expect_err("first push should retain its lease after completion fails");
+        let pending_transfer: (DoltHashId, Uuid) = config
+            .query_row(
+                "SELECT to_commit, transfer_id FROM remote_operations \
+                 WHERE operation = 'push' AND completed_at IS NULL AND failed_at IS NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("should retain pending push lease");
+        assert_eq!(pending_transfer, (original_destination, TEST_TRANSFER_ID));
+
+        let graph =
+            get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
+        Collection::create(&graph, "advanced-head").expect("should advance local graph");
+        let advanced_destination =
+            commit_all(&graph, "advance push retry").expect("should commit advanced local head");
+        drop(graph);
+
+        execute_push(&workspace, None, None, false).expect("advanced push retry should complete");
+        let requests = server.join().expect("GenHub server should finish");
+
+        assert_eq!(requests.len(), 7);
+        assert!(requests[0].contains("\"operation\":\"push\""));
+        assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
+        assert!(requests[3].contains("\"operation\":\"push\""));
+        assert!(requests[4].starts_with("POST /api/repos/alice/example/asset-transfers "));
+        assert!(requests[5].starts_with("POST /api/repos/alice/example/asset-transfers/complete "));
+        assert!(requests[5].contains(&format!("\"transfer_id\":\"{RETRIED_TRANSFER_ID}\"")));
+        assert!(requests[6].contains("\"operation\":\"pull\""));
+        let completed_transfer: (DoltHashId, DoltHashId, Uuid) = config
+            .query_row(
+                "SELECT to_commit, assets_transfer_checkpoint, transfer_id \
+                 FROM remote_operations WHERE operation = 'push' AND completed_at IS NOT NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("should complete advanced push operation");
+        assert_eq!(
+            completed_transfer,
+            (
+                advanced_destination,
+                advanced_destination,
+                RETRIED_TRANSFER_ID
+            )
+        );
+        let graph =
+            get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
+        let tracking_hash = hash_of(&graph, "origin/main").expect("should query tracking branch");
+        assert_eq!(tracking_hash, advanced_destination);
+    }
+
+    #[test]
+    fn test_push_retry_refreshes_expired_transfer_lease() {
+        let _environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .expect("should lock process environment");
+        let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("should bind expired lease retry server");
+        let address = listener
+            .local_addr()
+            .expect("should read expired lease retry server address");
+        let temp = tempdir().expect("should create expired lease retry directory");
+        let remote_graph = temp.path().join("remote.db");
+        let transfer_url = format!("file://{}", remote_graph.display());
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for request_index in 0..7 {
+                let (mut stream, _) = listener.accept().expect("should accept GenHub request");
+                let mut request = [0_u8; 8192];
+                let read = stream
+                    .read(&mut request)
+                    .expect("should read GenHub request");
+                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                match request_index {
+                    0 | 3 | 6 => {
+                        let transfer_id = if request_index == 0 {
+                            TEST_TRANSFER_ID
+                        } else {
+                            RETRIED_TRANSFER_ID
+                        };
+                        let body = format!(
+                            "{{\"remote_url\":\"{transfer_url}\",\
+                             \"expires_at\":\"2030-01-01T00:00:00Z\",\
+                             \"default_branch\":\"main\",\
+                             \"transfer_id\":\"{transfer_id}\"}}"
+                        );
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write capability response");
+                    }
+                    1 | 4 => {
+                        let body = "{\"assets\":[]}";
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write asset response");
+                    }
+                    2 => {
+                        let body = "asset verification unavailable";
+                        write!(
+                            stream,
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .expect("should write failed completion response");
+                    }
+                    5 => {
+                        stream
+                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                            .expect("should write completion response");
+                    }
+                    _ => unreachable!("request index should be covered"),
+                }
+            }
+            requests
+        });
+
+        let workspace = Workspace::new(temp.path().join("local"));
+        workspace.ensure_gen_dir();
+        let config = get_config_connection(Some(workspace.gen_db_path().unwrap()))
+            .expect("should open push config");
+        let graph = get_connection(workspace.graph_db_path().unwrap()).expect("should open graph");
+        Collection::create(&graph, "expired-lease-retry-fixture")
+            .expect("should create expired lease retry fixture");
+        let destination_hash = commit_all(&graph, "expired lease retry fixture")
+            .expect("should commit expired lease retry fixture");
+        Remote::create(
+            &config,
+            "origin",
+            &format!("http://{address}/api/repos/alice/example"),
+        )
+        .expect("should configure origin");
+        Defaults::set_default_remote(&config, Some("origin")).expect("should set default remote");
+        drop(graph);
+
+        execute_push(&workspace, None, None, false)
+            .expect_err("first push should retain its lease after completion fails");
+        config
+            .execute(
+                "UPDATE remote_operations SET transfer_expires_at = 0 \
+                 WHERE operation = 'push' AND completed_at IS NULL AND failed_at IS NULL",
+                [],
+            )
+            .expect("should expire the persisted transfer lease");
+
+        execute_push(&workspace, None, None, false)
+            .expect("expired lease retry should obtain a new transfer");
+        let requests = server.join().expect("GenHub server should finish");
+
+        assert_eq!(requests.len(), 7);
+        assert!(requests[0].contains("\"operation\":\"push\""));
+        assert!(requests[2].contains(&format!("\"transfer_id\":\"{TEST_TRANSFER_ID}\"")));
+        assert!(requests[3].contains("\"operation\":\"push\""));
+        assert!(requests[5].contains(&format!("\"transfer_id\":\"{RETRIED_TRANSFER_ID}\"")));
+        assert!(requests[6].contains("\"operation\":\"pull\""));
+        let completed_transfer: (DoltHashId, Uuid, i64) = config
+            .query_row(
+                "SELECT to_commit, transfer_id, transfer_expires_at \
+                 FROM remote_operations WHERE operation = 'push' AND completed_at IS NOT NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("should complete refreshed transfer lease");
+        assert_eq!(completed_transfer.0, destination_hash);
+        assert_eq!(completed_transfer.1, RETRIED_TRANSFER_ID);
+        assert!(completed_transfer.2 > Utc::now().timestamp());
     }
 
     #[test]

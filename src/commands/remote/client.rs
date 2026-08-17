@@ -27,6 +27,7 @@
 
 use std::{env, io};
 
+use chrono::{DateTime, Utc};
 use gen_core::{DoltHashId, HashId};
 use reqwest::{
     StatusCode, Url,
@@ -145,7 +146,7 @@ pub struct CapabilityRequest<'branch> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct CapabilityResponse {
     pub remote_url: String,
-    pub expires_at: String,
+    pub expires_at: DateTime<Utc>,
     pub default_branch: String,
     /// Identifies the capability's transfer-scoped push lease.
     pub transfer_id: Uuid,
@@ -711,7 +712,9 @@ mod tests {
             response,
             CapabilityResponse {
                 remote_url: expected_url.to_string(),
-                expires_at: "2030-01-01T00:00:00Z".to_string(),
+                expires_at: "2030-01-01T00:00:00Z"
+                    .parse()
+                    .expect("should parse capability expiry"),
                 default_branch: "main".to_string(),
                 transfer_id: TEST_TRANSFER_ID,
             }

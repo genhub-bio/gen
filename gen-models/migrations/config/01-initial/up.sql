@@ -21,6 +21,7 @@ CREATE TABLE remote_operations (
     assets_transfer_checkpoint TEXT,
     to_commit TEXT,
     transfer_id BLOB CHECK(transfer_id IS NULL OR length(transfer_id) = 16),
+    transfer_expires_at INTEGER,
     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT,
     failed_at TEXT,
@@ -31,6 +32,7 @@ CREATE TABLE remote_operations (
         AND assets_transfer_checkpoint = to_commit
     )),
     CHECK(operation = 'push' OR transfer_id IS NULL),
+    CHECK((transfer_id IS NULL) = (transfer_expires_at IS NULL)),
     CHECK(operation != 'push' OR completed_at IS NULL OR transfer_id IS NOT NULL),
     FOREIGN KEY(remote_name) REFERENCES remotes(name) ON DELETE CASCADE
 ) STRICT;

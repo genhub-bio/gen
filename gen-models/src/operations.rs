@@ -693,6 +693,8 @@ pub struct RemoteOperationRecord {
     pub to_commit: Option<DoltHashId>,
     /// GenHub push lease retained by a pending operation.
     pub transfer_id: Option<Uuid>,
+    /// Unix timestamp after which GenHub will reject the retained push lease.
+    pub transfer_expires_at: Option<i64>,
     /// Time at which the operation began.
     pub started_at: String,
     /// Time at which both graph and asset transfer completed.
@@ -716,6 +718,7 @@ impl Query for RemoteOperationRecord {
             assets_transfer_checkpoint: row.get("assets_transfer_checkpoint").unwrap(),
             to_commit: row.get("to_commit").unwrap(),
             transfer_id: row.get("transfer_id").unwrap(),
+            transfer_expires_at: row.get("transfer_expires_at").unwrap(),
             started_at: row.get("started_at").unwrap(),
             completed_at: row.get("completed_at").unwrap(),
             failed_at: row.get("failed_at").unwrap(),
@@ -737,6 +740,9 @@ impl RemoteOperationRecord {
                 "SELECT * FROM remote_operations \
                  WHERE remote_name = ?1 AND branch_name = ?2 \
                    AND completed_at IS NULL AND failed_at IS NULL \
+                   -- This is confusing, but this checks whether a clone operation is followed by a pull.
+                   -- If a clone fails to download assets, a pull can finish the operation even though the
+                   -- persisted operation is clone and the requested operation is pull.
                    AND (operation = ?3 OR operation = 'clone' AND ?3 = 'pull') \
                  ORDER BY id LIMIT 1",
                 params![remote_name, branch_name, operation.as_str()],
@@ -772,27 +778,7 @@ impl RemoteOperationRecord {
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
-    /// Returns the local branch commit from before the operation for conflict detection.
-    pub const fn from_commit(&self) -> Option<&DoltHashId> {
-        self.from_commit.as_ref()
-    }
-
-    /// Returns the last commit whose complete asset batch was verified locally.
-    pub const fn assets_transfer_checkpoint(&self) -> Option<&DoltHashId> {
-        self.assets_transfer_checkpoint.as_ref()
-    }
-
-    /// Returns the graph commit already transferred by a pending operation.
-    pub const fn to_commit(&self) -> Option<&DoltHashId> {
-        self.to_commit.as_ref()
-    }
-
-    /// Returns the GenHub push lease retained by a pending operation.
-    pub const fn transfer_id(&self) -> Option<Uuid> {
-        self.transfer_id
-    }
-
-    /// Records the graph commit whose assets must be hydrated by this operation.
+    /// Records the desired end commit an operation is tracking.
     pub fn set_destination(
         &mut self,
         conn: &ConfigConnection,
@@ -827,13 +813,16 @@ impl RemoteOperationRecord {
         conn: &ConfigConnection,
         to_commit: &DoltHashId,
         transfer_id: Uuid,
+        transfer_expires_at: i64,
     ) -> SQLResult<()> {
         conn.execute(
-            "UPDATE remote_operations SET to_commit = ?1, transfer_id = ?2 WHERE id = ?3",
-            params![to_commit, transfer_id, self.id],
+            "UPDATE remote_operations \
+             SET to_commit = ?1, transfer_id = ?2, transfer_expires_at = ?3 WHERE id = ?4",
+            params![to_commit, transfer_id, transfer_expires_at, self.id],
         )?;
         self.to_commit = Some(*to_commit);
         self.transfer_id = Some(transfer_id);
+        self.transfer_expires_at = Some(transfer_expires_at);
         Ok(())
     }
 
@@ -1312,6 +1301,7 @@ mod tests {
                 .expect("should create remote");
             let destination_commit = DoltHashId([3_u8; 20]);
             let transfer_id = Uuid::from_u128(7);
+            let transfer_expires_at = 1_900_000_000;
             let mut operation = RemoteOperationRecord::begin_or_resume(
                 config,
                 "origin",
@@ -1321,7 +1311,12 @@ mod tests {
             )
             .expect("should begin push operation");
             operation
-                .set_push_destination(config, &destination_commit, transfer_id)
+                .set_push_destination(
+                    config,
+                    &destination_commit,
+                    transfer_id,
+                    transfer_expires_at,
+                )
                 .expect("should record push destination and lease");
 
             let mut resumed = RemoteOperationRecord::begin_or_resume(
@@ -1333,8 +1328,9 @@ mod tests {
             )
             .expect("should resume push operation");
 
-            assert_eq!(resumed.to_commit(), Some(&destination_commit));
-            assert_eq!(resumed.transfer_id(), Some(transfer_id));
+            assert_eq!(resumed.to_commit.as_ref(), Some(&destination_commit));
+            assert_eq!(resumed.transfer_id, Some(transfer_id));
+            assert_eq!(resumed.transfer_expires_at, Some(transfer_expires_at));
             resumed
                 .advance_assets_transfer_checkpoint(config, &destination_commit)
                 .expect("should record completed push assets");
