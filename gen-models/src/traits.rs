@@ -30,9 +30,7 @@ pub trait Query {
 
     fn query(conn: &Connection, query: &str, params: impl Params) -> Vec<Self::Model> {
         let mut stmt = conn.prepare(query).unwrap();
-        let rows = stmt
-            .query_map(params, |row| Ok(Self::process_row(row)))
-            .unwrap();
+        let rows = stmt.query_map(params, Self::try_process_row).unwrap();
         let mut objs = vec![];
         for row in rows {
             objs.push(row.unwrap());
@@ -46,7 +44,7 @@ pub trait Query {
         params: impl Params,
     ) -> Result<Vec<Self::Model>, QueryError> {
         let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map(params, |row| Ok(Self::process_row(row)))?;
+        let rows = stmt.query_map(params, Self::try_process_row)?;
         let mut objs = vec![];
         for row in rows {
             objs.push(row?);
@@ -56,7 +54,7 @@ pub trait Query {
 
     fn get(conn: &Connection, query: &str, params: impl Params) -> SQLResult<Self::Model> {
         let mut stmt = conn.prepare(query).unwrap();
-        stmt.query_row(params, |row| Ok(Self::process_row(row)))
+        stmt.query_row(params, Self::try_process_row)
     }
 
     fn table_name_with_history_ref(history_ref: Option<&str>) -> String {
@@ -90,7 +88,9 @@ pub trait Query {
             params.push((":history_ref", history_ref));
         }
         let mut rows = stmt.query(&params[..]).unwrap();
-        rows.next().unwrap().map(|row| Self::process_row(row))
+        rows.next()
+            .unwrap()
+            .map(|row| Self::try_process_row(row).unwrap())
     }
 
     fn query_by_ids<'a, I: ?Sized, T>(
@@ -129,9 +129,7 @@ pub trait Query {
             if let Some(history_ref) = history_ref.as_ref() {
                 params.push((":history_ref", history_ref));
             }
-            let rows = stmt
-                .query_map(&params[..], |row| Ok(Self::process_row(row)))
-                .unwrap();
+            let rows = stmt.query_map(&params[..], Self::try_process_row).unwrap();
             for row in rows {
                 results.push(row.unwrap());
             }
@@ -165,6 +163,10 @@ pub trait Query {
     }
 
     fn process_row(row: &Row) -> Self::Model;
+
+    fn try_process_row(row: &Row) -> SQLResult<Self::Model> {
+        Ok(Self::process_row(row))
+    }
 
     fn table_name() -> &'static str {
         Self::TABLE_NAME

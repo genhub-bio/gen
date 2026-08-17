@@ -862,7 +862,6 @@ mod tests {
         errors::OperationError,
         operations::{calculate_reader_checksum, commit_operation_summary},
         path::Path,
-        path_edge::PathEdge,
         sample::Sample,
         sample_lineage::SampleLineage,
         test_helpers::{create_bg, get_connection, setup_block_group, setup_gen},
@@ -912,10 +911,7 @@ mod tests {
             let _ = Annotation::get_or_create(&conn, "mreB", "genes", &accession.id, None).unwrap();
 
             let other_block_group = create_bg(&conn, "test", "test", "other");
-            let edge_ids = PathEdge::edges_for_path(&conn, &path.id, None)
-                .into_iter()
-                .map(|edge| edge.id)
-                .collect::<Vec<_>>();
+            let edge_ids = path.edge_ids.clone();
             let block_group_edges = edge_ids
                 .iter()
                 .map(|edge_id| BlockGroupEdgeData {
@@ -963,10 +959,7 @@ mod tests {
                     .unwrap();
 
             let child_block_group = create_bg(&conn, "test", "child", "chr1");
-            let edge_ids = PathEdge::edges_for_path(&conn, &parent_path.id, None)
-                .into_iter()
-                .map(|edge| edge.id)
-                .collect::<Vec<_>>();
+            let edge_ids = parent_path.edge_ids.clone();
             let block_group_edges = edge_ids
                 .iter()
                 .map(|edge_id| BlockGroupEdgeData {
@@ -1014,10 +1007,7 @@ mod tests {
                     .unwrap();
 
             let child_block_group = create_bg(&conn, "test", "child", "chr1");
-            let edge_ids = PathEdge::edges_for_path(&conn, &parent_path.id, None)
-                .into_iter()
-                .map(|edge| edge.id)
-                .collect::<Vec<_>>();
+            let edge_ids = parent_path.edge_ids.clone();
             let block_group_edges = edge_ids
                 .iter()
                 .map(|edge_id| BlockGroupEdgeData {
@@ -1056,10 +1046,7 @@ mod tests {
             annotation_name: &str,
         ) -> Annotation {
             let block_group = create_bg(conn, collection_name, sample_name, block_group_name);
-            let edge_ids = PathEdge::edges_for_path(conn, &parent_path.id, None)
-                .into_iter()
-                .map(|edge| edge.id)
-                .collect::<Vec<_>>();
+            let edge_ids = parent_path.edge_ids.clone();
             let block_group_edges = edge_ids
                 .iter()
                 .map(|edge_id| BlockGroupEdgeData {

@@ -4,7 +4,7 @@ use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_END_SEQUENCE_HASH, PATH_START_NODE_ID, PATH_START_SEQUENCE_HASH,
     Sha256Hash, traits::Capnp,
 };
-use rusqlite::{Row, params, types::Value};
+use rusqlite::{Row, ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -94,6 +94,31 @@ impl Node {
             }
             Err(e) => Err(NodeError::DatabaseError(e)),
         }
+    }
+
+    /// Inserts nodes in parameter-limit-sized batches while preserving existing IDs.
+    #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, nodes)))]
+    pub fn bulk_create(conn: &GraphConnection, nodes: &[Node]) -> Result<(), NodeError> {
+        let batch_size = traits::max_rows_per_batch(conn, 2);
+        for chunk in nodes.chunks(batch_size) {
+            let mut sql = String::from("INSERT INTO nodes (id, sequence_hash) VALUES ");
+            for row_index in 0..chunk.len() {
+                if row_index > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?, ?)");
+            }
+            sql.push_str(" ON CONFLICT(id) DO NOTHING;");
+
+            let mut parameters = Vec::<&dyn ToSql>::with_capacity(chunk.len() * 2);
+            for node in chunk {
+                parameters.push(&node.id);
+                parameters.push(&node.sequence_hash);
+            }
+            let mut statement = conn.prepare_cached(&sql)?;
+            statement.execute(rusqlite::params_from_iter(parameters))?;
+        }
+        Ok(())
     }
 
     pub fn get_sequences_by_node_ids(
@@ -187,6 +212,7 @@ mod tests {
     use capnp::message::TypedBuilder;
 
     use super::*;
+    use crate::test_helpers::get_connection;
 
     #[test]
     fn test_capnp_serialization() {
@@ -201,5 +227,39 @@ mod tests {
 
         let deserialized = Node::read_capnp(root.into_reader());
         assert_eq!(node, deserialized);
+    }
+
+    #[test]
+    fn test_bulk_create_nodes_ignores_existing_and_duplicate_ids() {
+        let conn = &get_connection(None).unwrap();
+        let sequences = [
+            Sequence::new()
+                .sequence_type("DNA")
+                .sequence("AACCTT")
+                .build(),
+            Sequence::new()
+                .sequence_type("DNA")
+                .sequence("GGCCAA")
+                .build(),
+        ];
+        Sequence::bulk_create(conn, &sequences).unwrap();
+        let existing = Node {
+            id: HashId::convert_str("bulk-node-existing"),
+            sequence_hash: sequences[0].hash,
+        };
+        let new_node = Node {
+            id: HashId::convert_str("bulk-node-new"),
+            sequence_hash: sequences[1].hash,
+        };
+
+        Node::create(conn, &existing.sequence_hash, &existing.id).unwrap();
+        Node::bulk_create(
+            conn,
+            &[existing.clone(), new_node.clone(), new_node.clone()],
+        )
+        .unwrap();
+
+        let stored = Node::query_by_ids(conn, &[existing.id, new_node.id], None);
+        assert_eq!(stored, vec![existing, new_node]);
     }
 }

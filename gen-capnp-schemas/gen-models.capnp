@@ -92,13 +92,7 @@ struct Path {
   blockGroupId @1 :List(UInt8);
   name @2 :Text;
   createdOn @3 :Int64;
-}
-
-struct PathEdge {
-  id @0 :List(UInt8);
-  pathId @1 :List(UInt8);
-  edgeId @2 :List(UInt8);
-  indexInPath @3 :Int64;
+  edgeIds @4 :List(UInt8);
 }
 
 # Accession models
@@ -290,13 +284,12 @@ struct ChangesetModels {
   edges @5 :List(Edge);
   blockGroupEdges @6 :List(BlockGroupEdge);
   paths @7 :List(Path);
-  pathEdges @8 :List(PathEdge);
-  accessions @9 :List(Accession);
-  accessionNodes @10 :List(AccessionNode);
-  annotationGroups @11 :List(AnnotationGroup);
-  annotations @12 :List(Annotation);
-  annotationGroupSamples @13 :List(AnnotationGroupSample);
-  sampleLineages @14 :List(SampleLineage);
+  accessions @8 :List(Accession);
+  accessionNodes @9 :List(AccessionNode);
+  annotationGroups @10 :List(AnnotationGroup);
+  annotations @11 :List(Annotation);
+  annotationGroupSamples @12 :List(AnnotationGroupSample);
+  sampleLineages @13 :List(SampleLineage);
 }
 
 struct DependencyModels {

@@ -1,7 +1,7 @@
+use core::fmt::Write as _;
 use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
-use indexmap::IndexSet;
 use rusqlite::{self, Row, ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 
@@ -82,10 +82,20 @@ pub struct BlockGroupEdgeData {
 
 impl BlockGroupEdgeData {
     pub fn id_hash(&self) -> HashId {
-        HashId(calculate_hash(&format!(
+        let mut buffer = String::new();
+        self.id_hash_with_buffer(&mut buffer)
+    }
+
+    /// Calculates the ID using reusable formatting storage for bulk workflows.
+    pub fn id_hash_with_buffer(&self, buffer: &mut String) -> HashId {
+        buffer.clear();
+        write!(
+            buffer,
             "{}:{}:{}:{}",
             self.block_group_id, self.edge_id, self.chromosome_index, self.phased
-        )))
+        )
+        .expect("should write block-group edge hash input to a String");
+        HashId(calculate_hash(buffer))
     }
 }
 
@@ -138,19 +148,18 @@ impl BlockGroupEdge {
         tracing::instrument(skip(conn, block_group_edges))
     )]
     pub fn bulk_create(conn: &GraphConnection, block_group_edges: &[BlockGroupEdgeData]) {
-        let unique_block_group_edges = block_group_edges
-            .iter()
-            .collect::<IndexSet<_>>()
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        if unique_block_group_edges.is_empty() {
+        if block_group_edges.is_empty() {
             return;
         }
         let batch_size = max_rows_per_batch(conn, 6);
+        let mut hash_buffer = String::new();
 
-        for chunk in unique_block_group_edges.chunks(batch_size) {
+        for chunk in block_group_edges.chunks(batch_size) {
             let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+            let block_group_edge_ids = chunk
+                .iter()
+                .map(|block_group_edge| block_group_edge.id_hash_with_buffer(&mut hash_buffer))
+                .collect::<Vec<_>>();
             let mut sql = String::from(
                 "INSERT OR IGNORE INTO block_group_edges
                  (id, block_group_id, edge_id, chromosome_index, phased, created_on) VALUES ",
@@ -162,17 +171,19 @@ impl BlockGroupEdge {
                 sql.push_str("(?, ?, ?, ?, ?, ?)");
             }
             sql.push(';');
-            let mut params = Vec::with_capacity(chunk.len() * 6);
-            for block_group_edge in chunk {
-                params.push(Value::from(block_group_edge.id_hash()));
-                params.push(Value::from(block_group_edge.block_group_id));
-                params.push(Value::from(block_group_edge.edge_id));
-                params.push(Value::from(block_group_edge.chromosome_index));
-                params.push(Value::from(block_group_edge.phased));
-                params.push(Value::from(timestamp));
+            let mut parameters = Vec::<&dyn ToSql>::with_capacity(chunk.len() * 6);
+            for (block_group_edge_id, block_group_edge) in block_group_edge_ids.iter().zip(chunk) {
+                parameters.push(block_group_edge_id);
+                parameters.push(&block_group_edge.block_group_id);
+                parameters.push(&block_group_edge.edge_id);
+                parameters.push(&block_group_edge.chromosome_index);
+                parameters.push(&block_group_edge.phased);
+                parameters.push(&timestamp);
             }
-            let mut stmt = conn.prepare_cached(&sql).unwrap();
-            stmt.execute(rusqlite::params_from_iter(params)).unwrap();
+            let mut statement = conn.prepare_cached(&sql).unwrap();
+            statement
+                .execute(rusqlite::params_from_iter(parameters))
+                .unwrap();
         }
     }
 
@@ -307,8 +318,15 @@ mod tests {
             phased: 12,
             ..block_group_edge.clone()
         };
+        let expected_id = HashId(calculate_hash(&format!(
+            "{}:{}:{}:{}",
+            block_group_edge.block_group_id,
+            block_group_edge.edge_id,
+            block_group_edge.chromosome_index,
+            block_group_edge.phased
+        )));
 
-        assert_eq!(block_group_edge.id_hash(), block_group_edge.id_hash());
+        assert_eq!(block_group_edge.id_hash(), expected_id);
         assert_ne!(
             block_group_edge.id_hash(),
             changed_block_group_edge.id_hash()

@@ -4,7 +4,6 @@ use gen_models::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::{Edge, EdgeData},
-    path_edge::PathEdge,
     traits::Query,
 };
 use thiserror::Error;
@@ -79,7 +78,9 @@ pub fn load_block_group_chunk(conn: &GraphConnection, block_group_id: HashId) ->
 
     let path = BlockGroup::get_current_path(conn, &block_group_id, None)
         .expect("Block group chunk requires a current path");
-    let path_edges = PathEdge::edges_for_path(conn, &path.id, None);
+    let path_edges = path
+        .edges(conn, None)
+        .expect("block group chunk path should contain valid edges");
 
     let start_edge = path_edges[0].clone();
     let path_start_point = Some(NodePoint {

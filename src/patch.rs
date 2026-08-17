@@ -31,7 +31,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, result::ZipError, write::Sim
 
 const MANIFEST_ENTRY: &str = "manifest.json";
 const PATCH_FORMAT_VERSION: u32 = 2;
-const BOOTSTRAP_TABLES: [&str; 19] = [
+const BOOTSTRAP_TABLES: [&str; 18] = [
     "accession_nodes",
     "accessions",
     "annotation_group_samples",
@@ -45,7 +45,6 @@ const BOOTSTRAP_TABLES: [&str; 19] = [
     "gen_operation_assets",
     "gen_operation_log",
     "nodes",
-    "path_edges",
     "paths",
     "reference_aliases",
     "sample_lineage",
@@ -255,7 +254,6 @@ fn is_schema_bootstrap_working_set(
             (SELECT COUNT(*) FROM gen_asset_refs) + \
             (SELECT COUNT(*) FROM gen_operation_assets) + \
             (SELECT COUNT(*) FROM gen_operation_log) + \
-            (SELECT COUNT(*) FROM path_edges) + \
             (SELECT COUNT(*) FROM paths) + \
             (SELECT COUNT(*) FROM sample_lineage) + \
             (SELECT COUNT(*) FROM samples)",
@@ -689,13 +687,15 @@ mod tests {
         collection::Collection,
         history::dolt::DoltHistoryStore,
         operations::{OperationFile, add_files_operation, commit_operation_summary},
+        path::Path,
         traits::Query,
     };
     use tempfile::Builder;
 
     use super::*;
     use crate::{
-        imports::fasta::import_fasta, test_helpers::setup_gen_on_disk,
+        imports::{fasta::import_fasta, gfa::import_gfa},
+        test_helpers::setup_gen_on_disk,
         views::annotation_files::load_annotation_file_entries,
     };
 
@@ -1094,6 +1094,38 @@ mod tests {
         let annotation_entries = load_annotation_file_entries(target_context.graph().conn(), None);
         assert_eq!(annotation_entries.len(), 1);
         assert_eq!(annotation_entries[0].display_name, "fixture-track");
+    }
+
+    #[test]
+    fn test_patch_round_trip_preserves_path_edge_id_blob_order() {
+        let source_context = setup_gen_on_disk();
+        let source_graph = source_context.graph().conn();
+        let gfa_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/gfa/repeated_path_edge.gfa");
+        let operation_summary = import_gfa(
+            &source_context,
+            &gfa_path,
+            "path-blob-patch",
+            "patch-sample",
+        )
+        .unwrap();
+        let operation = commit_operation_summary(&source_context, &operation_summary).unwrap();
+        let mut patch_archive = Cursor::new(Vec::new());
+        create_patch(&source_context, &[operation], &mut patch_archive).unwrap();
+
+        patch_archive.set_position(0);
+        let mut target_context = setup_gen_on_disk();
+        apply_patch_archive(&mut target_context, &mut patch_archive).unwrap();
+
+        let mut source_paths = Path::all(source_graph);
+        source_paths.sort_by_key(|path| path.id);
+        let mut target_paths = Path::all(target_context.graph().conn());
+        target_paths.sort_by_key(|path| path.id);
+
+        assert!(!source_paths.is_empty());
+        assert_eq!(target_paths, source_paths);
+        assert_eq!(target_paths[0].edge_ids.len(), 5);
+        assert_eq!(target_paths[0].edge_ids[1], target_paths[0].edge_ids[3]);
     }
 
     #[test]

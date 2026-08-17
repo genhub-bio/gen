@@ -34,7 +34,6 @@ use crate::{
     },
     gen_models_capnp::block_group,
     path::{Path, PathData},
-    path_edge::PathEdge,
     region::{ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     traits::*,
@@ -403,11 +402,7 @@ impl BlockGroup {
         );
 
         for path in &existing_paths {
-            let edge_ids = PathEdge::edges_for_path(conn, &path.id, None)
-                .into_iter()
-                .map(|edge| edge.id)
-                .collect::<Vec<_>>();
-            Path::create(conn, &path.name, target_block_group_id, &edge_ids)?;
+            Path::create(conn, &path.name, target_block_group_id, &path.edge_ids)?;
         }
 
         Ok(())

@@ -1,3 +1,4 @@
+use core::fmt::Write as _;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -101,7 +102,15 @@ pub struct EdgeData {
 
 impl EdgeData {
     pub fn id_hash(&self) -> HashId {
-        HashId(calculate_hash(&format!(
+        let mut buffer = String::new();
+        self.id_hash_with_buffer(&mut buffer)
+    }
+
+    /// Calculates the ID using reusable formatting storage for bulk workflows.
+    pub fn id_hash_with_buffer(&self, buffer: &mut String) -> HashId {
+        buffer.clear();
+        write!(
+            buffer,
             "{}:{}:{}:{}:{}:{}",
             self.source_node_id,
             self.source_coordinate,
@@ -109,7 +118,9 @@ impl EdgeData {
             self.target_node_id,
             self.target_coordinate,
             self.target_strand
-        )))
+        )
+        .expect("should write edge hash input to a String");
+        HashId(calculate_hash(buffer))
     }
 }
 
@@ -214,6 +225,33 @@ pub enum EdgeError {
 }
 
 impl Edge {
+    fn insert_edge_rows(conn: &GraphConnection, rows: &[(&HashId, &EdgeData)]) {
+        let mut sql = String::from(
+            "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES ",
+        );
+        for row_index in 0..rows.len() {
+            if row_index > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
+        }
+        sql.push_str(" ON CONFLICT(id) DO NOTHING;");
+        let mut parameters = Vec::<&dyn ToSql>::with_capacity(rows.len() * 7);
+        for (edge_id, edge) in rows {
+            parameters.push(*edge_id);
+            parameters.push(&edge.source_node_id);
+            parameters.push(&edge.source_coordinate);
+            parameters.push(&edge.source_strand);
+            parameters.push(&edge.target_node_id);
+            parameters.push(&edge.target_coordinate);
+            parameters.push(&edge.target_strand);
+        }
+        let mut statement = conn.prepare_cached(&sql).unwrap();
+        statement
+            .execute(rusqlite::params_from_iter(parameters))
+            .unwrap();
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
@@ -288,47 +326,45 @@ impl Edge {
 
     #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, edges)))]
     pub fn bulk_create(conn: &GraphConnection, edges: &[EdgeData]) -> Vec<HashId> {
-        let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
+        let mut hash_buffer = String::new();
+        let edge_ids = edges
+            .iter()
+            .map(|edge| edge.id_hash_with_buffer(&mut hash_buffer))
+            .collect::<Vec<_>>();
         let batch_size = max_rows_per_batch(conn, 7);
 
-        let query = Edge::query_by_ids(conn, &edge_ids, None);
-        let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
-
-        let mut edges_to_insert = IndexSet::new();
-        for (index, edge) in edge_ids.iter().enumerate() {
-            if !existing_edges.contains(edge) {
-                edges_to_insert.insert(&edges[index]);
-            }
-        }
+        let edges_to_insert = edge_ids
+            .iter()
+            .copied()
+            .zip(edges.iter().copied())
+            .collect::<IndexSet<_>>();
 
         for chunk in &edges_to_insert.iter().chunks(batch_size) {
-            let chunk = chunk.collect::<Vec<_>>();
-            let mut sql = String::from(
-                "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES ",
-            );
-            for row_index in 0..chunk.len() {
-                if row_index > 0 {
-                    sql.push(',');
-                }
-                sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
-            }
-            let mut params = Vec::with_capacity(chunk.len() * 7);
-            for edge in chunk {
-                params.push(Value::from(edge.id_hash()));
-                params.push(Value::from(edge.source_node_id));
-                params.push(Value::from(edge.source_coordinate));
-                params.push(Value::from(edge.source_strand));
-                params.push(Value::from(edge.target_node_id));
-                params.push(Value::from(edge.target_coordinate));
-                params.push(Value::from(edge.target_strand));
-            }
-            sql.push(';');
-            let mut statement = conn.prepare_cached(&sql).unwrap();
-            statement
-                .execute(rusqlite::params_from_iter(params))
-                .unwrap();
+            let rows = chunk
+                .map(|(edge_id, edge)| (edge_id, edge))
+                .collect::<Vec<_>>();
+            Self::insert_edge_rows(conn, &rows);
         }
         edge_ids
+    }
+
+    /// Inserts unique edges whose deterministic IDs were already calculated by a streaming caller.
+    #[cfg_attr(
+        feature = "profiling",
+        tracing::instrument(skip(conn, edge_ids, edges))
+    )]
+    pub fn bulk_create_with_ids(conn: &GraphConnection, edge_ids: &[HashId], edges: &[EdgeData]) {
+        assert_eq!(
+            edge_ids.len(),
+            edges.len(),
+            "edge IDs and edge records should have equal lengths"
+        );
+        let batch_size = max_rows_per_batch(conn, 7);
+        for (edge_id_chunk, edge_chunk) in edge_ids.chunks(batch_size).zip(edges.chunks(batch_size))
+        {
+            let rows = edge_id_chunk.iter().zip(edge_chunk).collect::<Vec<_>>();
+            Self::insert_edge_rows(conn, &rows);
+        }
     }
 
     pub fn to_data(edge: Edge) -> EdgeData {
@@ -1238,9 +1274,11 @@ mod tests {
             target_strand: Strand::Forward,
         };
 
-        let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
-        assert_eq!(edge_ids.len(), 3);
-        let edges = Edge::query_by_ids(conn, &edge_ids, None);
+        let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge1, edge3]);
+        assert_eq!(edge_ids.len(), 4);
+        assert_eq!(edge_ids[0], edge_ids[2]);
+        let unique_edge_ids = [edge_ids[0], edge_ids[1], edge_ids[3]];
+        let edges = Edge::query_by_ids(conn, &unique_edge_ids, None);
         assert_eq!(edges.len(), 3);
 
         let edges_by_source_node_id = edges
@@ -1260,6 +1298,25 @@ mod tests {
         assert_eq!(edge_result3.source_coordinate, 4);
         assert_eq!(edge_result3.target_node_id, PATH_END_NODE_ID);
         assert_eq!(edge_result3.target_coordinate, -1);
+    }
+
+    #[test]
+    fn test_bulk_create_with_ids_uses_precomputed_ids() {
+        let conn = &mut get_connection(None).unwrap();
+        let edge = EdgeData {
+            source_node_id: PATH_START_NODE_ID,
+            source_coordinate: 0,
+            source_strand: Strand::Forward,
+            target_node_id: PATH_END_NODE_ID,
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+        let edge_id = edge.id_hash();
+
+        Edge::bulk_create_with_ids(conn, &[edge_id], &[edge]);
+
+        let created_edge = Edge::get_by_id(conn, &edge_id, None).unwrap();
+        assert_eq!(EdgeData::from(&created_edge), edge);
     }
 
     #[test]
@@ -2033,6 +2090,15 @@ mod tests {
             target_coordinate: 67_890,
             target_strand: Strand::ImportantButUnknown,
         };
+        let expected_id = HashId(calculate_hash(&format!(
+            "{}:{}:{}:{}:{}:{}",
+            edge.source_node_id,
+            edge.source_coordinate,
+            edge.source_strand,
+            edge.target_node_id,
+            edge.target_coordinate,
+            edge.target_strand
+        )));
 
         let created_edge = Edge::create(
             conn,
@@ -2045,7 +2111,8 @@ mod tests {
         )
         .expect("should create edge with xxhash-derived id");
 
-        assert_eq!(edge.id_hash(), created_edge.id);
+        assert_eq!(edge.id_hash(), expected_id);
+        assert_eq!(created_edge.id, expected_id);
     }
 
     #[test]

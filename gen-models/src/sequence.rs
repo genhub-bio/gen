@@ -7,7 +7,7 @@ use noodles::{
     core::Region,
     fasta::{self, fai, io::indexed_reader::Builder as IndexBuilder},
 };
-use rusqlite::{Row, params};
+use rusqlite::{Row, ToSql, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -443,6 +443,46 @@ impl Sequence {
         NewSequence::new()
     }
 
+    /// Returns the inline sequence payload stored by this model.
+    pub fn stored_sequence(&self) -> &str {
+        &self.sequence
+    }
+
+    /// Inserts already-built sequences in parameter-limit-sized batches.
+    #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, sequences)))]
+    pub fn bulk_create(
+        conn: &GraphConnection,
+        sequences: &[Sequence],
+    ) -> Result<(), SequenceError> {
+        let batch_size = max_rows_per_batch(conn, 6);
+        for chunk in sequences.chunks(batch_size) {
+            let mut sql = String::from(
+                "INSERT INTO sequences
+                 (hash, sequence_type, sequence, name, file_path, length) VALUES ",
+            );
+            for row_index in 0..chunk.len() {
+                if row_index > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?, ?, ?, ?, ?, ?)");
+            }
+            sql.push_str(" ON CONFLICT(hash) DO NOTHING;");
+
+            let mut parameters = Vec::<&dyn ToSql>::with_capacity(chunk.len() * 6);
+            for sequence in chunk {
+                parameters.push(&sequence.hash);
+                parameters.push(&sequence.sequence_type);
+                parameters.push(&sequence.sequence);
+                parameters.push(&sequence.name);
+                parameters.push(&sequence.file_path);
+                parameters.push(&sequence.length);
+            }
+            let mut statement = conn.prepare_cached(&sql)?;
+            statement.execute(rusqlite::params_from_iter(parameters))?;
+        }
+        Ok(())
+    }
+
     fn is_circular(&self) -> bool {
         self.sequence_type
             .split_whitespace()
@@ -581,6 +621,29 @@ mod tests {
         assert_eq!(&sequence.sequence, "AACCTT");
         assert_eq!(sequence.sequence_type, "DNA");
         assert!(!sequence.external_sequence);
+    }
+
+    #[test]
+    fn test_bulk_create_sequences_ignores_existing_and_duplicate_hashes() {
+        let conn = &get_connection(None).unwrap();
+        let existing = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AACCTT")
+            .build();
+        let new_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("GGCCAA")
+            .build();
+
+        Sequence::bulk_create(conn, std::slice::from_ref(&existing)).unwrap();
+        Sequence::bulk_create(
+            conn,
+            &[existing.clone(), new_sequence.clone(), new_sequence.clone()],
+        )
+        .unwrap();
+
+        let stored = Sequence::query_by_ids(conn, &[existing.hash, new_sequence.hash], None);
+        assert_eq!(stored, vec![existing, new_sequence]);
     }
 
     #[test]

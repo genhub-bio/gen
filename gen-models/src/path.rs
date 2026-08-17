@@ -1,16 +1,22 @@
 use core::ops::Range as RustRange;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
-    calculate_hash, is_end_node, is_start_node,
+    HASH_ID_SIZE, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock,
+    Strand, calculate_hash, is_end_node, is_start_node,
     range::{Range, RangeMapping},
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
 use itertools::Itertools;
-use rusqlite::{Row, params, types::Value as SQLValue};
+use rusqlite::{
+    Row, params,
+    types::{Type, Value as SQLValue},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -18,10 +24,9 @@ use crate::{
     block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     edge::Edge,
-    errors::{PathEdgeError, QueryError},
+    errors::QueryError,
     gen_models_capnp::path as PathCapnp,
     node::Node,
-    path_edge::PathEdge,
     sequence::{Sequence, SequenceError},
     traits::*,
 };
@@ -32,6 +37,7 @@ pub struct Path {
     pub block_group_id: HashId,
     pub name: String,
     pub created_on: i64,
+    pub edge_ids: Vec<HashId>,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -42,8 +48,10 @@ pub enum PathError {
     Missing(String),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
-    #[error("Problem creating path edges: {0}")]
-    PathEdges(#[from] PathEdgeError),
+    #[error(
+        "Malformed path edge-ID BLOB length {actual}; expected a multiple of {hash_id_size} bytes"
+    )]
+    InvalidEdgeBlobLength { actual: usize, hash_id_size: usize },
     #[error("Problem querying for path: {0}")]
     Query(#[from] QueryError),
     #[error("Problem loading sequence for path: {0}")]
@@ -59,6 +67,8 @@ impl<'a> Capnp<'a> for Path {
         builder.set_block_group_id(&self.block_group_id.0).unwrap();
         builder.set_name(&self.name);
         builder.set_created_on(self.created_on);
+        let encoded_edge_ids = encode_edge_ids(&self.edge_ids);
+        builder.set_edge_ids(encoded_edge_ids.as_slice()).unwrap();
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -78,14 +88,45 @@ impl<'a> Capnp<'a> for Path {
             .unwrap();
         let name = reader.get_name().unwrap().to_string().unwrap();
         let created_on = reader.get_created_on();
+        let edge_ids = decode_edge_ids(reader.get_edge_ids().unwrap().as_slice().unwrap())
+            .expect("should contain a valid path edge-ID array");
 
         Path {
             id,
             block_group_id,
             name,
             created_on,
+            edge_ids,
         }
     }
+}
+
+fn encode_edge_ids(edge_ids: &[HashId]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(edge_ids.len() * HASH_ID_SIZE);
+    for edge_id in edge_ids {
+        encoded.extend_from_slice(&edge_id.0);
+    }
+    encoded
+}
+
+fn decode_edge_ids(encoded: &[u8]) -> Result<Vec<HashId>, PathError> {
+    if !encoded.len().is_multiple_of(HASH_ID_SIZE) {
+        return Err(PathError::InvalidEdgeBlobLength {
+            actual: encoded.len(),
+            hash_id_size: HASH_ID_SIZE,
+        });
+    }
+
+    Ok(encoded
+        .chunks_exact(HASH_ID_SIZE)
+        .map(|chunk| {
+            HashId(
+                chunk
+                    .try_into()
+                    .expect("should contain one complete edge identifier"),
+            )
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -136,28 +177,30 @@ impl Path {
         tracing::instrument(skip(conn, edge_ids, block_group_id))
     )]
     pub fn validate_edges(conn: &GraphConnection, edge_ids: &[HashId], block_group_id: &HashId) {
-        let edge_id_set = edge_ids.iter().copied().collect::<HashSet<HashId>>();
-
-        // No duplicate edges allowed
-        if edge_id_set.len() != edge_ids.len() {
-            println!("Duplicate edge IDs detected in path creation");
+        if edge_ids.is_empty() {
+            return;
         }
 
-        // All path edges must be in the path's block group
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None);
-        let bg_edge_ids = augmented_edges
+        // Only load the canonical edges requested by this path. GFA imports can have many paths
+        // over one large block group, so scanning that whole block group for every path makes path
+        // validation quadratic in practice.
+        let requested_edge_ids = edge_ids.iter().copied().collect::<HashSet<_>>();
+        let unique_edge_ids = requested_edge_ids.iter().copied().collect::<Vec<_>>();
+        let augmented_edges =
+            BlockGroupEdge::specific_edges_for_block_group(conn, block_group_id, &unique_edge_ids);
+        let block_group_edge_ids = augmented_edges
             .iter()
             .map(|augmented_edge| augmented_edge.edge.id)
             .collect::<HashSet<_>>();
 
         assert!(
-            edge_id_set.is_subset(&bg_edge_ids),
+            requested_edge_ids.is_subset(&block_group_edge_ids),
             "Not all edges are in the block group ({block_group_id})"
         );
 
         let edges_by_id = augmented_edges
             .iter()
-            .map(|augmented_edge| (&augmented_edge.edge.id, augmented_edge.edge.clone()))
+            .map(|augmented_edge| (augmented_edge.edge.id, &augmented_edge.edge))
             .collect::<HashMap<_, _>>();
 
         // Two consecutive edges must share a node
@@ -203,62 +246,122 @@ impl Path {
         edge_ids: &[HashId],
     ) -> Result<Path, PathError> {
         Path::validate_edges(conn, edge_ids, block_group_id);
+        Self::create_unchecked(conn, name, block_group_id, edge_ids)
+    }
+
+    /// Creates a path whose ordered edges have already been validated and persisted by the caller.
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, name, block_group_id, edge_ids))
+    )]
+    pub fn create_unchecked(
+        conn: &GraphConnection,
+        name: &str,
+        block_group_id: &HashId,
+        edge_ids: &[HashId],
+    ) -> Result<Path, PathError> {
         let hash = HashId(calculate_hash(&format!("{block_group_id}:{name}")));
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-        // TODO: Should we do something if edge_ids don't match here? Suppose we have a path
-        // for a block group with edges 1,2,3. And then the same path is added again with edges
-        // 5,6,7, should this be an error? Should we just keep adding edges?
-        let query =
-            "INSERT INTO paths (id, name, block_group_id, created_on) VALUES (?1, ?2, ?3, ?4);";
+        let encoded_edge_ids = encode_edge_ids(edge_ids);
+        let query = "INSERT INTO paths (id, name, block_group_id, created_on, edge_ids) \
+                     VALUES (?1, ?2, ?3, ?4, ?5);";
         let mut stmt = conn.prepare(query).unwrap();
 
-        let path = match stmt.execute(params![hash, name, block_group_id, timestamp]) {
+        let insert_result = stmt.execute(params![
+            hash,
+            name,
+            block_group_id,
+            timestamp,
+            encoded_edge_ids
+        ]);
+        drop(stmt);
+        drop(encoded_edge_ids);
+        let path = match insert_result {
             Ok(_) => Path {
                 id: hash,
                 name: name.to_string(),
                 block_group_id: *block_group_id,
                 created_on: timestamp,
+                edge_ids: edge_ids.to_vec(),
             },
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                Path {
-                    id: hash,
-                    name: name.to_string(),
-                    block_group_id: *block_group_id,
-                    created_on: timestamp,
-                }
+                Path::get(
+                    conn,
+                    "SELECT paths.* FROM paths WHERE id = ?1",
+                    params![hash],
+                )?
             }
             Err(e) => {
                 return Err(PathError::DatabaseError(e));
             }
         };
 
-        let _ = PathEdge::bulk_create(conn, &path.id, edge_ids);
-
         Ok(path)
     }
 
-    pub fn delete(conn: &GraphConnection, name: &str, block_group_id: &HashId) {
-        let path = Path::get(
-            conn,
-            "select * from paths where name = ?1 and block_group_id = ?2",
-            params![name, block_group_id],
-        )
-        .unwrap();
-        PathEdge::delete(conn, &path.id);
+    /// Creates a path from concatenated edge-ID bytes prepared by a trusted streaming caller.
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, name, block_group_id, encoded_edge_ids))
+    )]
+    pub fn create_from_encoded_edge_ids_unchecked(
+        conn: &GraphConnection,
+        name: &str,
+        block_group_id: &HashId,
+        encoded_edge_ids: &[u8],
+    ) -> Result<(), PathError> {
+        if !encoded_edge_ids.len().is_multiple_of(HASH_ID_SIZE) {
+            return Err(PathError::InvalidEdgeBlobLength {
+                actual: encoded_edge_ids.len(),
+                hash_id_size: HASH_ID_SIZE,
+            });
+        }
+        let hash = HashId(calculate_hash(&format!("{block_group_id}:{name}")));
+        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        let query = "INSERT INTO paths (id, name, block_group_id, created_on, edge_ids) \
+                     VALUES (?1, ?2, ?3, ?4, ?5);";
+        match conn.execute(
+            query,
+            params![hash, name, block_group_id, timestamp, encoded_edge_ids],
+        ) {
+            Ok(_) => Ok(()),
+            Err(database_error @ rusqlite::Error::SqliteFailure(sqlite_error, _))
+                if sqlite_error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                let existing_path = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM paths WHERE id = ?1)",
+                    params![hash],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if existing_path {
+                    Ok(())
+                } else {
+                    Err(PathError::DatabaseError(database_error))
+                }
+            }
+            Err(error) => Err(PathError::DatabaseError(error)),
+        }
+    }
 
+    pub fn delete(conn: &GraphConnection, name: &str, block_group_id: &HashId) {
         let query = "DELETE FROM paths where name = ?1 AND block_group_id = ?2;";
         conn.execute(query, params![name.to_string(), block_group_id])
             .unwrap();
     }
 
     pub fn get_by_id(conn: &GraphConnection, path_id: &HashId) -> Path {
-        Path::get(conn, "select * from paths where id = ?1;", params![path_id]).unwrap()
+        Path::get(
+            conn,
+            "SELECT paths.* FROM paths WHERE id = ?1;",
+            params![path_id],
+        )
+        .unwrap()
     }
 
     pub fn query_for_collection(conn: &GraphConnection, collection_name: &str) -> Vec<Path> {
-        let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1";
+        let query = "SELECT paths.* FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1";
         Path::query(conn, query, params![collection_name])
     }
 
@@ -267,8 +370,100 @@ impl Path {
         collection_name: &str,
         sample_name: &str,
     ) -> Vec<Path> {
-        let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
+        let query = "SELECT paths.* FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
         Path::query(conn, query, params![collection_name, sample_name])
+    }
+
+    fn edges_for_ids(
+        conn: &GraphConnection,
+        edge_ids: &[HashId],
+        history_ref: Option<&str>,
+    ) -> Result<Vec<Edge>, PathError> {
+        let edges = Edge::query_by_ids(conn, edge_ids, history_ref);
+        if edges.len() != edge_ids.len() {
+            return Err(PathError::Missing(format!(
+                "Expected {} edges while loading a path, found {}",
+                edge_ids.len(),
+                edges.len()
+            )));
+        }
+        Ok(edges)
+    }
+
+    pub fn edges(
+        &self,
+        conn: &GraphConnection,
+        history_ref: Option<&str>,
+    ) -> Result<Vec<Edge>, PathError> {
+        if let Some(history_ref) = history_ref {
+            return Self::edges_for_path(conn, &self.id, Some(history_ref));
+        }
+        Self::edges_for_ids(conn, &self.edge_ids, None)
+    }
+
+    pub fn edges_for_path(
+        conn: &GraphConnection,
+        path_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Result<Vec<Edge>, PathError> {
+        let table_name = Self::table_name_with_history_ref(history_ref);
+        let query = format!("SELECT paths.* FROM {table_name} paths WHERE id = :path_id");
+        let mut query_params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":path_id", path_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        let path = Self::try_query(conn, &query, &query_params[..])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| PathError::Missing(format!("Missing path {path_id}")))?;
+        Self::edges_for_ids(conn, &path.edge_ids, history_ref)
+    }
+
+    pub fn edges_for_paths(
+        conn: &GraphConnection,
+        path_ids: Vec<HashId>,
+    ) -> Result<HashMap<HashId, Vec<Edge>>, PathError> {
+        if path_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let path_id_values = Rc::new(
+            path_ids
+                .iter()
+                .copied()
+                .map(SQLValue::from)
+                .collect::<Vec<_>>(),
+        );
+        let paths = Self::try_query(
+            conn,
+            "WITH requested AS (
+                 SELECT value, rowid AS position FROM rarray(?1)
+             )
+             SELECT paths.* FROM paths
+             JOIN requested ON paths.id = requested.value
+             ORDER BY requested.position",
+            params![path_id_values],
+        )?;
+        if paths.len() != path_ids.len() {
+            return Err(PathError::Missing(format!(
+                "Expected {} paths, found {}",
+                path_ids.len(),
+                paths.len()
+            )));
+        }
+
+        let edge_ids = paths
+            .iter()
+            .flat_map(|path| path.edge_ids.iter().copied())
+            .collect::<Vec<_>>();
+        let edges = Self::edges_for_ids(conn, &edge_ids, None)?;
+        let mut edge_offset = 0;
+        let mut edges_by_path_id = HashMap::new();
+        for path in paths {
+            let edge_end = edge_offset + path.edge_ids.len();
+            edges_by_path_id.insert(path.id, edges[edge_offset..edge_end].to_vec());
+            edge_offset = edge_end;
+        }
+        Ok(edges_by_path_id)
     }
 
     pub fn sequence(
@@ -335,7 +530,7 @@ impl Path {
         conn: &GraphConnection,
         history_ref: Option<&str>,
     ) -> Result<Vec<PathBlock>, PathError> {
-        let edges = PathEdge::edges_for_path(conn, &self.id, history_ref);
+        let edges = self.edges(conn, history_ref)?;
 
         let mut sequence_node_ids = HashSet::new();
         for edge in &edges {
@@ -660,7 +855,7 @@ impl Path {
         let block_with_start = tree.query_point(path_start).next().unwrap().value;
         let block_with_end = tree.query_point(path_end).next().unwrap().value;
 
-        let edges = PathEdge::edges_for_path(conn, &self.id, None);
+        let edges = self.edges(conn, None)?;
         let edges_by_source = edges
             .iter()
             .map(|edge| ((edge.source_node_id, edge.source_coordinate), edge))
@@ -754,7 +949,7 @@ impl Path {
 
         let deletion_edge = deletion_edge_result[0].clone();
 
-        let edges = PathEdge::edges_for_path(conn, &self.id, None);
+        let edges = self.edges(conn, None)?;
         let edges_by_source = edges
             .iter()
             .map(|edge| ((edge.source_node_id, edge.source_coordinate), edge))
@@ -908,7 +1103,7 @@ impl RegionResolver for Path {
             .map_err(PathError::DatabaseError)?;
         let matches = stmt
             .query_map(params![collection_name, sample_name, region.name], |row| {
-                Ok((Self::process_row(row), row.get::<_, bool>(4)?))
+                Ok((Self::try_process_row(row)?, row.get::<_, bool>(5)?))
             })
             .map_err(PathError::DatabaseError)?
             .collect::<Result<Vec<_>, _>>()
@@ -940,12 +1135,21 @@ impl Query for Path {
     const TABLE_NAME: &'static str = "paths";
 
     fn process_row(row: &Row) -> Self::Model {
-        Path {
-            id: row.get(0).unwrap(),
-            block_group_id: row.get(1).unwrap(),
-            name: row.get(2).unwrap(),
-            created_on: row.get(3).unwrap(),
-        }
+        Self::try_process_row(row).expect("should decode a valid path row")
+    }
+
+    fn try_process_row(row: &Row) -> rusqlite::Result<Self::Model> {
+        let encoded_edge_ids = row.get::<_, Vec<u8>>(4)?;
+        let edge_ids = decode_edge_ids(&encoded_edge_ids).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, Type::Blob, Box::new(error))
+        })?;
+        Ok(Path {
+            id: row.get(0)?,
+            block_group_id: row.get(1)?,
+            name: row.get(2)?,
+            created_on: row.get(3)?,
+            edge_ids,
+        })
     }
 }
 
@@ -962,6 +1166,7 @@ mod tests {
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         edge::Edge,
+        history::dolt::commit_all,
         sample::{NewSample, Sample},
         test_helpers::{create_bg, get_connection},
     };
@@ -985,6 +1190,302 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn create_repeating_path_edges(
+        conn: &GraphConnection,
+    ) -> (BlockGroup, Vec<HashId>, Vec<HashId>) {
+        Collection::create(conn, "blob storage").unwrap();
+        Sample::get_or_create(
+            conn,
+            NewSample {
+                name: "blob-sample",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let block_group = BlockGroup::create(
+            conn,
+            NewBlockGroup {
+                collection_name: "blob storage",
+                sample_name: "blob-sample",
+                name: "cycle",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let sequence_a = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("A")
+            .save(conn)
+            .unwrap();
+        let sequence_c = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("C")
+            .save(conn)
+            .unwrap();
+        let node_a =
+            Node::create(conn, &sequence_a.hash, &HashId::convert_str("blob-node-a")).unwrap();
+        let node_c =
+            Node::create(conn, &sequence_c.hash, &HashId::convert_str("blob-node-c")).unwrap();
+        let start_to_a = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            node_a,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let a_to_c =
+            Edge::create(conn, node_a, 1, Strand::Forward, node_c, 0, Strand::Forward).unwrap();
+        let c_to_a =
+            Edge::create(conn, node_c, 1, Strand::Forward, node_a, 0, Strand::Forward).unwrap();
+        let c_to_end = Edge::create(
+            conn,
+            node_c,
+            1,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let block_group_edges = [start_to_a.id, a_to_c.id, c_to_a.id, c_to_end.id]
+            .into_iter()
+            .map(|edge_id| BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(conn, &block_group_edges);
+
+        let repeated = vec![start_to_a.id, a_to_c.id, c_to_a.id, a_to_c.id, c_to_end.id];
+        let short = vec![start_to_a.id, a_to_c.id, c_to_end.id];
+        (block_group, repeated, short)
+    }
+
+    #[test]
+    fn test_empty_edge_id_array_encoding_and_decoding() {
+        let encoded = encode_edge_ids(&[]);
+
+        assert!(encoded.is_empty());
+        assert_eq!(decode_edge_ids(&encoded).unwrap(), Vec::<HashId>::new());
+    }
+
+    #[test]
+    fn test_ordered_edge_id_array_round_trip() {
+        let edge_ids = vec![HashId::pad_str(3), HashId::pad_str(1), HashId::pad_str(2)];
+
+        let encoded = encode_edge_ids(&edge_ids);
+
+        assert_eq!(encoded.len(), edge_ids.len() * HASH_ID_SIZE);
+        assert_eq!(decode_edge_ids(&encoded).unwrap(), edge_ids);
+    }
+
+    #[test]
+    fn test_create_from_encoded_edge_ids_preserves_order_without_decoding_input() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test collection").unwrap();
+        let block_group = create_test_block_group(conn);
+        let edge_ids = vec![HashId::pad_str(3), HashId::pad_str(1), HashId::pad_str(3)];
+        let encoded_edge_ids = encode_edge_ids(&edge_ids);
+
+        Path::create_from_encoded_edge_ids_unchecked(
+            conn,
+            "encoded",
+            &block_group.id,
+            &encoded_edge_ids,
+        )
+        .unwrap();
+        Path::create_from_encoded_edge_ids_unchecked(
+            conn,
+            "encoded",
+            &block_group.id,
+            &encoded_edge_ids,
+        )
+        .unwrap();
+
+        let path_id = HashId(calculate_hash(&format!("{}:encoded", block_group.id)));
+        assert_eq!(Path::get_by_id(conn, &path_id).edge_ids, edge_ids);
+    }
+
+    #[test]
+    fn test_duplicate_edge_ids_preserved_at_distinct_positions() {
+        let repeated = HashId::pad_str(42);
+        let edge_ids = vec![HashId::pad_str(1), repeated, HashId::pad_str(2), repeated];
+
+        let decoded = decode_edge_ids(&encode_edge_ids(&edge_ids)).unwrap();
+
+        assert_eq!(decoded, edge_ids);
+        assert_eq!(decoded[1], decoded[3]);
+    }
+
+    #[test]
+    fn test_malformed_edge_id_blob_is_rejected() {
+        let error = decode_edge_ids(&[0; HASH_ID_SIZE + 1]).unwrap_err();
+        assert_eq!(
+            error,
+            PathError::InvalidEdgeBlobLength {
+                actual: HASH_ID_SIZE + 1,
+                hash_id_size: HASH_ID_SIZE,
+            }
+        );
+
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test collection").unwrap();
+        let block_group = create_test_block_group(conn);
+        conn.execute(
+            "INSERT INTO paths (id, block_group_id, name, created_on, edge_ids)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                HashId::convert_str("malformed-path"),
+                block_group.id,
+                "malformed",
+                1_i64,
+                vec![0_u8; HASH_ID_SIZE + 1]
+            ],
+        )
+        .unwrap();
+
+        let query_error = Path::try_query(
+            conn,
+            "SELECT paths.* FROM paths WHERE name = 'malformed'",
+            [],
+        )
+        .unwrap_err();
+        let QueryError::DatabaseError(rusqlite::Error::FromSqlConversionFailure(
+            column,
+            Type::Blob,
+            source,
+        )) = query_error
+        else {
+            panic!("expected malformed path BLOB conversion error");
+        };
+        assert_eq!(column, 4);
+        assert_eq!(
+            source.downcast_ref::<PathError>(),
+            Some(&PathError::InvalidEdgeBlobLength {
+                actual: HASH_ID_SIZE + 1,
+                hash_id_size: HASH_ID_SIZE,
+            })
+        );
+    }
+
+    #[test]
+    fn test_path_create_reconstructs_ordered_repeated_edges_and_sequence() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group, repeated, _) = create_repeating_path_edges(conn);
+
+        let created = Path::create(conn, "repeated", &block_group.id, &repeated).unwrap();
+        let loaded = Path::get_by_id(conn, &created.id);
+        let loaded_edge_ids = loaded
+            .edges(conn, None)
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(loaded.edge_ids, repeated);
+        assert_eq!(loaded_edge_ids, repeated);
+        assert_eq!(loaded.sequence(conn, None).unwrap(), "ACAC");
+        let encoded = conn
+            .query_row(
+                "SELECT edge_ids FROM paths WHERE id = ?1",
+                params![loaded.id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .unwrap();
+        assert_eq!(encoded, encode_edge_ids(&repeated));
+    }
+
+    #[test]
+    fn test_multiple_paths_share_canonical_edges_without_path_edges_table() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group, repeated, _) = create_repeating_path_edges(conn);
+        let path_a = Path::create(conn, "path-a", &block_group.id, &repeated).unwrap();
+        let path_b = Path::create(conn, "path-b", &block_group.id, &repeated).unwrap();
+
+        let edges_by_path = Path::edges_for_paths(conn, vec![path_a.id, path_b.id]).unwrap();
+        let edge_ids_a = edges_by_path[&path_a.id]
+            .iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>();
+        let edge_ids_b = edges_by_path[&path_b.id]
+            .iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(edge_ids_a, repeated);
+        assert_eq!(edge_ids_b, repeated);
+        let path_edges_table_count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'path_edges'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(path_edges_table_count, 0);
+    }
+
+    #[test]
+    fn test_empty_path_stores_valid_empty_blob() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test collection").unwrap();
+        let block_group = create_test_block_group(conn);
+
+        let path = Path::create(conn, "empty", &block_group.id, &[]).unwrap();
+        let encoded = conn
+            .query_row(
+                "SELECT edge_ids FROM paths WHERE id = ?1",
+                params![path.id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .unwrap();
+
+        assert!(path.edge_ids.is_empty());
+        assert!(encoded.is_empty());
+        assert_eq!(path.sequence(conn, None).unwrap(), "");
+    }
+
+    #[test]
+    fn test_historical_path_read_returns_snapshot_edge_array() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group, repeated, short) = create_repeating_path_edges(conn);
+        let path = Path::create(conn, "history", &block_group.id, &repeated).unwrap();
+        let first_commit = commit_all(conn, "repeated path").unwrap();
+
+        conn.execute(
+            "UPDATE paths SET edge_ids = ?1 WHERE id = ?2",
+            params![encode_edge_ids(&short), path.id],
+        )
+        .unwrap();
+        commit_all(conn, "short path").unwrap();
+
+        let first_ref = first_commit.to_string();
+        let query = format!(
+            "SELECT paths.* FROM {} paths WHERE id = :path_id",
+            Path::table_name_with_history_ref(Some(&first_ref))
+        );
+        let query_params: [(&str, &dyn rusqlite::ToSql); 2] =
+            [(":history_ref", &first_ref), (":path_id", &path.id)];
+        let historical_path = Path::try_query(conn, &query, &query_params)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let current_path = Path::get_by_id(conn, &path.id);
+
+        assert_eq!(historical_path.edge_ids, repeated);
+        assert_eq!(current_path.edge_ids, short);
+        assert_eq!(
+            historical_path.sequence(conn, Some(&first_ref)).unwrap(),
+            "ACAC"
+        );
+        assert_eq!(current_path.sequence(conn, None).unwrap(), "AC");
     }
 
     mod region_resolver {
@@ -1254,6 +1755,7 @@ mod tests {
             block_group_id: HashId::pad_str(50),
             name: "test_path".to_string(),
             created_on: Utc::now().timestamp_nanos_opt().unwrap(),
+            edge_ids: vec![HashId::pad_str(1), HashId::pad_str(2)],
         };
 
         let mut message = TypedBuilder::<PathCapnp::Owned>::new_default();
