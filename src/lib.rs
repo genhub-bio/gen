@@ -57,6 +57,8 @@ pub fn get_connection_for_branch(
     db_path: impl Into<PathBuf>,
     branch: Option<&str>,
 ) -> Result<GraphConnection, core::errors::ConnectionError> {
+    #[cfg(feature = "profiling")]
+    let _connection_span = tracing::info_span!("get_connection_for_branch").entered();
     let db_path = db_path.into();
     let graph = get_raw_connection(db_path)?;
     if let Some(branch) = branch
@@ -75,8 +77,16 @@ pub fn get_connection_for_branch(
 pub fn get_raw_connection(
     db_path: impl Into<PathBuf>,
 ) -> Result<GraphConnection, core::errors::ConnectionError> {
-    let conn = Connection::open(db_path.into())?;
-    rusqlite::vtab::array::load_module(&conn).unwrap();
+    let conn = {
+        #[cfg(feature = "profiling")]
+        let _open_span = tracing::info_span!("open_graph_database").entered();
+        Connection::open(db_path.into())?
+    };
+    {
+        #[cfg(feature = "profiling")]
+        let _load_module_span = tracing::info_span!("load_array_module").entered();
+        rusqlite::vtab::array::load_module(&conn).unwrap();
+    }
     Ok(GraphConnection(conn))
 }
 

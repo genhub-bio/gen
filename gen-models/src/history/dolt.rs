@@ -20,7 +20,11 @@
 //! method delegates to the free function; the two forms are entry points for different callers, not
 //! separate implementations of Dolt behavior.
 
-use std::rc::Rc;
+use std::{
+    fs::{self, File},
+    io::Read as _,
+    rc::Rc,
+};
 
 use gen_core::{BranchName, CommitRef, DoltHashId};
 use rusqlite::{OptionalExtension, Result as SqlResult, params, types::Value};
@@ -32,6 +36,13 @@ use crate::{
     },
     operations::{DEFAULT_COMMITTER_EMAIL, Defaults, GEN_DEFAULT_COMMITTER_NAME},
 };
+
+const DOLTLITE_MANIFEST_SIZE: usize = 168;
+const DOLTLITE_MANIFEST_MAGIC: [u8; 4] = *b"CTLD";
+const DOLTLITE_MANIFEST_VERSION: u32 = 12;
+const DOLTLITE_MANIFEST_VERSION_OFFSET: usize = 4;
+const DOLTLITE_WAL_OFFSET_OFFSET: usize = 84;
+const DOLTLITE_COMPACTION_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Raw commit metadata read from `dolt_log` before conversion to [`HistoryEntry`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,9 +212,58 @@ pub fn commit_all_with_config(
 
 #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, message)))]
 pub fn commit_staged_all(conn: &GraphConnection, message: &str) -> SqlResult<DoltHashId> {
+    compact_unindexed_wal(conn)?;
     conn.query_row("SELECT dolt_commit('-A', '-m', ?1)", [message], |row| {
         row.get(0)
     })
+}
+
+/// Compacts DoltLite's append-only WAL before it makes future database opens expensive.
+///
+/// DoltLite replays and verifies every unindexed WAL chunk when opening a connection. Periodic
+/// compaction converts those chunks into its persistent index while retaining commit history.
+fn compact_unindexed_wal(conn: &GraphConnection) -> SqlResult<()> {
+    let Some(path) = conn.path().filter(|path| !path.is_empty()) else {
+        return Ok(());
+    };
+    let Ok(database_size) = fs::metadata(path).map(|metadata| metadata.len()) else {
+        return Ok(());
+    };
+    let mut manifest = [0; DOLTLITE_MANIFEST_SIZE];
+    let Ok(()) = File::open(path).and_then(|mut file| file.read_exact(&mut manifest)) else {
+        return Ok(());
+    };
+    let Some(wal_bytes) = doltlite_wal_bytes(&manifest, database_size) else {
+        return Ok(());
+    };
+    if wal_bytes < DOLTLITE_COMPACTION_THRESHOLD_BYTES {
+        return Ok(());
+    }
+
+    conn.query_row("SELECT dolt_gc()", [], |_| Ok(()))
+}
+
+fn doltlite_wal_bytes(manifest: &[u8], database_size: u64) -> Option<u64> {
+    let manifest = manifest.get(..DOLTLITE_MANIFEST_SIZE)?;
+    if manifest.get(..DOLTLITE_MANIFEST_MAGIC.len())? != DOLTLITE_MANIFEST_MAGIC {
+        return None;
+    }
+    let version = u32::from_le_bytes(
+        manifest
+            .get(DOLTLITE_MANIFEST_VERSION_OFFSET..DOLTLITE_MANIFEST_VERSION_OFFSET + 4)?
+            .try_into()
+            .ok()?,
+    );
+    if version != DOLTLITE_MANIFEST_VERSION {
+        return None;
+    }
+    let wal_offset = u64::from_le_bytes(
+        manifest
+            .get(DOLTLITE_WAL_OFFSET_OFFSET..DOLTLITE_WAL_OFFSET_OFFSET + 8)?
+            .try_into()
+            .ok()?,
+    );
+    (wal_offset <= database_size).then(|| database_size - wal_offset)
 }
 
 pub fn active_branch(conn: &GraphConnection) -> SqlResult<String> {
@@ -884,8 +944,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        DoltHistoryStore, active_branch, add_remote, branch_exists, branch_hash, branch_rows,
-        checkout, commit_all, commit_staged_all, connect_branch, create_branch, diff_row_count,
+        DOLTLITE_MANIFEST_MAGIC, DOLTLITE_MANIFEST_SIZE, DOLTLITE_MANIFEST_VERSION,
+        DOLTLITE_MANIFEST_VERSION_OFFSET, DOLTLITE_WAL_OFFSET_OFFSET, DoltHistoryStore,
+        active_branch, add_remote, branch_exists, branch_hash, branch_rows, checkout, commit_all,
+        commit_staged_all, connect_branch, create_branch, diff_row_count, doltlite_wal_bytes,
         hash_of, is_current_branch_dirty, log_entries, log_entries_for_hashes,
         log_entries_for_revision, merge, merge_base, remote_rows, remove_remote, reset_hard,
         search_branch_names, set_commit_author_email, set_commit_author_name, status_rows,
@@ -901,6 +963,25 @@ mod tests {
         test_helpers::{get_connection, setup_gen_on_disk},
         traits::Query,
     };
+
+    #[test]
+    fn test_doltlite_wal_bytes_reads_manifest_offset() {
+        let mut manifest = [0; DOLTLITE_MANIFEST_SIZE];
+        manifest[..DOLTLITE_MANIFEST_MAGIC.len()].copy_from_slice(&DOLTLITE_MANIFEST_MAGIC);
+        manifest[DOLTLITE_MANIFEST_VERSION_OFFSET..DOLTLITE_MANIFEST_VERSION_OFFSET + 4]
+            .copy_from_slice(&DOLTLITE_MANIFEST_VERSION.to_le_bytes());
+        manifest[DOLTLITE_WAL_OFFSET_OFFSET..DOLTLITE_WAL_OFFSET_OFFSET + 8]
+            .copy_from_slice(&1024_u64.to_le_bytes());
+
+        assert_eq!(doltlite_wal_bytes(&manifest, 4096), Some(3072));
+    }
+
+    #[test]
+    fn test_doltlite_wal_bytes_rejects_unknown_manifest() {
+        let manifest = [0; DOLTLITE_MANIFEST_SIZE];
+
+        assert_eq!(doltlite_wal_bytes(&manifest, 4096), None);
+    }
 
     #[test]
     fn test_diff_row_count_counts_committed_sample_change() {

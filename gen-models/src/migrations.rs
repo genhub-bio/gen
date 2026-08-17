@@ -21,6 +21,8 @@ enum MigrationError {
 }
 
 pub fn run_migrations(conn: &mut Connection) {
+    #[cfg(feature = "profiling")]
+    let _migration_span = tracing::info_span!("run_migrations").entered();
     apply_graph_migrations(conn).unwrap();
 }
 
@@ -28,14 +30,22 @@ fn apply_graph_migrations(conn: &mut Connection) -> Result<bool, MigrationError>
     let migrations = Migrations::from_directory(&MIGRATION_DIR)?;
 
     // Apply some PRAGMA, often better to do it outside of migrations
-    conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.execute("PRAGMA cache_size=50000;", [])?;
-    // synchronous = NORMAL should be fine with WAL mode, and helps with performance
-    // https://developer.android.com/topic/performance/sqlite-performance-best-practices
-    conn.execute("PRAGMA synchronous = NORMAL;", [])?;
+    {
+        #[cfg(feature = "profiling")]
+        let _pragma_span = tracing::info_span!("configure_graph_connection").entered();
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.execute("PRAGMA cache_size=50000;", [])?;
+        // synchronous = NORMAL should be fine with WAL mode, and helps with performance
+        // https://developer.android.com/topic/performance/sqlite-performance-best-practices
+        conn.execute("PRAGMA synchronous = NORMAL;", [])?;
+    }
 
-    let pending_migrations = migrations.pending_migrations(conn)?;
+    let pending_migrations = {
+        #[cfg(feature = "profiling")]
+        let _pending_span = tracing::info_span!("check_pending_migrations").entered();
+        migrations.pending_migrations(conn)?
+    };
     if pending_migrations > 0 {
         let changed_tables: i64 =
             conn.query_row("SELECT COUNT(*) FROM dolt_status", [], |row| row.get(0))?;
@@ -45,7 +55,11 @@ fn apply_graph_migrations(conn: &mut Connection) -> Result<bool, MigrationError>
     }
 
     // 2️⃣ Update the database schema, atomically
-    migrations.to_latest(conn)?;
+    {
+        #[cfg(feature = "profiling")]
+        let _to_latest_span = tracing::info_span!("migrate_to_latest").entered();
+        migrations.to_latest(conn)?;
+    }
 
     if pending_migrations > 0 {
         conn.query_row(
