@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Example usage, to write results to a file:
+# SAMPLE_LIMIT=100 bin/benchmark_incremental_vcf_updates.sh | tee benchmark-results.tsv
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "${SCRIPT_DIR}")"
 GEN_BIN="${GEN_BIN:-${BASE_DIR}/target/release/gen}"
