@@ -2532,7 +2532,8 @@ mod remotes {
                     json!({
                         "remote_url": graph_url,
                         "expires_at": "2030-01-01T00:00:00Z",
-                        "default_branch": "main"
+                        "default_branch": "main",
+                        "transfer_id": "00000000-0000-0000-0000-000000000001"
                     })
                     .to_string()
                     .into_bytes()
