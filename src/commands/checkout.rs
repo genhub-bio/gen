@@ -19,11 +19,10 @@ use crate::{
     history::ensure_clean_working_set,
 };
 
-/// Restores a commit's one-file-per-logical-path view from `.gen/assets`.
+/// Restores assets present at the requested commit from `.gen/assets` into the workspace
 ///
-/// The previous branch's cumulative versions identify clean tracked files that checkout may safely
-/// replace. Unknown local contents are preserved and receive the requested version as a conflict,
-/// matching clone and pull behavior.
+/// Previously stored versioned files are safely replaced by requested versions.
+/// Unknown local contents are preserved and receive the requested version marked as a conflict.
 fn materialize_checked_out_assets(
     graph: &GraphConnection,
     workspace: &Workspace,

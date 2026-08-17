@@ -673,12 +673,10 @@ fn copy_versioned_asset(
     result
 }
 
-/// Applies a verified versioned asset to the workspace without overwriting unknown local content.
+/// Copies a versioned asset to the workspace without overwriting unknown local content.
 ///
-/// HTTP downloads and `file://` copies pass the path produced by their storage phase. Checkout
-/// resolves that same checksum-addressed path before calling this function. Historical versions
-/// have no logical destination and remain solely in `.gen/assets`; selected versions replace a
-/// known prior version or are copied beside unknown local content as a conflict.
+/// Versioned assets replace a known prior version or are copied beside unknown local
+/// content as a conflict, preventing unintentional overwrites of data.
 pub(crate) fn materialize_versioned_asset(
     workspace: &Workspace,
     asset: &AssetRef,
