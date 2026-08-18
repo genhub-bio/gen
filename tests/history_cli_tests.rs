@@ -20,7 +20,6 @@ use gen_models::{
     assets::AssetRef,
     block_group::BlockGroup,
     collection::Collection,
-    db::GraphConnection,
     history::{
         HistoryStore,
         dolt::{DoltHistoryStore, status_rows},
@@ -29,7 +28,7 @@ use gen_models::{
     sample_lineage::SampleLineage,
     traits::Query,
 };
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use tempfile::tempdir;
 
 fn gen_binary() -> PathBuf {
@@ -2166,8 +2165,8 @@ mod remotes {
     use serde_json::json;
 
     use super::{
-        Connection, GraphConnection, Path, PathBuf, assert_success, asset_refs, fs, get_connection,
-        operations_stdout, run_gen, status_rows, tempdir,
+        Path, PathBuf, assert_success, asset_refs, fs, get_connection, operations_stdout, run_gen,
+        tempdir,
     };
 
     fn resolved_ref_hash(repo_root: &Path, reference: &str) -> String {
@@ -2176,13 +2175,6 @@ mod remotes {
         connection
             .query_row("SELECT dolt_hashof(?1)", [reference], |row| row.get(0))
             .unwrap_or_else(|error| panic!("should resolve {reference}: {error}"))
-    }
-
-    fn raw_graph_status(repo_root: &Path) -> Vec<gen_models::history::dolt::DoltStatusRow> {
-        let connection = Connection::open(repo_root.join(".gen/default.db"))
-            .expect("should open graph database without migrations");
-        rusqlite::vtab::array::load_module(&connection).expect("should load array module");
-        status_rows(&GraphConnection(connection)).expect("should query raw Dolt status")
     }
 
     fn collect_files(root: &Path) -> Vec<PathBuf> {
@@ -2295,22 +2287,6 @@ mod remotes {
             materialized_asset_contents(destination_repo_root),
             source_assets,
             "remote transfer should materialize the same branch-head paths and contents"
-        );
-    }
-
-    fn assert_remote_asset_is_not_materialized(repo_root: &Path) {
-        let repo_asset_path = repo_root.join("simple.gff");
-        assert!(
-            !repo_asset_path.exists(),
-            "remote transfer should keep asset payloads out of the repo checkout: {}",
-            repo_asset_path.display()
-        );
-
-        let asset_cache_dir = repo_root.join(".gen/assets");
-        let asset_cache_files = collect_files(&asset_cache_dir);
-        assert!(
-            asset_cache_files.is_empty(),
-            "remote transfer should keep .gen/assets as an empty cache until materialization is requested: {asset_cache_files:?}"
         );
     }
 
@@ -2458,104 +2434,10 @@ mod remotes {
         (repository_url, stop, handle)
     }
 
+    // Direct `file://` clone must preserve graph history, branches, tags, AssetRef rows, and the
+    // exact checksum-addressed files stored by the source workspace.
     #[test]
-    fn test_clone_of_schema_less_main_is_clean_and_can_checkout_schema_branch() {
-        let remote_repo_dir = tempdir().expect("should create temp remote repo directory");
-        let clone_parent_dir = tempdir().expect("should create temp clone parent directory");
-        let remote_gen_dir = remote_repo_dir.path().join(".gen");
-        fs::create_dir(&remote_gen_dir).expect("should create remote Gen directory");
-        let remote_graph_path = remote_gen_dir.join("default.db");
-
-        let raw_remote =
-            Connection::open(&remote_graph_path).expect("should open raw remote graph");
-        raw_remote
-            .query_row("SELECT dolt_branch('foobar')", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("should create foobar from the schema-less main branch");
-        raw_remote
-            .query_row("SELECT dolt_checkout('foobar')", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("should check out foobar");
-        raw_remote
-            .query_row("SELECT dolt_config('user.name', 'Test User')", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("should configure test committer name");
-        raw_remote
-            .query_row(
-                "SELECT dolt_config('user.email', 'test@example.com')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("should configure test committer email");
-        raw_remote
-            .execute_batch(
-                "CREATE TABLE branch_only(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-             INSERT INTO branch_only VALUES(1, 'visible on foobar');",
-            )
-            .expect("should create branch-only graph state");
-        raw_remote
-            .query_row(
-                "SELECT dolt_commit('-A', '-m', 'Add branch-only state')",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("should commit the foobar state");
-        raw_remote
-            .query_row("SELECT dolt_checkout('main')", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("should leave the remote on schema-less main");
-        drop(raw_remote);
-
-        let remote_url = format!("file://{}", remote_repo_dir.path().display());
-        assert_success(
-            &run_gen(clone_parent_dir.path(), &["clone", &remote_url]),
-            "clone from schema-branch remote should succeed",
-        );
-        let cloned_repo_path = clone_parent_dir.path().join(
-            remote_repo_dir
-                .path()
-                .file_name()
-                .expect("remote temp dir should have a basename"),
-        );
-
-        assert!(
-            raw_graph_status(&cloned_repo_path).is_empty(),
-            "clone should not apply uncommitted migrations to main"
-        );
-        let cloned_graph = Connection::open(cloned_repo_path.join(".gen/default.db"))
-            .expect("should open cloned graph for ref inspection");
-        let active_branch: String = cloned_graph
-            .query_row("SELECT active_branch()", [], |row| row.get(0))
-            .expect("should read cloned active branch");
-        let branch_names = cloned_graph
-            .prepare("SELECT name FROM dolt_branches ORDER BY name")
-            .expect("should prepare cloned branch query")
-            .query_map([], |row| row.get::<_, String>(0))
-            .expect("should query cloned branches")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("should collect cloned branches");
-        assert_eq!(active_branch, "main");
-        assert!(
-            branch_names.iter().any(|name| name == "foobar"),
-            "clone should retain foobar; found {branch_names:?}"
-        );
-        drop(cloned_graph);
-        assert_success(
-            &run_gen(&cloned_repo_path, &["checkout", "foobar"]),
-            "checkout of the schema branch after clone should succeed",
-        );
-        assert!(
-            raw_graph_status(&cloned_repo_path).is_empty(),
-            "checking out the migrated branch should remain clean"
-        );
-    }
-
-    #[test]
-    fn test_clone_from_file_remote_preserves_history_and_asset_refs() {
+    fn test_clone_from_file_remote_preserves_history_and_versioned_assets() {
         let remote_repo_dir = tempdir().expect("should create temp remote repo directory");
         let clone_parent_dir = tempdir().expect("should create temp clone parent directory");
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
@@ -2631,7 +2513,7 @@ mod remotes {
                 .any(|asset_ref| asset_ref.name.as_deref() == Some("simple.gff")),
             "cloned graph db should retain the asset reference rows: {refs:?}"
         );
-        assert_remote_asset_is_not_materialized(&cloned_repo_path);
+        assert_asset_store_matches(remote_repo_dir.path(), &cloned_repo_path);
         assert_eq!(
             resolved_ref_hash(&cloned_repo_path, "feature"),
             resolved_ref_hash(remote_repo_dir.path(), "feature"),
@@ -2644,8 +2526,10 @@ mod remotes {
         );
     }
 
+    // A `file://` push must copy committed versioned assets into the remote store so a later clone
+    // can recover them, without transferring unrelated uncommitted graph changes.
     #[test]
-    fn test_push_to_file_remote_and_clone_preserves_history_and_asset_refs() {
+    fn test_push_to_file_remote_and_clone_preserves_versioned_assets() {
         let local_repo_dir = tempdir().expect("should create temp local repo directory");
         let remote_repo_dir = tempdir().expect("should create temp remote repo directory");
         let clone_parent_dir = tempdir().expect("should create temp clone parent directory");
@@ -2747,7 +2631,8 @@ mod remotes {
                 .any(|asset_ref| asset_ref.name.as_deref() == Some("simple.gff")),
             "cloned graph db should retain the pushed asset reference rows: {refs:?}"
         );
-        assert_remote_asset_is_not_materialized(&cloned_repo_path);
+        assert_asset_store_matches(local_repo_dir.path(), remote_repo_dir.path());
+        assert_asset_store_matches(local_repo_dir.path(), &cloned_repo_path);
         let cloned_graph = get_connection(cloned_repo_path.join(".gen/default.db"))
             .expect("should open clone for dirty marker check");
         let dirty_marker_exists: bool = cloned_graph
@@ -2760,6 +2645,111 @@ mod remotes {
         assert!(
             !dirty_marker_exists,
             "push should transfer only committed history, not dirty working-tree changes"
+        );
+    }
+
+    // Ensure that file:// clones + pulls: download all required versioned files and materialize the correct
+    // assets at logical paths.
+    #[test]
+    fn test_clone_and_pull_from_file_remote_populates_versioned_assets() {
+        let remote_repo_dir = tempdir().expect("should create temp remote repo directory");
+        let clone_parent_dir = tempdir().expect("should create temp clone parent directory");
+        let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_fixture_path = fixtures_dir.join("simple.fa");
+        let logical_path = "inputs/simple.fa";
+        let remote_fasta_path = remote_repo_dir.path().join(logical_path);
+        let updated_fasta = b">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGATTT\n";
+
+        assert_success(
+            &run_gen(remote_repo_dir.path(), &["init"]),
+            "remote gen init should succeed",
+        );
+        fs::create_dir_all(
+            remote_fasta_path
+                .parent()
+                .expect("remote FASTA should have a parent directory"),
+        )
+        .expect("should create remote input directory");
+        fs::copy(&fasta_fixture_path, &remote_fasta_path)
+            .expect("should copy FASTA into the remote workspace");
+        assert_success(
+            &run_gen(
+                remote_repo_dir.path(),
+                &[
+                    "import",
+                    "fasta",
+                    logical_path,
+                    "--name",
+                    "test-collection",
+                    "--sample",
+                    "test-sample",
+                ],
+            ),
+            "remote fasta import should succeed",
+        );
+
+        let remote_url = format!("file://{}", remote_repo_dir.path().display());
+        assert_success(
+            &run_gen(clone_parent_dir.path(), &["clone", &remote_url]),
+            "clone from file remote should succeed",
+        );
+        let cloned_repo_path = clone_parent_dir.path().join(
+            remote_repo_dir
+                .path()
+                .file_name()
+                .expect("remote temp dir should have a basename"),
+        );
+        let cloned_assets_before_pull = asset_store_contents(&cloned_repo_path);
+        assert_asset_store_matches(remote_repo_dir.path(), &cloned_repo_path);
+        assert_materialized_assets_match(
+            remote_repo_dir.path(),
+            &cloned_repo_path,
+            &[logical_path],
+        );
+        let cloned_fasta_before_pull = fs::read(cloned_repo_path.join(logical_path))
+            .expect("file clone should materialize the original FASTA");
+
+        fs::write(&remote_fasta_path, updated_fasta)
+            .expect("should update the remote logical FASTA");
+        assert_success(
+            &run_gen(
+                remote_repo_dir.path(),
+                &[
+                    "add-file",
+                    logical_path,
+                    "--message",
+                    "update-fasta-after-clone",
+                ],
+            ),
+            "remote FASTA update should succeed",
+        );
+        assert_success(
+            &run_gen(&cloned_repo_path, &["pull"]),
+            "pull from file remote should succeed",
+        );
+
+        assert!(
+            asset_store_contents(&cloned_repo_path).len() > cloned_assets_before_pull.len(),
+            "pull should add the newly committed versioned asset"
+        );
+        assert_asset_store_matches(remote_repo_dir.path(), &cloned_repo_path);
+        assert_materialized_assets_match(
+            remote_repo_dir.path(),
+            &cloned_repo_path,
+            &[logical_path],
+        );
+        let cloned_fasta_after_pull = fs::read(cloned_repo_path.join(logical_path))
+            .expect("file pull should materialize the updated FASTA");
+        assert_eq!(cloned_fasta_after_pull, updated_fasta);
+        assert_ne!(
+            cloned_fasta_after_pull, cloned_fasta_before_pull,
+            "pull should replace the logical path with its branch-head version"
+        );
+        assert!(
+            asset_store_contents(&cloned_repo_path)
+                .iter()
+                .any(|(_, contents)| contents == &cloned_fasta_before_pull),
+            "the superseded FASTA should remain available only by its versioned filename"
         );
     }
 
