@@ -51,7 +51,7 @@ intervaltree = "0.2.7"
 itertools = "0.14.0"
 noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "csi", "fasta", "gff", "gtf", "vcf"] }
 petgraph = "0.6.5"
-rusqlite = { package = "rusqdoltlite", version = "0.40.14", features = ["bundled", "array", "limits", "fallible_uint", "backup"] }
+rusqlite = { package = "rusqdoltlite", version = "0.40.16", features = ["bundled", "array", "limits", "fallible_uint", "backup"] }
 rusqlite_migration = { package = "rusqdoltlite_migration", version = "2.6.4" , features = ["from-directory"]}
 serde = {  version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
@@ -97,7 +97,7 @@ cargo-llvm-cov = "0.8.5"
 cargo-deny = "0.19.0"
 more-asserts = "0.3.1"
 insta = "1.43.1"
-rusqlite = { package = "rusqdoltlite", version = "0.40.14", features = ["remote"] }
+rusqlite = { package = "rusqdoltlite", version = "0.40.16", features = ["remote"] }
 
 [profile.release]
 opt-level = "s"

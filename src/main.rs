@@ -155,6 +155,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return r#gen::commands::checkout::execute(
             &graph_connection,
             &config_conn,
+            &workspace,
             branch.as_deref(),
             hash.as_deref(),
         );

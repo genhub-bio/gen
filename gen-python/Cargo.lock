@@ -1365,6 +1365,7 @@ dependencies = [
  "capnp",
  "clap",
  "convert_case 0.8.0",
+ "crc32c",
  "crossterm",
  "csv",
  "directories",
@@ -1389,6 +1390,7 @@ dependencies = [
  "intervaltree",
  "itertools",
  "log",
+ "md-5",
  "noodles",
  "once_cell",
  "petgraph",
@@ -1504,6 +1506,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "url",
@@ -2324,9 +2327,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdoltlite-sys"
-version = "0.38.14"
+version = "0.38.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fbf72e2d56836b1c5cf51e40534a969b563994a1b726fe502ef8f8158366b32"
+checksum = "0bdf11eb320f0717c4c72bdc09ccf13e23c97049e87f7590212bdcb43efa8949"
 dependencies = [
  "cc",
  "pkg-config",
@@ -4154,9 +4157,9 @@ dependencies = [
 
 [[package]]
 name = "rusqdoltlite"
-version = "0.40.14"
+version = "0.40.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6de2ed3a86b99876639d7e7af3ed30992a2f46a73131b5c9339c1c28d8aebea"
+checksum = "242b526b6795fe4012d54b1b30333561660f7d5f0e97c4bcd07eecbde3bff8f0"
 dependencies = [
  "bitflags 2.11.1",
  "fallible-iterator",

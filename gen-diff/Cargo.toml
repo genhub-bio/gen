@@ -13,6 +13,6 @@ gen-graph = { path = "../gen-graph", version = "0.2.1" }
 gen-models = { path = "../gen-models", version = "0.2.1" }
 itertools = "0.14.0"
 petgraph = "0.6.5"
-rusqlite = { package = "rusqdoltlite", version = "0.40.14", features = ["fallible_uint"] }
+rusqlite = { package = "rusqdoltlite", version = "0.40.16", features = ["fallible_uint"] }
 tempfile = "3.24.0"
 thiserror = "2.0.12"
