@@ -93,22 +93,15 @@ pub trait Query {
         rows.next().unwrap().map(|row| Self::process_row(row))
     }
 
-    fn query_by_ids<'a, I: ?Sized, T>(
-        conn: &Connection,
-        ids: &'a I,
-        history_ref: Option<&str>,
-    ) -> Vec<Self::Model>
+    fn query_by_ids<T>(conn: &Connection, ids: &[T], history_ref: Option<&str>) -> Vec<Self::Model>
     where
-        &'a I: IntoIterator<Item = &'a T>,
-        T: Clone + 'a,
+        T: Clone,
         Value: From<T>,
     {
         let mut results = vec![];
         let batch_size = max_rows_per_batch(conn, 1);
-        for chunk in &ids.into_iter().chunks(batch_size) {
-            let values: Vec<Value> = chunk
-                .map(|value: &'a T| Value::from(value.clone()))
-                .collect();
+        for chunk in &ids.iter().chunks(batch_size) {
+            let values: Vec<Value> = chunk.map(|value| Value::from(value.clone())).collect();
             let query = format!(
                 "
                     WITH arr AS (
