@@ -169,12 +169,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         force,
     }) = &cli.command
     {
-        return r#gen::commands::remote::operations::execute_push(
+        r#gen::commands::remote::operations::execute_push(
             &workspace,
             remote.as_deref(),
             branch.as_deref(),
             *force,
-        );
+        )?;
+        return Ok(());
     }
     if let Some(Commands::Pull { remote, branch }) = &cli.command {
         return r#gen::commands::remote::operations::execute_pull(

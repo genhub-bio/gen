@@ -14,8 +14,9 @@
 //! rejects an expired capability, the operation requests a fresh capability and retries.
 //! After the graph transfer, [`acquire_asset_transfers`] obtains the per-asset upload or
 //! download URLs used to transfer files referenced by the selected branch. A push then
-//! calls [`complete_asset_transfers`] with GCS-validated upload receipts so GenHub can
-//! verify the stored objects before finalizing a new repository.
+//! calls [`complete_asset_transfers`] with the successful capability's transfer ID and
+//! GCS-validated upload receipts so GenHub can verify the stored objects before releasing
+//! the push lease.
 //!
 //! Both acquisition functions use the same authentication sequence. Public clone and
 //! pull requests may first be attempted anonymously; otherwise the client tries
@@ -26,6 +27,7 @@
 
 use std::{env, io};
 
+use chrono::{DateTime, Utc};
 use gen_core::{DoltHashId, HashId};
 use reqwest::{
     StatusCode, Url,
@@ -33,6 +35,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::commands::remote::{
     server::AuthTokens,
@@ -143,8 +146,10 @@ pub struct CapabilityRequest<'branch> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct CapabilityResponse {
     pub remote_url: String,
-    pub expires_at: String,
+    pub expires_at: DateTime<Utc>,
     pub default_branch: String,
+    /// Identifies the capability's transfer-scoped push lease.
+    pub transfer_id: Uuid,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -183,6 +188,8 @@ pub struct AssetUploadReceipt {
 /// Signals that all uploads for a pushed branch have completed.
 #[derive(Clone, Debug, Serialize)]
 pub struct AssetTransferCompletionRequest<'request> {
+    /// The capability-scoped owner of the push lease being completed.
+    pub transfer_id: Uuid,
     /// The branch whose expected asset set should be verified.
     pub branch: &'request str,
     /// Provider-checksum receipts for every uploaded or reused object.
@@ -503,11 +510,14 @@ mod tests {
     };
 
     use reqwest::{StatusCode, blocking::Client};
+    use uuid::Uuid;
 
     use super::{
         AuthTokens, CapabilityRequest, CapabilityResponse, RemoteClientError, RemoteOperation,
         RepositoryRemote, TokenStore, acquire_capability_with_store, normalized_origin,
     };
+
+    const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
 
     struct MemoryTokenStore {
         tokens: Mutex<Option<AuthTokens>>,
@@ -614,7 +624,8 @@ mod tests {
         serde_json::json!({
             "remote_url": remote_url,
             "expires_at": "2030-01-01T00:00:00Z",
-            "default_branch": "main"
+            "default_branch": "main",
+            "transfer_id": TEST_TRANSFER_ID
         })
         .to_string()
     }
@@ -701,8 +712,11 @@ mod tests {
             response,
             CapabilityResponse {
                 remote_url: expected_url.to_string(),
-                expires_at: "2030-01-01T00:00:00Z".to_string(),
+                expires_at: "2030-01-01T00:00:00Z"
+                    .parse()
+                    .expect("should parse capability expiry"),
                 default_branch: "main".to_string(),
+                transfer_id: TEST_TRANSFER_ID,
             }
         );
         assert!(!requests[0].to_ascii_lowercase().contains("x-api-key:"));

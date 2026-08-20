@@ -622,6 +622,7 @@ dependencies = [
  "js-sys",
  "num-traits",
  "pure-rust-locales",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1707,6 +1708,7 @@ dependencies = [
  "capnp",
  "cargo-deny",
  "cargo-llvm-cov",
+ "chrono",
  "clap",
  "convert_case 0.8.0",
  "crc32c",
@@ -1760,6 +1762,7 @@ dependencies = [
  "tui-widget-list",
  "url",
  "url-parse",
+ "uuid",
  "webbrowser",
  "zip",
 ]
@@ -1864,6 +1867,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -4771,6 +4775,7 @@ dependencies = [
  "libdoltlite-sys",
  "smallvec",
  "sqlite-wasm-rs",
+ "uuid",
 ]
 
 [[package]]
