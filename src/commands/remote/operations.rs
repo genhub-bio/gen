@@ -39,6 +39,11 @@
 //! resolved as safe workspace-relative paths, including `.gen/outside_root` paths used to
 //! represent inputs that originally came from outside the workspace.
 //!
+//! Clone and pull are distributed operations where the graph database is sync'd and then the assets
+//! are transfered. Thus, an asset transfer can fail and need to be resumed. We track the state of
+//! asset transfers and checkpoint after each commit is successfully transfered. When the entire
+//! commit range has been transfered, we mark the operation as complete.
+//!
 //! Pull records the branch commit from before the Dolt operation so downloads can
 //! distinguish a clean old version from a local modification. If the destination still
 //! matches the previous commit and the remote asset changed, the download replaces it as
@@ -63,14 +68,19 @@ use gen_core::{
     config::{DEFAULT_GRAPH_DB_NAME, Workspace},
 };
 use gen_models::{
-    assets::{AssetRef, LocalAssetUri, materialization_destination_path},
+    assets::{AssetRef, AssetView, LocalAssetUri, materialization_destination_path},
     db::{ConfigConnection, GraphConnection},
+    errors::QueryError,
     history::dolt::{
         active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull, push,
         push_force, remote_rows, set_remote_url,
     },
-    operations::{Defaults, Remote, RemoteBranch, calculate_file_checksum},
+    operations::{
+        Defaults, Remote, RemoteBranch, RemoteOperationKind as StoredRemoteOperationKind,
+        RemoteOperationRecord, calculate_file_checksum,
+    },
 };
+use indexmap::IndexMap;
 use md5::Md5;
 use reqwest::{
     StatusCode,
@@ -364,6 +374,12 @@ pub(crate) enum DownloadAssetOutcome {
     Unchanged,
     Downloaded,
     Conflict(PathBuf),
+}
+
+#[derive(Clone, Copy)]
+struct AssetTransferRange<'commit> {
+    from_commit: Option<&'commit DoltHashId>,
+    previous_hash: Option<&'commit DoltHashId>,
 }
 
 /// This is effectively a dirty file check. On clones/pulls we want to update
@@ -841,25 +857,49 @@ fn transfer_file_remote_assets(
     Ok(())
 }
 
+/// Get the assets between two commits and excludes the already checkpointed commit.
+fn get_remaining_assets_to_transfer(
+    graph: &GraphConnection,
+    assets_transfer_checkpoint: Option<&DoltHashId>,
+    to_hash: &DoltHashId,
+) -> Result<IndexMap<DoltHashId, Vec<AssetRef>>, QueryError> {
+    let mut assets_by_commit = AssetRef::get_assets_by_commit(
+        graph,
+        assets_transfer_checkpoint,
+        Some(to_hash),
+        AssetView::Cumulative,
+    )?;
+    if let Some(assets_transfer_checkpoint) = assets_transfer_checkpoint
+        && assets_by_commit
+            .shift_remove(assets_transfer_checkpoint)
+            .is_none()
+    {
+        return Err(QueryError::ResultsNotFound(format!(
+            "Asset transfer checkpoint {assets_transfer_checkpoint} is not in the first-parent history of {to_hash}"
+        )));
+    }
+    Ok(assets_by_commit)
+}
+
 /// Transfers the asset versions needed after a graph clone, pull, or push.
 ///
 /// The CLI orchestration calls this after Dolt transfers graph history. It derives the asset delta
-/// between `previous_hash` and the destination branch, then dispatches `file://` transfers to
-/// [`transfer_file_remote_assets`] or asks GenHub for HTTP transfer URLs. Push uploads local
-/// versions; HTTP clone and pull send downloads through [`download_asset`]. The cumulative asset
-/// view supplies history and conflict checksums, while the materialized view selects the one version
-/// per logical path that is additionally copied out of `.gen/assets`.
+/// for the requested commit range, then dispatches `file://` transfers to
+/// [`transfer_file_remote_assets`] or asks GenHub for HTTP transfer URLs. Clone and pull process
+/// commits in order so each completed asset batch can advance the durable checkpoint. The
+/// materialized view selects the one version per logical path copied out of `.gen/assets`.
 fn transfer_assets(
     graph: &GraphConnection,
     workspace: &Workspace,
     remote: &Remote,
     operation: RemoteOperation,
     branch: &str,
-    previous_hash: Option<&DoltHashId>,
+    range: AssetTransferRange<'_>,
+    mut complete_commit: impl FnMut(&DoltHashId) -> Result<(), Box<dyn Error>>,
 ) -> Result<Vec<AssetUploadReceipt>, Box<dyn Error>> {
     let commit_hash = hash_of(graph, branch)?;
-    let current_assets: HashMap<_, _> =
-        AssetRef::get_cumulative_assets_at(graph, previous_hash, Some(&commit_hash))?
+    let range_assets: HashMap<_, _> =
+        AssetRef::get_cumulative_assets_at(graph, range.from_commit, Some(&commit_hash))?
             .into_iter()
             .map(|asset| (asset.id, asset))
             .collect();
@@ -868,7 +908,15 @@ fn transfer_assets(
             .into_iter()
             .map(|asset| asset.id)
             .collect();
-    let previous_assets = if let Some(previous_hash) = previous_hash {
+    let excluded_assets = if let Some(from_commit) = range.from_commit {
+        AssetRef::get_cumulative_assets_at(graph, None, Some(from_commit))?
+            .into_iter()
+            .map(|asset| (asset.id, asset))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let mut previous_assets = if let Some(previous_hash) = range.previous_hash {
         AssetRef::get_cumulative_assets_at(graph, None, Some(previous_hash))?
             .into_iter()
             .map(|asset| (asset.id, asset))
@@ -876,84 +924,126 @@ fn transfer_assets(
     } else {
         HashMap::new()
     };
-    // These are assets we expect to be in the current batch of transfers
-    let mut assets: HashMap<_, _> = current_assets
+    previous_assets.extend(
+        excluded_assets
+            .iter()
+            .map(|(asset_id, asset)| (*asset_id, asset.clone())),
+    );
+    let assets: HashMap<_, _> = range_assets
         .iter()
-        .filter(|(id, _)| !previous_assets.contains_key(id))
+        .filter(|(id, _)| !excluded_assets.contains_key(id))
         .map(|(id, asset)| (*id, asset.clone()))
         .collect();
     if remote.url.starts_with("file://") {
-        transfer_file_remote_assets(
-            workspace,
-            remote,
-            operation,
-            &assets,
-            &materialized_asset_ids,
-            &previous_assets,
-        )?;
+        match operation {
+            RemoteOperation::Push => transfer_file_remote_assets(
+                workspace,
+                remote,
+                operation,
+                &assets,
+                &materialized_asset_ids,
+                &previous_assets,
+            )?,
+            RemoteOperation::Clone | RemoteOperation::Pull => {
+                let assets_by_commit =
+                    get_remaining_assets_to_transfer(graph, range.from_commit, &commit_hash)?;
+                for (commit_hash, assets) in assets_by_commit {
+                    let assets = assets
+                        .into_iter()
+                        .map(|asset| (asset.id, asset))
+                        .collect::<HashMap<_, _>>();
+                    transfer_file_remote_assets(
+                        workspace,
+                        remote,
+                        operation,
+                        &assets,
+                        &materialized_asset_ids,
+                        &previous_assets,
+                    )?;
+                    complete_commit(&commit_hash)?;
+                }
+            }
+        }
         return Ok(Vec::new());
     }
 
     let repository = RepositoryRemote::parse(&remote.url)?;
     let response = acquire_asset_transfers(
         &repository,
-        &AssetTransferRequest { operation, branch },
+        &AssetTransferRequest {
+            operation,
+            branch,
+            from_commit: range.from_commit,
+            to_commit: Some(&commit_hash),
+        },
         login_origin,
     )?;
     let client = Client::new();
-    let mut upload_receipts = Vec::new();
-    for transfer in response.assets {
-        let Some(asset) = assets.remove(&transfer.id) else {
-            if current_assets.contains_key(&transfer.id)
-                || previous_assets.contains_key(&transfer.id)
-            {
-                continue;
-            }
+    for transfer in &response.assets {
+        if !range_assets.contains_key(&transfer.id) && !excluded_assets.contains_key(&transfer.id) {
             return Err(format!(
                 "GenHub returned an asset transfer not present on branch '{branch}': {}",
                 transfer.id
             )
             .into());
-        };
-        match operation {
-            RemoteOperation::Push => {
-                upload_receipts.push(upload_asset(&client, workspace, &asset, &transfer.url)?);
-            }
-            RemoteOperation::Clone | RemoteOperation::Pull => {
-                let destination_logical_path = if materialized_asset_ids.contains(&asset.id) {
-                    asset.logical_path.as_deref()
-                } else {
-                    None
-                };
-                if let DownloadAssetOutcome::Conflict(conflict_path) = download_asset(
-                    &client,
-                    workspace,
-                    &asset,
-                    &previous_assets,
-                    destination_logical_path,
-                    &transfer.url,
-                )? {
-                    warn_asset_conflict(
-                        workspace,
-                        &asset,
-                        destination_logical_path,
-                        &conflict_path,
-                    )?;
-                }
-            }
         }
     }
-    if !assets.is_empty() {
-        return Err(format!(
-            "GenHub omitted {} local asset transfer(s) for branch '{branch}'",
-            assets.len()
-        )
-        .into());
+    if operation == RemoteOperation::Push {
+        let mut assets = assets;
+        let mut upload_receipts = Vec::new();
+        for transfer in response.assets {
+            let Some(asset) = assets.remove(&transfer.id) else {
+                continue;
+            };
+            upload_receipts.push(upload_asset(&client, workspace, &asset, &transfer.url)?);
+        }
+        if !assets.is_empty() {
+            return Err(format!(
+                "GenHub omitted {} local asset transfer(s) for branch '{branch}'",
+                assets.len()
+            )
+            .into());
+        }
+        return Ok(upload_receipts);
     }
-    Ok(upload_receipts)
+
+    let mut transfer_urls = response
+        .assets
+        .into_iter()
+        .map(|transfer| (transfer.id, transfer.url))
+        .collect::<HashMap<_, _>>();
+    let assets_by_commit =
+        get_remaining_assets_to_transfer(graph, range.from_commit, &commit_hash)?;
+    for (commit_hash, assets) in assets_by_commit {
+        for asset in assets {
+            let Some(url) = transfer_urls.remove(&asset.id) else {
+                return Err(
+                    format!("GenHub omitted asset {} for branch '{branch}'", asset.id).into(),
+                );
+            };
+            let destination_logical_path = if materialized_asset_ids.contains(&asset.id) {
+                asset.logical_path.as_deref()
+            } else {
+                None
+            };
+            if let DownloadAssetOutcome::Conflict(conflict_path) = download_asset(
+                &client,
+                workspace,
+                &asset,
+                &previous_assets,
+                destination_logical_path,
+                &url,
+            )? {
+                warn_asset_conflict(workspace, &asset, destination_logical_path, &conflict_path)?;
+            }
+        }
+        complete_commit(&commit_hash)?;
+    }
+    Ok(Vec::new())
 }
 
 pub fn clone_into_workspace(
+    config: &ConfigConnection,
     remote: &Remote,
     workspace: &Workspace,
 ) -> Result<String, Box<dyn Error>> {
@@ -996,14 +1086,33 @@ pub fn clone_into_workspace(
     let branch = active_branch(&graph)?;
     drop(graph);
     let graph = get_raw_connection(workspace.graph_db_path()?)?;
+    let mut operation = RemoteOperationRecord::begin_or_resume(
+        config,
+        &remote.name,
+        &branch,
+        StoredRemoteOperationKind::Clone,
+        None,
+    )?;
+    let destination_hash = hash_of(&graph, &branch)?;
+    operation.set_destination(config, &destination_hash)?;
+    let assets_transfer_checkpoint = operation.assets_transfer_checkpoint;
+    let previous_hash = operation.from_commit;
     transfer_assets(
         &graph,
         workspace,
         remote,
         RemoteOperation::Clone,
         &branch,
-        None,
+        AssetTransferRange {
+            from_commit: assets_transfer_checkpoint.as_ref(),
+            previous_hash: previous_hash.as_ref(),
+        },
+        |commit_hash| {
+            operation.advance_assets_transfer_checkpoint(config, commit_hash)?;
+            Ok(())
+        },
     )?;
+    operation.complete(config)?;
     Ok(branch)
 }
 
@@ -1049,7 +1158,11 @@ pub fn execute_push(
         &remote,
         RemoteOperation::Push,
         &branch,
-        previous_hash.as_ref(),
+        AssetTransferRange {
+            from_commit: previous_hash.as_ref(),
+            previous_hash: previous_hash.as_ref(),
+        },
+        |_| Ok(()),
     )?;
     if !remote.url.starts_with("file://") {
         let repository = RepositoryRemote::parse(&remote.url)?;
@@ -1099,22 +1212,48 @@ pub fn execute_pull(
         .unwrap_or(active_branch(&graph)?);
     let remote = resolve_remote(&config, explicit_remote, &branch)?;
     let previous_hash = branch_hash(&graph, &branch)?;
-    run_graph_transfer(
+    let mut operation = RemoteOperationRecord::begin_or_resume(
+        &config,
+        &remote.name,
+        &branch,
+        StoredRemoteOperationKind::Pull,
+        previous_hash.as_ref(),
+    )?;
+    if let Err(error) = run_graph_transfer(
         &graph,
         &remote,
         RemoteOperation::Pull,
         &branch,
         false,
         || pull(&graph, &remote.name, &branch),
-    )?;
+    ) {
+        if let Err(metadata_error) = operation.fail(&config) {
+            eprintln!(
+                "Warning: failed to record unsuccessful pull operation for branch '{branch}': {metadata_error}"
+            );
+        }
+        return Err(error);
+    }
+    let destination_hash = hash_of(&graph, &branch)?;
+    operation.set_destination(&config, &destination_hash)?;
+    let assets_transfer_checkpoint = operation.assets_transfer_checkpoint;
+    let previous_hash = operation.from_commit;
     transfer_assets(
         &graph,
         workspace,
         &remote,
         RemoteOperation::Pull,
         &branch,
-        previous_hash.as_ref(),
+        AssetTransferRange {
+            from_commit: assets_transfer_checkpoint.as_ref(),
+            previous_hash: previous_hash.as_ref(),
+        },
+        |commit_hash| {
+            operation.advance_assets_transfer_checkpoint(&config, commit_hash)?;
+            Ok(())
+        },
     )?;
+    operation.complete(&config)?;
     RemoteBranch::set_remote_validated(&config, &branch, Some(&remote.name))?;
     println!("Pulled branch '{branch}' from '{}'.", remote.name);
     Ok(())
@@ -1165,13 +1304,16 @@ mod tests {
         thread,
     };
 
-    use gen_core::config::Workspace;
+    use gen_core::{DoltHashId, HashId, config::Workspace};
     use gen_models::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
         db::GraphConnection,
-        history::dolt::{commit_all, hash_of, remote_rows, remove_remote},
-        operations::{Defaults, Remote, calculate_reader_checksum},
+        history::dolt::{clone_remote, commit_all, hash_of, remote_rows, remove_remote},
+        operations::{
+            Defaults, Remote, RemoteOperationKind as StoredRemoteOperationKind,
+            RemoteOperationRecord, calculate_reader_checksum,
+        },
     };
     use reqwest::blocking::Client;
     use rusqlite::{Connection, Error as SqlError};
@@ -1179,11 +1321,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        DownloadAssetOutcome, RemoteOperation, canonical_remote_url, clone_destination_name,
-        copy_versioned_asset, download_asset, download_to_versioned_store, execute_push,
-        file_graph_url, resolve_remote, run_graph_transfer, temporary_path, transfer_assets,
+        AssetTransferRange, DownloadAssetOutcome, RemoteOperation, canonical_remote_url,
+        clone_destination_name, copy_versioned_asset, download_asset, download_to_versioned_store,
+        execute_pull, execute_push, file_graph_url, get_remaining_assets_to_transfer,
+        resolve_remote, run_graph_transfer, temporary_path, transfer_assets,
     };
-    use crate::{get_config_connection, get_connection};
+    use crate::{get_config_connection, get_connection, get_raw_connection};
 
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1205,7 +1348,7 @@ mod tests {
         use url::Url;
 
         use super::super::clone_into_workspace;
-        use crate::get_connection;
+        use crate::{get_config_connection, get_connection};
 
         struct CloneFixture {
             _temp: TempDir,
@@ -1355,7 +1498,16 @@ mod tests {
                 workspace,
             } = CloneFixture::new();
 
-            let result = clone_into_workspace(&remote, &workspace);
+            workspace.ensure_gen_dir();
+            let config = get_config_connection(Some(
+                workspace
+                    .gen_db_path()
+                    .expect("should resolve clone config path"),
+            ))
+            .expect("should create clone config database");
+            Remote::create(&config, &remote.name, &remote.url)
+                .expect("should configure clone remote");
+            let result = clone_into_workspace(&config, &remote, &workspace);
             capability_stop.store(true, Ordering::Release);
             expired_server
                 .join()
@@ -1488,6 +1640,123 @@ mod tests {
             },
             server,
         )
+    }
+
+    fn serve_pull_api(
+        graph_url: &str,
+        asset_id: HashId,
+        asset_url: &str,
+        pull_count: usize,
+        fail_first_asset: bool,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind pull API server");
+        let address = listener
+            .local_addr()
+            .expect("should read pull API server address");
+        let graph_url = graph_url.to_string();
+        let asset_url = asset_url.to_string();
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            let mut asset_request_count = 0;
+            for _ in 0..(pull_count * 2) {
+                let (mut stream, _) = listener.accept().expect("should accept pull API request");
+                let mut request = [0_u8; 8192];
+                let read = stream
+                    .read(&mut request)
+                    .expect("should read pull API request");
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                let response_body = if request.contains("/remote-capability ") {
+                    json!({
+                        "remote_url": graph_url,
+                        "expires_at": "2030-01-01T00:00:00Z",
+                        "default_branch": "main"
+                    })
+                    .to_string()
+                } else if request.contains("/asset-transfers ") {
+                    let download_url = if fail_first_asset && asset_request_count == 0 {
+                        "http://127.0.0.1:1/unavailable"
+                    } else {
+                        &asset_url
+                    };
+                    asset_request_count += 1;
+                    json!({
+                        "assets": [{ "id": asset_id, "url": download_url }]
+                    })
+                    .to_string()
+                } else {
+                    panic!("unexpected pull API request: {request}");
+                };
+                requests.push(request);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .expect("should write pull API response");
+            }
+            requests
+        });
+        (format!("http://{address}/api/repos/alice/example"), handle)
+    }
+
+    fn serve_checkpoint_pull_api(
+        graph_url: &str,
+        first_asset: (HashId, &str),
+        second_asset: (HashId, &str),
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("should bind checkpoint pull API server");
+        let address = listener
+            .local_addr()
+            .expect("should read checkpoint pull API server address");
+        let graph_url = graph_url.to_string();
+        let first_asset_url = first_asset.1.to_string();
+        let second_asset_url = second_asset.1.to_string();
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            let mut asset_request_count = 0;
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().expect("should accept pull API request");
+                let mut request = [0_u8; 8192];
+                let read = stream
+                    .read(&mut request)
+                    .expect("should read pull API request");
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                let response_body = if request.contains("/remote-capability ") {
+                    json!({
+                        "remote_url": graph_url,
+                        "expires_at": "2030-01-01T00:00:00Z",
+                        "default_branch": "main"
+                    })
+                    .to_string()
+                } else if request.contains("/asset-transfers ") {
+                    let assets = if asset_request_count == 0 {
+                        json!([
+                            {
+                                "id": second_asset.0,
+                                "url": "http://127.0.0.1:1/unavailable"
+                            },
+                            { "id": first_asset.0, "url": first_asset_url }
+                        ])
+                    } else {
+                        json!([{ "id": second_asset.0, "url": second_asset_url }])
+                    };
+                    asset_request_count += 1;
+                    json!({ "assets": assets }).to_string()
+                } else {
+                    panic!("unexpected pull API request: {request}");
+                };
+                requests.push(request);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .expect("should write pull API response");
+            }
+            requests
+        });
+        (format!("http://{address}/api/repos/alice/example"), handle)
     }
 
     struct EnvironmentGuard {
@@ -1806,6 +2075,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_remaining_assets_to_transfer_rejects_unrelated_checkpoint() {
+        let temp = tempdir().expect("should create transfer workspace");
+        let graph = get_connection(temp.path().join("graph.db"))
+            .expect("should create transfer graph database");
+        Collection::create(&graph, "base").expect("should create base collection");
+        let destination =
+            commit_all(&graph, "create base collection").expect("should commit base collection");
+        let unrelated_checkpoint = DoltHashId([9_u8; 20]);
+
+        let error =
+            get_remaining_assets_to_transfer(&graph, Some(&unrelated_checkpoint), &destination)
+                .expect_err("should reject a checkpoint outside first-parent history");
+
+        assert!(
+            error
+                .to_string()
+                .contains("is not in the first-parent history")
+        );
+    }
+
     // This ensures that we only request and pull assets that we don't already have by requesting versions
     // after the commit hash prior to the pull.
     #[test]
@@ -1847,7 +2137,11 @@ mod tests {
             &remote,
             RemoteOperation::Pull,
             "main",
-            Some(&previous_hash),
+            AssetTransferRange {
+                from_commit: Some(&previous_hash),
+                previous_hash: Some(&previous_hash),
+            },
+            |_| Ok(()),
         )
         .expect("should transfer only the asset delta");
         let transfer_request = transfer_server
@@ -1907,7 +2201,11 @@ mod tests {
             &remote,
             RemoteOperation::Clone,
             "main",
-            None,
+            AssetTransferRange {
+                from_commit: None,
+                previous_hash: None,
+            },
+            |_| Ok(()),
         )
         .expect("should transfer clone assets");
         let transfer_request = transfer_server
@@ -1946,6 +2244,310 @@ mod tests {
             !temp.path().join("reference.fa.conflict").exists(),
             "clean clone should not create a conflict file"
         );
+    }
+
+    #[test]
+    fn test_execute_pull_transfers_assets_after_graph_db_is_synced() {
+        // Test that if we have transferred a graph.db, on a subsequent pull we will transfer assets. This mimics
+        // things like resumes.
+        let temp = tempdir().expect("should create unhydrated pull workspace");
+        let remote_graph_path = temp.path().join("remote.db");
+        let remote_graph =
+            get_connection(&remote_graph_path).expect("should create remote graph database");
+        Collection::create(&remote_graph, "base").expect("should create remote base state");
+        let contents = b"branch-only asset\n";
+        let asset = test_asset(contents, "feature.gfa", 1);
+        AssetRef::create(&remote_graph, &asset).expect("should insert remote asset");
+        let current_hash =
+            commit_all(&remote_graph, "add branch asset").expect("should commit remote asset");
+        drop(remote_graph);
+
+        let workspace = Workspace::new(temp.path().join("local"));
+        workspace.ensure_gen_dir();
+        let local_graph = get_raw_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve local graph database path"),
+        )
+        .expect("should open local graph database");
+        let graph_url = format!("file://{}", remote_graph_path.display());
+        // This does a direct clone of the graph db and avoids transfering assets
+        clone_remote(&local_graph, &graph_url).expect("should clone remote graph state");
+        drop(local_graph);
+
+        let (asset_url, asset_server) = serve_asset(contents);
+        let (remote_url, api_server) = serve_pull_api(&graph_url, asset.id, &asset_url, 1, false);
+        let config = get_config_connection(Some(
+            workspace
+                .gen_db_path()
+                .expect("should resolve local config database path"),
+        ))
+        .expect("should open local config database");
+        let remote =
+            Remote::create(&config, "origin", &remote_url).expect("should configure origin");
+        Defaults::set_default_remote(&config, Some(&remote.name))
+            .expect("should set default remote");
+
+        execute_pull(&workspace, None, None).expect("pull should hydrate the missing asset");
+
+        let requests = api_server.join().expect("pull API server should finish");
+        let asset_request = requests
+            .iter()
+            .find(|request| request.contains("/asset-transfers "))
+            .expect("should request asset transfers");
+        assert!(asset_request.contains("\"from_commit\":null"));
+        assert!(asset_request.contains(&format!("\"to_commit\":\"{current_hash}\"")));
+        assert_eq!(
+            fs::read(temp.path().join("local/feature.gfa"))
+                .expect("should read hydrated branch asset"),
+            contents
+        );
+        let completed_operations = config
+            .query_row(
+                "SELECT COUNT(*) FROM remote_operations \
+                 WHERE operation = 'pull' AND completed_at IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("should count completed pull operations");
+        assert_eq!(completed_operations, 1);
+        asset_server.join().expect("asset server should finish");
+    }
+
+    #[test]
+    fn test_execute_pull_resumes_an_incomplete_asset_operation() {
+        let temp = tempdir().expect("should create pull retry workspace");
+        let remote_graph_path = temp.path().join("remote.db");
+        let remote_graph =
+            get_connection(&remote_graph_path).expect("should create remote graph database");
+        Collection::create(&remote_graph, "base").expect("should create remote base state");
+        let previous_hash =
+            commit_all(&remote_graph, "base").expect("should commit remote base state");
+        drop(remote_graph);
+
+        let workspace = Workspace::new(temp.path().join("local"));
+        workspace.ensure_gen_dir();
+        let local_graph = get_raw_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve local graph database path"),
+        )
+        .expect("should open local graph database");
+        let graph_url = format!("file://{}", remote_graph_path.display());
+        clone_remote(&local_graph, &graph_url).expect("should clone remote base state");
+        drop(local_graph);
+
+        let remote_graph =
+            get_connection(&remote_graph_path).expect("should reopen remote graph database");
+        let contents = b"retry asset\n";
+        let asset = test_asset(contents, "retry.gfa", 1);
+        AssetRef::create(&remote_graph, &asset).expect("should insert remote asset");
+        let current_hash =
+            commit_all(&remote_graph, "add retry asset").expect("should commit remote asset");
+        drop(remote_graph);
+
+        let (asset_url, asset_server) = serve_asset(contents);
+        let (remote_url, api_server) = serve_pull_api(&graph_url, asset.id, &asset_url, 2, true);
+        let config = get_config_connection(Some(
+            workspace
+                .gen_db_path()
+                .expect("should resolve local config database path"),
+        ))
+        .expect("should open local config database");
+        let remote =
+            Remote::create(&config, "origin", &remote_url).expect("should configure origin");
+        Defaults::set_default_remote(&config, Some(&remote.name))
+            .expect("should set default remote");
+        let mut baseline = RemoteOperationRecord::begin_or_resume(
+            &config,
+            &remote.name,
+            "main",
+            StoredRemoteOperationKind::Clone,
+            None,
+        )
+        .expect("should begin baseline clone operation");
+        baseline
+            .set_destination(&config, &previous_hash)
+            .expect("should record baseline clone destination");
+        baseline
+            .advance_assets_transfer_checkpoint(&config, &previous_hash)
+            .expect("should record baseline asset checkpoint");
+        baseline
+            .complete(&config)
+            .expect("should complete baseline clone operation");
+
+        execute_pull(&workspace, None, None)
+            .expect_err("first pull should fail during its asset phase");
+        assert!(!temp.path().join("local/retry.gfa").exists());
+        let pending_commits: (DoltHashId, DoltHashId) = config
+            .query_row(
+                "SELECT from_commit, assets_transfer_checkpoint FROM remote_operations \
+                 WHERE completed_at IS NULL AND failed_at IS NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("should retain the incomplete operation bounds");
+        assert_eq!(pending_commits, (previous_hash, previous_hash));
+        execute_pull(&workspace, None, None).expect("pull retry should succeed");
+
+        let requests = api_server.join().expect("pull API server should finish");
+        let asset_requests = requests
+            .iter()
+            .filter(|request| request.contains("/asset-transfers "))
+            .collect::<Vec<_>>();
+        let from_commit_json = format!("\"from_commit\":\"{previous_hash}\"");
+        let to_commit_json = format!("\"to_commit\":\"{current_hash}\"");
+        assert_eq!(asset_requests.len(), 2);
+        for request in asset_requests {
+            assert!(request.contains(&from_commit_json));
+            assert!(request.contains(&to_commit_json));
+        }
+        assert_eq!(
+            fs::read(temp.path().join("local/retry.gfa")).expect("should read retried asset"),
+            contents
+        );
+        let pending_operations = config
+            .query_row(
+                "SELECT COUNT(*) FROM remote_operations \
+                 WHERE completed_at IS NULL AND failed_at IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("should count pending remote operations");
+        assert_eq!(pending_operations, 0);
+        asset_server.join().expect("asset server should finish");
+    }
+
+    #[test]
+    fn test_execute_pull_records_asset_checkpoint_and_resumes_remaining_transfer() {
+        let temp = tempdir().expect("should create checkpoint pull workspace");
+        let remote_graph_path = temp.path().join("remote.db");
+        let remote_graph =
+            get_connection(&remote_graph_path).expect("should create remote graph database");
+        Collection::create(&remote_graph, "base").expect("should create remote base state");
+        let baseline_hash =
+            commit_all(&remote_graph, "base").expect("should commit remote base state");
+        drop(remote_graph);
+
+        let workspace = Workspace::new(temp.path().join("local"));
+        workspace.ensure_gen_dir();
+        let local_graph = get_raw_connection(
+            workspace
+                .graph_db_path()
+                .expect("should resolve local graph database path"),
+        )
+        .expect("should open local graph database");
+        let graph_url = format!("file://{}", remote_graph_path.display());
+        clone_remote(&local_graph, &graph_url).expect("should clone remote base state");
+        drop(local_graph);
+
+        let remote_graph =
+            get_connection(&remote_graph_path).expect("should reopen remote graph database");
+        let first_contents = b"first checkpoint asset\n";
+        let first_asset = test_asset(first_contents, "first.gfa", 1);
+        AssetRef::create(&remote_graph, &first_asset).expect("should insert first remote asset");
+        let first_asset_commit =
+            commit_all(&remote_graph, "add first asset").expect("should commit first remote asset");
+        let second_contents = b"second checkpoint asset\n";
+        let second_asset = test_asset(second_contents, "second.gfa", 2);
+        AssetRef::create(&remote_graph, &second_asset).expect("should insert second remote asset");
+        let destination_hash = commit_all(&remote_graph, "add second asset")
+            .expect("should commit second remote asset");
+        drop(remote_graph);
+
+        let (first_asset_url, first_asset_server) = serve_asset(first_contents);
+        let (second_asset_url, second_asset_server) = serve_asset(second_contents);
+        let (remote_url, api_server) = serve_checkpoint_pull_api(
+            &graph_url,
+            (first_asset.id, &first_asset_url),
+            (second_asset.id, &second_asset_url),
+        );
+        let config = get_config_connection(Some(
+            workspace
+                .gen_db_path()
+                .expect("should resolve local config database path"),
+        ))
+        .expect("should open local config database");
+        let remote =
+            Remote::create(&config, "origin", &remote_url).expect("should configure origin");
+        Defaults::set_default_remote(&config, Some(&remote.name))
+            .expect("should set default remote");
+        let mut baseline = RemoteOperationRecord::begin_or_resume(
+            &config,
+            &remote.name,
+            "main",
+            StoredRemoteOperationKind::Clone,
+            None,
+        )
+        .expect("should begin baseline clone operation");
+        baseline
+            .set_destination(&config, &baseline_hash)
+            .expect("should record baseline clone destination");
+        baseline
+            .advance_assets_transfer_checkpoint(&config, &baseline_hash)
+            .expect("should record baseline asset checkpoint");
+        baseline
+            .complete(&config)
+            .expect("should complete baseline clone operation");
+
+        execute_pull(&workspace, None, None)
+            .expect_err("first pull should fail in the second commit batch");
+        assert_eq!(
+            fs::read(temp.path().join("local/first.gfa"))
+                .expect("should retain the completed first commit asset"),
+            first_contents
+        );
+        assert!(!temp.path().join("local/second.gfa").exists());
+        let (assets_transfer_checkpoint, to_commit): (DoltHashId, DoltHashId) = config
+            .query_row(
+                "SELECT assets_transfer_checkpoint, to_commit FROM remote_operations \
+                 WHERE completed_at IS NULL AND failed_at IS NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("should retain commit-level asset progress");
+        assert_eq!(
+            assets_transfer_checkpoint, first_asset_commit,
+            "checkpoint should advance through the last fully transferred commit"
+        );
+        assert_eq!(
+            to_commit, destination_hash,
+            "interrupted operation should retain its graph destination"
+        );
+        first_asset_server
+            .join()
+            .expect("first asset transfer should finish before the interruption");
+
+        execute_pull(&workspace, None, None).expect("pull retry should resume after checkpoint");
+
+        let requests = api_server.join().expect("pull API server should finish");
+        let asset_requests = requests
+            .iter()
+            .filter(|request| request.contains("/asset-transfers "))
+            .collect::<Vec<_>>();
+        assert_eq!(asset_requests.len(), 2);
+        assert!(asset_requests[0].contains(&format!("\"from_commit\":\"{baseline_hash}\"")));
+        assert!(asset_requests[1].contains(&format!("\"from_commit\":\"{first_asset_commit}\"")));
+        for request in asset_requests {
+            assert!(request.contains(&format!("\"to_commit\":\"{destination_hash}\"")));
+        }
+        assert_eq!(
+            fs::read(temp.path().join("local/second.gfa"))
+                .expect("should materialize the resumed second commit asset"),
+            second_contents
+        );
+        let completed_checkpoint: DoltHashId = config
+            .query_row(
+                "SELECT assets_transfer_checkpoint FROM remote_operations \
+                 WHERE completed_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should store the destination as the completed checkpoint");
+        assert_eq!(completed_checkpoint, destination_hash);
+        second_asset_server
+            .join()
+            .expect("second asset server should finish");
     }
 
     #[test]

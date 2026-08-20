@@ -21,7 +21,10 @@ use std::{
 
 use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use itertools::Itertools;
-use rusqlite::{OptionalExtension, Result as SQLResult, Row, params};
+use rusqlite::{
+    OptionalExtension, Result as SQLResult, Row, params,
+    types::{FromSql, FromSqlResult, ValueRef},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -638,6 +641,179 @@ impl RemoteBranch {
     }
 }
 
+/// A remote read operation whose graph and asset phases must complete together.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteOperationKind {
+    /// Initializes a workspace from a remote repository.
+    Clone,
+    /// Advances an existing local branch from a remote repository.
+    Pull,
+}
+
+impl RemoteOperationKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clone => "clone",
+            Self::Pull => "pull",
+        }
+    }
+}
+
+impl FromSql for RemoteOperationKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value.as_str().map(|operation| match operation {
+            "clone" => Self::Clone,
+            "pull" => Self::Pull,
+            _ => unreachable!("remote operation should satisfy its database constraint"),
+        })
+    }
+}
+
+/// Tracks the commit range for a pull or clone until all local assets are verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteOperationRecord {
+    /// Config database row identifier.
+    pub id: i64,
+    /// Configured remote participating in the operation.
+    pub remote_name: String,
+    /// Branch transferred by the operation.
+    pub branch_name: String,
+    /// Direction of the remote graph transfer.
+    pub operation: RemoteOperationKind,
+    /// Local branch commit from before the graph transfer.
+    pub from_commit: Option<DoltHashId>,
+    /// Last commit whose complete asset batch was verified locally.
+    pub assets_transfer_checkpoint: Option<DoltHashId>,
+    /// Destination graph commit whose assets must be transferred.
+    pub to_commit: Option<DoltHashId>,
+    /// Time at which the operation began.
+    pub started_at: String,
+    /// Time at which both graph and asset transfer completed.
+    pub completed_at: Option<String>,
+    /// Time at which the operation became unrecoverable.
+    pub failed_at: Option<String>,
+}
+
+impl Query for RemoteOperationRecord {
+    type Model = RemoteOperationRecord;
+
+    const TABLE_NAME: &'static str = "remote_operations";
+
+    fn process_row(row: &Row) -> Self::Model {
+        Self {
+            id: row.get("id").unwrap(),
+            remote_name: row.get("remote_name").unwrap(),
+            branch_name: row.get("branch_name").unwrap(),
+            operation: row.get("operation").unwrap(),
+            from_commit: row.get("from_commit").unwrap(),
+            assets_transfer_checkpoint: row.get("assets_transfer_checkpoint").unwrap(),
+            to_commit: row.get("to_commit").unwrap(),
+            started_at: row.get("started_at").unwrap(),
+            completed_at: row.get("completed_at").unwrap(),
+            failed_at: row.get("failed_at").unwrap(),
+        }
+    }
+}
+
+impl RemoteOperationRecord {
+    /// Resumes an incomplete operation or starts one from the supplied local commit.
+    pub fn begin_or_resume(
+        conn: &ConfigConnection,
+        remote_name: &str,
+        branch_name: &str,
+        operation: RemoteOperationKind,
+        from_commit: Option<&DoltHashId>,
+    ) -> SQLResult<Self> {
+        let pending = conn
+            .query_row(
+                "SELECT * FROM remote_operations \
+                 WHERE remote_name = ?1 AND branch_name = ?2 \
+                   AND completed_at IS NULL AND failed_at IS NULL \
+                 ORDER BY id LIMIT 1",
+                params![remote_name, branch_name],
+                |row| Ok(Self::process_row(row)),
+            )
+            .optional()?;
+        if let Some(pending) = pending {
+            return Ok(pending);
+        }
+
+        let assets_transfer_checkpoint = conn
+            .query_row(
+                "SELECT assets_transfer_checkpoint FROM remote_operations \
+                 WHERE remote_name = ?1 AND branch_name = ?2 AND completed_at IS NOT NULL \
+                 ORDER BY id DESC LIMIT 1",
+                params![remote_name, branch_name],
+                |row| row.get::<_, DoltHashId>(0),
+            )
+            .optional()?;
+        conn.execute(
+            "INSERT INTO remote_operations \
+             (remote_name, branch_name, operation, from_commit, assets_transfer_checkpoint) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                remote_name,
+                branch_name,
+                operation.as_str(),
+                from_commit,
+                assets_transfer_checkpoint
+            ],
+        )?;
+        Self::get_by_id(conn, &conn.last_insert_rowid(), None)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    /// Records the desired end commit an operation is tracking.
+    pub fn set_destination(
+        &mut self,
+        conn: &ConfigConnection,
+        to_commit: &DoltHashId,
+    ) -> SQLResult<()> {
+        conn.execute(
+            "UPDATE remote_operations SET to_commit = ?1 WHERE id = ?2",
+            params![to_commit, self.id],
+        )?;
+        self.to_commit = Some(*to_commit);
+        Ok(())
+    }
+
+    /// After transferring assets for a commit, mark it in the database so subsequent transfers for
+    /// resumes can restart from there.
+    pub fn advance_assets_transfer_checkpoint(
+        &mut self,
+        conn: &ConfigConnection,
+        commit: &DoltHashId,
+    ) -> SQLResult<()> {
+        conn.execute(
+            "UPDATE remote_operations SET assets_transfer_checkpoint = ?1 WHERE id = ?2",
+            params![commit, self.id],
+        )?;
+        self.assets_transfer_checkpoint = Some(*commit);
+        Ok(())
+    }
+
+    /// Marks the operation complete only after its graph and asset phases succeed.
+    pub fn complete(&self, conn: &ConfigConnection) -> SQLResult<()> {
+        if self.to_commit.is_none() || self.to_commit != self.assets_transfer_checkpoint {
+            self.fail(conn)?;
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        conn.execute(
+            "UPDATE remote_operations SET completed_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            [self.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn fail(&self, conn: &ConfigConnection) -> SQLResult<()> {
+        conn.execute(
+            "UPDATE remote_operations SET failed_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            [self.id],
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Defaults {
     pub id: i64,
@@ -933,6 +1109,153 @@ mod tests {
             let defaults = Defaults::get(config_conn).expect("should load defaults");
             assert_eq!(defaults.default_committer_name, "Test User");
             assert_eq!(defaults.default_committer_email, "test@example.com");
+        }
+    }
+
+    #[cfg(test)]
+    mod remote_operations {
+        use gen_core::DoltHashId;
+
+        use crate::{
+            operations::{Remote, RemoteOperationKind, RemoteOperationRecord},
+            test_helpers::setup_gen,
+            traits::Query,
+        };
+
+        #[test]
+        fn test_remote_operation_resumes_until_completed() {
+            let context = setup_gen();
+            let config = context.config().conn();
+            Remote::create(config, "origin", "https://example.com/repo")
+                .expect("should create remote");
+            let original_commit = DoltHashId([1_u8; 20]);
+            let advanced_commit = DoltHashId([2_u8; 20]);
+
+            let mut baseline = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Clone,
+                Some(&original_commit),
+            )
+            .expect("should begin clone operation");
+            assert_eq!(baseline.from_commit, Some(original_commit));
+            assert_eq!(baseline.assets_transfer_checkpoint, None);
+            baseline
+                .set_destination(config, &original_commit)
+                .expect("should record clone destination");
+            baseline
+                .advance_assets_transfer_checkpoint(config, &original_commit)
+                .expect("should record clone asset checkpoint");
+            baseline
+                .complete(config)
+                .expect("should complete clone operation");
+
+            let operation = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Pull,
+                Some(&original_commit),
+            )
+            .expect("should begin pull operation");
+            let mut resumed = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Pull,
+                Some(&advanced_commit),
+            )
+            .expect("should resume pull operation");
+
+            assert_eq!(resumed, operation);
+            assert_eq!(resumed.from_commit, Some(original_commit));
+            assert_eq!(resumed.assets_transfer_checkpoint, Some(original_commit));
+
+            resumed
+                .set_destination(config, &advanced_commit)
+                .expect("should record pull destination");
+            resumed
+                .advance_assets_transfer_checkpoint(config, &advanced_commit)
+                .expect("should record pull asset checkpoint");
+            resumed
+                .complete(config)
+                .expect("should complete pull operation");
+            let completed = RemoteOperationRecord::get_by_id(config, &resumed.id, None)
+                .expect("should refetch completed pull operation");
+            assert!(
+                completed.completed_at.is_some(),
+                "completed_at should be set"
+            );
+            assert_eq!(completed.failed_at, None, "failed_at should remain unset");
+
+            let next = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Pull,
+                Some(&advanced_commit),
+            )
+            .expect("should begin the next pull operation");
+            assert_ne!(next.id, operation.id);
+            assert_eq!(next.from_commit, Some(advanced_commit));
+            assert_eq!(next.assets_transfer_checkpoint, Some(advanced_commit));
+        }
+
+        #[test]
+        fn test_failed_graph_operation_does_not_resume() {
+            let context = setup_gen();
+            let config = context.config().conn();
+            Remote::create(config, "origin", "https://example.com/repo")
+                .expect("should create remote");
+            let original_commit = DoltHashId([1_u8; 20]);
+
+            let failed = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Pull,
+                Some(&original_commit),
+            )
+            .expect("should begin pull operation");
+            failed.fail(config).expect("should fail pull operation");
+            let next = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Pull,
+                Some(&original_commit),
+            )
+            .expect("should begin replacement pull operation");
+
+            assert_ne!(next.id, failed.id);
+        }
+
+        #[test]
+        fn test_remote_operation_cannot_complete_before_asset_checkpoint() {
+            let context = setup_gen();
+            let config = context.config().conn();
+            Remote::create(config, "origin", "https://example.com/repo")
+                .expect("should create remote");
+            let destination_commit = DoltHashId([1_u8; 20]);
+            let mut operation = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Clone,
+                None,
+            )
+            .expect("should begin clone operation");
+            operation
+                .set_destination(config, &destination_commit)
+                .expect("should record graph destination");
+
+            operation
+                .complete(config)
+                .expect_err("should require assets to reach graph destination");
+            let failed = RemoteOperationRecord::get_by_id(config, &operation.id, None)
+                .expect("should refetch failed clone operation");
+            assert!(failed.failed_at.is_some(), "failed_at should be set");
         }
     }
 
