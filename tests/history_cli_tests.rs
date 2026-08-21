@@ -107,7 +107,7 @@ mod diff_views {
 
     use super::{
         DiffChangeKind, DiffRange, DoltHistoryStore, HashSet, HistoryStore, Node, Path, PathBuf,
-        assert_success, collect_operation_diff, fs, get_connection, run_gen, tempdir,
+        Workspace, assert_success, collect_operation_diff, fs, get_connection, run_gen, tempdir,
     };
 
     fn maybe_export_diff_graph_debug(graph: &gen_diff::graph::DiffGenGraph, export_path: &Path) {
@@ -187,6 +187,7 @@ mod diff_views {
     #[test]
     fn test_view_diff_reports_vcf_added_and_removed_nodes_from_deltas() {
         let repo_dir = tempdir().expect("should create temp repo directory");
+        let workspace = Workspace::new(repo_dir.path());
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let fasta_path = fixtures_dir.join("simple.fa");
         let vcf_path = fixtures_dir.join("simple.vcf");
@@ -288,6 +289,7 @@ mod diff_views {
             .expect("lineage-derived sample should retain parent block group id");
         let parent_graph = gen_models::block_group::BlockGroup::get_graph(
             &graph_conn,
+            &workspace,
             &parent_block_group_id,
             None,
         )
@@ -339,8 +341,9 @@ mod diff_views {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        let workspace = gen_core::Workspace::new(repo_dir.path());
         let sequences_by_node_id =
-            Node::get_sequences_by_node_ids(&graph_conn, &diff_node_ids, None);
+            Node::get_sequences_by_node_ids(&graph_conn, &workspace, &diff_node_ids, None);
         let removed_sequences = unknown_diff
             .graph
             .nodes()

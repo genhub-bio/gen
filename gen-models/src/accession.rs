@@ -1,8 +1,8 @@
 use std::{collections::HashMap, ops::Range as StdRange, rc::Rc};
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash,
-    is_terminal,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace,
+    calculate_hash, is_terminal,
     range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -561,11 +561,12 @@ impl AccessionSpan {
     /// the entire region is used.
     pub fn from_resolved_region(
         conn: &GraphConnection,
+        workspace: &Workspace,
         region: &ResolvedGenRegion,
         ranges: Option<&[StdRange<i64>]>,
     ) -> Result<Vec<AccessionSpan>, AccessionError> {
         let tree = region
-            .intervaltree(conn)
+            .intervaltree(conn, workspace)
             .map_err(|err| AccessionError::RegionProjection(err.to_string()))?;
         match ranges {
             Some(ranges) => Self::from_intervaltree_ranges(&tree, ranges),

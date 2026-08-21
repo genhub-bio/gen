@@ -83,6 +83,7 @@ pub fn update_with_sequence(
 
             insert_sequence_change(
                 conn,
+                context.workspace(),
                 &resolved_region,
                 target_block_group,
                 &path,
@@ -118,6 +119,7 @@ pub fn update_with_sequence(
 
             insert_sequence_change(
                 conn,
+                context.workspace(),
                 &resolved_region,
                 target_block_group,
                 &path,
@@ -170,6 +172,7 @@ pub fn update_with_sequence(
 
 fn insert_sequence_change(
     conn: &gen_models::db::GraphConnection,
+    workspace: &gen_core::Workspace,
     region: &ResolvedGenRegion,
     target_block_group: &BlockGroup,
     path: &gen_models::path::Path,
@@ -177,7 +180,7 @@ fn insert_sequence_change(
 ) -> Result<(), SequenceUpdateError> {
     let source = target_update_region(conn, region, target_block_group.id, Some(path))?;
     let data = InsertChangeData::new(block);
-    insert_update_change(conn, source, data)?;
+    insert_update_change(conn, workspace, source, data)?;
     Ok(())
 }
 
@@ -249,10 +252,16 @@ mod tests {
             preserve_edge: true,
         };
 
-        BlockGroup::insert_change(&conn, &change).unwrap();
+        BlockGroup::insert_change(&conn, crate::test_helpers::test_workspace(), &change).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &block_group_id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter([
                 "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
                 "AAAAAAAAAATTTTTNNNNCCCCCGGGGGGGGGG".to_string(),
@@ -283,10 +292,16 @@ mod tests {
             preserve_edge: true,
         };
 
-        BlockGroup::insert_change(&conn, &change).unwrap();
+        BlockGroup::insert_change(&conn, crate::test_helpers::test_workspace(), &change).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &block_group_id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &block_group_id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter([
                 "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
                 "AAAAANNNNGGGGG".to_string(),
@@ -343,7 +358,13 @@ mod tests {
         );
         let block_group = get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_group.id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_group.id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter([
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATAAACGATCGATCGGGAACACACAGAGA".to_string(),
@@ -403,7 +424,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
         assert_eq!(
@@ -454,11 +481,15 @@ mod tests {
         let child_path = BlockGroup::get_current_path(conn, &child_blockgroup, None).unwrap();
         let other_path = BlockGroup::get_current_path(conn, &other_blockgroup, None).unwrap();
         assert_eq!(
-            child_path.sequence(conn, None).unwrap(),
+            child_path
+                .sequence(conn, context.workspace(), None)
+                .unwrap(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA"
         );
         assert_eq!(
-            other_path.sequence(conn, None).unwrap(),
+            other_path
+                .sequence(conn, context.workspace(), None)
+                .unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
         );
     }
@@ -516,7 +547,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -574,7 +611,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -638,7 +681,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -696,7 +745,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -754,7 +809,13 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -801,13 +862,21 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &block_groups[0].id, false).unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_groups[0].id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
 
         let latest_path = BlockGroup::get_current_path(conn, &block_groups[0].id, None).unwrap();
         assert_eq!(
-            latest_path.sequence(conn, None).unwrap(),
+            latest_path
+                .sequence(conn, context.workspace(), None)
+                .unwrap(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA"
         );
     }
@@ -865,9 +934,15 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, &collection, "deleted");
-        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            None,
+        )
+        .unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
-        let sequences = Node::get_sequences_by_node_ids(conn, &node_ids, None);
+        let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {
             sequences[&node.node_id]
                 .get_sequence(node.sequence_start, node.sequence_end)
@@ -909,9 +984,15 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, &collection, "deleted2");
-        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group.id,
+            None,
+        )
+        .unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
-        let sequences = Node::get_sequences_by_node_ids(conn, &node_ids, None);
+        let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {
             sequences[&node.node_id]
                 .get_sequence(node.sequence_start, node.sequence_end)

@@ -630,7 +630,7 @@ where
                             None,
                         ),
                     };
-                    BlockGroup::insert_change(conn, &change).unwrap();
+                    BlockGroup::insert_change(conn, context.workspace(), &change).unwrap();
                     applied_changes.push((edit, change_node_id));
                 }
 
@@ -1199,7 +1199,13 @@ mod tests {
             let f = reader::parse_file(&path).unwrap();
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
-            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+            let seqs = BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1247,7 +1253,13 @@ mod tests {
         GATGCCATTGGGATATATCAACGGTGGTATATCCAGTGATTTTTTTCTCCAT",
             );
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
-            let seqs = BlockGroup::get_all_sequences(conn, &block_group_id, false).unwrap();
+            let seqs = BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap();
             assert_eq!(
                 seqs,
                 HashSet::from_iter([
@@ -1296,6 +1308,7 @@ mod tests {
             );
             let seqs = BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion", None),
                 false,
             )
@@ -1350,6 +1363,7 @@ mod tests {
             );
             let seqs = BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution", None),
                 false,
             )
@@ -1389,6 +1403,7 @@ mod tests {
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let sequences: HashSet<String> = BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None),
                 false,
             )

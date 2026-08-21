@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use gen_core::{NodeIntervalBlock, range::Range};
+use gen_core::{NodeIntervalBlock, Workspace, range::Range};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupError},
     db::GraphConnection,
@@ -30,6 +30,7 @@ pub enum GfaDiffError {
 
 pub fn gfa_sample_diff(
     conn: &GraphConnection,
+    workspace: &Workspace,
     collection_name: &str,
     filename: &PathBuf,
     from_sample_name: &str,
@@ -136,7 +137,7 @@ pub fn gfa_sample_diff(
         }
 
         if let Some(source_path) = source_path_result {
-            let source_sequence = source_path.sequence(conn, None)?;
+            let source_sequence = source_path.sequence(conn, workspace, None)?;
 
             let source_len = source_sequence.len() as i64;
             if last_source_position < source_len {
@@ -159,7 +160,7 @@ pub fn gfa_sample_diff(
         }
 
         if let Some(target_path) = target_path_result {
-            let target_sequence = target_path.sequence(conn, None)?;
+            let target_sequence = target_path.sequence(conn, workspace, None)?;
 
             let target_len = target_sequence.len() as i64;
             if last_target_position < target_len {
@@ -402,6 +403,7 @@ mod tests {
         let gfa_path = temp_dir.path().join("parent-child-diff.gfa");
         gfa_sample_diff(
             conn,
+            context.workspace(),
             collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -419,8 +421,13 @@ mod tests {
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_child_sequences =
-            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false).unwrap();
+        let all_child_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_child_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // We've replaced the middle AAAA with CCCC, so expect that as the child sequence
         assert_eq!(
@@ -487,6 +494,7 @@ mod tests {
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
         gfa_sample_diff(
             conn,
+            context.workspace(),
             collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -504,8 +512,13 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 3", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
+        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_grandchild_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // We've replaced the middle AAAA with CCCC and the middle TTTT with GGGG, so four possible sequences
         assert_eq!(
@@ -522,7 +535,15 @@ mod tests {
         );
 
         let gfa_path = temp_dir.path().join("child-grandchild-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "child", "grandchild").unwrap();
+        gfa_sample_diff(
+            conn,
+            context.workspace(),
+            collection_name,
+            &gfa_path,
+            "child",
+            "grandchild",
+        )
+        .unwrap();
 
         let _ = import_gfa(
             &context,
@@ -535,8 +556,13 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 4", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
+        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_grandchild_block_group.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             all_grandchild_sequences,
@@ -625,6 +651,7 @@ mod tests {
         let gfa_path = temp_dir.path().join("diff-against-nothing.gfa");
         gfa_sample_diff(
             conn,
+            context.workspace(),
             collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -642,8 +669,13 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_block_group.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             all_sequences,
@@ -732,6 +764,7 @@ mod tests {
         let gfa_path = temp_dir.path().join("self-diff.gfa");
         gfa_sample_diff(
             conn,
+            context.workspace(),
             collection_name,
             &gfa_path,
             "test sample",
@@ -749,8 +782,13 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_block_group.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             all_sequences,
@@ -903,7 +941,15 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("unrelated-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "sample1", "sample2").unwrap();
+        gfa_sample_diff(
+            conn,
+            context.workspace(),
+            collection_name,
+            &gfa_path,
+            "sample1",
+            "sample2",
+        )
+        .unwrap();
 
         let _ = import_gfa(
             &context,
@@ -915,8 +961,13 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 3", None)
             .pop()
             .unwrap();
-        let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_block_group.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             all_sequences,
@@ -1070,7 +1121,15 @@ mod tests {
 
         let temp_dir = tempdir().unwrap();
         let gfa_path = temp_dir.path().join("unrelated-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "sample1", "sample2").unwrap();
+        gfa_sample_diff(
+            conn,
+            context.workspace(),
+            collection_name,
+            &gfa_path,
+            "sample1",
+            "sample2",
+        )
+        .unwrap();
 
         let _ = import_gfa(
             &context,
@@ -1082,8 +1141,13 @@ mod tests {
         let new_block_group = Collection::get_block_groups(conn, "test collection 3", None)
             .pop()
             .unwrap();
-        let all_sequences =
-            BlockGroup::get_all_sequences(conn, &new_block_group.id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_block_group.id,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             all_sequences,
@@ -1208,6 +1272,7 @@ mod tests {
         let gfa_path = temp_dir.path().join("parent-child-diff.gfa");
         gfa_sample_diff(
             conn,
+            context.workspace(),
             collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -1225,8 +1290,13 @@ mod tests {
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_child_sequences =
-            BlockGroup::get_all_sequences(conn, &new_child_block_group.id, false).unwrap();
+        let all_child_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_child_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // We've replaced [2, 6) of AAAA with CCCC
         assert_eq!(
@@ -1293,6 +1363,7 @@ mod tests {
         let gfa_path = temp_dir.path().join("parent-grandchild-diff.gfa");
         gfa_sample_diff(
             conn,
+            context.workspace(),
             collection_name,
             &gfa_path,
             Sample::DEFAULT_NAME,
@@ -1311,8 +1382,13 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 3", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
+        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_grandchild_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // Original is AAAAAAAAAAAAAAAA
         // Grandchild is AACCGGGGAAAAAA
@@ -1326,7 +1402,15 @@ mod tests {
         );
 
         let gfa_path = temp_dir.path().join("child-grandchild-diff.gfa");
-        gfa_sample_diff(conn, collection_name, &gfa_path, "child", "grandchild").unwrap();
+        gfa_sample_diff(
+            conn,
+            context.workspace(),
+            collection_name,
+            &gfa_path,
+            "child",
+            "grandchild",
+        )
+        .unwrap();
 
         let _ = import_gfa(
             &context,
@@ -1339,8 +1423,13 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 4", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, &new_grandchild_block_group.id, false).unwrap();
+        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &new_grandchild_block_group.id,
+            false,
+        )
+        .unwrap();
 
         // Child is      AACCCCAAAAAAAAAA
         // Grandchild is AACCGGGGAAAAAA

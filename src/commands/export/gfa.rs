@@ -41,6 +41,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .unwrap_or_else(|| get_default_collection(config_conn));
     export_gfa(
         conn,
+        context.workspace(),
         name,
         &PathBuf::from(cmd.path),
         cmd.sample.as_str(),

@@ -5,7 +5,7 @@ use std::{
 };
 
 use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
-use gen_core::{HashId, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_START_NODE_ID, Workspace};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
 use gen_tui::{
@@ -80,9 +80,7 @@ fn get_block_group_path_nodes(
     )
     .map_err(|e| format!("Failed to query path: {}", e))?;
 
-    let path_blocks = path
-        .blocks(conn, None)
-        .map_err(|err| format!("Failed to load path blocks: {err}"))?;
+    let path_blocks = path.coordinate_blocks(conn, None);
 
     let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
     if path_nodes.is_empty() {
@@ -162,22 +160,30 @@ pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     (window.0.saturating_sub(span), window.1.saturating_add(span))
 }
 
+struct AnnotationViewportRequest<'a> {
+    conn: &'a GraphConnection,
+    workspace: &'a Workspace,
+    history_ref: Option<&'a str>,
+    block_group: &'a BlockGroup,
+    node_ids: &'a HashSet<HashId>,
+}
+
 fn load_annotation_groups_for_viewport(
-    conn: &GraphConnection,
-    history_ref: Option<&str>,
-    block_group: &BlockGroup,
-    node_ids: &HashSet<HashId>,
+    request: AnnotationViewportRequest<'_>,
     explorer_state: &mut CollectionExplorerState,
     overlays: &mut Vec<GraphOverlay>,
     messages: &mut crate::views::messages::MessageBuffer,
 ) {
-    for entry in load_annotation_group_entries(conn, block_group, history_ref) {
+    for entry in
+        load_annotation_group_entries(request.conn, request.block_group, request.history_ref)
+    {
         let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
-            conn,
-            history_ref,
-            current_block_group: block_group,
+            conn: request.conn,
+            workspace: request.workspace,
+            history_ref: request.history_ref,
+            current_block_group: request.block_group,
             entry: &entry,
-            node_ids,
+            node_ids: request.node_ids,
         }) {
             Ok(spans) => spans,
             Err(err) => {
@@ -261,7 +267,7 @@ pub fn view_block_group(
 
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, &block_group.id, history_ref)?;
+        block_graph = BlockGroup::get_graph(conn, workspace, &block_group.id, history_ref)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -556,6 +562,7 @@ pub fn view_block_group(
                                             load_annotations_for_group(
                                                 &AnnotationGroupTrackRequest {
                                                     conn,
+                                                    workspace,
                                                     history_ref,
                                                     current_block_group: current_block_group
                                                         .as_ref()
@@ -677,6 +684,7 @@ pub fn view_block_group(
                                 let spans = match entry.map(|entry| {
                                     load_annotations_for_group(&AnnotationGroupTrackRequest {
                                         conn,
+                                        workspace,
                                         history_ref,
                                         current_block_group: bg,
                                         entry,
@@ -1067,7 +1075,7 @@ pub fn view_block_group(
                 reapply_overlays(&mut graph_controller, &mut overlays, &mut annotation_colors);
 
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
-                let widget = create_gen_graph_widget(conn)
+                let widget = create_gen_graph_widget(conn, workspace)
                     .detail_level(graph_controller.get_detail_level())
                     .style(canvas_style)
                     .cursor();
@@ -1220,10 +1228,13 @@ pub fn view_block_group(
                 );
                 explorer_state.active_annotation_groups.clear();
                 load_annotation_groups_for_viewport(
-                    conn,
-                    history_ref,
-                    block_group,
-                    &node_ids,
+                    AnnotationViewportRequest {
+                        conn,
+                        workspace,
+                        history_ref,
+                        block_group,
+                        node_ids: &node_ids,
+                    },
                     &mut explorer_state,
                     &mut overlays,
                     &mut messages,
@@ -1238,7 +1249,7 @@ pub fn view_block_group(
         // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, new_block_group_id, history_ref)?;
+            block_graph = BlockGroup::get_graph(conn, workspace, new_block_group_id, history_ref)?;
             // Update the graph controller
             graph_controller = create_gen_graph_controller(block_graph.clone());
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {

@@ -156,7 +156,7 @@ mod tests {
         let stitched_sequence =
             BlockGroup::get_current_path(graph_conn, &stitched_block_group_id, None)
                 .unwrap()
-                .sequence(graph_conn, None)
+                .sequence(graph_conn, context.workspace(), None)
                 .unwrap();
         assert_eq!(stitched_sequence, "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
     }

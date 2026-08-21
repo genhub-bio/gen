@@ -15,7 +15,7 @@
 //! coordinate reference frame (left side = 0). But to store graph changes in
 //! the additive model in the database we must convert back to the Node format.
 
-use gen_core::{HashId, Strand};
+use gen_core::{HashId, Strand, Workspace};
 pub use gen_graph::GraphNodeSlice;
 
 use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
@@ -30,9 +30,9 @@ pub struct GraphLocus {
 
 impl GraphLocus {
     /// Concatenate the sequence bytes covered by this locus.
-    pub fn sequence(&self, conn: &GraphConnection) -> Vec<u8> {
+    pub fn sequence(&self, conn: &GraphConnection, workspace: &Workspace) -> Vec<u8> {
         let node_ids: Vec<HashId> = self.slices.iter().map(|s| s.block.node_id).collect();
-        let sequences = Node::get_sequences_by_node_ids(conn, &node_ids, None);
+        let sequences = Node::get_sequences_by_node_ids(conn, workspace, &node_ids, None);
 
         let mut out = Vec::new();
         for s in &self.slices {

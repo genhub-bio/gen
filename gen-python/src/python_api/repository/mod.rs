@@ -378,8 +378,12 @@ impl PyRepository {
     }
 
     fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
-        let sequences_by_node_id =
-            Node::get_sequences_by_node_ids(self.context.graph().conn(), &[node_key.node_id], None);
+        let sequences_by_node_id = Node::get_sequences_by_node_ids(
+            self.context.graph().conn(),
+            self.context.workspace(),
+            &[node_key.node_id],
+            None,
+        );
         let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "Node with id {:?} not found",

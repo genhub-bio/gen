@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use gen_core::{
     INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
-    is_end_node, is_start_node,
+    Workspace, is_end_node, is_start_node,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
@@ -96,14 +96,16 @@ impl NodeSizer<GenGraph> for GenGraphNodeSizer {
 /// and genomic sequence visualization with caching.
 pub struct GenGraphNodeRenderer<'a> {
     conn: &'a GraphConnection,
+    workspace: &'a Workspace,
     cache: HashMap<GraphNode, String>,
 }
 
 impl<'a> GenGraphNodeRenderer<'a> {
     /// Create a new GenGraph node renderer with database connection
-    pub fn new(conn: &'a GraphConnection) -> Self {
+    pub fn new(conn: &'a GraphConnection, workspace: &'a Workspace) -> Self {
         Self {
             conn,
+            workspace,
             cache: HashMap::new(),
         }
     }
@@ -126,7 +128,8 @@ impl<'a> GenGraphNodeRenderer<'a> {
             node_key.sequence_start,
             node_key.sequence_end,
         );
-        let sequences = Node::get_sequences_by_node_ids(self.conn, &[db_node_id], None);
+        let sequences =
+            Node::get_sequences_by_node_ids(self.conn, self.workspace, &[db_node_id], None);
         let sequence = match sequences.get(&db_node_id) {
             Some(seq) => seq.get_sequence(start, end)?,
             None => "?".repeat((end - start).max(0) as usize),
@@ -245,10 +248,11 @@ pub fn inner_truncation(s: &str, target_length: u32) -> String {
 ///
 /// # Returns
 /// A configured GraphWidget ready to visualize GenGraph data
-pub fn create_gen_graph_widget(
-    conn: &GraphConnection,
-) -> GraphWidget<'_, GenGraph, GenGraphNodeSizer, GenGraphNodeRenderer<'_>> {
-    let renderer = GenGraphNodeRenderer::new(conn);
+pub fn create_gen_graph_widget<'a>(
+    conn: &'a GraphConnection,
+    workspace: &'a Workspace,
+) -> GraphWidget<'a, GenGraph, GenGraphNodeSizer, GenGraphNodeRenderer<'a>> {
+    let renderer = GenGraphNodeRenderer::new(conn, workspace);
     GraphWidget::with_renderer(renderer)
 }
 
@@ -965,7 +969,7 @@ mod tests {
         viewport_state.viewport_bounds = Rect::new(0, 0, 5, 5);
         let mut buffer = Buffer::empty(viewport_state.viewport_bounds);
         let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
-        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn());
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
 
         renderer.render_node(
             &mut world_buffer,
@@ -994,7 +998,7 @@ mod tests {
         let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport_state);
         let position = WorldPos::ZERO;
         world_buffer.set_char_styled(position, '━', Style::default().fg(Color::Yellow));
-        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn());
+        let mut renderer = GenGraphNodeRenderer::new(context.graph().conn(), context.workspace());
 
         renderer.render_node(
             &mut world_buffer,
@@ -1108,7 +1112,14 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1", None).unwrap();
+        let gen_graph = Sample::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            collection,
+            "SAMPLE1",
+            None,
+        )
+        .unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);
@@ -1118,11 +1129,8 @@ mod tests {
                 controller.viewport_state.viewport_bounds = area;
                 controller.ensure_camera_coverage().unwrap();
                 controller.rebuild_viewport_graph().unwrap();
-                GraphWidget::with_renderer(GenGraphNodeRenderer::new(conn)).render(
-                    area,
-                    f.buffer_mut(),
-                    &mut controller,
-                );
+                GraphWidget::with_renderer(GenGraphNodeRenderer::new(conn, context.workspace()))
+                    .render(area, f.buffer_mut(), &mut controller);
             })
             .unwrap();
 
@@ -1156,7 +1164,14 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, Sample::DEFAULT_NAME, None).unwrap();
+        let gen_graph = Sample::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            collection,
+            Sample::DEFAULT_NAME,
+            None,
+        )
+        .unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let block = controller

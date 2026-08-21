@@ -486,7 +486,7 @@ pub fn view_operations(
                 graph_controller.update_animations(frame_delta);
 
                 let canvas_style = Style::default().bg(current_theme()[0x00]);
-                let widget = create_gen_graph_widget(conn)
+                let widget = create_gen_graph_widget(conn, context.workspace())
                     .detail_level(graph_controller.get_detail_level())
                     .style(canvas_style)
                     .cursor();

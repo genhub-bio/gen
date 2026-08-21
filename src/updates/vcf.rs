@@ -687,9 +687,16 @@ pub fn update_with_vcf(
                         }
                     })
                     .collect::<Vec<_>>();
-                BlockGroup::insert_changes(conn, &in_place_changes, Some(&mut tree_map)).unwrap();
+                BlockGroup::insert_changes(
+                    conn,
+                    context.workspace(),
+                    &in_place_changes,
+                    Some(&mut tree_map),
+                )
+                .unwrap();
             } else {
-                BlockGroup::insert_changes(conn, chunk, Some(&mut tree_map)).unwrap();
+                BlockGroup::insert_changes(conn, context.workspace(), chunk, Some(&mut tree_map))
+                    .unwrap();
             }
             bar.inc(chunk.len() as u64);
         }
@@ -781,6 +788,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -789,14 +797,24 @@ mod tests {
         );
         // `G1` genotype has no changes
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "G1").id, false)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "G1").id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         // `foo` is homozygous for the first variant and does not contain the second
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "foo").id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
         );
 
@@ -833,6 +851,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -841,8 +860,13 @@ mod tests {
         );
         // `bar` sample has the refrence + a deletion of the C
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "bar").id, false)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "bar").id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATGATCGATCGGGAACACACAGAGA".to_string()
@@ -850,8 +874,13 @@ mod tests {
         );
         // `baz` sample has a deletion of CG and an insertion of A
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "baz").id, false)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "baz").id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATATCGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATCAGATCGATCGGGAACACACAGAGA".to_string(),
@@ -890,6 +919,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -899,6 +929,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, "sample 1").id,
                 false
             )
@@ -948,6 +979,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, "sample 1").id,
                 false
             )
@@ -1023,6 +1055,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, "unknown").id,
                 false
             )
@@ -1064,8 +1097,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, false)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "foo").id,
+                false
+            )
+            .unwrap(),
             HashSet::from_iter(
                 ["ATCATCGATCGATCGATCGGGAACACACAGAGA",]
                     .iter()
@@ -1104,8 +1142,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "foo").id, true)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "foo").id,
+                true
+            )
+            .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGGATCGGGAACACACAGAGA".to_string(),
                 "ATCGATCGATCGATCATCATCGATCGGGAACACACAGAGA".to_string()
@@ -1428,6 +1471,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
+                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 true,
             )
@@ -1435,18 +1479,33 @@ mod tests {
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f1").id, true)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "f1").id,
+                true
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCTCGATCGATCGCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f2").id, true)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "f2").id,
+                true
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCTGGATCGATCGCGGAATCAGAACACACAGGA".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(conn, &get_sample_bg(conn, &collection, "f3").id, true)
-                .unwrap(),
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "f3").id,
+                true
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGGGATCGATCGCTCAGAACACACAGGA".to_string()])
         );
     }
@@ -1492,6 +1551,7 @@ mod tests {
 
         let child_sequences = BlockGroup::get_all_sequences(
             conn,
+            crate::test_helpers::test_workspace(),
             &get_sample_bg(conn, &collection, "child").id,
             true,
         )
@@ -1548,6 +1608,7 @@ mod tests {
 
         let child_sequences = BlockGroup::get_all_sequences(
             conn,
+            crate::test_helpers::test_workspace(),
             &get_sample_bg(conn, &collection, "child").id,
             true,
         )

@@ -81,9 +81,21 @@ pub fn derive_translation_operation(
         Some(annotation)
             if resolved.start == resolved.anchor_start && resolved.end == resolved.anchor_end =>
         {
-            translate_annotation(graph_conn, annotation, Some(&bg_id), tr_params)
+            translate_annotation(
+                graph_conn,
+                db_context.workspace(),
+                annotation,
+                Some(&bg_id),
+                tr_params,
+            )
         }
-        _ => translate_from_path(graph_conn, &bg_id, resolved.start, tr_params),
+        _ => translate_from_path(
+            graph_conn,
+            db_context.workspace(),
+            &bg_id,
+            resolved.start,
+            tr_params,
+        ),
     };
     let protein_bg = match protein_result {
         Ok(protein_bg) => protein_bg,

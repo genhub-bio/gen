@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_END_SEQUENCE_HASH, PATH_START_NODE_ID, PATH_START_SEQUENCE_HASH,
-    Sha256Hash, traits::Capnp,
+    Sha256Hash, Workspace, traits::Capnp,
 };
 use rusqlite::{Row, params, types::Value};
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,7 @@ impl Node {
 
     pub fn get_sequences_by_node_ids(
         conn: &GraphConnection,
+        _workspace: &Workspace,
         node_ids: &[HashId],
         history_ref: Option<&str>,
     ) -> HashMap<HashId, Sequence> {
@@ -107,7 +108,7 @@ impl Node {
             .map(|node| (node.id, node.sequence_hash))
             .collect::<HashMap<HashId, Sha256Hash>>();
         let sequences_by_hash: HashMap<Sha256Hash, Sequence> = HashMap::from_iter(
-            Sequence::query_by_ids(
+            <Sequence as Query>::query_by_ids(
                 conn,
                 &sequence_hashes_by_node_id
                     .values()
@@ -119,12 +120,14 @@ impl Node {
             .map(|seq| (seq.hash, seq.clone())),
         );
         sequence_hashes_by_node_id
-            .clone()
             .into_iter()
             .map(|(node_id, sequence_hash)| {
                 (
                     node_id,
-                    sequences_by_hash.get(&sequence_hash).unwrap().clone(),
+                    sequences_by_hash
+                        .get(&sequence_hash)
+                        .expect("should load sequence for node")
+                        .clone(),
                 )
             })
             .collect::<HashMap<HashId, Sequence>>()
