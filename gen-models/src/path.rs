@@ -2,7 +2,7 @@ use core::ops::Range as RustRange;
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand, Workspace,
     calculate_hash, is_end_node, is_start_node,
     range::{Range, RangeMapping},
     region::{Region, RegionResolutionError, RegionResolver},
@@ -22,7 +22,7 @@ use crate::{
     gen_models_capnp::path as PathCapnp,
     node::Node,
     path_edge::PathEdge,
-    sequence::{Sequence, SequenceError},
+    sequence::SequenceError,
     traits::*,
 };
 
@@ -274,9 +274,10 @@ impl Path {
     pub fn sequence(
         &self,
         conn: &GraphConnection,
+        workspace: &Workspace,
         history_ref: Option<&str>,
     ) -> Result<String, PathError> {
-        let blocks = self.blocks(conn, history_ref)?;
+        let blocks = self.blocks(conn, workspace, history_ref)?;
         Ok(blocks
             .into_iter()
             .map(|block| block.block_sequence)
@@ -289,69 +290,24 @@ impl Path {
         conn: &GraphConnection,
         history_ref: Option<&str>,
     ) -> Result<i64, PathError> {
-        let blocks = self.blocks(conn, history_ref)?;
-        let end_block = blocks.last().unwrap();
-        // the last block is the terminal node, which starts at the end of the path
-        Ok(end_block.path_start)
+        let edges = PathEdge::edges_for_path(conn, &self.id, history_ref);
+        Ok(edges
+            .into_iter()
+            .tuple_windows()
+            .map(|(into, out_of)| out_of.source_coordinate - into.target_coordinate)
+            .sum())
     }
 
-    pub fn edge_pairs_to_block(
-        &self,
-        into: Edge,
-        out_of: Edge,
-        sequences_by_node_id: &HashMap<HashId, Sequence>,
-        current_path_length: i64,
-    ) -> Result<PathBlock, PathError> {
-        let start = into.target_coordinate;
-        let end = out_of.source_coordinate;
-        let strand = into.target_strand;
-        let block_sequence_length = end - start;
-        let Some(sequence) = sequences_by_node_id.get(&into.target_node_id) else {
-            return Err(PathError::Missing(format!(
-                "Missing sequence for node {} while building path {}",
-                into.target_node_id, self.id
-            )));
-        };
-
-        let block_sequence = if strand == Strand::Reverse {
-            revcomp(&sequence.get_sequence(start, end)?)
-        } else {
-            sequence.get_sequence(start, end)?
-        };
-
-        Ok(PathBlock {
-            node_id: into.target_node_id,
-            block_sequence,
-            sequence_start: start,
-            sequence_end: end,
-            path_start: current_path_length,
-            path_end: current_path_length + block_sequence_length,
-            strand,
-        })
-    }
-
-    pub fn blocks(
+    /// Returns path blocks without loading their sequence content.
+    ///
+    /// Coordinate-only consumers do not need repository access and therefore should not require a
+    /// workspace merely to calculate node ranges or path length.
+    pub fn coordinate_blocks(
         &self,
         conn: &GraphConnection,
         history_ref: Option<&str>,
-    ) -> Result<Vec<PathBlock>, PathError> {
+    ) -> Vec<PathBlock> {
         let edges = PathEdge::edges_for_path(conn, &self.id, history_ref);
-
-        let mut sequence_node_ids = HashSet::new();
-        for edge in &edges {
-            if !is_start_node(edge.source_node_id) {
-                sequence_node_ids.insert(edge.source_node_id);
-            }
-            if !is_end_node(edge.target_node_id) {
-                sequence_node_ids.insert(edge.target_node_id);
-            }
-        }
-        let sequences_by_node_id = Node::get_sequences_by_node_ids(
-            conn,
-            &sequence_node_ids.into_iter().collect::<Vec<_>>(),
-            history_ref,
-        );
-
         let mut blocks = vec![];
         let mut path_length = 0;
 
@@ -369,10 +325,19 @@ impl Path {
         });
 
         for (into, out_of) in edges.into_iter().tuple_windows() {
-            let block =
-                self.edge_pairs_to_block(into, out_of, &sequences_by_node_id, path_length)?;
-            path_length += block.block_sequence.len() as i64;
-            blocks.push(block);
+            let sequence_start = into.target_coordinate;
+            let sequence_end = out_of.source_coordinate;
+            let block_length = sequence_end - sequence_start;
+            blocks.push(PathBlock {
+                node_id: into.target_node_id,
+                block_sequence: String::new(),
+                sequence_start,
+                sequence_end,
+                path_start: path_length,
+                path_end: path_length + block_length,
+                strand: into.target_strand,
+            });
+            path_length += block_length;
         }
 
         // NOTE: Adding an "end block" for the dedicated end sequence with a range from the path
@@ -388,6 +353,43 @@ impl Path {
             strand: Strand::Forward,
         });
 
+        blocks
+    }
+
+    pub fn blocks(
+        &self,
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        history_ref: Option<&str>,
+    ) -> Result<Vec<PathBlock>, PathError> {
+        let mut blocks = self.coordinate_blocks(conn, history_ref);
+        let sequence_node_ids = blocks
+            .iter()
+            .filter(|block| !is_start_node(block.node_id) && !is_end_node(block.node_id))
+            .map(|block| block.node_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let sequences_by_node_id =
+            Node::get_sequences_by_node_ids(conn, workspace, &sequence_node_ids, history_ref);
+
+        for block in &mut blocks {
+            if is_start_node(block.node_id) || is_end_node(block.node_id) {
+                continue;
+            }
+            let sequence = sequences_by_node_id.get(&block.node_id).ok_or_else(|| {
+                PathError::Missing(format!(
+                    "Missing sequence for node {} while building path {}",
+                    block.node_id, self.id
+                ))
+            })?;
+            block.block_sequence = if block.strand == Strand::Reverse {
+                revcomp(&sequence.get_sequence(block.sequence_start, block.sequence_end)?)
+            } else {
+                sequence.get_sequence(block.sequence_start, block.sequence_end)?
+            };
+        }
+
         Ok(blocks)
     }
 
@@ -395,7 +397,7 @@ impl Path {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, PathError> {
-        let blocks = self.blocks(conn, None)?;
+        let blocks = self.coordinate_blocks(conn, None);
         let tree: IntervalTree<i64, NodeIntervalBlock> = blocks
             .into_iter()
             .map(|block| {
@@ -422,8 +424,8 @@ impl Path {
     ) -> Result<Vec<RangeMapping>, PathError> {
         // Given two paths, find the overlapping parts of common nodes/blocks and return a list af
         // mappings from subranges of one path to corresponding shared subranges of the other path
-        let our_blocks = self.blocks(conn, None)?;
-        let their_blocks = other_path.blocks(conn, None)?;
+        let our_blocks = self.coordinate_blocks(conn, None);
+        let their_blocks = other_path.coordinate_blocks(conn, None);
 
         let our_node_ids = our_blocks
             .iter()
@@ -636,11 +638,11 @@ impl Path {
         annotations: Vec<Annotation>,
     ) -> Result<Vec<Annotation>, PathError> {
         let mapping_tree = self.get_mapping_tree(conn, path)?;
-        let sequence_length = path.sequence(conn, None)?.len();
+        let sequence_length = path.length(conn, None)?;
         Ok(annotations
             .into_iter()
             .filter_map(|annotation| {
-                Path::propagate_annotation(annotation, &mapping_tree, sequence_length as i64)
+                Path::propagate_annotation(annotation, &mapping_tree, sequence_length)
             })
             .clone()
             .collect())
@@ -963,7 +965,8 @@ mod tests {
         collection::Collection,
         edge::Edge,
         sample::{NewSample, Sample},
-        test_helpers::{create_bg, get_connection},
+        sequence::Sequence,
+        test_helpers::{create_bg, get_connection, test_workspace},
     };
 
     fn create_test_block_group(conn: &GraphConnection) -> BlockGroup {
@@ -1458,7 +1461,7 @@ mod tests {
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
         assert_eq!(
-            path.sequence(conn, None).unwrap(),
+            path.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGATCGAAAAAAACCCCCCCGGGGGGG"
         );
     }
@@ -1557,7 +1560,7 @@ mod tests {
 
         let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
         assert_eq!(
-            path.sequence(conn, None).unwrap(),
+            path.sequence(conn, test_workspace(), None).unwrap(),
             "CCCCCCCGGGGGGGTTTTTTTCGATCGAT"
         );
     }
@@ -1822,7 +1825,7 @@ mod tests {
         assert_eq!(block4.strand, Strand::Forward);
 
         assert_eq!(
-            path.sequence(conn, None).unwrap(),
+            path.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGAAAAAAAACCCCCCCCGGGG"
         );
     }
@@ -2099,7 +2102,10 @@ mod tests {
 
         let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGTTTTTTTT");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGTTTTTTTT"
+        );
 
         let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 1);
@@ -2217,7 +2223,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGTTTTTTTTATCG");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGTTTTTTTTATCG"
+        );
 
         let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
@@ -2341,7 +2350,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATTTTTTTTTCG");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATTTTTTTTTCG"
+        );
 
         let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
@@ -2448,7 +2460,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCG");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCG"
+        );
 
         let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
@@ -2590,7 +2605,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            path2.sequence(conn, None).unwrap(),
+            path2.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGATCGAAAAAAAATTTTTTTT"
         );
 
@@ -2733,7 +2748,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGAAAAAAAATTTT");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGAAAAAAAATTTT"
+        );
 
         let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
@@ -2857,7 +2875,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGTTTT");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGTTTT"
+        );
 
         let mappings = path1.find_block_mappings(conn, &path2).unwrap();
         assert_eq!(mappings.len(), 2);
@@ -3160,7 +3181,10 @@ mod tests {
 
         let path2 = Path::create(conn, "chr2", &block_group.id, &edge_ids).unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGTTTTTTTT");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGTTTTTTTT"
+        );
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3283,7 +3307,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGTTTTTTTTATCG");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGTTTTTTTTATCG"
+        );
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3410,7 +3437,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATTTTTTTTTCG");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATTTTTTTTTCG"
+        );
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3554,7 +3584,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            path2.sequence(conn, None).unwrap(),
+            path2.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGATCGAAAAAAAATTTTTTTT"
         );
 
@@ -3683,7 +3713,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGTTTT");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGTTTT"
+        );
 
         let annotation = Annotation {
             name: "foo".to_string(),
@@ -3764,7 +3797,10 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
-        assert_eq!(path1.sequence(conn, None).unwrap(), "ATCGATCGAAAAAAAA");
+        assert_eq!(
+            path1.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGATCGAAAAAAAA"
+        );
 
         let sequence3 = Sequence::new()
             .sequence_type("DNA")
@@ -3806,7 +3842,10 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path2 = path1.new_path_with(conn, 4, 11, &edge4, &edge5).unwrap();
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGCCCCCCCCAAAAA");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGCCCCCCCCAAAAA"
+        );
 
         let edge6 = Edge::create(
             conn,
@@ -3842,7 +3881,10 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path3 = path1.new_path_with(conn, 4, 7, &edge6, &edge7).unwrap();
-        assert_eq!(path3.sequence(conn, None).unwrap(), "ATCGCCCCCCCCGAAAAAAAA");
+        assert_eq!(
+            path3.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGCCCCCCCCGAAAAAAAA"
+        );
     }
 
     #[test]
@@ -3906,7 +3948,10 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
         let path1 = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
-        assert_eq!(path1.sequence(conn, None).unwrap(), "ATCGATCGAAAAAAAA");
+        assert_eq!(
+            path1.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGATCGAAAAAAAA"
+        );
 
         let deletion_edge = Edge::create(
             conn,
@@ -3929,7 +3974,10 @@ mod tests {
         BlockGroupEdge::bulk_create(conn, &[block_group_edge]);
 
         let path2 = path1.new_path_with_deletion(conn, 4, 11).unwrap();
-        assert_eq!(path2.sequence(conn, None).unwrap(), "ATCGAAAAA");
+        assert_eq!(
+            path2.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGAAAAA"
+        );
     }
 
     #[test]

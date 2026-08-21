@@ -5,7 +5,7 @@ use std::{
 };
 
 use gen_core::{
-    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, calculate_hash, is_terminal,
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace, calculate_hash, is_terminal,
     traits::Capnp,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
@@ -21,7 +21,7 @@ use crate::{
     errors::NodeError,
     gen_models_capnp::edge,
     node::Node,
-    sequence::{Sequence, SequenceError, cached_sequence},
+    sequence::{Sequence, SequenceError},
     traits::*,
 };
 
@@ -137,7 +137,7 @@ pub struct GroupBlock {
     pub id: i64,
     pub node_id: HashId,
     sequence: Option<String>,
-    external_sequence: Option<(String, String, bool)>,
+    external_sequence: Option<Sequence>,
     pub start: i64,
     pub end: i64,
 }
@@ -149,11 +149,7 @@ impl GroupBlock {
                 id,
                 node_id,
                 sequence: None,
-                external_sequence: Some((
-                    sequence.file_path.clone(),
-                    sequence.name.clone(),
-                    sequence.sequence_type.eq_ignore_ascii_case("circular"),
-                )),
+                external_sequence: Some(sequence.clone()),
                 start,
                 end,
             }
@@ -172,8 +168,8 @@ impl GroupBlock {
     pub fn sequence(&self) -> String {
         if let Some(sequence) = &self.sequence {
             sequence.to_string()
-        } else if let Some((path, name, circular)) = &self.external_sequence {
-            cached_sequence(path, name, self.start, self.end, *circular).unwrap()
+        } else if let Some(sequence) = &self.external_sequence {
+            sequence.get_sequence(self.start, self.end).unwrap()
         } else {
             panic!("Sequence or external sequence is not set.")
         }
@@ -514,6 +510,7 @@ impl Edge {
     /// another real block.
     pub fn blocks_from_edges(
         conn: &GraphConnection,
+        workspace: &Workspace,
         block_group_id: &HashId,
         edges: &[AugmentedEdge],
         history_ref: Option<&str>,
@@ -620,11 +617,9 @@ impl Edge {
             incomplete_node_ids = next_incomplete_node_ids.into_iter().collect();
         }
 
-        let sequences_by_node_id = Node::get_sequences_by_node_ids(
-            conn,
-            &node_ids.iter().copied().collect::<Vec<HashId>>(),
-            history_ref,
-        );
+        let node_ids = node_ids.iter().copied().collect::<Vec<HashId>>();
+        let sequences_by_node_id =
+            Node::get_sequences_by_node_ids(conn, workspace, &node_ids, history_ref);
 
         let mut blocks = vec![];
         let mut block_index = 0;
@@ -931,7 +926,7 @@ mod tests {
         collection::Collection,
         region::ResolvedGenRegion,
         sequence::Sequence,
-        test_helpers::{get_connection, setup_block_group},
+        test_helpers::{get_connection, setup_block_group, test_workspace},
     };
 
     fn get_block_boundaries(
@@ -1576,7 +1571,9 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges, None).unwrap();
+        let blocks =
+            Edge::blocks_from_edges(&conn, test_workspace(), &bg.id, &augmented_edges, None)
+                .unwrap();
 
         // 5 non-terminal nodes: AAA, GGG, TTT, CCC, ATC
         // 2 terminal blocks: START, END
@@ -1704,7 +1701,9 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges, None).unwrap();
+        let blocks =
+            Edge::blocks_from_edges(&conn, test_workspace(), &bg.id, &augmented_edges, None)
+                .unwrap();
         let node_blocks = blocks
             .iter()
             .filter(|block| block.node_id == node_id)
@@ -1832,7 +1831,9 @@ mod tests {
             },
         ];
 
-        let blocks = Edge::blocks_from_edges(&conn, &bg.id, &augmented_edges, None).unwrap();
+        let blocks =
+            Edge::blocks_from_edges(&conn, test_workspace(), &bg.id, &augmented_edges, None)
+                .unwrap();
         let mid_intervals = blocks
             .iter()
             .filter(|block| block.node_id == n_mid)
@@ -1911,6 +1912,7 @@ mod tests {
 
         let blocks = Edge::blocks_from_edges(
             &conn,
+            test_workspace(),
             &bg.id,
             &[AugmentedEdge {
                 edge: e_a_b,
@@ -2054,7 +2056,9 @@ mod tests {
         let (block_group_id, path) = setup_block_group(&conn);
 
         let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id, None);
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges, None).unwrap();
+        let blocks =
+            Edge::blocks_from_edges(&conn, test_workspace(), &block_group_id, &edges, None)
+                .unwrap();
 
         // 4 actual sequences: 10-length ones of all A, all T, all C, all G
         // 2 terminal node blocks (start/end)
@@ -2086,10 +2090,12 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        BlockGroup::insert_change(&conn, &change).unwrap();
+        BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
         let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id, None);
 
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges, None).unwrap();
+        let blocks =
+            Edge::blocks_from_edges(&conn, test_workspace(), &block_group_id, &edges, None)
+                .unwrap();
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence
@@ -2100,7 +2106,9 @@ mod tests {
 
         // Confirm that ordering doesn't matter
         edges.reverse();
-        let blocks = Edge::blocks_from_edges(&conn, &block_group_id, &edges, None).unwrap();
+        let blocks =
+            Edge::blocks_from_edges(&conn, test_workspace(), &block_group_id, &edges, None)
+                .unwrap();
 
         // 2 10-length sequences of all C, all G
         // 1 inserted NNNN sequence

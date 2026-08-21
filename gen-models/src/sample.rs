@@ -1,6 +1,6 @@
 use std::{collections::HashSet, rc::Rc};
 
-use gen_core::traits::Capnp;
+use gen_core::{Workspace, traits::Capnp};
 use gen_graph::GenGraph;
 use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
@@ -181,6 +181,7 @@ impl Sample {
 
     pub fn get_graph(
         conn: &GraphConnection,
+        workspace: &Workspace,
         collection: &str,
         name: &str,
         history_ref: Option<&str>,
@@ -188,7 +189,7 @@ impl Sample {
         let block_groups = Sample::get_block_groups(conn, collection, name, history_ref);
         let mut sample_graph = GenGraph::new();
         for bg in block_groups {
-            let bg_graph = BlockGroup::get_graph(conn, &bg.id, history_ref)?;
+            let bg_graph = BlockGroup::get_graph(conn, workspace, &bg.id, history_ref)?;
             // Add nodes and edges from block group graph to sample graph
             for node in bg_graph.nodes() {
                 sample_graph.add_node(node);
@@ -206,6 +207,7 @@ impl Sample {
 
     pub fn get_all_sequences(
         conn: &GraphConnection,
+        workspace: &Workspace,
         collection_name: &str,
         sample_name: &str,
         prune: bool,
@@ -214,7 +216,12 @@ impl Sample {
         let mut sequences = HashSet::new();
         for block_group in Sample::get_block_groups(conn, collection_name, sample_name, history_ref)
         {
-            sequences.extend(BlockGroup::get_all_sequences(conn, &block_group.id, prune)?);
+            sequences.extend(BlockGroup::get_all_sequences(
+                conn,
+                workspace,
+                &block_group.id,
+                prune,
+            )?);
         }
         Ok(sequences)
     }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_core::{HashId, NodeIntervalBlock, is_terminal};
+use gen_core::{HashId, NodeIntervalBlock, Workspace, is_terminal};
 use gen_graph::{GenGraph, GraphError, GraphNode, GraphNodePosition, MergeGraph};
 use intervaltree::IntervalTree;
 use petgraph::Direction;
@@ -20,6 +20,7 @@ pub struct ResolvedGraph {
 /// Returns true if the graph was expanded, false if no new edges were added.
 pub fn expand(
     conn: &GraphConnection,
+    workspace: &Workspace,
     graph: &mut GenGraph,
     block_group_id: &HashId,
     node_id: HashId,
@@ -60,10 +61,11 @@ pub fn expand(
         return false;
     }
 
-    let fragment = match BlockGroup::get_graph_from_edges(conn, block_group_id, &new_edges) {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
+    let fragment =
+        match BlockGroup::get_graph_from_edges(conn, workspace, block_group_id, &new_edges) {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
     graph.merge_graph(&fragment);
     true
 }
@@ -214,6 +216,7 @@ impl ResolvedGraph {
         &self,
         coord: i64,
         conn: &GraphConnection,
+        workspace: &Workspace,
     ) -> Result<GraphNodePosition, GraphError> {
         let mut block = None;
         for item in self.interval_tree.query_point(coord) {
@@ -300,6 +303,7 @@ impl ResolvedGraph {
         let mut expanded_graph = self.graph.clone();
         expand(
             conn,
+            workspace,
             &mut expanded_graph,
             &self.block_group_id,
             boundary_node.node_id,
@@ -309,7 +313,7 @@ impl ResolvedGraph {
             &mut expanded_graph,
             &boundary_anchor,
             boundary_distance,
-            |g, nid| expand(conn, g, &self.block_group_id, nid),
+            |g, nid| expand(conn, workspace, g, &self.block_group_id, nid),
         )?;
 
         anchors.into_iter().next().ok_or(GraphError::NoPath)
@@ -331,7 +335,7 @@ mod tests {
         node::Node,
         sample::{NewSample, Sample},
         sequence::Sequence,
-        test_helpers::get_connection,
+        test_helpers::{get_connection, test_workspace},
     };
 
     fn setup_subset_graph() -> (crate::db::GraphConnection, HashId) {
@@ -531,7 +535,7 @@ mod tests {
         };
 
         let result = find_offset(&mut graph, &anchor, 3, |g, nid| {
-            expand(&conn, g, &bg_id, nid)
+            expand(&conn, test_workspace(), g, &bg_id, nid)
         });
         assert!(
             result.is_ok(),
@@ -561,7 +565,7 @@ mod tests {
         };
 
         let result = find_offset(&mut graph, &anchor, 7, |g, nid| {
-            expand(&conn, g, &bg_id, nid)
+            expand(&conn, test_workspace(), g, &bg_id, nid)
         });
         assert!(
             result.is_ok(),
@@ -610,7 +614,7 @@ mod tests {
         };
 
         let result = find_offset(&mut graph, &anchor, 7, |g, nid| {
-            expand(&conn, g, &bg_id, nid)
+            expand(&conn, test_workspace(), g, &bg_id, nid)
         });
         assert!(
             result.is_ok(),
@@ -643,7 +647,7 @@ mod tests {
         };
 
         let result = find_offset(&mut graph, &anchor, -3, |g, nid| {
-            expand(&conn, g, &bg_id, nid)
+            expand(&conn, test_workspace(), g, &bg_id, nid)
         });
         assert!(
             result.is_ok(),
@@ -676,7 +680,7 @@ mod tests {
         };
 
         let result = find_offset(&mut graph, &anchor, 100, |g, nid| {
-            expand(&conn, g, &bg_id, nid)
+            expand(&conn, test_workspace(), g, &bg_id, nid)
         });
         assert!(result.is_err());
     }
@@ -711,7 +715,7 @@ mod tests {
         };
 
         let result = find_offset(&mut graph, &anchor, 2, |g, nid| {
-            expand(&conn, g, &bg_id, nid)
+            expand(&conn, test_workspace(), g, &bg_id, nid)
         });
         assert!(result.is_ok());
         let positions = result.unwrap();
@@ -746,7 +750,9 @@ mod tests {
             block_group_id: bg_id,
         };
 
-        let position = resolved.resolve_anchor(-2, &conn).unwrap();
+        let position = resolved
+            .resolve_anchor(-2, &conn, test_workspace())
+            .unwrap();
 
         assert_eq!(
             position.graph_node,
@@ -768,7 +774,13 @@ mod tests {
 
         assert_eq!(graph.node_count(), 1);
 
-        let expanded = expand(&conn, &mut graph, &bg_id, HashId::convert_str("node-y"));
+        let expanded = expand(
+            &conn,
+            test_workspace(),
+            &mut graph,
+            &bg_id,
+            HashId::convert_str("node-y"),
+        );
         assert!(expanded, "expand should add new nodes");
         assert!(
             graph.node_count() > 1,

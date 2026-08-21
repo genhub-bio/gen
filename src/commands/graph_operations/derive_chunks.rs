@@ -187,7 +187,7 @@ mod tests {
             .map(|bg| {
                 BlockGroup::get_current_path(conn, &bg.id, None)
                     .unwrap()
-                    .sequence(conn, None)
+                    .sequence(conn, context.workspace(), None)
                     .unwrap()
             })
             .collect()

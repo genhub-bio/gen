@@ -233,9 +233,10 @@ impl PySequenceGraph {
             )
         })?;
         let conn = context.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
-        let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+            .map_err(block_group_err_to_pyerr)?;
+        let matcher =
+            GenGraphMatcher::new_with_sequence_kind(conn, context.workspace(), graph, kind);
 
         let gen_dir = context.workspace().ensure_gen_dir();
         let index_path = gen_dir
@@ -295,9 +296,10 @@ impl PySequenceGraph {
         fs::create_dir_all(&index_dir)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
         let conn = context.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
-        let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+            .map_err(block_group_err_to_pyerr)?;
+        let matcher =
+            GenGraphMatcher::new_with_sequence_kind(conn, context.workspace(), graph, kind);
         let normalized = kind != SequenceKind::Exact;
         let index = SeedIndex::build(&matcher, k, normalized);
         let path = index_dir.join(format!("{}.bin", self.id));
@@ -342,8 +344,10 @@ impl PySequenceGraph {
     /// Raises ``RuntimeError`` if this sequence graph was not created via a
     /// ``Repository``.
     fn get_node_sequence(&self, node: &PyGraphNode) -> PyResult<String> {
-        let conn = self.require_context("get_node_sequence()")?.graph().conn();
-        let sequences = Node::get_sequences_by_node_ids(conn, &[node.node_id], None);
+        let context = self.require_context("get_node_sequence()")?;
+        let conn = context.graph().conn();
+        let sequences =
+            Node::get_sequences_by_node_ids(conn, context.workspace(), &[node.node_id], None);
         let sequence = sequences.get(&node.node_id).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "Node with id {:?} not found",
@@ -356,9 +360,10 @@ impl PySequenceGraph {
     }
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let conn = self.require_context("to_dict()")?.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
+        let context = self.require_context("to_dict()")?;
+        let conn = context.graph().conn();
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+            .map_err(block_group_err_to_pyerr)?;
         let dict = PyDict::new(py);
         let nodes: Vec<PyGraphNode> = graph
             .nodes()
@@ -392,9 +397,10 @@ impl PySequenceGraph {
     }
 
     fn to_rustworkx(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let conn = self.require_context("to_rustworkx()")?.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
+        let context = self.require_context("to_rustworkx()")?;
+        let conn = context.graph().conn();
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+            .map_err(block_group_err_to_pyerr)?;
         {
             let rustworkx = PyModule::import(py, "rustworkx").map_err(|_| {
                 pyo3::exceptions::PyModuleNotFoundError::new_err(
@@ -434,9 +440,10 @@ impl PySequenceGraph {
     }
 
     fn to_networkx(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let conn = self.require_context("to_networkx()")?.graph().conn();
-        let graph =
-            BlockGroup::get_graph(conn, &self.id, None).map_err(block_group_err_to_pyerr)?;
+        let context = self.require_context("to_networkx()")?;
+        let conn = context.graph().conn();
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+            .map_err(block_group_err_to_pyerr)?;
         {
             let networkx = PyModule::import(py, "networkx").map_err(|_| {
                 pyo3::exceptions::PyModuleNotFoundError::new_err(
@@ -496,6 +503,7 @@ impl PySequenceGraph {
         let conn = ctx.graph().conn();
         export_fasta(
             conn,
+            ctx.workspace(),
             &self.collection_name,
             Some(&self.sample_name),
             &PathBuf::from(&filename),
@@ -517,6 +525,7 @@ impl PySequenceGraph {
         let conn = ctx.graph().conn();
         export_gfa(
             conn,
+            ctx.workspace(),
             &self.collection_name,
             &PathBuf::from(&filename),
             &self.sample_name,
@@ -537,7 +546,15 @@ impl PySequenceGraph {
         let writer = fs::File::create(&filename).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create '{}': {e}", filename))
         })?;
-        export_genbank(conn, &self.collection_name, &self.sample_name, writer, None).map_err(|e| {
+        export_genbank(
+            conn,
+            ctx.workspace(),
+            &self.collection_name,
+            &self.sample_name,
+            writer,
+            None,
+        )
+        .map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to export GenBank '{}': {e}", filename))
         })
     }
@@ -624,11 +641,11 @@ impl PySequenceGraph {
                 let bg_id = self.id;
                 if let Some(start) = start {
                     run_translation_operation(ctx, &label, || {
-                        translate_from_path(conn, &bg_id, start, params)
+                        translate_from_path(conn, ctx.workspace(), &bg_id, start, params)
                     })
                 } else {
                     run_translation_operation(ctx, &label, || {
-                        translate_block_group(conn, &bg_id, params)
+                        translate_block_group(conn, ctx.workspace(), &bg_id, params)
                     })
                 }
             }
@@ -636,7 +653,13 @@ impl PySequenceGraph {
                 if let Ok(ann) = region.extract::<PyRef<PyAnnotation>>() {
                     let annotation = ann.inner.clone();
                     run_translation_operation(ctx, &annotation.name, || {
-                        translate_annotation(conn, &annotation, Some(&self.id), params)
+                        translate_annotation(
+                            conn,
+                            ctx.workspace(),
+                            &annotation,
+                            Some(&self.id),
+                            params,
+                        )
                     })
                 } else if let Ok(region_str) = region.extract::<&str>() {
                     // Resolution scoped to self: named path first, then annotation in lineage.
@@ -646,7 +669,7 @@ impl PySequenceGraph {
                     if path.is_some() {
                         let coordinate = start.unwrap_or(0);
                         run_translation_operation(ctx, region_str, || {
-                            translate_from_path(conn, &self.id, coordinate, params)
+                            translate_from_path(conn, ctx.workspace(), &self.id, coordinate, params)
                         })
                     } else {
                         let annotation = Annotation::query_with_lineage(
@@ -666,7 +689,13 @@ impl PySequenceGraph {
                         })?;
 
                         run_translation_operation(ctx, region_str, || {
-                            translate_annotation(conn, &annotation, Some(&self.id), params)
+                            translate_annotation(
+                                conn,
+                                ctx.workspace(),
+                                &annotation,
+                                Some(&self.id),
+                                params,
+                            )
                         })
                     }
                 } else {

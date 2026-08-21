@@ -1,9 +1,11 @@
 use core::ops::Range;
 use std::collections::HashMap;
 
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
+use gen_core::{
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace, is_end_node, is_start_node,
+};
 use gen_models::{
-    block_group::{BlockGroup, NewBlockGroup},
+    block_group::{BlockGroup, NewBlockGroup, SubgraphBoundary},
     block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::Edge,
@@ -169,11 +171,16 @@ pub fn derive_chunks(
 
         BlockGroup::derive_subgraph(
             conn,
+            context.workspace(),
             &parent_block_group_id,
-            &start_block,
-            &end_block,
-            start_node_coordinate,
-            end_node_coordinate,
+            SubgraphBoundary {
+                block: &start_block,
+                sequence_coordinate: start_node_coordinate,
+            },
+            SubgraphBoundary {
+                block: &end_block,
+                sequence_coordinate: end_node_coordinate,
+            },
             &child_block_group_id,
             create_block_group,
         )?;
@@ -460,16 +467,17 @@ fn create_stitched_block_group(
         new_region_name,
     )?;
 
-    validate_stitched_block_group_is_acyclic(conn, &child_block_group.id)?;
+    validate_stitched_block_group_is_acyclic(conn, context.workspace(), &child_block_group.id)?;
 
     Ok(())
 }
 
 fn validate_stitched_block_group_is_acyclic(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: &HashId,
 ) -> Result<(), GraphOperationError> {
-    let graph = BlockGroup::get_graph(conn, block_group_id, None)?;
+    let graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)?;
     if is_cyclic_directed(&graph) {
         return Err(GraphOperationError::StitchedGraphCycle(format!(
             "block group {block_group_id} is cyclic"
@@ -652,11 +660,19 @@ mod tests {
             .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
             .unwrap();
         assert_eq!(
-            insert_path.sequence(conn, None).unwrap(),
+            insert_path
+                .sequence(conn, context.workspace(), None)
+                .unwrap(),
             "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
         );
 
-        let all_sequences = BlockGroup::get_all_sequences(conn, &block_group1_id, false).unwrap();
+        let all_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group1_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences,
             HashSet::from_iter(vec![
@@ -681,14 +697,23 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME, None);
         let block_group2 = block_groups.iter().find(|x| x.name == "chr1").unwrap();
 
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences2,
             HashSet::from_iter(vec!["TTTTTCCCCC".to_string(), "TAAAAAAAAC".to_string(),])
         );
 
         let new_path = BlockGroup::get_current_path(conn, &block_group2.id, None).unwrap();
-        assert_eq!(new_path.sequence(conn, None).unwrap(), "TAAAAAAAAC");
+        assert_eq!(
+            new_path.sequence(conn, context.workspace(), None).unwrap(),
+            "TAAAAAAAAC"
+        );
     }
 
     #[test]
@@ -737,8 +762,13 @@ mod tests {
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let original_block_group_id = &original_block_groups[0].id;
-        let all_original_sequences =
-            BlockGroup::get_all_sequences(conn, original_block_group_id, false).unwrap();
+        let all_original_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            original_block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_original_sequences,
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
@@ -746,8 +776,13 @@ mod tests {
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2", None);
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, grandchild_block_group_id, false).unwrap();
+        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            grandchild_block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_grandchild_sequences,
             HashSet::from_iter(vec![
@@ -779,17 +814,32 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, "test3", None);
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences2,
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
         );
 
         let path2 = BlockGroup::get_current_path(conn, &block_group2.id, None).unwrap();
-        assert_eq!(path2.sequence(conn, None).unwrap(), "TCAATCG");
+        assert_eq!(
+            path2.sequence(conn, context.workspace(), None).unwrap(),
+            "TCAATCG"
+        );
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
-        let all_sequences3 = BlockGroup::get_all_sequences(conn, &block_group3.id, false).unwrap();
+        let all_sequences3 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group3.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences3,
             HashSet::from_iter(vec![
@@ -799,7 +849,10 @@ mod tests {
         );
 
         let path3 = BlockGroup::get_current_path(conn, &block_group3.id, None).unwrap();
-        assert_eq!(path3.sequence(conn, None).unwrap(), "ATCGATCAAGGAACACA");
+        assert_eq!(
+            path3.sequence(conn, context.workspace(), None).unwrap(),
+            "ATCGATCAAGGAACACA"
+        );
     }
 
     #[test]
@@ -848,8 +901,13 @@ mod tests {
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let original_block_group_id = &original_block_groups[0].id;
-        let all_original_sequences =
-            BlockGroup::get_all_sequences(conn, original_block_group_id, false).unwrap();
+        let all_original_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            original_block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_original_sequences,
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
@@ -857,8 +915,13 @@ mod tests {
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2", None);
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
-        let all_grandchild_sequences =
-            BlockGroup::get_all_sequences(conn, grandchild_block_group_id, false).unwrap();
+        let all_grandchild_sequences = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            grandchild_block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_grandchild_sequences,
             HashSet::from_iter(vec![
@@ -890,17 +953,32 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, "test3", None);
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
-        let all_sequences2 = BlockGroup::get_all_sequences(conn, &block_group2.id, false).unwrap();
+        let all_sequences2 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group2.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences2,
             HashSet::from_iter(vec!["TCAATCG".to_string(), "TCGATCG".to_string(),])
         );
 
         let path2 = BlockGroup::get_current_path(conn, &block_group2.id, None).unwrap();
-        assert_eq!(path2.sequence(conn, None).unwrap(), "TCAATCG");
+        assert_eq!(
+            path2.sequence(conn, context.workspace(), None).unwrap(),
+            "TCAATCG"
+        );
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
-        let all_sequences3 = BlockGroup::get_all_sequences(conn, &block_group3.id, false).unwrap();
+        let all_sequences3 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group3.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences3,
             HashSet::from_iter(vec![
@@ -910,7 +988,10 @@ mod tests {
         );
 
         let path3 = BlockGroup::get_current_path(conn, &block_group3.id, None).unwrap();
-        assert_eq!(path3.sequence(conn, None).unwrap(), "ATCGATCAAGGAACACA");
+        assert_eq!(
+            path3.sequence(conn, context.workspace(), None).unwrap(),
+            "ATCGATCAAGGAACACA"
+        );
 
         // Stitch the two main chunks back together in same order
         make_stitch(
@@ -929,7 +1010,13 @@ mod tests {
             .find(|x| x.name == "m123.stitched")
             .unwrap();
 
-        let all_sequences4 = BlockGroup::get_all_sequences(conn, &block_group4.id, false).unwrap();
+        let all_sequences4 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group4.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences4,
             HashSet::from_iter(vec![
@@ -943,7 +1030,7 @@ mod tests {
         let path4 = BlockGroup::get_current_path(conn, &block_group4.id, None).unwrap();
         // path2 + path3 concatenated
         assert_eq!(
-            path4.sequence(conn, None).unwrap(),
+            path4.sequence(conn, context.workspace(), None).unwrap(),
             "TCAATCGATCGATCAAGGAACACA"
         );
 
@@ -964,7 +1051,13 @@ mod tests {
             .find(|x| x.name == "m123.reverse-stitched")
             .unwrap();
 
-        let all_sequences5 = BlockGroup::get_all_sequences(conn, &block_group5.id, false).unwrap();
+        let all_sequences5 = BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &block_group5.id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_sequences5,
             HashSet::from_iter(vec![
@@ -978,7 +1071,7 @@ mod tests {
         let path5 = BlockGroup::get_current_path(conn, &block_group5.id, None).unwrap();
         // path3 + path2 concatenated
         assert_eq!(
-            path5.sequence(conn, None).unwrap(),
+            path5.sequence(conn, context.workspace(), None).unwrap(),
             "ATCGATCAAGGAACACATCAATCG"
         );
     }

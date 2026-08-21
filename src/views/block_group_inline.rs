@@ -6,7 +6,7 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use gen_core::HashId;
+use gen_core::{HashId, Workspace};
 use gen_graph::GenGraph;
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
@@ -41,9 +41,7 @@ fn get_path_nodes(
     path: &Path,
     graph: &GenGraph,
 ) -> std::io::Result<Vec<gen_graph::GraphNode>> {
-    let path_blocks = path
-        .blocks(conn, None)
-        .map_err(|err| Error::other(format!("Failed to load path blocks: {err}")))?;
+    let path_blocks = path.coordinate_blocks(conn, None);
 
     let path_nodes = project_path_overlay_nodes(graph, &path_blocks);
     if path_nodes.is_empty() {
@@ -113,6 +111,7 @@ impl EventSource for TickEventSource {
 pub struct InlineGenGraphState<'a> {
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     conn: &'a GraphConnection,
+    workspace: &'a Workspace,
     paths: Vec<Vec<gen_graph::GraphNode>>,
     block_group_id: Option<HashId>,
     history_ref: Option<&'a str>,
@@ -126,6 +125,7 @@ impl<'a> InlineGenGraphState<'a> {
     pub fn new(
         graph: &GenGraph,
         conn: &'a GraphConnection,
+        workspace: &'a Workspace,
         block_group_id: Option<HashId>,
         history_ref: Option<&'a str>,
     ) -> Self {
@@ -136,6 +136,7 @@ impl<'a> InlineGenGraphState<'a> {
         Self {
             controller: graph_controller,
             conn,
+            workspace,
             paths: Vec::new(),
             block_group_id,
             history_ref,
@@ -165,6 +166,7 @@ impl<'a> InlineGenGraphState<'a> {
         for entry in load_annotation_group_entries(conn, &block_group, self.history_ref) {
             let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
                 conn,
+                workspace: self.workspace,
                 history_ref: self.history_ref,
                 current_block_group: &block_group,
                 entry: &entry,
@@ -203,11 +205,12 @@ impl<'a> InlineGenGraphState<'a> {
 ///
 pub fn show_inline_gen_graph_widget(
     conn: &GraphConnection,
+    workspace: &Workspace,
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
 ) -> Result<bool> {
-    show_inline_widget(conn, graph, paths, height, None, None)
+    show_inline_widget(conn, workspace, graph, paths, height, None, None)
 }
 
 /// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
@@ -215,14 +218,17 @@ pub fn show_inline_gen_graph_widget(
 /// See [`show_inline_gen_graph_widget`] for controls and return value.
 pub fn show_inline_block_group_widget(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: HashId,
     paths: Vec<Path>,
     height: u16,
     history_ref: Option<&str>,
 ) -> Result<bool> {
-    let graph = BlockGroup::get_graph(conn, &block_group_id, history_ref).map_err(Error::other)?;
+    let graph = BlockGroup::get_graph(conn, workspace, &block_group_id, history_ref)
+        .map_err(Error::other)?;
     show_inline_widget(
         conn,
+        workspace,
         &graph,
         paths,
         height,
@@ -233,6 +239,7 @@ pub fn show_inline_block_group_widget(
 
 fn show_inline_widget(
     conn: &GraphConnection,
+    workspace: &Workspace,
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
@@ -247,7 +254,8 @@ fn show_inline_widget(
 
     match terminal_result {
         Ok(mut terminal) => {
-            let mut state = InlineGenGraphState::new(graph, conn, block_group_id, history_ref);
+            let mut state =
+                InlineGenGraphState::new(graph, conn, workspace, block_group_id, history_ref);
             for path in paths {
                 state.add_path(&path, conn)?;
             }
@@ -394,7 +402,7 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
 
     // Create the GenGraph widget with current level of detail
     let detail_level = state.controller.get_detail_level();
-    let widget = create_gen_graph_widget(state.conn)
+    let widget = create_gen_graph_widget(state.conn, state.workspace)
         .detail_level(detail_level)
         .cursor();
 
@@ -429,7 +437,7 @@ fn render_final(frame: &mut Frame, state: &mut InlineGenGraphState) {
 
     // Create the GenGraph widget with current level of detail
     let detail_level = state.controller.get_detail_level();
-    let widget = create_gen_graph_widget(state.conn).detail_level(detail_level);
+    let widget = create_gen_graph_widget(state.conn, state.workspace).detail_level(detail_level);
 
     // Render the graph widget
     frame.render_stateful_widget(
@@ -484,11 +492,12 @@ mod tests {
     use petgraph::graphmap::DiGraphMap;
 
     use super::*;
-    use crate::{graph::GraphNode, test_helpers::get_connection};
+    use crate::{graph::GraphNode, test_helpers::setup_gen};
 
     #[test]
     fn test_inline_state_creation() {
-        let conn = get_connection(None).expect("Failed to get test database connection");
+        let context = setup_gen();
+        let conn = context.graph().conn();
         let mut graph = DiGraphMap::new();
 
         // Add a simple test node
@@ -499,7 +508,7 @@ mod tests {
         };
         graph.add_node(node);
 
-        let state = InlineGenGraphState::new(&graph, &conn, None, None);
+        let state = InlineGenGraphState::new(&graph, conn, context.workspace(), None, None);
         assert_eq!(state.controller.get_detail_level(), VisualDetail::Truncated);
     }
 }

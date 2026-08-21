@@ -716,7 +716,12 @@ pub fn add_annotation(
     let graph_conn = context.graph().conn();
     let parsed_region = Region::parse(region)?;
     let resolved_region = crate::region::resolve(&parsed_region, graph_conn, collection, sample)?;
-    let spans = AccessionSpan::from_resolved_region(graph_conn, &resolved_region, None)?;
+    let spans = AccessionSpan::from_resolved_region(
+        graph_conn,
+        context.workspace(),
+        &resolved_region,
+        None,
+    )?;
 
     let accession = Accession::get_or_create(
         graph_conn,

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use gen_annotations::projection;
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace, is_terminal,
 };
 use gen_graph::{GraphNode, all_intermediate_edges};
 use gen_models::{
@@ -570,6 +570,12 @@ struct TranslationSubgraph {
     exit_nodes: Vec<HashId>,
 }
 
+struct TranslationTarget<'a> {
+    sample_name: &'a str,
+    block_group_name: &'a str,
+    label_hash: HashId,
+}
+
 /// Translate the full sequence graph: the whole sub-DAG between the graph start
 /// and end nodes, with every parallel branch represented. Each walk ends at the
 /// first in-frame stop codon, which is emitted as a `*` residue and then bounded
@@ -578,12 +584,13 @@ struct TranslationSubgraph {
 /// terminates would explode the protein graph.
 pub fn translate_block_group(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: &HashId,
     params: TranslationParams<'_>,
 ) -> Result<BlockGroup, TranslationError> {
     let block_group = BlockGroup::get_by_id(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
-    let subgraph = extract_full_graph(conn, block_group_id)?;
+    let subgraph = extract_full_graph(conn, workspace, block_group_id)?;
     let strand = params.strand.unwrap_or(Strand::Forward);
     let label = HashId::convert_str(&format!("translate-full:{block_group_id}"));
     let block_group_name = params
@@ -592,12 +599,15 @@ pub fn translate_block_group(
         .unwrap_or_else(|| format!("{} (protein)", block_group.name));
     translate_from(
         conn,
+        workspace,
         subgraph,
         strand,
         params,
-        &block_group.sample_name,
-        &block_group_name,
-        label,
+        TranslationTarget {
+            sample_name: &block_group.sample_name,
+            block_group_name: &block_group_name,
+            label_hash: label,
+        },
     )
 }
 
@@ -605,9 +615,10 @@ pub fn translate_block_group(
 /// terminals) as an in-memory sub-DAG. No database writes.
 fn extract_full_graph(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: &HashId,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, block_group_id, None)
+    let gen_graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
     let start_node = gen_graph
         .nodes()
@@ -690,11 +701,12 @@ fn extract_full_graph(
 /// nothing past the entry point is ever consulted.
 fn extract_from_entry(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: &HashId,
     entry_node_id: HashId,
     entry_coord: i64,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, block_group_id, None)
+    let gen_graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let entry_node = gen_graph
@@ -798,6 +810,7 @@ fn extract_from_entry(
 /// first in-frame stop codon, the same as every other translation entry point.
 pub fn translate_annotation(
     conn: &GraphConnection,
+    workspace: &Workspace,
     annotation: &Annotation,
     block_group_id: Option<&HashId>,
     params: TranslationParams<'_>,
@@ -829,6 +842,7 @@ pub fn translate_annotation(
 
     let subgraph = extract_from_entry(
         conn,
+        workspace,
         block_group_id,
         segments[0].node_id,
         segments[0].range.start,
@@ -839,12 +853,15 @@ pub fn translate_annotation(
         .unwrap_or_else(|| format!("{} (protein)", annotation.name));
     translate_from(
         conn,
+        workspace,
         subgraph,
         strand,
         params,
-        &block_group.sample_name,
-        &block_group_name,
-        annotation.id,
+        TranslationTarget {
+            sample_name: &block_group.sample_name,
+            block_group_name: &block_group_name,
+            label_hash: annotation.id,
+        },
     )
 }
 
@@ -854,6 +871,7 @@ pub fn translate_annotation(
 /// the same entry-point pipeline `translate_annotation` uses.
 pub fn translate_from_path(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: &HashId,
     coordinate: i64,
     params: TranslationParams<'_>,
@@ -876,7 +894,13 @@ pub fn translate_from_path(
     let entry_seq = entry_block.sequence_start + (coordinate - entry_block.start);
     let strand = params.strand.unwrap_or(entry_block.strand);
 
-    let subgraph = extract_from_entry(conn, block_group_id, entry_block.node_id, entry_seq)?;
+    let subgraph = extract_from_entry(
+        conn,
+        workspace,
+        block_group_id,
+        entry_block.node_id,
+        entry_seq,
+    )?;
     let block_group_name = params
         .name
         .map(str::to_string)
@@ -884,12 +908,15 @@ pub fn translate_from_path(
     let label = HashId::convert_str(&format!("translate-from:{block_group_id}:{coordinate}"));
     translate_from(
         conn,
+        workspace,
         subgraph,
         strand,
         params,
-        &block_group.sample_name,
-        &block_group_name,
-        label,
+        TranslationTarget {
+            sample_name: &block_group.sample_name,
+            block_group_name: &block_group_name,
+            label_hash: label,
+        },
     )
 }
 
@@ -912,13 +939,17 @@ pub fn translate_from_path(
 /// predecessor, e.g. where a junction or two variant paths reconverge).
 fn translate_from(
     conn: &GraphConnection,
+    workspace: &Workspace,
     subgraph: TranslationSubgraph,
     strand: Strand,
     params: TranslationParams<'_>,
-    sample_name: &str,
-    block_group_name: &str,
-    label_hash: HashId,
+    target: TranslationTarget<'_>,
 ) -> Result<BlockGroup, TranslationError> {
+    let TranslationTarget {
+        sample_name,
+        block_group_name,
+        label_hash,
+    } = target;
     let TranslationSubgraph {
         graph: subgraph,
         node_ranges,
@@ -936,7 +967,7 @@ fn translate_from(
             .filter_map(|(nid, _, _)| if seen.insert(*nid) { Some(*nid) } else { None })
             .collect()
     };
-    let sequences_by_node = Node::get_sequences_by_node_ids(conn, &real_node_ids, None);
+    let sequences_by_node = Node::get_sequences_by_node_ids(conn, workspace, &real_node_ids, None);
 
     let mut dna_by_node: HashMap<HashId, String> = HashMap::new();
     for virtual_node_id in subgraph.nodes() {
@@ -1417,7 +1448,7 @@ mod tests {
         CodonTable, TranslationError, TranslationParams, translate_annotation,
         translate_block_group, translate_from_path,
     };
-    use crate::test_helpers::{create_bg, get_connection};
+    use crate::test_helpers::{create_bg, get_connection, test_workspace};
 
     #[test]
     fn standard_met() {
@@ -1834,7 +1865,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         }
         node_ids.retain(|id| *id != PATH_START_NODE_ID && *id != PATH_END_NODE_ID);
         let node_ids_vec: Vec<HashId> = node_ids.into_iter().collect();
-        let sequences_by_node = Node::get_sequences_by_node_ids(conn, &node_ids_vec, None);
+        let sequences_by_node =
+            Node::get_sequences_by_node_ids(conn, test_workspace(), &node_ids_vec, None);
         sequences_by_node
             .values()
             .filter(|seq| {
@@ -1846,8 +1878,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
     /// Whether PATH_END is reachable from PATH_START in the protein graph.
     fn start_reaches_end(conn: &GraphConnection, block_group_id: &HashId) -> bool {
-        let graph =
-            BlockGroup::get_graph(conn, block_group_id, None).expect("should load protein graph");
+        let graph = BlockGroup::get_graph(
+            conn,
+            crate::test_helpers::test_workspace(),
+            block_group_id,
+            None,
+        )
+        .expect("should load protein graph");
         let start = graph.nodes().find(|n| n.node_id == PATH_START_NODE_ID);
         let end = graph.nodes().find(|n| n.node_id == PATH_END_NODE_ID);
         match (start, end) {
@@ -1861,10 +1898,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // ATG→M, GAA→E, TGA→* : single node, frame 0
         let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -1873,8 +1922,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn translate_default_name_is_source_name_protein_suffixed() {
         let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(protein.name, "test-gene (protein)");
     }
 
@@ -1882,8 +1937,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn translate_explicit_name_overrides_default() {
         let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test").name("custom-protein-name");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(protein.name, "custom-protein-name");
     }
 
@@ -1891,13 +1952,26 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn translate_duplicate_name_in_sample_errors() {
         let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test");
-        translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
 
         // Same collection, same sample (it's always the source sample now), same
         // default name: the second translation must error instead of silently
         // merging new protein edges into the first run's sequence graph.
         let params = TranslationParams::new("test");
-        let result = translate_annotation(&conn, &annotation, Some(&block_group_id), params);
+        let result = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        );
         assert!(matches!(
             result,
             Err(TranslationError::DuplicateBlockGroup(name)) if name == "test-gene (protein)"
@@ -1909,10 +1983,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // initial_frame=1 → head_skip=2, reads "GGAATG" → G,M; tail "A" dropped
         let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGGAATGA"]);
         let params = TranslationParams::new("test").initial_frame(1).unwrap();
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["GM".to_string()])
         );
     }
@@ -1923,10 +2009,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Node B = "AATGA": junction G+"AA"="GAA"→E; B[2..]="TGA"→*
         let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGG", "AATGA"]);
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -1937,10 +2035,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Junction ATG=M (B fully consumed); node C: GAA→E, TGA→* → "E*"
         let (conn, annotation, block_group_id) = setup_linear_gene(&["AT", "G", "GAATGA"]);
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -1951,10 +2061,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Multi-hop junction "T"+"G"+"G" = TGG = W; node C → "E*"
         let (conn, annotation, block_group_id) = setup_linear_gene(&["T", "G", "GGAATGA"]);
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["WE*".to_string()])
         );
     }
@@ -1964,10 +2086,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // Table 4: TGA → W (Trp), not stop
         let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGTGA"]);
         let params = TranslationParams::new("test").codon_table(CodonTable::ncbi(4).unwrap());
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["MW".to_string()])
         );
     }
@@ -2014,7 +2148,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let params = TranslationParams::new("test");
         // Strand is resolved before subgraph extraction, so a valid block-group id is
         // required even though this case errors out first.
-        let result = translate_annotation(&conn, &annotation, Some(&block_group.id), params);
+        let result = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group.id),
+            params,
+        );
         assert!(
             matches!(result, Err(TranslationError::AmbiguousStrand)),
             "expected AmbiguousStrand, got {:?}",
@@ -2055,11 +2195,23 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
 
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group.id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group.id),
+            params,
+        )
+        .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from([expected.to_string()]),
             "reverse-strand protein should read N → C left to right"
         );
@@ -2077,8 +2229,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn non_synonymous_snp_creates_variant_protein_path() {
         let (conn, annotation, block_group_id) = setup_variant_gene("ATG", "GAA", "CAA", "TGA");
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
 
         // Both amino acids must appear as protein nodes.
         assert_eq!(
@@ -2118,8 +2276,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn synonymous_snp_collapses_to_single_protein_node() {
         let (conn, annotation, block_group_id) = setup_variant_gene("ATG", "GAA", "GAG", "TGA");
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
 
         // Synonymous collapse: exactly one protein node with sequence "E".
         assert_eq!(
@@ -2150,8 +2314,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn synonymous_junction_snp_collapses_junction_node() {
         let (conn, annotation, block_group_id) = setup_variant_gene("ATGG", "AA", "AG", "TAA");
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
 
         // Exactly one junction node coding for E.
         assert_eq!(
@@ -2174,7 +2344,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn full_block_group_keeps_parallel_columns() {
         let (conn, block_group_id) = setup_parallel_columns();
         let params = TranslationParams::new("test");
-        let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
+        let protein =
+            translate_block_group(&conn, test_workspace(), &block_group_id, params).unwrap();
 
         for amino_acid in ["G", "A", "D", "F"] {
             assert_eq!(
@@ -2193,8 +2364,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn variant_bubble_protein_graph_is_connected() {
         let (conn, annotation, block_group_id) = setup_real_bubble();
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
 
         // Both the wild-type (E) and variant (A) junction residues must appear.
         assert_eq!(
@@ -2217,8 +2394,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             start_reaches_end(&conn, &protein.id),
             "protein graph has no PATH_START → PATH_END path (disconnected)"
         );
-        let protein_graph =
-            BlockGroup::get_graph(&conn, &protein.id, None).expect("should load protein graph");
+        let protein_graph = BlockGroup::get_graph(
+            &conn,
+            crate::test_helpers::test_workspace(),
+            &protein.id,
+            None,
+        )
+        .expect("should load protein graph");
         assert_eq!(
             connected_components(&protein_graph),
             1,
@@ -2233,10 +2415,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // A = "ATGT": ATG→M, tail "T" (1 byte). B = "AAGG": junction "T"+"AA" = "TAA" = stop.
         let (conn, annotation, block_group_id) = setup_linear_gene(&["ATGT", "AAGG"]);
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["M*".to_string()])
         );
     }
@@ -2291,13 +2485,20 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         let protein = translate_annotation(
             &conn,
+            test_workspace(),
             &annotation,
             Some(&child_bg.id),
             TranslationParams::new("test"),
         )
         .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["ME*".to_string()]),
             "translation should only follow the annotation's own entry node"
         );
@@ -2310,10 +2511,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         // TAA is a stop in the standard table; the rest of the node is never read.
         let (conn, annotation, block_group_id) = setup_linear_gene(&["TAAGGGCCC"]);
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["*".to_string()])
         );
     }
@@ -2331,10 +2544,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (conn, annotation, block_group_id) =
             setup_variant_gene("ATG", "CCC", "CC", "GTAGGGTAA");
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["MP*".to_string(), "MPVG*".to_string()]),
             "frameshift deletion should truncate the variant protein at the premature stop"
         );
@@ -2352,10 +2577,22 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (conn, annotation, block_group_id) =
             setup_variant_gene("ATG", "AAA", "AA", "TGACTAAGG");
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["MK*".to_string(), "MND*".to_string()]),
             "frameshift deletion should read through the wild-type stop to a later one"
         );
@@ -2410,7 +2647,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn junction_codons_with_same_amino_acid_deduplicate() {
         let (conn, block_group_id) = setup_junction_fanout();
         let params = TranslationParams::new("test");
-        let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
+        let protein =
+            translate_block_group(&conn, test_workspace(), &block_group_id, params).unwrap();
 
         assert_eq!(
             count_protein_nodes_with_aa(&conn, &protein.id, "K"),
@@ -2469,7 +2707,8 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
     fn many_to_one_junction_convergence_deduplicates() {
         let (conn, block_group_id) = setup_many_to_one_junction();
         let params = TranslationParams::new("test");
-        let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
+        let protein =
+            translate_block_group(&conn, test_workspace(), &block_group_id, params).unwrap();
 
         assert_eq!(
             count_protein_nodes_with_aa(&conn, &protein.id, "K"),
@@ -2533,6 +2772,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         let parent_protein = translate_annotation(
             &conn,
+            test_workspace(),
             &annotation,
             Some(&parent_bg.id),
             TranslationParams::new("test"),
@@ -2540,6 +2780,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
         let child_protein = translate_annotation(
             &conn,
+            test_workspace(),
             &annotation,
             Some(&child_bg.id),
             TranslationParams::new("test"),
@@ -2547,12 +2788,30 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &parent_protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
-            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &child_protein.id,
+                true
+            )
+            .unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &parent_protein.id,
+                true
+            )
+            .unwrap(),
             "upstream deletion changed the annotated protein",
         );
     }
@@ -2615,6 +2874,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         let parent_protein = translate_annotation(
             &conn,
+            test_workspace(),
             &annotation,
             Some(&parent_bg.id),
             TranslationParams::new("test"),
@@ -2622,6 +2882,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
         let child_protein = translate_annotation(
             &conn,
+            test_workspace(),
             &annotation,
             Some(&child_bg.id),
             TranslationParams::new("test"),
@@ -2629,16 +2890,40 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &parent_protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &child_protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["MQ*".to_string()])
         );
         assert_ne!(
-            BlockGroup::get_all_sequences(&conn, &child_protein.id, true).unwrap(),
-            BlockGroup::get_all_sequences(&conn, &parent_protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &child_protein.id,
+                true
+            )
+            .unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &parent_protein.id,
+                true
+            )
+            .unwrap(),
             "point mutation inside the CDS did not change the protein",
         );
     }
@@ -2697,6 +2982,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         let protein = translate_annotation(
             &conn,
+            test_workspace(),
             &annotation,
             Some(&child_bg.id),
             TranslationParams::new("test"),
@@ -2704,7 +2990,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["ME*".to_string()]),
             "translation should only follow the annotation's own entry node"
         );
@@ -2762,6 +3054,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
         let protein = translate_annotation(
             &conn,
+            test_workspace(),
             &annotation,
             Some(&child_bg.id),
             TranslationParams::new("test"),
@@ -2769,7 +3062,13 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["ME*".to_string(), "MEW".to_string()]),
             "last-base variant was dropped from the extracted subgraph",
         );
@@ -2818,11 +3117,23 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
         Path::create(&conn, "probe", &block_group.id, &[e_start_a, e_a_end]).unwrap();
 
-        let from_path =
-            translate_from_path(&conn, &block_group.id, 0, TranslationParams::new("test")).unwrap();
+        let from_path = translate_from_path(
+            &conn,
+            test_workspace(),
+            &block_group.id,
+            0,
+            TranslationParams::new("test"),
+        )
+        .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &from_path.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &from_path.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["*".to_string()]),
             "translate_from_path(0) should only translate the literal entry node (A), \
              not the unrelated D/P/Z branch reachable from PATH_START"
@@ -2841,10 +3152,17 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (conn, block_group_id, _, _) =
             setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
         let params = TranslationParams::new("test").strand(Strand::Reverse);
-        let protein = translate_block_group(&conn, &block_group_id, params).unwrap();
+        let protein =
+            translate_block_group(&conn, test_workspace(), &block_group_id, params).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
@@ -2866,11 +3184,23 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         );
 
         let params = TranslationParams::new("test");
-        let protein =
-            translate_annotation(&conn, &annotation, Some(&block_group_id), params).unwrap();
+        let protein = translate_annotation(
+            &conn,
+            test_workspace(),
+            &annotation,
+            Some(&block_group_id),
+            params,
+        )
+        .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
@@ -2884,10 +3214,17 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         let (conn, block_group_id, _, _) =
             setup_reverse_variant_gene(REV_PREFIX, "GAA", "CAA", REV_SUFFIX);
         let params = TranslationParams::new("test").strand(Strand::Reverse);
-        let protein = translate_from_path(&conn, &block_group_id, 0, params).unwrap();
+        let protein =
+            translate_from_path(&conn, test_workspace(), &block_group_id, 0, params).unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, &protein.id, true).unwrap(),
+            BlockGroup::get_all_sequences(
+                &conn,
+                crate::test_helpers::test_workspace(),
+                &protein.id,
+                true
+            )
+            .unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }

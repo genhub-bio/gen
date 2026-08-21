@@ -86,7 +86,7 @@ pub fn propagate_gff(
 
     let sequence_lengths_by_path_name = target_paths_by_bg_name
         .iter()
-        .map(|(name, path)| Ok((name.clone(), path.sequence(conn, None)?.len() as i64)))
+        .map(|(name, path)| Ok((name.clone(), path.length(conn, None)?)))
         .collect::<Result<HashMap<String, i64>, PathError>>()?;
 
     for result in reader.record_bufs() {
@@ -156,7 +156,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::propagate_gff;
-    use crate::test_helpers::get_connection;
+    use crate::test_helpers::{get_connection, test_workspace};
 
     fn create_block_group(conn: &GraphConnection) {
         let collection = Collection::create(conn, "test").unwrap();
@@ -304,7 +304,8 @@ mod tests {
             preserve_edge: true,
         };
 
-        BlockGroup::insert_change(conn, &change).expect("should apply AA update to child sample");
+        BlockGroup::insert_change(conn, test_workspace(), &change)
+            .expect("should apply AA update to child sample");
 
         let edge_to_insert = Edge::query(
             conn,

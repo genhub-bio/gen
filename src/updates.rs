@@ -1,4 +1,4 @@
-use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock};
+use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Workspace};
 use gen_models::{
     block_group::{BlockGroup, BlockGroupChange},
     db::GraphConnection,
@@ -81,6 +81,7 @@ impl InsertChangeData {
 
 pub(crate) fn insert_update_change(
     conn: &GraphConnection,
+    workspace: &Workspace,
     region: ResolvedGenRegion,
     data: InsertChangeData,
 ) -> Result<(), BlockGroupError> {
@@ -92,5 +93,5 @@ pub(crate) fn insert_update_change(
         phased: data.phased,
         preserve_edge: data.preserve_edge,
     };
-    BlockGroup::insert_change(conn, &change)
+    BlockGroup::insert_change(conn, workspace, &change)
 }

@@ -44,6 +44,7 @@ use crate::views::{
 
 pub struct AnnotationGroupTrackRequest<'a> {
     pub conn: &'a GraphConnection,
+    pub workspace: &'a Workspace,
     pub history_ref: Option<&'a str>,
     pub current_block_group: &'a BlockGroup,
     pub entry: &'a AnnotationGroupEntry,
@@ -56,6 +57,7 @@ pub fn load_annotations_for_group(
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
     load_group_annotations(
         request.conn,
+        request.workspace,
         request.current_block_group,
         request.entry,
         request.node_ids,
@@ -157,6 +159,7 @@ fn spans_whole_block_group(segments: &[AnnotationSegment], graph: &GenGraph) -> 
 
 fn load_group_annotations(
     conn: &GraphConnection,
+    workspace: &Workspace,
     current_block_group: &BlockGroup,
     entry: &AnnotationGroupEntry,
     node_ids: &HashSet<HashId>,
@@ -177,7 +180,7 @@ fn load_group_annotations(
     // a combinatorial library). Clip them onto the block group's full graph so an
     // annotation still covers every surviving fragment of its original range, on every
     // branch, with a gap wherever an edit spliced in unrelated sequence.
-    let graph = BlockGroup::get_graph(conn, &current_block_group.id, history_ref)
+    let graph = BlockGroup::get_graph(conn, workspace, &current_block_group.id, history_ref)
         .unwrap_or_else(|_| GenGraph::new());
     Ok(annotations
         .into_iter()
@@ -769,6 +772,7 @@ pub fn load_annotation_file_track(
     match request.entry.file_addition.file_type {
         FileTypes::Gff3 => translate_gff(
             request.conn,
+            request.workspace,
             request.collection_name,
             request.sample_name,
             request.history_ref,
@@ -777,6 +781,7 @@ pub fn load_annotation_file_track(
         )?,
         FileTypes::Bed => translate_bed(
             request.conn,
+            request.workspace,
             request.collection_name,
             request.sample_name,
             request.history_ref,
@@ -1051,7 +1056,8 @@ mod tests {
 
         let block_groups = Sample::get_block_groups(conn, "fixtures", "puc19-sample", None);
         let block_group = &block_groups[0];
-        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
         let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
 
         let groups =
@@ -1066,6 +1072,7 @@ mod tests {
 
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
+            workspace: context.workspace(),
             history_ref: None,
             current_block_group: block_group,
             entry: &entry,
@@ -1128,7 +1135,8 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let block_group = &block_groups[0];
 
-        let graph = BlockGroup::get_graph(conn, &block_group.id, None).unwrap();
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
         let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
 
         let entry = AnnotationGroupEntry {
@@ -1141,6 +1149,7 @@ mod tests {
 
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
+            workspace: context.workspace(),
             history_ref: None,
             current_block_group: block_group,
             entry: &entry,
@@ -1222,7 +1231,9 @@ mod tests {
             entry.source_block_group_id, selected_block_group.id,
             "the entry source should differ from the currently selected block group"
         );
-        let selected_graph = BlockGroup::get_graph(conn, &selected_block_group.id, None).unwrap();
+        let selected_graph =
+            BlockGroup::get_graph(conn, context.workspace(), &selected_block_group.id, None)
+                .unwrap();
         let node_ids = selected_graph
             .nodes()
             .map(|node| node.node_id)
@@ -1230,6 +1241,7 @@ mod tests {
 
         let spans = load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
+            workspace: context.workspace(),
             history_ref: None,
             current_block_group: &selected_block_group,
             entry: &entry,

@@ -4,7 +4,7 @@ use std::{
     io::{BufRead, Read, Write},
 };
 
-use gen_core::{HashId, Strand, is_terminal};
+use gen_core::{HashId, Strand, Workspace, is_terminal};
 use gen_graph::{GraphNode, project_path};
 use gen_models::{
     block_group::BlockGroup,
@@ -31,6 +31,7 @@ pub enum GffError {
 
 pub fn translate_gff<R, W>(
     conn: &GraphConnection,
+    workspace: &Workspace,
     collection: &str,
     sample: &str,
     history_ref: Option<&str>,
@@ -72,10 +73,12 @@ where
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     let path = BlockGroup::get_current_path(conn, &bg.id, history_ref)?;
-                    let graph = BlockGroup::get_graph(conn, &bg.id, history_ref)?;
+                    let graph = BlockGroup::get_graph(conn, workspace, &bg.id, history_ref)?;
                     let mut tree = IntervalTree::default();
                     let mut position: i64 = 0;
-                    for (node, strand) in project_path(&graph, &path.blocks(conn, history_ref)?) {
+                    for (node, strand) in
+                        project_path(&graph, &path.coordinate_blocks(conn, history_ref))
+                    {
                         if !is_terminal(node.node_id) {
                             // GFF indexing is one based, inclusive, so we add 1 to the start.
                             // Take a sequence that is 1-4 in our coordinates, this converts to:
@@ -126,7 +129,7 @@ mod tests {
     use gen_models::{reference_alias::ReferenceAlias, sample::Sample};
 
     use super::translate_gff;
-    use crate::test_helpers::{get_connection, setup_test_data};
+    use crate::test_helpers::{get_connection, setup_test_data, test_workspace};
 
     #[test]
     fn translates_coordinates_to_nodes() {
@@ -139,6 +142,7 @@ mod tests {
         let mut buffer = Vec::new();
         translate_gff(
             &conn,
+            test_workspace(),
             &collection,
             "foo",
             None,
@@ -174,6 +178,7 @@ mod tests {
         let mut buffer = Vec::new();
         translate_gff(
             &conn,
+            test_workspace(),
             &collection,
             Sample::DEFAULT_NAME,
             None,
@@ -225,6 +230,7 @@ mod tests {
         let mut buffer = Vec::new();
         translate_gff(
             &conn,
+            test_workspace(),
             &collection,
             Sample::DEFAULT_NAME,
             None,
