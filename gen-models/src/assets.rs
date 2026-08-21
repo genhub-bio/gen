@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::{self, Read, Write},
+    io::{self, BufReader, Read, Write},
     path::{Component, Path, PathBuf},
     string::ToString,
     sync::{Arc, LazyLock, Mutex},
@@ -318,15 +318,20 @@ impl AssetRef {
     ///
     /// Local references resolve through the repository's content-addressed asset store. Remote
     /// references retain their URI and are opened lazily through the configured storage backend.
-    pub fn reader(&self, workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError> {
-        if LocalAssetUri::is_local_path_or_file_uri(&self.uri) {
+    pub fn reader(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<BufReader<blocking::StdReader>, FileAdditionError> {
+        let reader = if LocalAssetUri::is_local_path_or_file_uri(&self.uri) {
             let asset_path = self.versioned_store_path(workspace)?;
-            return OpenDalLocation::from_absolute_path(&asset_path)
+            OpenDalLocation::from_absolute_path(&asset_path)
                 .map_err(opendal_file_addition_error)?
-                .reader();
-        }
+                .reader()?
+        } else {
+            <dyn AssetUri>::from_uri(&self.uri).reader(workspace)?
+        };
 
-        <dyn AssetUri>::from_uri(&self.uri).reader(workspace)
+        Ok(BufReader::new(reader))
     }
 
     pub fn id_hash(
@@ -901,7 +906,7 @@ impl OpenDalLocation {
             .to_string();
         let operator = with_opendal_runtime(|| {
             let builder = services::Fs::default().root(&root.to_string_lossy());
-            let op = opendal::Operator::new(builder)?.finish();
+            let op = opendal::Operator::new(builder)?;
             blocking::Operator::new(op)
         })?;
 

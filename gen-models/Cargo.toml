@@ -28,7 +28,7 @@ flate2 = "1.1.0"
 intervaltree = "0.2.7"
 itertools = "0.14.0"
 noodles = { version = "0.101.0", features = ["async", "bed", "bgzf", "core", "fasta", "gff", "gtf", "tabix", "vcf"] }
-opendal = { version = "0.56", features = ["blocking", "services-fs", "services-http", "services-s3", "services-gcs", "services-azblob"] }
+opendal = { version = "0.58", features = ["blocking", "services-fs", "services-http", "services-s3", "services-gcs", "services-azblob"] }
 petgraph = "0.6.5"
 rusqlite = { package = "rusqdoltlite", version = "0.40.16", features = ["bundled", "array", "limits", "fallible_uint", "backup", "uuid"] }
 rusqlite_migration = { package = "rusqdoltlite_migration", version = "2.6.4" , features = ["from-directory"]}
