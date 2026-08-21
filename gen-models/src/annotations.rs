@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     accession::{Accession, AccessionError, AccessionSpan, NewAccession},
-    assets::{AssetRole, OperationKind},
+    assets::{AssetRef, AssetRole, OperationKind},
     db::{DbContext, GraphConnection},
     errors::{FileAdditionError, OperationError},
     file_types::FileTypes,
@@ -806,6 +806,15 @@ pub fn add_annotation_file(
             None
         };
     let name_value = name.unwrap_or_default();
+    let annotation_asset_ref_id = AssetRef::id_hash(
+        &file_addition.asset_uri,
+        file_addition.file_type.as_str(),
+        file_addition.checksum.as_ref(),
+        &AssetRole::Annotation,
+        Some(&annotation_logical_path),
+        name,
+        None,
+    );
     let index_file_addition_id = prepared_index
         .as_ref()
         .map(|(index_file, _, _)| index_file.id.to_string())
@@ -822,6 +831,7 @@ pub fn add_annotation_file(
         role: AssetRole::Annotation,
         logical_path: Some(&annotation_logical_path),
         name,
+        upstream_asset_ref_id: None,
     }];
     if let Some((index_file_addition, index_logical_path, index_name)) = prepared_index.as_ref() {
         tracked_assets.push(OperationAssetRecord {
@@ -829,6 +839,7 @@ pub fn add_annotation_file(
             role: AssetRole::AnnotationIndex,
             logical_path: Some(index_logical_path),
             name: index_name.as_deref(),
+            upstream_asset_ref_id: Some(&annotation_asset_ref_id),
         });
     }
     track_operation_assets(
@@ -1553,6 +1564,11 @@ mod tests {
         assert_eq!(asset_refs.len(), 2);
         assert_eq!(asset_refs[0].role, AssetRole::Annotation);
         assert_eq!(asset_refs[1].role, AssetRole::AnnotationIndex);
+        assert_eq!(
+            asset_refs[1].upstream_asset_ref_id,
+            Some(asset_refs[0].id),
+            "annotation index should identify its immutable upstream annotation"
+        );
         assert_eq!(
             asset_refs[0].checksum,
             Some(calculate_reader_checksum("##gff-version 3\n".as_bytes()).unwrap())

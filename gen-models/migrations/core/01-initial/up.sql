@@ -170,8 +170,11 @@ CREATE TABLE gen_asset_refs (
   role TEXT NOT NULL,
   logical_path TEXT,
   name TEXT,
-  created_on INTEGER NOT NULL
+  created_on INTEGER NOT NULL,
+  upstream_asset_ref_id BLOB,
+  FOREIGN KEY(upstream_asset_ref_id) REFERENCES gen_asset_refs(id)
 ) STRICT;
+CREATE INDEX gen_asset_refs_upstream_idx ON gen_asset_refs(upstream_asset_ref_id);
 
 CREATE TABLE gen_operation_log (
   id BLOB PRIMARY KEY NOT NULL,

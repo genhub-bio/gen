@@ -259,6 +259,7 @@ mod tests {
             logical_path: Some("inputs/reference.fa".to_string()),
             name: Some("reference.fa".to_string()),
             created_on: 1,
+            upstream_asset_ref_id: None,
         };
         OperationLog::create(conn, &log).expect("should create operation log");
         AssetRef::create(conn, &asset).expect("should create checksumless asset");

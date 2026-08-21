@@ -185,6 +185,8 @@ pub struct AssetRef {
     pub logical_path: Option<String>,
     pub name: Option<String>,
     pub created_on: i64,
+    /// The source asset this asset indexes or otherwise works off.
+    pub upstream_asset_ref_id: Option<HashId>,
 }
 
 pub struct Assets;
@@ -237,6 +239,7 @@ impl Query for AssetRef {
             logical_path: row.get("logical_path").unwrap(),
             name: row.get("name").unwrap(),
             created_on: row.get("created_on").unwrap(),
+            upstream_asset_ref_id: row.get("upstream_asset_ref_id").unwrap(),
         }
     }
 }
@@ -280,23 +283,30 @@ impl AssetRef {
         role: &AssetRole,
         logical_path: Option<&str>,
         name: Option<&str>,
+        upstream_asset_ref_id: Option<&HashId>,
     ) -> HashId {
         let checksum = checksum
             .map(|checksum| checksum.to_string())
             .unwrap_or_default();
-        HashId(calculate_hash(&format!(
+        let mut identity = format!(
             "{uri}:{file_type}:{checksum}:{role}:{logical_path}:{name}",
             role = role.as_str(),
             logical_path = logical_path.unwrap_or_default(),
             name = name.unwrap_or_default(),
-        )))
+        );
+        if let Some(upstream_asset_ref_id) = upstream_asset_ref_id {
+            identity.push(':');
+            identity.push_str(&upstream_asset_ref_id.to_string());
+        }
+        HashId(calculate_hash(&identity))
     }
 
     pub fn create(conn: &GraphConnection, asset_ref: &AssetRef) -> rusqlite::Result<()> {
         conn.execute(
             "INSERT OR IGNORE INTO gen_asset_refs \
-             (id, uri, file_type, checksum, size, role, logical_path, name, created_on) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, uri, file_type, checksum, size, role, logical_path, name, created_on, \
+              upstream_asset_ref_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 asset_ref.id,
                 asset_ref.uri,
@@ -306,10 +316,36 @@ impl AssetRef {
                 &asset_ref.role,
                 asset_ref.logical_path,
                 asset_ref.name,
-                asset_ref.created_on
+                asset_ref.created_on,
+                asset_ref.upstream_asset_ref_id
             ],
         )?;
         Ok(())
+    }
+
+    /// Returns every asset derived from a given asset.
+    ///
+    /// The relationship is format-independent so sequence, annotation, alignment, and other
+    /// assets can discover any number of associated indices. There is no grouping mechanism,
+    /// so all downstream assets will be returned and the caller needs to identify which ones
+    /// go together.
+    pub fn get_derived_assets(
+        conn: &GraphConnection,
+        upstream_asset_ref_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Vec<Self> {
+        let table = Self::table_name_with_history_ref(history_ref);
+        let query = format!(
+            "SELECT * FROM {table} \
+             WHERE upstream_asset_ref_id = :upstream_asset_ref_id \
+             ORDER BY role, logical_path, id"
+        );
+        let mut query_params: Vec<(&str, &dyn ToSql)> =
+            vec![(":upstream_asset_ref_id", upstream_asset_ref_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        Self::query(conn, &query, &query_params[..])
     }
 
     /// Returns assets grouped by commit.
@@ -333,7 +369,8 @@ impl AssetRef {
                         asset_versions.role, \
                         asset_versions.logical_path, \
                         asset_versions.name, \
-                        asset_versions.created_on \
+                        asset_versions.created_on, \
+                        asset_versions.upstream_asset_ref_id \
                  FROM bounded_ancestry \
                  LEFT JOIN asset_versions \
                    ON asset_versions.introduction_commit = bounded_ancestry.commit_hash \
@@ -371,7 +408,8 @@ impl AssetRef {
                         materialized_assets.role, \
                         materialized_assets.logical_path, \
                         materialized_assets.name, \
-                        materialized_assets.created_on \
+                        materialized_assets.created_on, \
+                        materialized_assets.upstream_asset_ref_id \
                  FROM bounded_ancestry \
                  LEFT JOIN materialized_assets \
                   ON materialized_assets.introduction_commit = bounded_ancestry.commit_hash \
@@ -421,6 +459,7 @@ impl AssetRef {
                                 historical_assets.logical_path, \
                                 historical_assets.name, \
                                 historical_assets.created_on, \
+                                historical_assets.upstream_asset_ref_id, \
                                 bounded_ancestry.commit_hash AS introduction_commit, \
                                 MAX(bounded_ancestry.depth) AS introduction_depth \
                          FROM bounded_ancestry \
@@ -452,6 +491,7 @@ impl AssetRef {
                         logical_path: row.get("logical_path")?,
                         name: row.get("name")?,
                         created_on: row.get("created_on")?,
+                        upstream_asset_ref_id: row.get("upstream_asset_ref_id")?,
                     })
                 } else {
                     None
@@ -561,6 +601,7 @@ impl Assets {
                     annotation_assets.logical_path AS annotation_logical_path, \
                     annotation_assets.name AS annotation_name, \
                     annotation_assets.created_on AS annotation_created_on, \
+                    annotation_assets.upstream_asset_ref_id AS annotation_upstream_asset_ref_id, \
                     index_assets.id AS index_id, \
                     index_assets.uri AS index_uri, \
                     index_assets.file_type AS index_file_type, \
@@ -569,7 +610,8 @@ impl Assets {
                     index_assets.role AS index_role, \
                     index_assets.logical_path AS index_logical_path, \
                     index_assets.name AS index_name, \
-                    index_assets.created_on AS index_created_on \
+                    index_assets.created_on AS index_created_on, \
+                    index_assets.upstream_asset_ref_id AS index_upstream_asset_ref_id \
              FROM {operation_logs_table} operation_logs \
              JOIN {operation_assets_table} annotation_operation_assets \
                ON annotation_operation_assets.log_id = operation_logs.id \
@@ -581,6 +623,7 @@ impl Assets {
               AND index_operation_assets.role = :index_role \
              LEFT JOIN {asset_refs_table} index_assets \
                ON index_assets.id = index_operation_assets.asset_ref_id \
+              AND index_assets.upstream_asset_ref_id = annotation_assets.id \
              WHERE operation_logs.operation_kind = :operation_kind \
              ORDER BY operation_logs.created_on, annotation_assets.created_on, \
                       annotation_assets.name"
@@ -609,6 +652,7 @@ impl Assets {
                     logical_path: row.get("index_logical_path")?,
                     name: row.get("index_name")?,
                     created_on: row.get("index_created_on")?,
+                    upstream_asset_ref_id: row.get("index_upstream_asset_ref_id")?,
                 }),
                 None => None,
             };
@@ -624,6 +668,7 @@ impl Assets {
                     logical_path: row.get("annotation_logical_path")?,
                     name: row.get("annotation_name")?,
                     created_on: row.get("annotation_created_on")?,
+                    upstream_asset_ref_id: row.get("annotation_upstream_asset_ref_id")?,
                 },
                 index,
             })
@@ -1576,6 +1621,7 @@ mod tests {
             logical_path: Some("refs/reference.fa".to_string()),
             name: Some("reference.fa".to_string()),
             created_on: 1,
+            upstream_asset_ref_id: None,
         };
         let operation_log = OperationLog {
             id: HashId::convert_str("log"),
@@ -1603,6 +1649,59 @@ mod tests {
     }
 
     #[test]
+    fn test_asset_reference_supports_multiple_derived_assets() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let upstream = AssetRef {
+            id: HashId::convert_str("sequence-asset"),
+            uri: "file://reference.fa.bgz".to_string(),
+            file_type: "fasta".to_string(),
+            checksum: Some(Sha256Hash::convert_str("sequence-checksum")),
+            size: None,
+            role: AssetRole::Input,
+            logical_path: Some("reference.fa.bgz".to_string()),
+            name: Some("reference.fa.bgz".to_string()),
+            created_on: 1,
+            upstream_asset_ref_id: None,
+        };
+        let first_index = AssetRef {
+            id: HashId::convert_str("first-index"),
+            uri: "file://reference.fa.bgz.fai".to_string(),
+            file_type: "none".to_string(),
+            checksum: Some(Sha256Hash::convert_str("first-index-checksum")),
+            size: None,
+            role: AssetRole::Other("index".to_string()),
+            logical_path: Some("reference.fa.bgz.fai".to_string()),
+            name: Some("reference.fa.bgz.fai".to_string()),
+            created_on: 1,
+            upstream_asset_ref_id: Some(upstream.id),
+        };
+        let second_index = AssetRef {
+            id: HashId::convert_str("second-index"),
+            uri: "file://reference.fa.bgz.gzi".to_string(),
+            checksum: Some(Sha256Hash::convert_str("second-index-checksum")),
+            logical_path: Some("reference.fa.bgz.gzi".to_string()),
+            name: Some("reference.fa.bgz.gzi".to_string()),
+            ..first_index.clone()
+        };
+        AssetRef::create(conn, &upstream).expect("should insert upstream asset");
+        AssetRef::create(conn, &first_index).expect("should insert first derived asset");
+        AssetRef::create(conn, &second_index).expect("should insert second derived asset");
+        let commit = commit_all(conn, "add derived assets").expect("should commit derived assets");
+
+        assert_eq!(
+            AssetRef::get_derived_assets(conn, &upstream.id, None),
+            vec![first_index.clone(), second_index.clone()],
+            "current lookup should return every derived asset"
+        );
+        assert_eq!(
+            AssetRef::get_derived_assets(conn, &upstream.id, Some(&commit.to_string())),
+            vec![first_index, second_index],
+            "historical lookup should return every derived asset"
+        );
+    }
+
+    #[test]
     fn test_get_annotation_files_pairs_annotation_and_index_in_one_query() {
         let context = setup_gen();
         let conn = context.graph().conn();
@@ -1622,6 +1721,7 @@ mod tests {
             logical_path: Some("annotation.gff".to_string()),
             name: Some("genes".to_string()),
             created_on: 1,
+            upstream_asset_ref_id: None,
         };
         let index = AssetRef {
             id: HashId::convert_str("annotation-index-asset"),
@@ -1633,6 +1733,7 @@ mod tests {
             logical_path: Some("annotation.gff.tbi".to_string()),
             name: Some("genes".to_string()),
             created_on: 1,
+            upstream_asset_ref_id: Some(annotation.id),
         };
         OperationLog::create(conn, &log).expect("should insert annotation log");
         AssetRef::create(conn, &annotation).expect("should insert annotation asset");
@@ -1715,6 +1816,7 @@ mod tests {
                     logical_path: Some("alpha.fa".to_string()),
                     name: Some("alpha.fa".to_string()),
                     created_on: 1,
+                    upstream_asset_ref_id: None,
                 };
                 let zeta = AssetRef {
                     id: HashId::convert_str("zeta"),
@@ -1854,6 +1956,7 @@ mod tests {
                 logical_path: Some("reference.fa".to_string()),
                 name: Some("reference.fa".to_string()),
                 created_on: 1,
+                upstream_asset_ref_id: None,
             };
             AssetRef::create(conn, &main_asset).expect("should insert main asset");
             commit_all(conn, "add main asset").expect("should commit main asset");
@@ -2036,6 +2139,7 @@ mod tests {
             logical_path: Some("reference.fa".to_string()),
             name: Some("reference.fa".to_string()),
             created_on: 1,
+            upstream_asset_ref_id: None,
         };
         AssetRef::create(conn, &first_asset).expect("should insert first asset");
         commit_all(conn, "add first asset").expect("should commit first asset");
