@@ -246,8 +246,19 @@ fn resolve_remote(
     let remote_name = explicit_remote
         .map(str::to_string)
         .or_else(|| RemoteBranch::get_remote(config, branch))
-        .or_else(|| Defaults::get_default_remote(config))
-        .ok_or("No remote specified, tracked for this branch, or configured as default")?;
+        .or_else(|| Defaults::get_default_remote(config));
+    let remote_name = if let Some(remote_name) = remote_name {
+        remote_name
+    } else {
+        let mut remotes = Remote::list_all(config);
+        if remotes.len() == 1 {
+            remotes.remove(0).name
+        } else {
+            return Err(
+                "No remote specified, tracked for this branch, or configured as default".into(),
+            );
+        }
+    };
     Ok(Remote::get_by_name(config, &remote_name)?)
 }
 
@@ -422,6 +433,13 @@ pub(crate) enum DownloadAssetOutcome {
 struct AssetTransferRange<'commit> {
     from_commit: Option<&'commit DoltHashId>,
     previous_hash: Option<&'commit DoltHashId>,
+    materialize: bool,
+}
+
+struct AssetTransferTarget<'transfer> {
+    branch: &'transfer str,
+    history_ref: &'transfer str,
+    range: AssetTransferRange<'transfer>,
 }
 
 /// This is effectively a dirty file check. On clones/pulls we want to update
@@ -935,22 +953,24 @@ fn transfer_assets(
     workspace: &Workspace,
     remote: &Remote,
     operation: RemoteOperation,
-    branch: &str,
-    range: AssetTransferRange<'_>,
+    target: AssetTransferTarget<'_>,
     mut complete_commit: impl FnMut(&DoltHashId) -> Result<(), Box<dyn Error>>,
 ) -> Result<Vec<AssetUploadReceipt>, Box<dyn Error>> {
-    let commit_hash = hash_of(graph, branch)?;
+    let commit_hash = hash_of(graph, target.history_ref)?;
     let range_assets: HashMap<_, _> =
-        AssetRef::get_cumulative_assets_at(graph, range.from_commit, Some(&commit_hash))?
+        AssetRef::get_cumulative_assets_at(graph, target.range.from_commit, Some(&commit_hash))?
             .into_iter()
             .map(|asset| (asset.id, asset))
             .collect();
-    let materialized_asset_ids: HashSet<_> =
+    let materialized_asset_ids: HashSet<_> = if target.range.materialize {
         AssetRef::get_materialized_assets_at(graph, None, Some(&commit_hash))?
             .into_iter()
             .map(|asset| asset.id)
-            .collect();
-    let excluded_assets = if let Some(from_commit) = range.from_commit {
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let excluded_assets = if let Some(from_commit) = target.range.from_commit {
         AssetRef::get_cumulative_assets_at(graph, None, Some(from_commit))?
             .into_iter()
             .map(|asset| (asset.id, asset))
@@ -958,7 +978,7 @@ fn transfer_assets(
     } else {
         HashMap::new()
     };
-    let mut previous_assets = if let Some(previous_hash) = range.previous_hash {
+    let mut previous_assets = if let Some(previous_hash) = target.range.previous_hash {
         AssetRef::get_cumulative_assets_at(graph, None, Some(previous_hash))?
             .into_iter()
             .map(|asset| (asset.id, asset))
@@ -987,8 +1007,11 @@ fn transfer_assets(
                 &previous_assets,
             )?,
             RemoteOperation::Clone | RemoteOperation::Pull => {
-                let assets_by_commit =
-                    get_remaining_assets_to_transfer(graph, range.from_commit, &commit_hash)?;
+                let assets_by_commit = get_remaining_assets_to_transfer(
+                    graph,
+                    target.range.from_commit,
+                    &commit_hash,
+                )?;
                 for (commit_hash, assets) in assets_by_commit {
                     let assets = assets
                         .into_iter()
@@ -1014,8 +1037,8 @@ fn transfer_assets(
         &repository,
         &AssetTransferRequest {
             operation,
-            branch,
-            from_commit: range.from_commit,
+            branch: target.branch,
+            from_commit: target.range.from_commit,
             to_commit: Some(&commit_hash),
         },
         login_origin,
@@ -1024,8 +1047,8 @@ fn transfer_assets(
     for transfer in &response.assets {
         if !range_assets.contains_key(&transfer.id) && !excluded_assets.contains_key(&transfer.id) {
             return Err(format!(
-                "GenHub returned an asset transfer not present on branch '{branch}': {}",
-                transfer.id
+                "GenHub returned an asset transfer not present on branch '{}': {}",
+                target.branch, transfer.id
             )
             .into());
         }
@@ -1041,8 +1064,9 @@ fn transfer_assets(
         }
         if !assets.is_empty() {
             return Err(format!(
-                "GenHub omitted {} local asset transfer(s) for branch '{branch}'",
-                assets.len()
+                "GenHub omitted {} local asset transfer(s) for branch '{}'",
+                assets.len(),
+                target.branch
             )
             .into());
         }
@@ -1055,13 +1079,15 @@ fn transfer_assets(
         .map(|transfer| (transfer.id, transfer.url))
         .collect::<HashMap<_, _>>();
     let assets_by_commit =
-        get_remaining_assets_to_transfer(graph, range.from_commit, &commit_hash)?;
+        get_remaining_assets_to_transfer(graph, target.range.from_commit, &commit_hash)?;
     for (commit_hash, assets) in assets_by_commit {
         for asset in assets {
             let Some(url) = transfer_urls.remove(&asset.id) else {
-                return Err(
-                    format!("GenHub omitted asset {} for branch '{branch}'", asset.id).into(),
-                );
+                return Err(format!(
+                    "GenHub omitted asset {} for branch '{}'",
+                    asset.id, target.branch
+                )
+                .into());
             };
             let destination_logical_path = if materialized_asset_ids.contains(&asset.id) {
                 asset.logical_path.as_deref()
@@ -1144,10 +1170,14 @@ pub fn clone_into_workspace(
         workspace,
         remote,
         RemoteOperation::Clone,
-        &branch,
-        AssetTransferRange {
-            from_commit: assets_transfer_checkpoint.as_ref(),
-            previous_hash: previous_hash.as_ref(),
+        AssetTransferTarget {
+            branch: &branch,
+            history_ref: &branch,
+            range: AssetTransferRange {
+                from_commit: assets_transfer_checkpoint.as_ref(),
+                previous_hash: previous_hash.as_ref(),
+                materialize: true,
+            },
         },
         |commit_hash| {
             operation.advance_assets_transfer_checkpoint(config, commit_hash)?;
@@ -1301,10 +1331,14 @@ pub fn execute_push(
         workspace,
         &remote,
         RemoteOperation::Push,
-        &branch,
-        AssetTransferRange {
-            from_commit: assets_transfer_checkpoint,
-            previous_hash: previous_hash.as_ref(),
+        AssetTransferTarget {
+            branch: &branch,
+            history_ref: &branch,
+            range: AssetTransferRange {
+                from_commit: assets_transfer_checkpoint,
+                previous_hash: previous_hash.as_ref(),
+                materialize: true,
+            },
         },
         |_| Ok(()),
     )
@@ -1391,10 +1425,14 @@ pub fn execute_pull(
         workspace,
         &remote,
         RemoteOperation::Pull,
-        &branch,
-        AssetTransferRange {
-            from_commit: assets_transfer_checkpoint.as_ref(),
-            previous_hash: previous_hash.as_ref(),
+        AssetTransferTarget {
+            branch: &branch,
+            history_ref: &branch,
+            range: AssetTransferRange {
+                from_commit: assets_transfer_checkpoint.as_ref(),
+                previous_hash: previous_hash.as_ref(),
+                materialize: true,
+            },
         },
         |commit_hash| {
             operation.advance_assets_transfer_checkpoint(&config, commit_hash)?;
@@ -1404,6 +1442,51 @@ pub fn execute_pull(
     operation.complete(&config)?;
     RemoteBranch::set_remote_validated(&config, &branch, Some(&remote.name))?;
     println!("Pulled branch '{branch}' from '{}'.", remote.name);
+    Ok(())
+}
+
+/// Fetches a remote branch into its remote-tracking ref and hydrates immutable asset history.
+///
+/// Fetch deliberately leaves the local branch, checkout, and logical workspace files unchanged.
+pub fn execute_fetch(
+    workspace: &Workspace,
+    explicit_remote: Option<&str>,
+    explicit_branch: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let config = get_config_connection(Some(workspace.gen_db_path()?))?;
+    let graph = get_connection_for_branch(workspace.graph_db_path()?, None)?;
+    let branch = explicit_branch
+        .map(str::to_string)
+        .or_else(|| Defaults::get_current_branch(&config))
+        .unwrap_or(active_branch(&graph)?);
+    let remote = resolve_remote(&config, explicit_remote, &branch)?;
+    run_graph_transfer(
+        &graph,
+        &remote,
+        RemoteOperation::Pull,
+        &branch,
+        false,
+        || fetch(&graph, &remote.name, Some(&branch)),
+    )?;
+
+    let tracking_ref = format!("{}/{}", remote.name, branch);
+    transfer_assets(
+        &graph,
+        workspace,
+        &remote,
+        RemoteOperation::Pull,
+        AssetTransferTarget {
+            branch: &branch,
+            history_ref: &tracking_ref,
+            range: AssetTransferRange {
+                from_commit: None,
+                previous_hash: None,
+                materialize: false,
+            },
+        },
+        |_| Ok(()),
+    )?;
+    println!("Fetched branch '{branch}' from '{}'.", remote.name);
     Ok(())
 }
 
@@ -1471,9 +1554,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AssetTransferRange, DownloadAssetOutcome, PushTransferLease, RemoteOperation,
-        canonical_remote_url, clone_destination_name, copy_versioned_asset, download_asset,
-        download_to_versioned_store, execute_pull, execute_push, file_graph_url,
+        AssetTransferRange, AssetTransferTarget, DownloadAssetOutcome, PushTransferLease,
+        RemoteOperation, canonical_remote_url, clone_destination_name, copy_versioned_asset,
+        download_asset, download_to_versioned_store, execute_pull, execute_push, file_graph_url,
         get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer, temporary_path,
         transfer_assets,
     };
@@ -2295,10 +2378,14 @@ mod tests {
             &workspace,
             &remote,
             RemoteOperation::Pull,
-            "main",
-            AssetTransferRange {
-                from_commit: Some(&previous_hash),
-                previous_hash: Some(&previous_hash),
+            AssetTransferTarget {
+                branch: "main",
+                history_ref: "main",
+                range: AssetTransferRange {
+                    from_commit: Some(&previous_hash),
+                    previous_hash: Some(&previous_hash),
+                    materialize: true,
+                },
             },
             |_| Ok(()),
         )
@@ -2359,10 +2446,14 @@ mod tests {
             &workspace,
             &remote,
             RemoteOperation::Clone,
-            "main",
-            AssetTransferRange {
-                from_commit: None,
-                previous_hash: None,
+            AssetTransferTarget {
+                branch: "main",
+                history_ref: "main",
+                range: AssetTransferRange {
+                    from_commit: None,
+                    previous_hash: None,
+                    materialize: true,
+                },
             },
             |_| Ok(()),
         )
@@ -2769,6 +2860,23 @@ mod tests {
         assert_eq!(
             resolve_remote(&config, None, "main").unwrap().name,
             "default"
+        );
+    }
+
+    #[test]
+    fn test_remote_resolution_uses_the_only_configured_remote() {
+        let temp = tempdir().expect("should create remote resolution directory");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let config = get_config_connection(Some(workspace.gen_db_path().unwrap()))
+            .expect("should open config database");
+        Remote::create(&config, "sole", "file:///tmp/sole").expect("should create sole remote");
+
+        assert_eq!(
+            resolve_remote(&config, None, "new-branch")
+                .expect("should resolve the only configured remote")
+                .name,
+            "sole"
         );
     }
 

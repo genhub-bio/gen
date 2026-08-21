@@ -184,6 +184,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             branch.as_deref(),
         );
     }
+    if let Some(Commands::Fetch { remote, branch }) = &cli.command {
+        return r#gen::commands::remote::operations::execute_fetch(
+            &workspace,
+            remote.as_deref(),
+            branch.as_deref(),
+        );
+    }
     if let Some(Commands::Defaults {
         collection,
         committer_name,
@@ -919,7 +926,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => Err(format!("Error making a stitch: {e}").into()),
             }
         }
-        Some(Commands::Push { .. }) | Some(Commands::Pull { .. }) => unreachable!(),
+        Some(Commands::Push { .. })
+        | Some(Commands::Pull { .. })
+        | Some(Commands::Fetch { .. }) => unreachable!(),
         Some(Commands::AddReferenceAliases {
             reference_name,
             refseq_accession_id,
