@@ -19,7 +19,7 @@ use crate::{
     assets::{AssetRef, AssetUri, LocalAssetUri},
     db::GraphConnection,
     gen_models_capnp::sequence,
-    traits::Query,
+    traits::{Query, max_rows_per_batch},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -534,6 +534,40 @@ pub fn cached_sequence(
 }
 
 impl Sequence {
+    /// Saves sequences in bounded batches, retaining any row already stored under the same hash.
+    #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, sequences)))]
+    pub fn bulk_save(conn: &GraphConnection, sequences: &[Sequence]) -> Result<(), SequenceError> {
+        let batch_size = max_rows_per_batch(conn, 6);
+
+        for chunk in sequences.chunks(batch_size) {
+            let mut sql = String::from(
+                "INSERT OR IGNORE INTO sequences
+                 (hash, sequence_type, sequence, name, asset_ref_id, length) VALUES ",
+            );
+            for row_index in 0..chunk.len() {
+                if row_index > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?, ?, ?, ?, ?, ?)");
+            }
+            sql.push(';');
+
+            let mut values = Vec::with_capacity(chunk.len() * 6);
+            for sequence in chunk {
+                values.push(Value::from(sequence.hash));
+                values.push(Value::from(sequence.sequence_type.clone()));
+                values.push(Value::from(sequence.sequence.clone()));
+                values.push(Value::from(sequence.name.clone()));
+                values.push(Value::from(sequence.asset_ref_id));
+                values.push(Value::from(sequence.length));
+            }
+            let mut statement = conn.prepare_cached(&sql)?;
+            statement.execute(rusqlite::params_from_iter(values))?;
+        }
+
+        Ok(())
+    }
+
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> NewSequence<'static> {
         NewSequence::new()
