@@ -278,8 +278,10 @@ impl Path {
         edge_ids: &[HashId],
         block_group_id: &HashId,
     ) -> Result<(), PathError> {
-        // All path edges must be in the path's block group
-        let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None);
+        // Validate against only the requested edges. A block group can be much larger than any
+        // one path, and loading all of it here makes each additional path rescan the whole graph.
+        let augmented_edges =
+            BlockGroupEdge::specific_edges_for_block_group(conn, block_group_id, edge_ids, None);
         let bg_edge_ids = augmented_edges
             .iter()
             .map(|augmented_edge| augmented_edge.edge.id)

@@ -1232,6 +1232,7 @@ impl BlockGroup {
             conn,
             source_block_group_id,
             &subgraph_edge_ids,
+            None,
         );
         let source_edge_ids = source_edges
             .iter()

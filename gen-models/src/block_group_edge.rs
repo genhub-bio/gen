@@ -2,7 +2,7 @@ use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
 use indexmap::IndexSet;
-use rusqlite::{self, Row, ToSql, params, types::Value};
+use rusqlite::{self, Row, ToSql, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -229,25 +229,31 @@ impl BlockGroupEdge {
         conn: &GraphConnection,
         block_group_id: &HashId,
         edge_ids: &[HashId],
+        history_ref: Option<&str>,
     ) -> Vec<AugmentedEdge> {
-        let block_group_edges = BlockGroupEdge::query(
-            conn,
-            "SELECT * FROM block_group_edges WHERE block_group_id = ?1 AND edge_id in rarray(?2);",
-            params![
-                block_group_id,
-                Rc::new(
-                    edge_ids
-                        .iter()
-                        .map(|x| Value::from(*x))
-                        .collect::<Vec<Value>>()
-                )
-            ],
+        let query = format!(
+            "SELECT * FROM {} WHERE block_group_id = :block_group_id AND edge_id in rarray(:edge_ids);",
+            Self::table_name_with_history_ref(history_ref),
         );
+        let edge_id_values = Rc::new(
+            edge_ids
+                .iter()
+                .map(|edge_id| Value::from(*edge_id))
+                .collect::<Vec<_>>(),
+        );
+        let mut params: Vec<(&str, &dyn ToSql)> = vec![
+            (":block_group_id", block_group_id),
+            (":edge_ids", &edge_id_values),
+        ];
+        if let Some(history_ref) = history_ref.as_ref() {
+            params.push((":history_ref", history_ref));
+        }
+        let block_group_edges = BlockGroupEdge::query(conn, &query, &params[..]);
         let edge_ids = block_group_edges
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids, None);
+        let edges = Edge::query_by_ids(conn, &edge_ids, history_ref);
 
         let edge_map = edges
             .iter()
@@ -272,9 +278,15 @@ impl BlockGroupEdge {
 mod tests {
     use capnp::message::TypedBuilder;
     use chrono::Utc;
+    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 
     use super::*;
-    use crate::gen_models_capnp::block_group_edge;
+    use crate::{
+        collection::Collection,
+        gen_models_capnp::block_group_edge,
+        history::dolt::commit_all,
+        test_helpers::{create_bg, get_connection},
+    };
 
     #[test]
     fn test_block_group_edge_capnp_serialization() {
@@ -312,6 +324,58 @@ mod tests {
         assert_ne!(
             block_group_edge.id_hash(),
             changed_block_group_edge.id_hash()
+        );
+    }
+
+    #[test]
+    fn test_specific_edges_for_block_group_respects_history_ref() {
+        let conn = &get_connection(None).expect("should create graph connection");
+        Collection::get_or_create(conn, "test").expect("should create collection");
+        let block_group = create_bg(conn, "test", "test", "chr1");
+        let edge = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create edge");
+        let block_group_edge = BlockGroupEdgeData {
+            block_group_id: block_group.id,
+            edge_id: edge.id,
+            chromosome_index: 0,
+            phased: 0,
+        };
+        BlockGroupEdge::bulk_create(conn, core::slice::from_ref(&block_group_edge));
+        let historical_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None);
+        let historical_edge = historical_edges
+            .first()
+            .expect("should create a block group edge")
+            .clone();
+        let historical_commit =
+            commit_all(conn, "create block group edges").expect("should commit block group edges");
+        BlockGroupEdge::bulk_delete(conn, &[block_group_edge]);
+        Edge::delete_by_ids(conn, &[historical_edge.edge.id]);
+
+        assert!(
+            BlockGroupEdge::specific_edges_for_block_group(
+                conn,
+                &block_group.id,
+                &[historical_edge.edge.id],
+                None,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            BlockGroupEdge::specific_edges_for_block_group(
+                conn,
+                &block_group.id,
+                &[historical_edge.edge.id],
+                Some(&historical_commit.to_string()),
+            ),
+            vec![historical_edge]
         );
     }
 }
