@@ -31,7 +31,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, result::ZipError, write::Sim
 
 const MANIFEST_ENTRY: &str = "manifest.json";
 const PATCH_FORMAT_VERSION: u32 = 2;
-const BOOTSTRAP_TABLES: [&str; 19] = [
+const BOOTSTRAP_TABLES: [&str; 18] = [
     "accession_nodes",
     "accessions",
     "annotation_group_samples",
@@ -45,7 +45,6 @@ const BOOTSTRAP_TABLES: [&str; 19] = [
     "gen_operation_assets",
     "gen_operation_log",
     "nodes",
-    "path_edges",
     "paths",
     "reference_aliases",
     "sample_lineage",
@@ -255,7 +254,6 @@ fn is_schema_bootstrap_working_set(
             (SELECT COUNT(*) FROM gen_asset_refs) + \
             (SELECT COUNT(*) FROM gen_operation_assets) + \
             (SELECT COUNT(*) FROM gen_operation_log) + \
-            (SELECT COUNT(*) FROM path_edges) + \
             (SELECT COUNT(*) FROM paths) + \
             (SELECT COUNT(*) FROM sample_lineage) + \
             (SELECT COUNT(*) FROM samples)",

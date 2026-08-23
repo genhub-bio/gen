@@ -21,7 +21,6 @@ pub mod node;
 pub mod operations;
 pub mod patch;
 pub mod path;
-pub mod path_edge;
 pub mod reference_alias;
 pub mod region;
 pub mod sample;

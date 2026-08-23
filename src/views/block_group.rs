@@ -75,7 +75,8 @@ fn get_block_group_path_nodes(
     // Query the database for the most recent path for this block group
     let path = Path::get(
         conn,
-        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
+        "SELECT id, block_group_id, name, created_on FROM paths \
+         WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
         rusqlite::params![block_group_id],
     )
     .map_err(|e| format!("Failed to query path: {}", e))?;

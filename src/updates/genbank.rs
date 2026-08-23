@@ -102,7 +102,8 @@ where
                 };
                 let paths = Path::query(
                     conn,
-                    "select * from paths where block_group_id = ?1 AND name = ?2",
+                    "SELECT id, block_group_id, name, created_on FROM paths \
+                     WHERE block_group_id = ?1 AND name = ?2",
                     params![Value::from(block_group.id), Value::from(locus.name.clone())],
                 );
                 let path = if let Some(first) = paths.first() {

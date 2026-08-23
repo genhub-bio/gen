@@ -11,7 +11,6 @@ use gen_models::{
     edge::Edge,
     errors::{BlockGroupError, OperationError, PathError},
     path::Path,
-    path_edge::PathEdge,
     region::{Region, resolve},
     sample::Sample,
     traits::Query,
@@ -116,7 +115,7 @@ pub fn derive_chunks(
     let current_path_length = current_path.length(conn, None)?;
 
     let current_intervaltree = current_path.intervaltree(conn)?;
-    let current_path_edges = PathEdge::edges_for_path(conn, &current_path.id, None);
+    let current_path_edges = Path::edges_for_path(conn, &current_path.id, None);
 
     let chunk_ranges_length = chunk_ranges.len();
 
