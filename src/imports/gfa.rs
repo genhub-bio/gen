@@ -233,7 +233,20 @@ pub fn import_gfa(
     let edge_data = edges.into_iter().collect::<Vec<EdgeData>>();
     let edge_ids = Edge::bulk_create(conn, &edge_data);
 
-    let mut created_blockgroup_edges: IndexSet<HashId> = IndexSet::new();
+    // Every imported edge belongs to this block group regardless of how many paths traverse it.
+    // Insert that association once up front so path count does not multiply identical writes.
+    BlockGroupEdge::bulk_create(
+        conn,
+        &edge_ids
+            .iter()
+            .map(|id| BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: *id,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+            })
+            .collect::<Vec<BlockGroupEdgeData>>(),
+    );
 
     for input_path in &gfa.paths {
         let path_name = &input_path.name;
@@ -270,20 +283,6 @@ pub fn import_gfa(
         let edge_id = key.id_hash();
         path_edge_ids.push(edge_id);
         path_edge_data.push(key);
-        created_blockgroup_edges.extend(path_edge_ids.iter());
-
-        BlockGroupEdge::bulk_create(
-            conn,
-            &path_edge_ids
-                .iter()
-                .map(|id| BlockGroupEdgeData {
-                    block_group_id: block_group.id,
-                    edge_id: *id,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                })
-                .collect::<Vec<BlockGroupEdgeData>>(),
-        );
         Path::validate_edges_in_memory(&path_edge_ids, &path_edge_data)?;
         Path::create_with_validated_edges(conn, path_name, &block_group.id, &path_edge_ids)?;
     }
@@ -323,43 +322,9 @@ pub fn import_gfa(
         let edge_id = key.id_hash();
         path_edge_ids.push(edge_id);
         path_edge_data.push(key);
-        created_blockgroup_edges.extend(path_edge_ids.iter());
-
-        BlockGroupEdge::bulk_create(
-            conn,
-            &path_edge_ids
-                .iter()
-                .map(|id| BlockGroupEdgeData {
-                    block_group_id: block_group.id,
-                    edge_id: *id,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                })
-                .collect::<Vec<BlockGroupEdgeData>>(),
-        );
         Path::validate_edges_in_memory(&path_edge_ids, &path_edge_data)?;
         Path::create_with_validated_edges(conn, path_name, &block_group.id, &path_edge_ids)?;
     }
-
-    // make any block group edges not in paths or walks
-    BlockGroupEdge::bulk_create(
-        conn,
-        &edge_ids
-            .iter()
-            .filter_map(|id| {
-                if !created_blockgroup_edges.contains(id) {
-                    Some(BlockGroupEdgeData {
-                        block_group_id: block_group.id,
-                        edge_id: *id,
-                        chromosome_index: NO_CHROMOSOME_INDEX,
-                        phased: 0,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<BlockGroupEdgeData>>(),
-    );
 
     // check the graph for cycles and make start/end nodes if so
     let bar = progress_bar.add(get_progress_bar(None));
