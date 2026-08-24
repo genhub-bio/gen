@@ -41,7 +41,8 @@ pub fn import_fasta(
 ) -> Result<OperationSummary, FastaError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let mut operation_file = OperationFile::new(fasta.to_string()).set_file_type(FileTypes::Fasta);
+    let mut operation_files =
+        vec![OperationFile::new(fasta.to_string()).set_file_type(FileTypes::Fasta)];
     let mut sequence_asset_ref_id = None;
     let mut checksum_handle = None;
     let input: Box<dyn Read> = if shallow {
@@ -53,9 +54,9 @@ pub fn import_fasta(
         )
         .expect("should fit sequence asset timestamp in i64");
         let sequence_asset_ref =
-            operation_file.prepare_asset_ref(context.workspace(), created_on)?;
+            operation_files[0].prepare_asset_ref(context.workspace(), created_on)?;
         if let Some(checksum) = sequence_asset_ref.checksum {
-            operation_file = operation_file.set_checksum_override(checksum);
+            operation_files[0] = operation_files[0].clone().set_checksum_override(checksum);
         }
         AssetRef::create(conn, &sequence_asset_ref)
             .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
@@ -197,13 +198,15 @@ pub fn import_fasta(
                 "FASTA reader did not reach EOF before checksum was requested",
             )
         })?;
-        operation_file = operation_file.set_checksum_override(checksum_override);
+        operation_files[0] = operation_files[0]
+            .clone()
+            .set_checksum_override(checksum_override);
     }
 
     let bar = add_saving_operation_bar(&progress_bar);
     let operation_summary = OperationSummary::new(
         OperationInfo {
-            files: vec![operation_file],
+            files: operation_files,
             description: "fasta_addition".to_string(),
         },
         summary_str,
