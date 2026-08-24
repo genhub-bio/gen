@@ -20,10 +20,7 @@ use crate::{
     file_types::FileTypes,
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     history::{HistoryStore, dolt::DoltHistoryStore},
-    operations::{
-        FileAddition, OperationAssetRecord, OperationFile, OperationInfo, OperationSummary,
-        track_operation_assets,
-    },
+    operations::{FileAddition, OperationFile, OperationInfo, OperationSummary, track_asset_refs},
     traits::Query,
 };
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -831,23 +828,28 @@ pub fn add_annotation_file(
     let summary = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("Add annotation file {path}"));
-    let mut tracked_assets = vec![OperationAssetRecord {
-        file_addition: &file_addition,
-        role: AssetRole::Annotation,
-        logical_path: Some(&annotation_logical_path),
+    let created_on = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .expect("should create annotation asset timestamp");
+    let mut tracked_assets = vec![AssetRef::from_file_addition(
+        &file_addition,
+        AssetRole::Annotation,
+        Some(&annotation_logical_path),
         name,
-        upstream_asset_ref_id: None,
-    }];
+        None,
+        created_on,
+    )];
     if let Some((index_file_addition, index_logical_path, index_name)) = prepared_index.as_ref() {
-        tracked_assets.push(OperationAssetRecord {
-            file_addition: index_file_addition,
-            role: AssetRole::AnnotationIndex,
-            logical_path: Some(index_logical_path),
-            name: index_name.as_deref(),
-            upstream_asset_ref_id: Some(&annotation_asset_ref_id),
-        });
+        tracked_assets.push(AssetRef::from_file_addition(
+            index_file_addition,
+            AssetRole::AnnotationIndex,
+            Some(index_logical_path),
+            index_name.as_deref(),
+            Some(&annotation_asset_ref_id),
+            created_on,
+        ));
     }
-    track_operation_assets(
+    track_asset_refs(
         graph_conn,
         Some(&log_id),
         &OperationKind::AnnotationFile,

@@ -93,6 +93,43 @@ impl OperationFile {
         self
     }
 
+    /// Construct the AssetRef from an OperationFile
+    pub fn prepare_asset_ref(
+        &self,
+        workspace: &Workspace,
+        created_on: i64,
+    ) -> Result<AssetRef, FileAdditionError> {
+        let file_addition = FileAddition::prepare(
+            workspace,
+            &self.file_path,
+            self.file_type,
+            self.checksum_override,
+        )?;
+        let logical_path =
+            Self::storage_file_path(workspace, &self.file_path, file_addition.checksum.as_ref())?;
+        let file_type = file_addition.file_type.as_str();
+        Ok(AssetRef {
+            id: AssetRef::id_hash(
+                &file_addition.asset_uri,
+                file_type,
+                file_addition.checksum.as_ref(),
+                &AssetRole::Input,
+                Some(&logical_path),
+                Some(&self.filename),
+                None,
+            ),
+            uri: file_addition.asset_uri,
+            file_type: file_type.to_string(),
+            checksum: file_addition.checksum,
+            size: None,
+            role: AssetRole::Input,
+            logical_path: Some(logical_path),
+            name: Some(self.filename.clone()),
+            created_on,
+            upstream_asset_ref_id: None,
+        })
+    }
+
     /// Resolves the path stored in operation metadata without materializing remote assets.
     ///
     /// Local inputs use their content-addressed repository path and therefore require a checksum;
@@ -153,23 +190,13 @@ pub fn commit_operation_summary(
         return Err(OperationError::NoChanges);
     }
 
-    let prepared_files = operation_info
+    let created_on = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .expect("should create operation asset timestamp");
+    let prepared_assets = operation_info
         .files
         .iter()
-        .map(|operation_file| {
-            let file_addition = FileAddition::prepare(
-                workspace,
-                &operation_file.file_path,
-                operation_file.file_type,
-                operation_file.checksum_override,
-            )?;
-            let logical_path = OperationFile::storage_file_path(
-                workspace,
-                &operation_file.file_path,
-                file_addition.checksum.as_ref(),
-            )?;
-            Ok((file_addition, logical_path))
-        })
+        .map(|operation_file| operation_file.prepare_asset_ref(workspace, created_on))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| match err {
             FileAdditionError::ConfigError(config_error) => {
@@ -177,50 +204,29 @@ pub fn commit_operation_summary(
             }
             other => OperationError::SQLError(other.to_string()),
         })?;
-    let tracked_assets = prepared_files
-        .iter()
-        .zip(operation_info.files.iter())
-        .map(
-            |((file_addition, logical_path), operation_file)| OperationAssetRecord {
-                file_addition,
-                role: AssetRole::Input,
-                logical_path: Some(logical_path.as_str()),
-                name: Some(operation_file.filename.as_str()),
-                upstream_asset_ref_id: None,
-            },
-        )
-        .collect::<Vec<_>>();
     let operation_kind = OperationKind::Other(operation_info.description.clone());
-    track_operation_assets(
+    track_asset_refs(
         graph_conn,
         None,
         &operation_kind,
         &operation_summary.summary,
-        &tracked_assets,
+        &prepared_assets,
     )?;
 
     let commit_result = history_store.commit_all(&operation_summary.summary);
     commit_result.map_err(OperationError::from)
 }
 
-pub(crate) struct OperationAssetRecord<'a> {
-    pub file_addition: &'a FileAddition,
-    pub role: AssetRole,
-    pub logical_path: Option<&'a str>,
-    pub name: Option<&'a str>,
-    pub upstream_asset_ref_id: Option<&'a HashId>,
-}
-
 #[cfg_attr(
     feature = "profiling",
     tracing::instrument(skip(graph_conn, log_id, assets))
 )]
-pub(crate) fn track_operation_assets(
+pub(crate) fn track_asset_refs(
     graph_conn: &crate::db::GraphConnection,
     log_id: Option<&HashId>,
     operation_kind: &OperationKind,
     command: &str,
-    assets: &[OperationAssetRecord<'_>],
+    assets: &[AssetRef],
 ) -> Result<(), rusqlite::Error> {
     let created_on = chrono::Utc::now()
         .timestamp_nanos_opt()
@@ -228,44 +234,24 @@ pub(crate) fn track_operation_assets(
     let log_id = log_id
         .copied()
         .unwrap_or_else(|| OperationLog::id_hash(operation_kind, command, created_on));
-    let operation_log = OperationLog {
-        id: log_id,
-        operation_kind: operation_kind.clone(),
-        command: command.to_string(),
-        created_on,
-    };
-    OperationLog::create(graph_conn, &operation_log)?;
-
-    for asset in assets {
-        let file_type = asset.file_addition.file_type.as_str();
-        let asset_ref_id = AssetRef::id_hash(
-            &asset.file_addition.asset_uri,
-            file_type,
-            asset.file_addition.checksum.as_ref(),
-            &asset.role,
-            asset.logical_path,
-            asset.name,
-            asset.upstream_asset_ref_id,
-        );
-        let asset_ref = AssetRef {
-            id: asset_ref_id,
-            uri: asset.file_addition.asset_uri.clone(),
-            file_type: file_type.to_string(),
-            checksum: asset.file_addition.checksum,
-            size: None,
-            role: asset.role.clone(),
-            logical_path: asset.logical_path.map(str::to_string),
-            name: asset.name.map(str::to_string),
+    OperationLog::create(
+        graph_conn,
+        &OperationLog {
+            id: log_id,
+            operation_kind: operation_kind.clone(),
+            command: command.to_string(),
             created_on,
-            upstream_asset_ref_id: asset.upstream_asset_ref_id.copied(),
-        };
-        AssetRef::create(graph_conn, &asset_ref)?;
+        },
+    )?;
+
+    for asset_ref in assets {
+        AssetRef::create(graph_conn, asset_ref)?;
         OperationAsset::create(
             graph_conn,
             &OperationAsset {
                 log_id,
-                asset_ref_id,
-                role: asset.role.clone(),
+                asset_ref_id: asset_ref.id,
+                role: asset_ref.role.clone(),
             },
         )?;
     }
@@ -335,24 +321,28 @@ pub fn add_files_operation(
             format!("Add {} files", files.len())
         }
     });
-    let tracked_assets = unique_file_additions
+    let created_on = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .expect("should create operation asset timestamp");
+    let asset_refs = unique_file_additions
         .iter()
-        .map(
-            |(file_addition, filename, file_path)| OperationAssetRecord {
+        .map(|(file_addition, filename, file_path)| {
+            AssetRef::from_file_addition(
                 file_addition,
-                role: AssetRole::Input,
-                logical_path: Some(file_path.as_str()),
-                name: Some(filename.as_str()),
-                upstream_asset_ref_id: None,
-            },
-        )
+                AssetRole::Input,
+                Some(file_path),
+                Some(filename),
+                None,
+                created_on,
+            )
+        })
         .collect::<Vec<_>>();
-    track_operation_assets(
+    track_asset_refs(
         graph_conn,
         Some(&log_id),
         &OperationKind::AddFile,
         &summary,
-        &tracked_assets,
+        &asset_refs,
     )?;
     let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
     if history_store.status()?.is_empty() {

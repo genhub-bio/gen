@@ -27,9 +27,9 @@ struct Sequence {
   sequenceType @1 :Text;
   sequence @2 :Text;
   name @3 :Text;
-  filePath @4 :Text;
-  length @5 :Int64;
-  externalSequence @6 :Bool;
+  length @4 :Int64;
+  externalSequence @5 :Bool;
+  assetRefId @6 :List(UInt8);
 }
 
 struct Node {

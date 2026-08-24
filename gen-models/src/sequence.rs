@@ -1,47 +1,79 @@
-use std::{collections::HashMap, fs, str, sync};
+use core::hash::{Hash, Hasher};
+use std::{io::BufReader, ops::Range, rc::Rc, str, sync};
 
-use cached::proc_macro::cached;
-use gen_core::{HashId, Sha256Hash, traits::Capnp};
-use noodles::{
-    bgzf::{self, gzi},
-    core::Region,
-    fasta::{self, fai, io::indexed_reader::Builder as IndexBuilder},
-};
-use rusqlite::{Row, params};
+use flate2::read::MultiGzDecoder;
+use gen_core::{HashId, Sha256Hash, Workspace, traits::Capnp};
+use noodles::{bgzf, fasta};
+use rusqlite::{Row, ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{db::GraphConnection, gen_models_capnp::sequence, traits::*};
+use crate::{
+    assets::{AssetRef, AssetUri, LocalAssetUri},
+    db::GraphConnection,
+    gen_models_capnp::sequence,
+    traits::Query,
+};
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Sequence {
     pub hash: Sha256Hash,
     pub sequence_type: String,
     sequence: String,
-    // these 2 fields are only relevant when the sequence is stored externally
+    // These fields are only relevant when the sequence is stored externally.
     pub name: String,
-    pub file_path: String,
+    pub asset_ref_id: Option<HashId>,
     pub length: i64,
-    // indicates whether the sequence is stored externally, a quick flag instead of having to
-    // check sequence or file_path and do the logic in function calls.
+    // Indicates whether the sequence is stored externally, a quick flag instead of checking the
+    // sequence and asset reference in each caller.
     pub external_sequence: bool,
+    #[serde(skip)]
+    asset_ref: Option<AssetRef>,
+    #[serde(skip)]
+    workspace: Option<Workspace>,
+    #[serde(skip)]
+    asset_resolution_error: Option<String>,
+}
+
+impl PartialEq for Sequence {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+            && self.sequence_type == other.sequence_type
+            && self.sequence == other.sequence
+            && self.name == other.name
+            && self.asset_ref_id == other.asset_ref_id
+            && self.length == other.length
+            && self.external_sequence == other.external_sequence
+    }
+}
+
+impl Eq for Sequence {}
+
+impl Hash for Sequence {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hash.hash(state);
+        self.sequence_type.hash(state);
+        self.sequence.hash(state);
+        self.name.hash(state);
+        self.asset_ref_id.hash(state);
+        self.length.hash(state);
+        self.external_sequence.hash(state);
+    }
 }
 
 #[derive(Debug, Error, PartialEq)]
 pub enum SequenceError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
-    #[error("Sequence or file_path must be set.")]
+    #[error("Sequence or asset_ref_id must be set.")]
     NoSequence(),
-    #[error("A filepath must have an accompanying sequence name.")]
-    FilepathMissingSequenceName(),
+    #[error("An asset reference must have an accompanying sequence name.")]
+    AssetMissingSequenceName(),
     #[error("Sequence length must be specified.")]
     MissingSequenceLength(),
     #[error("Sequence cache lock poisoned: {0}")]
     CachePoisoned(String),
-    #[error("Invalid indexed sequence region '{name}': {reason}")]
-    InvalidRegion { name: String, reason: String },
     #[error("Sequence I/O error: {0}")]
     Io(String),
     #[error("Invalid UTF-8 while reading sequence data: {0}")]
@@ -50,6 +82,8 @@ pub enum SequenceError {
     IdMissing { file_path: String, name: String },
     #[error("Sequence bounds out of range: start={start}, end={end}, length={length}")]
     BoundsError { start: i64, end: i64, length: i64 },
+    #[error("Unable to resolve sequence asset: {0}")]
+    AssetResolution(String),
 }
 
 impl<'a> Capnp<'a> for Sequence {
@@ -61,9 +95,11 @@ impl<'a> Capnp<'a> for Sequence {
         builder.set_sequence_type(&self.sequence_type);
         builder.set_sequence(&self.sequence);
         builder.set_name(&self.name);
-        builder.set_file_path(&self.file_path);
         builder.set_length(self.length);
         builder.set_external_sequence(self.external_sequence);
+        if let Some(asset_ref_id) = self.asset_ref_id {
+            builder.set_asset_ref_id(&asset_ref_id.0).unwrap();
+        }
     }
 
     fn read_capnp(reader: Self::Reader) -> Self {
@@ -77,18 +113,26 @@ impl<'a> Capnp<'a> for Sequence {
         let sequence_type = reader.get_sequence_type().unwrap().to_string().unwrap();
         let sequence = reader.get_sequence().unwrap().to_string().unwrap();
         let name = reader.get_name().unwrap().to_string().unwrap();
-        let file_path = reader.get_file_path().unwrap().to_string().unwrap();
         let length = reader.get_length();
-        let external_sequence = reader.get_external_sequence();
+        let asset_ref_id = reader.get_asset_ref_id().ok().and_then(|value| {
+            value
+                .as_slice()
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(HashId)
+        });
+        let external_sequence = asset_ref_id.is_some();
 
         Sequence {
             hash,
             sequence_type,
             sequence,
             name,
-            file_path,
+            asset_ref_id,
             length,
             external_sequence,
+            asset_ref: None,
+            workspace: None,
+            asset_resolution_error: None,
         }
     }
 }
@@ -98,7 +142,7 @@ pub struct NewSequence<'a> {
     sequence_type: Option<&'a str>,
     sequence: Option<&'a str>,
     name: Option<&'a str>,
-    file_path: Option<&'a str>,
+    asset_ref_id: Option<&'a HashId>,
     length: Option<i64>,
     shallow: bool,
 }
@@ -109,7 +153,7 @@ impl<'a> From<&'a Sequence> for NewSequence<'a> {
             .sequence_type(&value.sequence_type)
             .sequence(&value.sequence)
             .name(&value.name)
-            .file_path(&value.file_path)
+            .asset_ref_id(value.asset_ref_id.as_ref())
             .length(value.length)
     }
 }
@@ -143,9 +187,9 @@ impl<'a> NewSequence<'a> {
         self
     }
 
-    pub fn file_path(mut self, path: &'a str) -> Self {
-        if !path.is_empty() {
-            self.file_path = Some(path);
+    pub fn asset_ref_id(mut self, asset_ref_id: Option<&'a HashId>) -> Self {
+        if asset_ref_id.is_some() {
+            self.asset_ref_id = asset_ref_id;
             self.shallow = true;
         }
         self
@@ -172,27 +216,28 @@ impl<'a> NewSequence<'a> {
             hasher.update("");
         }
         hasher.update(";");
-        if let Some(v) = self.file_path {
-            hasher.update(v);
+        if let Some(value) = self.asset_ref_id {
+            hasher.update(value.0);
         } else {
             hasher.update("");
         }
         hasher.update(";");
-
         Sha256Hash(hasher.finalize().into())
     }
 
     pub fn build(self) -> Sequence {
-        let file_path = self.file_path.unwrap_or("").to_string();
-        let external_sequence = !file_path.is_empty();
+        let external_sequence = self.asset_ref_id.is_some();
         Sequence {
             hash: self.hash(),
             sequence_type: self.sequence_type.unwrap().to_string(),
             sequence: self.sequence.unwrap_or("").to_string(),
             name: self.name.unwrap_or("").to_string(),
-            file_path,
+            asset_ref_id: self.asset_ref_id.copied(),
             length: self.length.unwrap(),
             external_sequence,
+            asset_ref: None,
+            workspace: None,
+            asset_resolution_error: None,
         }
     }
 
@@ -202,11 +247,11 @@ impl<'a> NewSequence<'a> {
     )]
     pub fn save(self, conn: &GraphConnection) -> Result<Sequence, SequenceError> {
         let mut length = 0;
-        if self.sequence.is_none() && self.file_path.is_none() {
+        if self.sequence.is_none() && self.asset_ref_id.is_none() {
             return Err(SequenceError::NoSequence());
         }
-        if self.file_path.is_some() && self.name.is_none() {
-            return Err(SequenceError::FilepathMissingSequenceName());
+        if self.asset_ref_id.is_some() && self.name.is_none() {
+            return Err(SequenceError::AssetMissingSequenceName());
         }
         if self.length.is_none() {
             if let Some(v) = self.sequence {
@@ -224,7 +269,7 @@ impl<'a> NewSequence<'a> {
         ) {
             Ok(_) => {}
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                let mut stmt = conn.prepare("INSERT INTO sequences (hash, sequence_type, sequence, name, file_path, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6);")?;
+                let mut stmt = conn.prepare("INSERT INTO sequences (hash, sequence_type, sequence, name, asset_ref_id, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6);")?;
                 match stmt.execute(params![
                     hash,
                     self.sequence_type.unwrap().to_string(),
@@ -234,7 +279,7 @@ impl<'a> NewSequence<'a> {
                         self.sequence.unwrap()
                     },
                     self.name.unwrap_or(""),
-                    self.file_path.unwrap_or(""),
+                    self.asset_ref_id,
                     self.length.unwrap_or(length)
                 ]) {
                     Ok(_) => {}
@@ -249,29 +294,20 @@ impl<'a> NewSequence<'a> {
             sequence_type: self.sequence_type.unwrap().to_string(),
             sequence: self.sequence.unwrap_or("").to_string(),
             name: self.name.unwrap_or("").to_string(),
-            file_path: self.file_path.unwrap_or("").to_string(),
+            asset_ref_id: self.asset_ref_id.copied(),
             length: self.length.unwrap_or(length),
-            external_sequence: !self.file_path.unwrap_or("").is_empty(),
+            external_sequence: self.asset_ref_id.is_some(),
+            asset_ref: None,
+            workspace: None,
+            asset_resolution_error: None,
         })
     }
 }
 
-#[cached(key = "String", convert = r#"{ format!("{}", path) }"#)]
-fn fasta_index(path: &str) -> Option<fai::Index> {
-    let index_path = format!("{path}.fai");
-    if fs::metadata(&index_path).is_ok() {
-        return Some(fai::fs::read(&index_path).unwrap());
-    }
-    None
-}
-
-#[cached(key = "String", convert = r#"{ format!("{}", path) }"#)]
-fn fasta_gzi_index(path: &str) -> Option<gzi::Index> {
-    let index_path = format!("{path}.gzi");
-    if fs::metadata(&index_path).is_ok() {
-        return Some(gzi::fs::read(&index_path).unwrap());
-    }
-    None
+fn asset_extension(asset_ref: &AssetRef) -> Option<String> {
+    <dyn AssetUri>::from_uri(&asset_ref.uri)
+        .suffix()
+        .and_then(|suffix| suffix.rsplit('.').next().map(str::to_string))
 }
 
 fn validate_sequence_bounds(
@@ -330,27 +366,31 @@ fn sequence_slice(
     })
 }
 
+type SequenceCache = sync::RwLock<Option<((HashId, String), Option<String>)>>;
+
 pub fn cached_sequence(
-    file_path: &str,
+    workspace: &Workspace,
+    sequence_asset: &AssetRef,
     name: &str,
-    start: i64,
-    end: i64,
+    range: Range<i64>,
     circular: bool,
 ) -> Result<String, SequenceError> {
-    static SEQUENCE_CACHE: sync::LazyLock<sync::RwLock<HashMap<String, Option<String>>>> =
-        sync::LazyLock::new(|| sync::RwLock::new(HashMap::new()));
-    let key = format!("{file_path}-{name}");
+    static SEQUENCE_CACHE: sync::LazyLock<SequenceCache> =
+        sync::LazyLock::new(|| sync::RwLock::new(None));
+    let cache_key = (sequence_asset.id, name.to_string());
 
     {
         let cache = SEQUENCE_CACHE
             .read()
             .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
-        if let Some(cached_sequence) = cache.get(&key) {
+        if let Some((cached_key, cached_sequence)) = cache.as_ref()
+            && cached_key == &cache_key
+        {
             if let Some(sequence) = cached_sequence {
-                return sequence_slice(sequence, start, end, circular);
+                return sequence_slice(sequence, range.start, range.end, circular);
             }
             return Err(SequenceError::IdMissing {
-                file_path: file_path.to_string(),
+                file_path: sequence_asset.uri.clone(),
                 name: name.to_string(),
             });
         }
@@ -361,78 +401,41 @@ pub fn cached_sequence(
         .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
 
     let mut sequence: Option<String> = None;
-    if let Some(index) = fasta_index(file_path) {
-        let region = name
-            .parse::<Region>()
-            .map_err(|err| SequenceError::InvalidRegion {
-                name: name.to_string(),
-                reason: err.to_string(),
-            })?;
-        let builder = IndexBuilder::default().set_index(index);
-        if let Some(gzi_index) = fasta_gzi_index(file_path) {
-            let bgzf_reader = bgzf::io::indexed_reader::Builder::default()
-                .set_index(gzi_index)
-                .build_from_path(file_path)
-                .map_err(|err| SequenceError::Io(err.to_string()))?;
-            let mut reader = builder
-                .build_from_reader(bgzf_reader)
-                .map_err(|err| SequenceError::Io(err.to_string()))?;
+    let sequence_extension = asset_extension(sequence_asset);
+    let sequence_reader = sequence_asset
+        .reader(workspace)
+        .map_err(|err| SequenceError::Io(err.to_string()))?;
+    let reader_stream: Box<dyn std::io::BufRead> = match sequence_extension.as_deref() {
+        Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(sequence_reader))),
+        Some("bgz") => Box::new(bgzf::io::Reader::new(sequence_reader)),
+        _ => Box::new(sequence_reader),
+    };
+    let mut reader = fasta::io::reader::Builder
+        .build_from_reader(reader_stream)
+        .map_err(|err| SequenceError::Io(err.to_string()))?;
+    for result in reader.records() {
+        let record = result.map_err(|err| SequenceError::Io(err.to_string()))?;
+        if String::from_utf8(record.name().to_vec())
+            .map_err(|err| SequenceError::Utf8(err.to_string()))?
+            == name
+        {
             sequence = Some(
-                str::from_utf8(
-                    reader
-                        .query(&region)
-                        .map_err(|err| SequenceError::Io(err.to_string()))?
-                        .sequence()
-                        .as_ref(),
-                )
-                .map_err(|err| SequenceError::Utf8(err.to_string()))?
-                .to_string(),
-            )
-        } else {
-            let mut reader = builder
-                .build_from_path(file_path)
-                .map_err(|err| SequenceError::Io(err.to_string()))?;
-            sequence = Some(
-                str::from_utf8(
-                    reader
-                        .query(&region)
-                        .map_err(|err| SequenceError::Io(err.to_string()))?
-                        .sequence()
-                        .as_ref(),
-                )
-                .map_err(|err| SequenceError::Utf8(err.to_string()))?
-                .to_string(),
+                str::from_utf8(record.sequence().as_ref())
+                    .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                    .to_string(),
             );
-        }
-    } else {
-        let mut reader = fasta::io::reader::Builder
-            .build_from_path(file_path)
-            .map_err(|err| SequenceError::Io(err.to_string()))?;
-        for result in reader.records() {
-            let record = result.map_err(|err| SequenceError::Io(err.to_string()))?;
-            if String::from_utf8(record.name().to_vec())
-                .map_err(|err| SequenceError::Utf8(err.to_string()))?
-                == name
-            {
-                sequence = Some(
-                    str::from_utf8(record.sequence().as_ref())
-                        .map_err(|err| SequenceError::Utf8(err.to_string()))?
-                        .to_string(),
-                );
-                break;
-            }
+            break;
         }
     }
-    // this is a LRU cache setup, we just keep the last sequence we fetched so we don't end up loading
-    // plant genomes into memory.
-    cache.clear();
-    cache.insert(key.clone(), sequence);
+    // This is an LRU cache setup; keep only the last sequence fetched so loading multiple plant
+    // genomes does not retain every genome in memory.
+    *cache = Some((cache_key, sequence));
     // we do this to avoid a clone of potentially large data.
-    if let Some(seq) = &cache[&key] {
-        return sequence_slice(seq, start, end, circular);
+    if let Some((_, Some(seq))) = cache.as_ref() {
+        return sequence_slice(seq, range.start, range.end, circular);
     }
     Err(SequenceError::IdMissing {
-        file_path: file_path.to_string(),
+        file_path: sequence_asset.uri.clone(),
         name: name.to_string(),
     })
 }
@@ -449,6 +452,77 @@ impl Sequence {
             .any(|part| part.eq_ignore_ascii_case("circular"))
     }
 
+    pub fn query_by_ids<T>(
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        ids: &[T],
+        history_ref: Option<&str>,
+    ) -> Vec<Self>
+    where
+        T: Clone,
+        rusqlite::types::Value: From<T>,
+    {
+        let sequence_table = <Self as Query>::table_name_with_history_ref(history_ref);
+        let asset_table = AssetRef::table_name_with_history_ref(history_ref);
+        let query = format!(
+            "WITH arr AS (
+                SELECT value, rowid AS pos FROM rarray(:ids)
+             )
+             SELECT sequences.*, asset_refs.*
+             FROM {sequence_table} AS sequences
+             LEFT JOIN {asset_table} AS asset_refs
+               ON sequences.asset_ref_id = asset_refs.id
+             JOIN arr ON sequences.hash = arr.value
+             ORDER BY arr.pos;"
+        );
+        let values: Vec<Value> = ids.iter().map(|id| Value::from(id.clone())).collect();
+        let id_values = Rc::new(values);
+        let mut query_params: Vec<(&str, &dyn ToSql)> = vec![(":ids", &id_values)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        let mut statement = conn.prepare(&query).unwrap();
+        statement
+            .query_map(&query_params[..], |row| {
+                Ok(Self::process_joined_row(row, workspace))
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
+    fn process_joined_row(row: &Row, workspace: &Workspace) -> Self {
+        let mut sequence = <Self as Query>::process_row(row);
+        if let Some(asset_ref_id) = sequence.asset_ref_id {
+            let Some(joined_asset_ref_id): Option<HashId> = row.get(6).unwrap() else {
+                sequence.asset_resolution_error =
+                    Some(format!("asset reference {asset_ref_id} does not exist"));
+                return sequence;
+            };
+            let asset_ref = AssetRef {
+                id: joined_asset_ref_id,
+                uri: row.get(7).unwrap(),
+                file_type: row.get(8).unwrap(),
+                checksum: row.get(9).unwrap(),
+                size: row.get(10).unwrap(),
+                role: row.get(11).unwrap(),
+                logical_path: row.get(12).unwrap(),
+                name: row.get(13).unwrap(),
+                created_on: row.get(14).unwrap(),
+                upstream_asset_ref_id: row.get(15).unwrap(),
+            };
+            if LocalAssetUri::is_local_path_or_file_uri(&asset_ref.uri)
+                && let Err(error) = asset_ref.versioned_store_path(workspace)
+            {
+                sequence.asset_resolution_error = Some(error.to_string());
+                return sequence;
+            }
+            sequence.asset_ref = Some(asset_ref);
+            sequence.workspace = Some(workspace.clone());
+        }
+        sequence
+    }
+
     pub fn get_sequence(
         &self,
         start: impl Into<Option<i64>>,
@@ -461,7 +535,26 @@ impl Sequence {
         let start = start.unwrap_or(0);
         let end = end.unwrap_or(self.length);
         if self.external_sequence {
-            return cached_sequence(&self.file_path, &self.name, start, end, self.is_circular());
+            if let Some(error) = self.asset_resolution_error.as_ref() {
+                return Err(SequenceError::AssetResolution(error.clone()));
+            }
+            let asset_ref = self.asset_ref.as_ref().ok_or_else(|| {
+                SequenceError::AssetResolution(
+                    "sequence asset was loaded without repository context".to_string(),
+                )
+            })?;
+            let workspace = self.workspace.as_ref().ok_or_else(|| {
+                SequenceError::AssetResolution(
+                    "sequence asset was loaded without repository context".to_string(),
+                )
+            })?;
+            return cached_sequence(
+                workspace,
+                asset_ref,
+                &self.name,
+                start..end,
+                self.is_circular(),
+            );
         }
         if start == 0 && end == self.length {
             return Ok(self.sequence.clone());
@@ -476,12 +569,29 @@ impl Sequence {
         stmt.execute(params![hash]).unwrap();
     }
 
-    pub fn query_by_blockgroup(conn: &GraphConnection, block_group_id: &HashId) -> Vec<Sequence> {
-        Sequence::query(
-            conn,
-            "select sequences.* from block_group_edges bge left join edges on bge.edge_id = edges.id left join nodes on (edges.source_node_id = nodes.id or edges.target_node_id = nodes.id) left join sequences on (nodes.sequence_hash = sequences.hash) where bge.block_group_id = ?1;",
-            params![block_group_id],
-        )
+    pub fn query_by_blockgroup(
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        block_group_id: &HashId,
+    ) -> Vec<Sequence> {
+        let asset_table = AssetRef::table_name_with_history_ref(None);
+        let query = format!(
+            "SELECT sequences.*, asset_refs.*
+             FROM block_group_edges bge
+             LEFT JOIN edges ON bge.edge_id = edges.id
+             LEFT JOIN nodes ON (edges.source_node_id = nodes.id OR edges.target_node_id = nodes.id)
+             LEFT JOIN sequences ON (nodes.sequence_hash = sequences.hash)
+             LEFT JOIN {asset_table} AS asset_refs ON sequences.asset_ref_id = asset_refs.id
+             WHERE bge.block_group_id = ?1;"
+        );
+        let mut statement = conn.prepare(&query).unwrap();
+        statement
+            .query_map(params![block_group_id], |row| {
+                Ok(Self::process_joined_row(row, workspace))
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
     }
 }
 
@@ -492,11 +602,7 @@ impl Query for Sequence {
     const TABLE_NAME: &'static str = "sequences";
 
     fn process_row(row: &Row) -> Self::Model {
-        let file_path: String = row.get(4).unwrap();
-        let mut external_sequence = false;
-        if !file_path.is_empty() {
-            external_sequence = true;
-        }
+        let asset_ref_id: Option<HashId> = row.get(4).unwrap();
         let hash: Sha256Hash = row.get(0).unwrap();
         let sequence = row.get(2).unwrap();
         Sequence {
@@ -504,9 +610,12 @@ impl Query for Sequence {
             sequence_type: row.get(1).unwrap(),
             sequence,
             name: row.get(3).unwrap(),
-            file_path,
+            asset_ref_id,
             length: row.get(5).unwrap(),
-            external_sequence,
+            external_sequence: asset_ref_id.is_some(),
+            asset_ref: None,
+            workspace: None,
+            asset_resolution_error: None,
         }
     }
 }
@@ -538,15 +647,30 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
-    #[allow(unused_imports)]
-    use std::time;
-    use std::{fs::OpenOptions, io::Write};
+    use std::{fs, io::Write as _, time::Instant};
 
-    use rand::RngExt;
+    use gen_core::traits::Capnp as _;
+    use rand::RngExt as _;
+    use sha2::Digest as _;
 
-    use super::*;
-    use crate::test_helpers::get_connection;
+    use super::{Sequence, SequenceError};
+    use crate::{
+        assets::{AssetRef, AssetRole},
+        gen_models_capnp::sequence,
+        operations::OperationFile,
+        test_helpers::{get_connection, setup_gen_on_disk},
+        traits::Query,
+    };
+
+    fn prepare_asset(context: &crate::db::DbContext, path: &str) -> AssetRef {
+        let operation_file = OperationFile::new(path);
+        let asset_ref = operation_file
+            .prepare_asset_ref(context.workspace(), 1)
+            .expect("should retain test asset");
+        AssetRef::create(context.graph().conn(), &asset_ref)
+            .expect("should create test asset reference");
+        asset_ref
+    }
 
     #[test]
     fn test_builder() {
@@ -556,14 +680,19 @@ mod tests {
             .build();
         assert_eq!(sequence.length, 4);
         assert_eq!(sequence.sequence, "ATCG");
+        assert_eq!(
+            sequence.hash.to_string(),
+            "4ab41cf208e5a797ed0052a3fc5f87bed18f94fc1fc7fdd6ed3199b4e1c34ace"
+        );
     }
 
     #[test]
-    fn test_builder_with_from_disk() {
+    fn test_builder_with_asset_ref() {
+        let asset_ref_id = gen_core::HashId::convert_str("asset");
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .name("chr1")
-            .file_path("/foo/bar")
+            .asset_ref_id(Some(&asset_ref_id))
             .length(50)
             .build();
         assert_eq!(sequence.length, 50);
@@ -610,18 +739,25 @@ mod tests {
 
     #[test]
     fn test_create_sequence_on_disk() {
-        let conn = &get_connection(None).unwrap();
+        let context = setup_gen_on_disk();
+        let fasta_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("reference.fa");
+        fs::write(&fasta_path, ">chr1\nAACCGGTTAA\n").unwrap();
+        let asset_ref = prepare_asset(&context, fasta_path.to_str().unwrap());
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .name("chr1")
-            .file_path("/some/path.fa")
+            .asset_ref_id(Some(&asset_ref.id))
             .length(10)
-            .save(conn)
+            .save(context.graph().conn())
             .unwrap();
         assert_eq!(sequence.sequence_type, "DNA");
         assert_eq!(&sequence.sequence, "");
         assert_eq!(sequence.name, "chr1");
-        assert_eq!(sequence.file_path, "/some/path.fa");
+        assert_eq!(sequence.asset_ref_id, Some(asset_ref.id));
         assert_eq!(sequence.length, 10);
         assert!(sequence.external_sequence);
     }
@@ -684,21 +820,35 @@ mod tests {
 
     #[test]
     fn test_get_sequence_from_disk() {
-        let conn = &get_connection(None).unwrap();
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_file_path = temp_dir.path().join("simple.fa");
+        let context = setup_gen_on_disk();
+        let temp_file_path = context.workspace().repo_root().unwrap().join("simple.fa");
         fs::write(
             &temp_file_path,
             ">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGA\n",
         )
         .unwrap();
-        let seq = Sequence::new()
+        let asset_ref = prepare_asset(&context, temp_file_path.to_str().unwrap());
+        let sequence = Sequence::new()
             .sequence_type("DNA")
             .name("m123")
-            .file_path(temp_file_path.to_str().unwrap())
+            .asset_ref_id(Some(&asset_ref.id))
             .length(34)
-            .save(conn)
+            .save(context.graph().conn())
             .unwrap();
+        let seq = Sequence::query_by_ids(
+            context.graph().conn(),
+            context.workspace(),
+            &[sequence.hash],
+            None,
+        )
+        .remove(0);
+        // Overwrite temp_file_path with a garbage sequence, showing that sequence access uses the versioned file
+        // and not any local materialized file.
+        fs::write(
+            &temp_file_path,
+            ">m123\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+        )
+        .unwrap();
         assert_eq!(
             seq.get_sequence(None, None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
@@ -712,19 +862,94 @@ mod tests {
         assert_eq!(seq.get_sequence(None, 5).unwrap(), "ATCGA");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_on_disk_sequence_rejects_asset_outside_repository() {
+        use std::os::unix::fs::symlink;
+
+        let context = setup_gen_on_disk();
+        let outside_directory = tempfile::tempdir().unwrap();
+        let outside_path = outside_directory.path().join("secret.fa");
+        let contents = b">secret\nPRIVATE\n";
+        fs::write(&outside_path, contents).unwrap();
+        let checksum = gen_core::Sha256Hash(sha2::Sha256::digest(contents).into());
+        let uri = format!("file://{}", outside_path.display());
+        let asset_ref = AssetRef {
+            id: AssetRef::id_hash(
+                &uri,
+                "fasta",
+                Some(&checksum),
+                &AssetRole::Input,
+                outside_path.to_str(),
+                Some("secret.fa"),
+                None,
+            ),
+            uri,
+            file_type: "fasta".to_string(),
+            checksum: Some(checksum),
+            size: None,
+            role: AssetRole::Input,
+            logical_path: Some(outside_path.to_string_lossy().to_string()),
+            name: Some("secret.fa".to_string()),
+            created_on: 1,
+            upstream_asset_ref_id: None,
+        };
+        AssetRef::create(context.graph().conn(), &asset_ref).unwrap();
+        let asset_filename =
+            <dyn crate::assets::AssetUri>::from_uri(&asset_ref.uri).hashed_filename(&checksum);
+        symlink(
+            &outside_path,
+            context
+                .workspace()
+                .asset_dir()
+                .unwrap()
+                .join(asset_filename),
+        )
+        .unwrap();
+        let unresolved_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .name("secret")
+            .asset_ref_id(Some(&asset_ref.id))
+            .length(7)
+            .save(context.graph().conn())
+            .unwrap();
+        let sequence = Sequence::query_by_ids(
+            context.graph().conn(),
+            context.workspace(),
+            &[unresolved_sequence.hash],
+            None,
+        )
+        .remove(0);
+
+        let error = sequence
+            .get_sequence(None, None)
+            .expect_err("should not read an asset outside the repository");
+        assert!(
+            matches!(&error, SequenceError::AssetResolution(reason) if reason.contains("not within repo root")),
+            "should report the repository boundary: {error}"
+        );
+    }
+
     #[test]
     fn test_get_sequence_from_disk_circular() {
-        let conn = &get_connection(None).unwrap();
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_file_path = temp_dir.path().join("simple.fa");
+        let context = setup_gen_on_disk();
+        let temp_file_path = context.workspace().repo_root().unwrap().join("simple.fa");
         fs::write(&temp_file_path, ">m123\nAAACCCTTT\n").unwrap();
-        let seq = Sequence::new()
+        let asset_ref = prepare_asset(&context, temp_file_path.to_str().unwrap());
+        let sequence = Sequence::new()
             .sequence_type("circular")
             .name("m123")
-            .file_path(temp_file_path.to_str().unwrap())
+            .asset_ref_id(Some(&asset_ref.id))
             .length(9)
-            .save(conn)
+            .save(context.graph().conn())
             .unwrap();
+        let seq = Sequence::query_by_ids(
+            context.graph().conn(),
+            context.workspace(),
+            &[sequence.hash],
+            None,
+        )
+        .remove(0);
         assert_eq!(seq.get_sequence(4, 2).unwrap(), "CCTTTAA");
         assert_eq!(
             seq.get_sequence(0, 10),
@@ -737,16 +962,10 @@ mod tests {
     }
 
     #[test]
-    // #[cfg(feature = "benchmark")]
     fn test_cached_sequence_performance() {
-        let conn = &get_connection(None).unwrap();
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_file_path = temp_dir.path().join("large.fa");
-        let mut file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&temp_file_path)
-            .unwrap();
+        let context = setup_gen_on_disk();
+        let fasta_path = context.workspace().repo_root().unwrap().join("large.fa");
+        let mut file = fs::File::create(&fasta_path).unwrap();
         writeln!(file, ">chr22").unwrap();
         for _ in 1..3_000_000 {
             writeln!(
@@ -755,26 +974,31 @@ mod tests {
             )
             .unwrap();
         }
-        // write index
-        let index_path = temp_dir.path().join("large.fa.fai");
-        fs::write(&index_path, "chr22	203999932	7	68	69\n").unwrap();
+        let asset_ref = prepare_asset(&context, fasta_path.to_str().unwrap());
         let sequence = Sequence::new()
             .sequence_type("DNA")
-            .file_path(temp_file_path.to_str().unwrap())
             .name("chr22")
+            .asset_ref_id(Some(&asset_ref.id))
             .length(203_999_932)
-            .save(conn)
+            .save(context.graph().conn())
             .unwrap();
-        let s = time::Instant::now();
-        for _ in 1..1_000_000 {
-            let start = rand::rng().random_range(1..200_000_000);
+        let sequence = Sequence::query_by_ids(
+            context.graph().conn(),
+            context.workspace(),
+            &[sequence.hash],
+            None,
+        )
+        .remove(0);
 
+        let start_time = Instant::now();
+        for _ in 1..1_000_000 {
+            let start = rand::rng().random_range(1_i64..200_000_000_i64);
             sequence.get_sequence(start, start + 20).unwrap();
         }
-        let elapsed = s.elapsed().as_secs();
+        let elapsed = start_time.elapsed().as_secs();
         assert!(
             elapsed < 5,
-            "Cached sequence benchmark failed: {elapsed}s elapsed"
+            "cached sequence benchmark failed: {elapsed}s elapsed"
         );
     }
 
@@ -783,13 +1007,16 @@ mod tests {
         use capnp::message::TypedBuilder;
 
         let sequence = Sequence {
-            hash: Sha256Hash::convert_str("test_hash"),
+            hash: gen_core::Sha256Hash::convert_str("test_hash"),
             sequence_type: "DNA".to_string(),
             sequence: "ATCG".to_string(),
             name: "test_seq".to_string(),
-            file_path: "/path/to/file".to_string(),
+            asset_ref_id: Some(gen_core::HashId::convert_str("asset")),
             length: 4,
-            external_sequence: false,
+            external_sequence: true,
+            asset_ref: None,
+            workspace: None,
+            asset_resolution_error: None,
         };
 
         let mut message = TypedBuilder::<sequence::Owned>::new_default();
