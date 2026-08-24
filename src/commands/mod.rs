@@ -280,6 +280,16 @@ pub enum Commands {
         #[arg(short, long)]
         branch: Option<String>,
     },
+    /// Fetch a remote branch into a remote-tracking ref without changing the checkout
+    #[command()]
+    Fetch {
+        /// The remote to fetch from
+        #[arg(short, long)]
+        remote: Option<String>,
+        /// The remote branch to fetch (defaults to the current branch)
+        #[arg(short, long)]
+        branch: Option<String>,
+    },
     /// Convert annotation coordinates between two samples
     #[command(arg_required_else_help(true))]
     PropagateAnnotations {

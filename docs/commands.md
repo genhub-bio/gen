@@ -95,6 +95,25 @@ Uncommitted working-tree changes are not transferred.
 After the push finishes, Gen uploads local assets referenced by the selected branch.
 Files are validated against their recorded checksums before upload.
 
+# Fetch
+
+Fetch one branch without merging it into a local branch or changing the working
+checkout:
+
+```sh
+gen fetch [--remote <name>] [--branch <name>]
+```
+
+The remote is selected from `--remote`, the branch's tracked remote, the
+repository default, or the only configured remote, in that order. The branch
+defaults to the current branch. Fetch runs Dolt's native fetch operation to
+update the remote-tracking ref and download its graph history.
+
+Gen also downloads every versioned asset reachable from the fetched branch into
+the checksum-addressed `.gen/assets` store. It does not copy any fetched version
+to its logical working-tree path; checkout and pull remain responsible for
+materializing the selected branch state.
+
 # Pull
 
 Pull one branch with:
@@ -108,6 +127,8 @@ automatically merges divergent history on the current branch. A missing local
 branch is created and associated with the selected remote. Pulling the current
 branch updates its working tree and rejects uncommitted changes; pulling a
 non-current branch leaves the checkout unchanged and requires a fast-forward.
+Pull uses the only configured remote when no explicit, tracked, or default
+remote selects one.
 Pull requires an existing repository and remote; use `gen clone` to initialize a
 workspace from a remote repository.
 

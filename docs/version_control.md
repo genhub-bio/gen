@@ -58,5 +58,4 @@ These are currently missing but planned to be added:
 * Diffs
 * Commit messages and packaging operations together into a unit
 * Patch creation and import
-* Syncing with remote repositories (fetch/pull/push)
 * Tags

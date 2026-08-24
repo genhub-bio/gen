@@ -2303,7 +2303,7 @@ mod remotes {
         assets::{Assets, LocalAssetUri, materialization_destination_path},
         history::dolt::{add_remote, push},
     };
-    use rusqlite::RemoteServer;
+    use rusqlite::{Connection, RemoteServer};
     use serde_json::json;
 
     use super::{
@@ -2361,6 +2361,106 @@ mod remotes {
             asset_store_contents(destination_repo_root),
             source_assets,
             "remote transfer should copy every versioned asset with its checksum-derived filename"
+        );
+    }
+
+    #[test]
+    fn test_fetch_from_file_remote_updates_tracking_history_and_assets() {
+        let remote_repo_dir = tempdir().expect("should create remote repo directory");
+        let local_repo_dir = tempdir().expect("should create local repo directory");
+        let asset_path = remote_repo_dir.path().join("versioned.txt");
+
+        assert_success(
+            &run_gen(remote_repo_dir.path(), &["init"]),
+            "remote init should succeed",
+        );
+        fs::write(&asset_path, b"version one\n").expect("should write first asset");
+        assert_success(
+            &run_gen(
+                remote_repo_dir.path(),
+                &[
+                    "add-file",
+                    asset_path.to_str().expect("should encode asset path"),
+                    "--message",
+                    "add first version",
+                ],
+            ),
+            "first asset commit should succeed",
+        );
+        assert_success(
+            &run_gen(remote_repo_dir.path(), &["branch", "--create", "feature"]),
+            "feature branch creation should succeed",
+        );
+        assert_success(
+            &run_gen(remote_repo_dir.path(), &["branch", "--checkout", "feature"]),
+            "feature checkout should succeed",
+        );
+        fs::write(&asset_path, b"version two\n").expect("should write second asset");
+        assert_success(
+            &run_gen(
+                remote_repo_dir.path(),
+                &[
+                    "add-file",
+                    asset_path.to_str().expect("should encode asset path"),
+                    "--message",
+                    "add second version",
+                ],
+            ),
+            "second asset commit should succeed",
+        );
+
+        assert_success(
+            &run_gen(local_repo_dir.path(), &["init"]),
+            "local init should succeed",
+        );
+        let remote_url = format!("file://{}", remote_repo_dir.path().display());
+        assert_success(
+            &run_gen(
+                local_repo_dir.path(),
+                &["remote", "add", "origin", &remote_url],
+            ),
+            "remote configuration should succeed",
+        );
+        assert_success(
+            &run_gen(local_repo_dir.path(), &["fetch", "--branch", "feature"]),
+            "fetch should succeed",
+        );
+
+        assert_eq!(
+            resolved_ref_hash(local_repo_dir.path(), "origin/feature"),
+            resolved_ref_hash(remote_repo_dir.path(), "feature"),
+            "fetch should update the remote-tracking ref"
+        );
+        let local_graph = Connection::open(local_repo_dir.path().join(".gen/default.db"))
+            .expect("should open fetched graph");
+        let active_branch: String = local_graph
+            .query_row("SELECT active_branch()", [], |row| row.get(0))
+            .expect("should read active branch");
+        assert_eq!(
+            active_branch, "main",
+            "fetch should not change the checkout"
+        );
+        assert_asset_store_matches(remote_repo_dir.path(), local_repo_dir.path());
+        let missing_asset = asset_store_contents(local_repo_dir.path())
+            .first()
+            .expect("fetch should populate immutable assets")
+            .0
+            .clone();
+        fs::remove_file(
+            local_repo_dir
+                .path()
+                .join(".gen/assets")
+                .join(&missing_asset),
+        )
+        .expect("should remove one fetched asset");
+        assert_success(
+            &run_gen(local_repo_dir.path(), &["fetch", "--branch", "feature"]),
+            "refetch should repair a missing immutable asset",
+        );
+        assert_asset_store_matches(remote_repo_dir.path(), local_repo_dir.path());
+        assert!(
+            !local_repo_dir.path().join("versioned.txt").exists(),
+            "fetch should not materialize logical asset files"
         );
     }
 
