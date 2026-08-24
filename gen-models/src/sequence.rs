@@ -842,6 +842,8 @@ mod tests {
             None,
         )
         .remove(0);
+        // Overwrite temp_file_path with a garbage sequence, showing that sequence access uses the versioned file
+        // and not any local materialized file.
         fs::write(
             &temp_file_path,
             ">m123\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
