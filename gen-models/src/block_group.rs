@@ -34,7 +34,6 @@ use crate::{
     },
     gen_models_capnp::block_group,
     path::{Path, PathData},
-    path_edge::PathEdge,
     region::{ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     traits::*,
@@ -222,7 +221,8 @@ impl<'a> PathCache<'a> {
             let conn = path_cache.conn;
             let new_path = Path::query(
                 conn,
-                "select * from paths where block_group_id = ?1 AND name = ?2",
+                "SELECT id, block_group_id, name, created_on FROM paths \
+                 WHERE block_group_id = ?1 AND name = ?2",
                 params![block_group_id, name],
             )[0]
             .clone();
@@ -408,12 +408,13 @@ impl BlockGroup {
     ) -> Result<(), BlockGroupError> {
         let existing_paths = Path::query(
             conn,
-            "SELECT * from paths where block_group_id = ?1;",
+            "SELECT id, block_group_id, name, created_on FROM paths \
+             WHERE block_group_id = ?1;",
             params![self.id],
         );
 
         for path in &existing_paths {
-            let edge_ids = PathEdge::edges_for_path(conn, &path.id, None)
+            let edge_ids = Path::edges_for_path(conn, &path.id, None)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();
@@ -1154,7 +1155,8 @@ impl BlockGroup {
         history_ref: Option<&str>,
     ) -> Result<Path, BlockGroupError> {
         let query = format!(
-            "SELECT * FROM {} WHERE block_group_id = :block_group_id ORDER BY created_on DESC",
+            "SELECT id, block_group_id, name, created_on FROM {} \
+             WHERE block_group_id = :block_group_id ORDER BY created_on DESC",
             Path::table_name_with_history_ref(history_ref)
         );
         let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
@@ -1177,7 +1179,8 @@ impl BlockGroup {
     ) -> Result<Option<Path>, BlockGroupError> {
         let paths = Path::try_query(
             conn,
-            "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC",
+            "SELECT id, block_group_id, name, created_on FROM paths \
+             WHERE block_group_id = ?1 ORDER BY created_on DESC",
             params![block_group_id],
         )?;
 

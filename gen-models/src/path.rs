@@ -2,28 +2,21 @@ use core::ops::Range as RustRange;
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{
-    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand, Workspace,
-    calculate_hash, is_end_node, is_start_node,
+    HASH_ID_SIZE, HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock,
+    Strand, Workspace, calculate_hash, is_end_node, is_start_node,
     range::{Range, RangeMapping},
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
 use itertools::Itertools;
-use rusqlite::{Row, params, types::Value as SQLValue};
+use rusqlite::{Row, ToSql, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group_edge::BlockGroupEdge,
-    db::GraphConnection,
-    edge::Edge,
-    errors::{PathEdgeError, QueryError},
-    gen_models_capnp::path as PathCapnp,
-    node::Node,
-    path_edge::PathEdge,
-    sequence::SequenceError,
-    traits::*,
+    block_group_edge::BlockGroupEdge, db::GraphConnection, edge::Edge, errors::QueryError,
+    gen_models_capnp::path as PathCapnp, node::Node, sequence::SequenceError, traits::*,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
@@ -42,8 +35,6 @@ pub enum PathError {
     Missing(String),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
-    #[error("Problem creating path edges: {0}")]
-    PathEdges(#[from] PathEdgeError),
     #[error("Problem querying for path: {0}")]
     Query(#[from] QueryError),
     #[error("Problem loading sequence for path: {0}")]
@@ -131,6 +122,85 @@ pub struct Annotation {
 }
 
 impl Path {
+    fn encode_edge_ids(edge_ids: &[HashId]) -> Vec<u8> {
+        let mut encoded = Vec::with_capacity(edge_ids.len() * HASH_ID_SIZE);
+        for edge_id in edge_ids {
+            encoded.extend_from_slice(&edge_id.0);
+        }
+        encoded
+    }
+
+    fn decode_edge_ids(encoded: &[u8]) -> Vec<HashId> {
+        let (edge_ids, remainder) = encoded.as_chunks::<HASH_ID_SIZE>();
+        assert!(
+            remainder.is_empty(),
+            "Path edge ID blob should contain fixed-width identifiers"
+        );
+        edge_ids.iter().copied().map(HashId).collect()
+    }
+
+    /// Returns the ordered edge identifiers stored by a path at an optional history reference.
+    pub fn edge_ids_for_path(
+        conn: &GraphConnection,
+        path_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Vec<HashId> {
+        let query = format!(
+            "SELECT edge_ids FROM {} WHERE id = :path_id",
+            Self::table_name_with_history_ref(history_ref)
+        );
+        let mut query_params: Vec<(&str, &dyn ToSql)> = vec![(":path_id", path_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        let encoded = conn
+            .query_row(&query, &query_params[..], |row| row.get::<_, Vec<u8>>(0))
+            .expect("should find path edge IDs");
+        Self::decode_edge_ids(&encoded)
+    }
+
+    /// Returns one edge identifier without loading the path's complete edge blob.
+    pub fn edge_id_at(
+        conn: &GraphConnection,
+        path_id: &HashId,
+        index: usize,
+        history_ref: Option<&str>,
+    ) -> Option<HashId> {
+        let start = index.checked_mul(HASH_ID_SIZE)?.checked_add(1)?;
+        let start = i64::try_from(start).ok()?;
+        let identifier_width = i64::try_from(HASH_ID_SIZE).expect("edge ID width should fit i64");
+        let query = format!(
+            "SELECT substr(edge_ids, :start, :identifier_width) FROM {} WHERE id = :path_id",
+            Self::table_name_with_history_ref(history_ref)
+        );
+        let mut query_params: Vec<(&str, &dyn ToSql)> = vec![
+            (":path_id", path_id),
+            (":start", &start),
+            (":identifier_width", &identifier_width),
+        ];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        let encoded = conn
+            .query_row(&query, &query_params[..], |row| row.get::<_, Vec<u8>>(0))
+            .expect("should find path edge IDs");
+        if encoded.is_empty() {
+            None
+        } else {
+            Self::decode_edge_ids(&encoded).into_iter().next()
+        }
+    }
+
+    /// Resolves the ordered edge identifiers stored by a path into edge records.
+    pub fn edges_for_path(
+        conn: &GraphConnection,
+        path_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Vec<Edge> {
+        let edge_ids = Self::edge_ids_for_path(conn, path_id, history_ref);
+        Edge::query_by_ids(conn, &edge_ids, history_ref)
+    }
+
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(conn, edge_ids, block_group_id))
@@ -208,11 +278,17 @@ impl Path {
         // TODO: Should we do something if edge_ids don't match here? Suppose we have a path
         // for a block group with edges 1,2,3. And then the same path is added again with edges
         // 5,6,7, should this be an error? Should we just keep adding edges?
-        let query =
-            "INSERT INTO paths (id, name, block_group_id, created_on) VALUES (?1, ?2, ?3, ?4);";
+        let encoded_edge_ids = Self::encode_edge_ids(edge_ids);
+        let query = "INSERT INTO paths (id, name, block_group_id, created_on, edge_ids) VALUES (?1, ?2, ?3, ?4, ?5);";
         let mut stmt = conn.prepare(query).unwrap();
 
-        let path = match stmt.execute(params![hash, name, block_group_id, timestamp]) {
+        let path = match stmt.execute(params![
+            hash,
+            name,
+            block_group_id,
+            timestamp,
+            encoded_edge_ids
+        ]) {
             Ok(_) => Path {
                 id: hash,
                 name: name.to_string(),
@@ -234,31 +310,26 @@ impl Path {
             }
         };
 
-        let _ = PathEdge::bulk_create(conn, &path.id, edge_ids);
-
         Ok(path)
     }
 
     pub fn delete(conn: &GraphConnection, name: &str, block_group_id: &HashId) {
-        let path = Path::get(
-            conn,
-            "select * from paths where name = ?1 and block_group_id = ?2",
-            params![name, block_group_id],
-        )
-        .unwrap();
-        PathEdge::delete(conn, &path.id);
-
         let query = "DELETE FROM paths where name = ?1 AND block_group_id = ?2;";
         conn.execute(query, params![name.to_string(), block_group_id])
             .unwrap();
     }
 
     pub fn get_by_id(conn: &GraphConnection, path_id: &HashId) -> Path {
-        Path::get(conn, "select * from paths where id = ?1;", params![path_id]).unwrap()
+        Path::get(
+            conn,
+            "SELECT id, block_group_id, name, created_on FROM paths WHERE id = ?1;",
+            params![path_id],
+        )
+        .unwrap()
     }
 
     pub fn query_for_collection(conn: &GraphConnection, collection_name: &str) -> Vec<Path> {
-        let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1";
+        let query = "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1";
         Path::query(conn, query, params![collection_name])
     }
 
@@ -267,7 +338,7 @@ impl Path {
         collection_name: &str,
         sample_name: &str,
     ) -> Vec<Path> {
-        let query = "SELECT * FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
+        let query = "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
         Path::query(conn, query, params![collection_name, sample_name])
     }
 
@@ -290,7 +361,7 @@ impl Path {
         conn: &GraphConnection,
         history_ref: Option<&str>,
     ) -> Result<i64, PathError> {
-        let edges = PathEdge::edges_for_path(conn, &self.id, history_ref);
+        let edges = Path::edges_for_path(conn, &self.id, history_ref);
         Ok(edges
             .into_iter()
             .tuple_windows()
@@ -307,7 +378,7 @@ impl Path {
         conn: &GraphConnection,
         history_ref: Option<&str>,
     ) -> Vec<PathBlock> {
-        let edges = PathEdge::edges_for_path(conn, &self.id, history_ref);
+        let edges = Path::edges_for_path(conn, &self.id, history_ref);
         let mut blocks = vec![];
         let mut path_length = 0;
 
@@ -662,7 +733,7 @@ impl Path {
         let block_with_start = tree.query_point(path_start).next().unwrap().value;
         let block_with_end = tree.query_point(path_end).next().unwrap().value;
 
-        let edges = PathEdge::edges_for_path(conn, &self.id, None);
+        let edges = Path::edges_for_path(conn, &self.id, None);
         let edges_by_source = edges
             .iter()
             .map(|edge| ((edge.source_node_id, edge.source_coordinate), edge))
@@ -756,7 +827,7 @@ impl Path {
 
         let deletion_edge = deletion_edge_result[0].clone();
 
-        let edges = PathEdge::edges_for_path(conn, &self.id, None);
+        let edges = Path::edges_for_path(conn, &self.id, None);
         let edges_by_source = edges
             .iter()
             .map(|edge| ((edge.source_node_id, edge.source_coordinate), edge))
@@ -900,7 +971,8 @@ impl RegionResolver for Path {
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
         let mut stmt = conn
             .prepare(
-                "SELECT paths.*, block_groups.is_default \
+                "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on, \
+                    block_groups.is_default \
              FROM paths \
              JOIN block_groups ON paths.block_group_id = block_groups.id \
              WHERE block_groups.collection_name = ?1 \
@@ -964,9 +1036,10 @@ mod tests {
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         edge::Edge,
+        history::dolt::commit_all,
         sample::{NewSample, Sample},
         sequence::Sequence,
-        test_helpers::{create_bg, get_connection, test_workspace},
+        test_helpers::{create_bg, get_connection, setup_block_group, test_workspace},
     };
 
     fn create_test_block_group(conn: &GraphConnection) -> BlockGroup {
@@ -1265,6 +1338,44 @@ mod tests {
 
         let deserialized = Path::read_capnp(root.into_reader());
         assert_eq!(path, deserialized);
+    }
+
+    #[test]
+    fn test_edge_id_blob_preserves_order_and_duplicates() {
+        let edge_ids = vec![HashId::pad_str(1), HashId::pad_str(2), HashId::pad_str(1)];
+
+        let encoded = Path::encode_edge_ids(&edge_ids);
+
+        assert_eq!(encoded.len(), edge_ids.len() * HASH_ID_SIZE);
+        assert_eq!(Path::decode_edge_ids(&encoded), edge_ids);
+    }
+
+    #[test]
+    fn test_edge_id_blob_is_available_at_history_ref() {
+        let conn = &get_connection(None).unwrap();
+        let (_block_group_id, path) = setup_block_group(conn);
+        let expected_edge_ids = Path::edge_ids_for_path(conn, &path.id, None);
+        let commit_hash = commit_all(conn, "path blob").expect("should commit path blob");
+        let history_ref = commit_hash.to_string();
+
+        assert_eq!(
+            Path::edge_ids_for_path(conn, &path.id, Some(&history_ref)),
+            expected_edge_ids
+        );
+    }
+
+    #[test]
+    fn test_edge_id_at_reads_one_fixed_width_identifier() {
+        let conn = &get_connection(None).unwrap();
+        let (_block_group_id, path) = setup_block_group(conn);
+        let edge_ids = Path::edge_ids_for_path(conn, &path.id, None);
+
+        assert_eq!(Path::edge_id_at(conn, &path.id, 0, None), Some(edge_ids[0]));
+        assert_eq!(
+            Path::edge_id_at(conn, &path.id, edge_ids.len() - 1, None),
+            edge_ids.last().copied()
+        );
+        assert_eq!(Path::edge_id_at(conn, &path.id, edge_ids.len(), None), None);
     }
 
     #[test]

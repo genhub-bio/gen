@@ -52,6 +52,8 @@ CREATE TABLE paths (
   block_group_id BLOB NOT NULL,
   name TEXT NOT NULL,
   created_on INTEGER NOT NULL,
+  -- Ordered concatenation of fixed-width HashId values.
+  edge_ids BLOB NOT NULL,
   FOREIGN KEY(block_group_id) REFERENCES block_groups(id)
 ) STRICT;
 CREATE UNIQUE INDEX path_uidx ON paths(block_group_id, name);
@@ -93,16 +95,6 @@ CREATE TABLE edges (
   FOREIGN KEY(target_node_id) REFERENCES nodes(id)
 ) STRICT;
 CREATE UNIQUE INDEX edge_uidx ON edges(source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand);
-
-CREATE TABLE path_edges (
-  id BLOB PRIMARY KEY NOT NULL,
-  path_id BLOB NOT NULL,
-  edge_id BLOB NOT NULL,
-  index_in_path INTEGER NOT NULL,
-  FOREIGN KEY(edge_id) REFERENCES edges(id),
-  FOREIGN KEY(path_id) REFERENCES paths(id)
-) STRICT;
-CREATE UNIQUE INDEX path_edges_uidx ON path_edges(path_id, edge_id, index_in_path);
 
 CREATE TABLE block_group_edges (
   id BLOB PRIMARY KEY NOT NULL,

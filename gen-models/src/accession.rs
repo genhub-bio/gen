@@ -771,7 +771,6 @@ mod tests {
         block_group_edge::{AugmentedEdgeData, BlockGroupEdgeData},
         edge::EdgeData,
         path::Path,
-        path_edge::PathEdge,
         test_helpers::{create_bg, get_connection, interval_tree_verify, setup_block_group},
     };
 
@@ -812,7 +811,7 @@ mod tests {
             let _ = BlockGroup::add_accession(conn, &path, "mreB", 5, 15, &mut path_cache).unwrap();
 
             let other_block_group = create_bg(conn, "test", "test", "other");
-            let edge_ids = PathEdge::edges_for_path(conn, &path.id, None)
+            let edge_ids = Path::edges_for_path(conn, &path.id, None)
                 .into_iter()
                 .map(|edge| edge.id)
                 .collect::<Vec<_>>();

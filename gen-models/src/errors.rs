@@ -9,7 +9,6 @@ pub use crate::{
     edge::EdgeError,
     node::NodeError,
     path::PathError,
-    path_edge::PathEdgeError,
     sample::SampleError,
     sequence::SequenceError,
 };
