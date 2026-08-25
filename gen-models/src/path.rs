@@ -15,8 +15,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group_edge::BlockGroupEdge, db::GraphConnection, edge::Edge, errors::QueryError,
-    gen_models_capnp::path as PathCapnp, node::Node, sequence::SequenceError, traits::*,
+    block_group_edge::BlockGroupEdge,
+    db::GraphConnection,
+    edge::{Edge, EdgeData},
+    errors::QueryError,
+    gen_models_capnp::path as PathCapnp,
+    node::Node,
+    sequence::SequenceError,
+    traits::*,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
@@ -35,6 +41,8 @@ pub enum PathError {
     Missing(String),
     #[error("Duplicate entry with uuid: {0}")]
     Duplicate(String),
+    #[error("Invalid path: {0}")]
+    Invalid(String),
     #[error("Problem querying for path: {0}")]
     Query(#[from] QueryError),
     #[error("Problem loading sequence for path: {0}")]
@@ -201,18 +209,75 @@ impl Path {
         Edge::query_by_ids(conn, &edge_ids, history_ref)
     }
 
+    fn validate_ordered_edges(edge_data: &[EdgeData]) -> Result<(), PathError> {
+        let Some(mut first_edge) = edge_data.first() else {
+            return Ok(());
+        };
+        for second_edge in &edge_data[1..] {
+            if first_edge.target_node_id != second_edge.source_node_id {
+                return Err(PathError::Invalid(format!(
+                    "edges {} and {} do not share the same node ({} vs. {})",
+                    first_edge.id_hash(),
+                    second_edge.id_hash(),
+                    first_edge.target_node_id,
+                    second_edge.source_node_id
+                )));
+            }
+            if first_edge.target_coordinate >= second_edge.source_coordinate {
+                return Err(PathError::Invalid(format!(
+                    "source coordinate {} for edge {} is not after target coordinate {} for edge {}",
+                    second_edge.source_coordinate,
+                    second_edge.id_hash(),
+                    first_edge.target_coordinate,
+                    first_edge.id_hash()
+                )));
+            }
+            if first_edge.target_strand != second_edge.source_strand {
+                return Err(PathError::Invalid(format!(
+                    "strand mismatch between consecutive edges {} and {}",
+                    first_edge.id_hash(),
+                    second_edge.id_hash()
+                )));
+            }
+            first_edge = second_edge;
+        }
+        Ok(())
+    }
+
+    /// Validates an ordered path against its corresponding edge data.
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(edge_ids, edge_data))
+    )]
+    pub fn validate_edges_in_memory(
+        edge_ids: &[HashId],
+        edge_data: &[EdgeData],
+    ) -> Result<(), PathError> {
+        if edge_ids.len() != edge_data.len() {
+            return Err(PathError::Invalid(
+                "path edge IDs and edge data must have the same length".to_string(),
+            ));
+        }
+        for (edge_id, edge_data) in edge_ids.iter().zip(edge_data) {
+            if *edge_id != edge_data.id_hash() {
+                return Err(PathError::Invalid(format!(
+                    "path edge ID {edge_id} does not match its edge data"
+                )));
+            }
+        }
+
+        Self::validate_ordered_edges(edge_data)
+    }
+
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(conn, edge_ids, block_group_id))
     )]
-    pub fn validate_edges(conn: &GraphConnection, edge_ids: &[HashId], block_group_id: &HashId) {
-        let edge_id_set = edge_ids.iter().copied().collect::<HashSet<HashId>>();
-
-        // No duplicate edges allowed
-        if edge_id_set.len() != edge_ids.len() {
-            println!("Duplicate edge IDs detected in path creation");
-        }
-
+    pub fn validate_edges(
+        conn: &GraphConnection,
+        edge_ids: &[HashId],
+        block_group_id: &HashId,
+    ) -> Result<(), PathError> {
         // All path edges must be in the path's block group
         let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None);
         let bg_edge_ids = augmented_edges
@@ -220,46 +285,32 @@ impl Path {
             .map(|augmented_edge| augmented_edge.edge.id)
             .collect::<HashSet<_>>();
 
-        assert!(
-            edge_id_set.is_subset(&bg_edge_ids),
-            "Not all edges are in the block group ({block_group_id})"
-        );
+        if !edge_ids.iter().all(|edge_id| bg_edge_ids.contains(edge_id)) {
+            return Err(PathError::Invalid(format!(
+                "not all edges are in the block group ({block_group_id})"
+            )));
+        }
 
         let edges_by_id = augmented_edges
             .iter()
             .map(|augmented_edge| (&augmented_edge.edge.id, augmented_edge.edge.clone()))
             .collect::<HashMap<_, _>>();
 
-        // Two consecutive edges must share a node
-        // Two consecutive edges must not go into and out of a node at the same coordinate
-        for (edge1_id, edge2_id) in edge_ids.iter().tuple_windows() {
-            let edge1 = edges_by_id.get(edge1_id).unwrap();
-            let edge2 = edges_by_id.get(edge2_id).unwrap();
-            assert!(
-                edge1.target_node_id == edge2.source_node_id,
-                "Edges {} and {} don't share the same node ({} vs. {})",
-                edge1.id,
-                edge2.id,
-                edge1.target_node_id,
-                edge2.source_node_id
-            );
-
-            assert!(
-                edge1.target_coordinate < edge2.source_coordinate,
-                "Source coordinate {} for edge {} is before target coordinate {} for edge {}",
-                edge2.source_coordinate,
-                edge2.id,
-                edge1.target_coordinate,
-                edge1.id
-            );
-
-            assert!(
-                edge1.target_strand == edge2.source_strand,
-                "Strand mismatch between consecutive edges {} and {}",
-                edge1.id,
-                edge2.id,
-            );
-        }
+        let ordered_edge_data = edge_ids
+            .iter()
+            .map(|edge_id| {
+                edges_by_id.get(edge_id).cloned().ok_or_else(|| {
+                    PathError::Invalid(format!(
+                        "edge {edge_id} is not in the block group ({block_group_id})"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ordered_edge_data = ordered_edge_data
+            .iter()
+            .map(EdgeData::from)
+            .collect::<Vec<_>>();
+        Self::validate_ordered_edges(&ordered_edge_data)
     }
 
     #[cfg_attr(
@@ -272,7 +323,30 @@ impl Path {
         block_group_id: &HashId,
         edge_ids: &[HashId],
     ) -> Result<Path, PathError> {
-        Path::validate_edges(conn, edge_ids, block_group_id);
+        Path::validate_edges(conn, edge_ids, block_group_id)?;
+        Self::create_from_edge_ids(conn, name, block_group_id, edge_ids)
+    }
+
+    /// Creates a path from edge identifiers previously validated in memory.
+    #[cfg_attr(
+        all(debug_assertions, feature = "profiling"),
+        tracing::instrument(skip(conn, name, block_group_id, edge_ids))
+    )]
+    pub fn create_with_validated_edges(
+        conn: &GraphConnection,
+        name: &str,
+        block_group_id: &HashId,
+        edge_ids: &[HashId],
+    ) -> Result<Path, PathError> {
+        Self::create_from_edge_ids(conn, name, block_group_id, edge_ids)
+    }
+
+    fn create_from_edge_ids(
+        conn: &GraphConnection,
+        name: &str,
+        block_group_id: &HashId,
+        edge_ids: &[HashId],
+    ) -> Result<Path, PathError> {
         let hash = HashId(calculate_hash(&format!("{block_group_id}:{name}")));
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
         // TODO: Should we do something if edge_ids don't match here? Suppose we have a path
@@ -1035,7 +1109,7 @@ mod tests {
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
-        edge::Edge,
+        edge::{Edge, EdgeData},
         history::dolt::commit_all,
         sample::{NewSample, Sample},
         sequence::Sequence,
@@ -1361,6 +1435,28 @@ mod tests {
         assert_eq!(
             Path::edge_ids_for_path(conn, &path.id, Some(&history_ref)),
             expected_edge_ids
+        );
+    }
+
+    #[test]
+    fn test_create_with_in_memory_validated_edges() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, existing_path) = setup_block_group(conn);
+        let edge_ids = Path::edge_ids_for_path(conn, &existing_path.id, None);
+        let edge_data = Edge::query_by_ids(conn, &edge_ids, None)
+            .iter()
+            .map(EdgeData::from)
+            .collect::<Vec<_>>();
+
+        Path::validate_edges_in_memory(&edge_ids, &edge_data)
+            .expect("should validate path edge data");
+        let copied_path =
+            Path::create_with_validated_edges(conn, "validated-copy", &block_group_id, &edge_ids)
+                .expect("should create path from validated edge IDs");
+
+        assert_eq!(
+            Path::edge_ids_for_path(conn, &copied_path.id, None),
+            edge_ids
         );
     }
 
@@ -4135,12 +4231,10 @@ mod tests {
             .collect::<Vec<BlockGroupEdgeData>>();
         BlockGroupEdge::bulk_create(conn, &block_group_edges);
 
-        // Should print a warning that there are duplicate edges, but continue
         let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
     }
 
     #[test]
-    #[should_panic(expected = "Not all edges are in the block group")]
     fn test_edges_must_be_in_path_block_group() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection").unwrap();
@@ -4173,7 +4267,10 @@ mod tests {
         .unwrap();
 
         let edge_ids = [edge1.id, edge2.id];
-        let _path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+        let error = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap_err();
+        assert!(
+            matches!(error, PathError::Invalid(message) if message.contains("not all edges are in the block group"))
+        );
     }
 
     #[test]
