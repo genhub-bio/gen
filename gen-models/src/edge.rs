@@ -2051,6 +2051,44 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_edge_creation_is_idempotent_by_primary_key() {
+        let conn = get_connection(None).expect("should create graph connection");
+        let edge = EdgeData {
+            source_node_id: PATH_START_NODE_ID,
+            source_coordinate: -1,
+            source_strand: Strand::Forward,
+            target_node_id: PATH_END_NODE_ID,
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+
+        let first = Edge::create(
+            &conn,
+            edge.source_node_id,
+            edge.source_coordinate,
+            edge.source_strand,
+            edge.target_node_id,
+            edge.target_coordinate,
+            edge.target_strand,
+        )
+        .expect("should create edge");
+        let duplicate = Edge::create(
+            &conn,
+            edge.source_node_id,
+            edge.source_coordinate,
+            edge.source_strand,
+            edge.target_node_id,
+            edge.target_coordinate,
+            edge.target_strand,
+        )
+        .expect("should treat the duplicate edge as existing");
+
+        assert_eq!(first.id, edge.id_hash());
+        assert_eq!(duplicate.id, first.id);
+        assert_eq!(Edge::all(&conn).len(), 1);
+    }
+
+    #[test]
     fn test_blocks_from_edges() {
         let conn = get_connection(None).unwrap();
         let (block_group_id, path) = setup_block_group(&conn);

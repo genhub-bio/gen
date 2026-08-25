@@ -94,7 +94,10 @@ CREATE TABLE edges (
   FOREIGN KEY(source_node_id) REFERENCES nodes(id),
   FOREIGN KEY(target_node_id) REFERENCES nodes(id)
 ) STRICT;
-CREATE UNIQUE INDEX edge_uidx ON edges(source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand);
+-- Edge IDs are deterministic hashes of the complete endpoint tuple, so the primary key is the
+-- canonical identity constraint without a second copy of every endpoint in a unique index.
+CREATE INDEX edge_source_idx ON edges(source_node_id, source_coordinate);
+CREATE INDEX edge_target_node_idx ON edges(target_node_id);
 
 CREATE TABLE block_group_edges (
   id BLOB PRIMARY KEY NOT NULL,
