@@ -21,7 +21,6 @@ use gen_models::{
     path::Path,
     sample::Sample,
     sequence::Sequence,
-    traits::Query,
 };
 use indexmap::IndexSet;
 use itertools::Itertools;
@@ -231,20 +230,8 @@ pub fn import_gfa(
 
     let gen_bar = progress_bar.add(get_time_elapsed_bar());
     gen_bar.set_message("Creating Gen Objects");
-    let edge_ids = Edge::bulk_create(conn, &edges.into_iter().collect::<Vec<EdgeData>>());
-
-    let saved_edges = Edge::query_by_ids(conn, &edge_ids, None);
-    let mut edge_ids_by_data = HashMap::new();
-    for edge in saved_edges {
-        let key = edge_data_from_fields(
-            edge.source_node_id,
-            edge.source_coordinate,
-            edge.source_strand,
-            edge.target_node_id,
-            edge.target_strand,
-        );
-        edge_ids_by_data.insert(key, edge.id);
-    }
+    let edge_data = edges.into_iter().collect::<Vec<EdgeData>>();
+    let edge_ids = Edge::bulk_create(conn, &edge_data);
 
     let mut created_blockgroup_edges: IndexSet<HashId> = IndexSet::new();
 
@@ -254,6 +241,7 @@ pub fn import_gfa(
         let mut source_coordinate = 0;
         let mut source_strand = Strand::Forward;
         let mut path_edge_ids = vec![];
+        let mut path_edge_data = vec![];
         for (index, segment_id) in input_path.segments.iter().enumerate() {
             let target = sequences_by_segment_id.get(segment_id).unwrap();
             let target_node_id = *node_ids_by_segment_id.get(segment_id).unwrap();
@@ -265,8 +253,9 @@ pub fn import_gfa(
                 target_node_id,
                 target_strand,
             );
-            let edge_id = *edge_ids_by_data.get(&key).unwrap();
+            let edge_id = key.id_hash();
             path_edge_ids.push(edge_id);
+            path_edge_data.push(key);
             source_node_id = target_node_id;
             source_coordinate = target.length;
             source_strand = target_strand;
@@ -278,8 +267,9 @@ pub fn import_gfa(
             PATH_END_NODE_ID,
             Strand::Forward,
         );
-        let edge_id = *edge_ids_by_data.get(&key).unwrap();
+        let edge_id = key.id_hash();
         path_edge_ids.push(edge_id);
+        path_edge_data.push(key);
         created_blockgroup_edges.extend(path_edge_ids.iter());
 
         BlockGroupEdge::bulk_create(
@@ -294,7 +284,8 @@ pub fn import_gfa(
                 })
                 .collect::<Vec<BlockGroupEdgeData>>(),
         );
-        Path::create(conn, path_name, &block_group.id, &path_edge_ids)?;
+        Path::validate_edges_in_memory(&path_edge_ids, &path_edge_data)?;
+        Path::create_with_validated_edges(conn, path_name, &block_group.id, &path_edge_ids)?;
     }
 
     for input_walk in &gfa.walk {
@@ -303,6 +294,7 @@ pub fn import_gfa(
         let mut source_coordinate = 0;
         let mut source_strand = Strand::Forward;
         let mut path_edge_ids = vec![];
+        let mut path_edge_data = vec![];
         for (index, segment_id) in input_walk.segments.iter().enumerate() {
             let target = sequences_by_segment_id.get(segment_id).unwrap();
             let target_node_id = *node_ids_by_segment_id.get(segment_id).unwrap();
@@ -314,8 +306,9 @@ pub fn import_gfa(
                 target_node_id,
                 target_strand,
             );
-            let edge_id = *edge_ids_by_data.get(&key).unwrap();
+            let edge_id = key.id_hash();
             path_edge_ids.push(edge_id);
+            path_edge_data.push(key);
             source_node_id = target_node_id;
             source_coordinate = target.length;
             source_strand = target_strand;
@@ -327,8 +320,9 @@ pub fn import_gfa(
             PATH_END_NODE_ID,
             Strand::Forward,
         );
-        let edge_id = *edge_ids_by_data.get(&key).unwrap();
+        let edge_id = key.id_hash();
         path_edge_ids.push(edge_id);
+        path_edge_data.push(key);
         created_blockgroup_edges.extend(path_edge_ids.iter());
 
         BlockGroupEdge::bulk_create(
@@ -343,7 +337,8 @@ pub fn import_gfa(
                 })
                 .collect::<Vec<BlockGroupEdgeData>>(),
         );
-        Path::create(conn, path_name, &block_group.id, &path_edge_ids)?;
+        Path::validate_edges_in_memory(&path_edge_ids, &path_edge_data)?;
+        Path::create_with_validated_edges(conn, path_name, &block_group.id, &path_edge_ids)?;
     }
 
     // make any block group edges not in paths or walks
@@ -493,6 +488,7 @@ mod tests {
         assets::{OperationKind, OperationLog},
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
+        traits::Query,
     };
     use rusqlite::params;
 
