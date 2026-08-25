@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read},
+    path::Path as FsPath,
     str,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -8,7 +9,7 @@ use std::{
 use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
-    assets::{AssetRef, AssetUri, ChecksummedReader},
+    assets::{AssetRef, AssetRole, AssetUri, ChecksummedReader},
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -38,6 +39,7 @@ pub fn import_fasta(
     collection_name: &str,
     sample: &str,
     shallow: bool,
+    indexes: &[String],
 ) -> Result<OperationSummary, FastaError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
@@ -61,6 +63,29 @@ pub fn import_fasta(
         AssetRef::create(conn, &sequence_asset_ref)
             .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
         sequence_asset_ref_id = Some(sequence_asset_ref.id);
+
+        let mut index_locations = indexes.to_vec();
+        for index_extension in ["fai", "gzi"] {
+            let index_location = format!("{fasta}.{index_extension}");
+            if !index_locations.contains(&index_location) && FsPath::new(&index_location).is_file()
+            {
+                index_locations.push(index_location);
+            }
+        }
+        for index_location in index_locations {
+            let mut index_operation_file = OperationFile::new(index_location)
+                .set_file_type(FileTypes::None)
+                .set_role(AssetRole::SequenceIndex)
+                .set_upstream_asset_ref_id(&sequence_asset_ref.id);
+            let index_asset_ref =
+                index_operation_file.prepare_asset_ref(context.workspace(), created_on)?;
+            if let Some(checksum) = index_asset_ref.checksum {
+                index_operation_file = index_operation_file.set_checksum_override(checksum);
+            }
+            AssetRef::create(conn, &index_asset_ref)
+                .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
+            operation_files.push(index_operation_file);
+        }
         Box::new(sequence_asset_ref.reader(context.workspace())?)
     } else {
         let asset_uri = <dyn AssetUri>::new(context.workspace(), fasta);
@@ -217,15 +242,14 @@ pub fn import_fasta(
 
 #[cfg(test)]
 mod tests {
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         fs,
-        io::Write as _,
+        io::{Read as _, Write as _},
         net::TcpListener,
         path::PathBuf,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         },
         thread,
@@ -233,33 +257,42 @@ mod tests {
     };
 
     use gen_models::{
-        assets::{AssetRef, OperationKind, OperationLog},
+        assets::{AssetRef, AssetRole, OperationAsset, OperationKind, OperationLog},
+        block_group::BlockGroup,
         errors::OperationError,
         history::{HistoryStore, dolt::DoltHistoryStore},
+        node::Node,
         operations::commit_operation_summary,
-        traits::*,
+        path::Path,
+        sample::Sample,
+        sequence::Sequence,
+        traits::Query,
     };
+    use noodles::bgzf::gzi;
 
-    use super::*;
+    use super::import_fasta;
     use crate::test_helpers::{setup_gen, setup_gen_on_disk};
 
     struct TestHttpServer {
         address: String,
+        requests: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         handle: Option<thread::JoinHandle<()>>,
     }
 
     impl TestHttpServer {
-        fn new(contents: Vec<u8>) -> Self {
+        fn new(files: HashMap<String, Vec<u8>>) -> Self {
             let listener =
-                TcpListener::bind(("127.0.0.1", 0)).expect("should bind remote FASTA server");
+                TcpListener::bind(("127.0.0.1", 0)).expect("should bind remote FASTA test server");
             listener
                 .set_nonblocking(true)
-                .expect("should configure remote FASTA server");
+                .expect("should configure remote FASTA test server");
             let address = listener
                 .local_addr()
                 .expect("should read remote FASTA server address")
                 .to_string();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = Arc::clone(&requests);
             let stop = Arc::new(AtomicBool::new(false));
             let server_stop = Arc::clone(&stop);
             let handle = thread::spawn(move || {
@@ -268,38 +301,103 @@ mod tests {
                         thread::sleep(Duration::from_millis(2));
                         continue;
                     };
-                    let mut request_bytes = [0_u8; 4096];
+                    let mut request_bytes = [0_u8; 8192];
                     let length = stream
                         .read(&mut request_bytes)
                         .expect("should read remote FASTA request");
-                    let request = String::from_utf8_lossy(&request_bytes[..length]);
-                    let method = request
-                        .lines()
+                    let request = String::from_utf8_lossy(&request_bytes[..length]).to_string();
+                    server_requests
+                        .lock()
+                        .expect("should lock remote FASTA request log")
+                        .push(request.clone());
+                    let mut request_lines = request.lines();
+                    let request_line = request_lines.next().unwrap_or_default();
+                    let mut request_parts = request_line.split_whitespace();
+                    let method = request_parts.next().unwrap_or_default();
+                    let path = request_parts
                         .next()
-                        .and_then(|line| line.split_whitespace().next())
+                        .unwrap_or_default()
+                        .split('?')
+                        .next()
                         .unwrap_or_default();
+                    let Some(contents) = files.get(path) else {
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .expect("should write missing remote FASTA response");
+                        continue;
+                    };
+                    let range = request_lines.find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("range: bytes=")
+                            .map(str::to_string)
+                    });
+                    let (status, start, end) = if let Some(range) = range {
+                        let (start, end) = range
+                            .split_once('-')
+                            .expect("should parse remote FASTA byte range");
+                        let start = start
+                            .parse::<usize>()
+                            .expect("should parse remote FASTA range start");
+                        let end = if end.is_empty() {
+                            contents.len().saturating_sub(1)
+                        } else {
+                            end.parse::<usize>()
+                                .expect("should parse remote FASTA range end")
+                                .min(contents.len().saturating_sub(1))
+                        };
+                        ("206 Partial Content", start, end)
+                    } else {
+                        ("200 OK", 0, contents.len().saturating_sub(1))
+                    };
+                    let body = if contents.is_empty() || start > end {
+                        &[][..]
+                    } else {
+                        &contents[start..=end]
+                    };
+                    let content_range = if status.starts_with("206") {
+                        format!("Content-Range: bytes {start}-{end}/{}\r\n", contents.len())
+                    } else {
+                        String::new()
+                    };
                     write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        contents.len()
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{content_range}Accept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        body.len()
                     )
                     .expect("should write remote FASTA response headers");
                     if method != "HEAD" {
                         stream
-                            .write_all(&contents)
+                            .write_all(body)
                             .expect("should write remote FASTA response body");
                     }
                 }
             });
             Self {
                 address,
+                requests,
                 stop,
                 handle: Some(handle),
             }
         }
 
-        fn url(&self) -> String {
-            format!("http://{}/reference.fa", self.address)
+        fn url(&self, path: &str) -> String {
+            format!("http://{}{path}", self.address)
+        }
+
+        fn clear_requests(&self) {
+            self.requests
+                .lock()
+                .expect("should lock remote FASTA request log")
+                .clear();
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .expect("should lock remote FASTA request log")
+                .clone()
         }
     }
 
@@ -307,7 +405,7 @@ mod tests {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
             if let Some(handle) = self.handle.take() {
-                handle.join().expect("should stop remote FASTA server");
+                handle.join().expect("should stop remote FASTA test server");
             }
         }
     }
@@ -327,6 +425,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
@@ -352,7 +451,8 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
                 .unwrap(),
-            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
+            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()]),
+            "shallow FASTA should read through retained sequence and index assets"
         );
 
         let path = Path::all(conn)[0].clone();
@@ -376,6 +476,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
@@ -399,6 +500,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "chr22", None);
@@ -424,6 +526,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
@@ -448,6 +551,7 @@ mod tests {
             "test",
             "new-sample",
             false,
+            &[],
         )
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", "new-sample", "m123", None);
@@ -472,31 +576,49 @@ mod tests {
     fn test_add_fasta_shallow() {
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
-        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+
         let fasta_path = context
             .workspace()
             .repo_root()
-            .expect("should have repository root")
-            .join("shallow.fa");
-        fs::copy(&fixture_path, &fasta_path).expect("should copy shallow FASTA fixture");
+            .unwrap()
+            .join("shallow.fa.bgz");
+        let index_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("shallow.fa.bgz.fai");
+        let gzip_index_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("shallow.fa.bgz.gzi");
+        fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz"),
+            &fasta_path,
+        )
+        .unwrap();
+        fs::write(&index_path, "m123\t37\t6\t37\t38\n").unwrap();
+        gzi::fs::write(&gzip_index_path, &gzi::Index::default()).unwrap();
 
         let operation_summary = import_fasta(
             &context,
-            &fasta_path.to_string_lossy().to_string(),
+            &fasta_path.to_str().unwrap().to_string(),
             "test",
             Sample::DEFAULT_NAME,
             true,
+            &[],
         )
-        .expect("should import shallow FASTA");
-        commit_operation_summary(&context, &operation_summary)
-            .expect("should commit shallow FASTA import");
-        fs::remove_file(&fasta_path).expect("should remove logical FASTA path");
-
+        .unwrap();
+        commit_operation_summary(&context, &operation_summary).unwrap();
+        fs::remove_file(&fasta_path).unwrap();
+        fs::write(&index_path, "invalid logical-path index\n").unwrap();
+        fs::write(&gzip_index_path, "invalid logical-path gzip index\n").unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
             BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
-                .expect("should load shallow sequence from immutable asset"),
-            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
+                .expect("should load shallow sequence from retained sequence and index assets"),
+            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()]),
+            "shallow FASTA should read through retained sequence and index assets"
         );
         let sequence = Sequence::query_by_blockgroup(conn, context.workspace(), &block_group_id)
             .into_iter()
@@ -520,59 +642,163 @@ mod tests {
 
         let path = Path::all(conn)[0].clone();
         assert_eq!(
-            path.sequence(conn, context.workspace(), None)
-                .expect("should read path through immutable sequence asset"),
-            "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+            path.sequence(conn, context.workspace(), None).unwrap(),
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            "path sequence should use the immutable FASTA asset"
+        );
+        let sequence = Sequence::query_by_blockgroup(conn, context.workspace(), &block_group_id)
+            .into_iter()
+            .find(|sequence| sequence.asset_ref_id.is_some())
+            .expect("should store the shallow sequence asset pointer");
+        let asset_refs = AssetRef::all(conn);
+        assert!(
+            asset_refs.iter().any(|asset_ref| {
+                Some(asset_ref.id) == sequence.asset_ref_id && asset_ref.role == AssetRole::Input
+            }),
+            "shallow sequence should point to its input AssetRef"
+        );
+        let mut index_assets = asset_refs
+            .iter()
+            .filter(|asset_ref| {
+                asset_ref.upstream_asset_ref_id == sequence.asset_ref_id
+                    && asset_ref.role == AssetRole::SequenceIndex
+            })
+            .collect::<Vec<_>>();
+        index_assets.sort_by_key(|asset_ref| asset_ref.name.as_deref());
+        assert_eq!(
+            index_assets.len(),
+            2,
+            "BGZF FASTA should retain both discovered indexes"
+        );
+        assert_eq!(
+            index_assets[0].name.as_deref(),
+            Some("shallow.fa.bgz.fai"),
+            "first retained index should be the FASTA index"
+        );
+        assert_eq!(
+            index_assets[1].name.as_deref(),
+            Some("shallow.fa.bgz.gzi"),
+            "second retained index should be the gzip index"
+        );
+        let operation_assets = OperationAsset::all(conn);
+        assert!(
+            operation_assets.iter().any(|operation_asset| {
+                Some(operation_asset.asset_ref_id) == sequence.asset_ref_id
+            }),
+            "operation should track the shallow sequence asset"
+        );
+        assert!(
+            index_assets.iter().all(|index_asset| {
+                operation_assets
+                    .iter()
+                    .any(|operation_asset| operation_asset.asset_ref_id == index_asset.id)
+            }),
+            "operation should track every retained sequence index"
         );
     }
 
     #[test]
-    fn test_add_remote_fasta_shallow_uses_remote_asset() {
-        let server = TestHttpServer::new(b">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGA\n".to_vec());
+    fn test_add_remote_shallow_fasta_with_multiple_remote_indexes() {
+        let fasta_contents = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fastas/bgzipped.fa.bgz"),
+        )
+        .expect("should read BGZF FASTA fixture");
+        let server = TestHttpServer::new(HashMap::from([
+            ("/reference.fa.bgz".to_string(), fasta_contents),
+            (
+                "/reference.fa.bgz.fai".to_string(),
+                b"m123\t37\t6\t37\t38\n".to_vec(),
+            ),
+            (
+                "/reference.fa.bgz.gzi".to_string(),
+                0_u64.to_le_bytes().to_vec(),
+            ),
+        ]));
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
-        let fasta = server.url();
+        let fasta = server.url("/reference.fa.bgz");
+        let indexes = [
+            server.url("/reference.fa.bgz.fai"),
+            server.url("/reference.fa.bgz.gzi"),
+        ];
 
-        let operation_summary = import_fasta(&context, &fasta, "test", Sample::DEFAULT_NAME, true)
-            .expect("should import shallow remote FASTA");
+        let operation_summary = import_fasta(
+            &context,
+            &fasta,
+            "test",
+            Sample::DEFAULT_NAME,
+            true,
+            &indexes,
+        )
+        .expect("should import a shallow remote BGZF with remote indexes");
         commit_operation_summary(&context, &operation_summary)
-            .expect("should commit shallow remote FASTA import");
+            .expect("should commit remote shallow FASTA assets");
 
         let sequence_asset = AssetRef::all(conn)
             .into_iter()
             .find(|asset_ref| asset_ref.uri == fasta)
-            .expect("should persist remote sequence AssetRef");
+            .expect("should store the remote sequence AssetRef");
         assert_eq!(
             sequence_asset.checksum, None,
-            "remote shallow asset should not require a retained local checksum"
+            "remote sequence AssetRef should remain checksumless"
+        );
+        let index_assets = AssetRef::get_derived_assets(conn, &sequence_asset.id, None);
+        assert_eq!(
+            index_assets.len(),
+            2,
+            "remote BGZF sequence should retain both index AssetRefs"
+        );
+        assert!(
+            index_assets.iter().all(|asset_ref| {
+                asset_ref.role == AssetRole::SequenceIndex && asset_ref.checksum.is_none()
+            }),
+            "remote indexes should remain checksumless sequence-index AssetRefs"
         );
         assert!(
             context
                 .workspace()
                 .asset_dir()
-                .expect("should have asset directory")
+                .unwrap()
                 .read_dir()
-                .expect("should read asset directory")
+                .unwrap()
                 .next()
                 .is_none(),
-            "remote shallow import should not retain a local asset"
+            "remote shallow import should not retain local sequence or index assets"
         );
 
+        server.clear_requests();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
-        assert_eq!(
-            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
-                .expect("should stream shallow sequence from remote AssetRef"),
-            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
-        );
         let sequence = Sequence::query_by_blockgroup(conn, context.workspace(), &block_group_id)
             .into_iter()
             .find(|sequence| sequence.asset_ref_id == Some(sequence_asset.id))
-            .expect("should resolve shallow sequence through remote AssetRef");
+            .expect("should resolve the remote shallow sequence AssetRef");
         assert_eq!(
-            sequence
-                .get_sequence(2, 8)
-                .expect("should read remote sequence slice"),
-            "CGATCG"
+            sequence.get_sequence(2, 8).unwrap(),
+            "CGATCG",
+            "indexed remote lookup should return the requested slice"
+        );
+
+        let requests = server.requests();
+        assert!(
+            requests.iter().any(|request| {
+                request.starts_with("GET /reference.fa.bgz.fai ")
+                    || request.starts_with("HEAD /reference.fa.bgz.fai ")
+            }),
+            "indexed lookup should request the remote FASTA index"
+        );
+        assert!(
+            requests.iter().any(|request| {
+                request.starts_with("GET /reference.fa.bgz.gzi ")
+                    || request.starts_with("HEAD /reference.fa.bgz.gzi ")
+            }),
+            "indexed lookup should request the remote gzip index"
+        );
+        assert!(
+            requests.iter().any(|request| {
+                request.starts_with("GET /reference.fa.bgz ")
+                    && request.to_ascii_lowercase().contains("\r\nrange: bytes=")
+            }),
+            "indexed remote lookup should use a byte-range request"
         );
     }
 
@@ -591,6 +817,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         commit_operation_summary(&context, &operation_summary).unwrap();
@@ -605,6 +832,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let result_error = commit_operation_summary(&context, &operation_summary).unwrap_err();

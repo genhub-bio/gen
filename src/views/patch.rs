@@ -208,7 +208,7 @@ mod tests {
             .join("fixtures/simple.fa")
             .to_string_lossy()
             .to_string();
-        let operation = import_fasta(context, &fixture_path, "default", sample, false)
+        let operation = import_fasta(context, &fixture_path, "default", sample, false, &[])
             .expect("should import the FASTA fixture");
         commit_operation_summary(context, &operation).expect("should commit the FASTA import");
     }

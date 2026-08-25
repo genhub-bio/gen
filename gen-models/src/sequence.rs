@@ -1,9 +1,15 @@
 use core::hash::{Hash, Hasher};
 use std::{io::BufReader, ops::Range, rc::Rc, str, sync};
 
+use cached::proc_macro::cached;
 use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, Sha256Hash, Workspace, traits::Capnp};
-use noodles::{bgzf, fasta};
+use indexmap::IndexMap;
+use noodles::{
+    bgzf::{self, gzi},
+    core::Region,
+    fasta::{self, fai, io::indexed_reader::Builder as IndexBuilder},
+};
 use rusqlite::{Row, ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,6 +36,8 @@ pub struct Sequence {
     pub external_sequence: bool,
     #[serde(skip)]
     asset_ref: Option<AssetRef>,
+    #[serde(skip)]
+    index_asset_refs: Vec<AssetRef>,
     #[serde(skip)]
     workspace: Option<Workspace>,
     #[serde(skip)]
@@ -74,6 +82,8 @@ pub enum SequenceError {
     MissingSequenceLength(),
     #[error("Sequence cache lock poisoned: {0}")]
     CachePoisoned(String),
+    #[error("Invalid indexed sequence region '{name}': {reason}")]
+    InvalidRegion { name: String, reason: String },
     #[error("Sequence I/O error: {0}")]
     Io(String),
     #[error("Invalid UTF-8 while reading sequence data: {0}")]
@@ -131,6 +141,7 @@ impl<'a> Capnp<'a> for Sequence {
             length,
             external_sequence,
             asset_ref: None,
+            index_asset_refs: Vec::new(),
             workspace: None,
             asset_resolution_error: None,
         }
@@ -236,6 +247,7 @@ impl<'a> NewSequence<'a> {
             length: self.length.unwrap(),
             external_sequence,
             asset_ref: None,
+            index_asset_refs: Vec::new(),
             workspace: None,
             asset_resolution_error: None,
         }
@@ -298,10 +310,29 @@ impl<'a> NewSequence<'a> {
             length: self.length.unwrap_or(length),
             external_sequence: self.asset_ref_id.is_some(),
             asset_ref: None,
+            index_asset_refs: Vec::new(),
             workspace: None,
             asset_resolution_error: None,
         })
     }
+}
+
+#[cached(
+    key = "String",
+    convert = r#"{ format!("{}:{}", workspace.base_dir().display(), asset_ref.id) }"#
+)]
+fn fasta_index(workspace: &Workspace, asset_ref: &AssetRef) -> Option<fai::Index> {
+    let reader = asset_ref.reader(workspace).ok()?;
+    fai::io::Reader::new(reader).read_index().ok()
+}
+
+#[cached(
+    key = "String",
+    convert = r#"{ format!("{}:{}", workspace.base_dir().display(), asset_ref.id) }"#
+)]
+fn fasta_gzi_index(workspace: &Workspace, asset_ref: &AssetRef) -> Option<gzi::Index> {
+    let reader = asset_ref.reader(workspace).ok()?;
+    gzi::io::Reader::new(reader).read_index().ok()
 }
 
 fn asset_extension(asset_ref: &AssetRef) -> Option<String> {
@@ -371,6 +402,7 @@ type SequenceCache = sync::RwLock<Option<((HashId, String), Option<String>)>>;
 pub fn cached_sequence(
     workspace: &Workspace,
     sequence_asset: &AssetRef,
+    index_assets: &[AssetRef],
     name: &str,
     range: Range<i64>,
     circular: bool,
@@ -401,30 +433,91 @@ pub fn cached_sequence(
         .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
 
     let mut sequence: Option<String> = None;
+    let fasta_index_asset = index_assets
+        .iter()
+        .find(|asset_ref| asset_extension(asset_ref).as_deref() == Some("fai"));
+    let gzip_index_asset = index_assets
+        .iter()
+        .find(|asset_ref| asset_extension(asset_ref).as_deref() == Some("gzi"));
     let sequence_extension = asset_extension(sequence_asset);
-    let sequence_reader = sequence_asset
-        .reader(workspace)
-        .map_err(|err| SequenceError::Io(err.to_string()))?;
-    let reader_stream: Box<dyn std::io::BufRead> = match sequence_extension.as_deref() {
-        Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(sequence_reader))),
-        Some("bgz") => Box::new(bgzf::io::Reader::new(sequence_reader)),
-        _ => Box::new(sequence_reader),
-    };
-    let mut reader = fasta::io::reader::Builder
-        .build_from_reader(reader_stream)
-        .map_err(|err| SequenceError::Io(err.to_string()))?;
-    for result in reader.records() {
-        let record = result.map_err(|err| SequenceError::Io(err.to_string()))?;
-        if String::from_utf8(record.name().to_vec())
-            .map_err(|err| SequenceError::Utf8(err.to_string()))?
-            == name
+    let compressed = matches!(sequence_extension.as_deref(), Some("gz" | "bgz"));
+    if let Some(index) = fasta_index_asset.and_then(|asset_ref| fasta_index(workspace, asset_ref)) {
+        let region = name
+            .parse::<Region>()
+            .map_err(|err| SequenceError::InvalidRegion {
+                name: name.to_string(),
+                reason: err.to_string(),
+            })?;
+        let builder = IndexBuilder::default().set_index(index);
+        if let Some(gzi_index) =
+            gzip_index_asset.and_then(|asset_ref| fasta_gzi_index(workspace, asset_ref))
         {
+            let sequence_reader = sequence_asset
+                .reader(workspace)
+                .map_err(|err| SequenceError::Io(err.to_string()))?;
+            let bgzf_reader = bgzf::io::indexed_reader::Builder::default()
+                .set_index(gzi_index)
+                .build_from_reader(sequence_reader)
+                .map_err(|err| SequenceError::Io(err.to_string()))?;
+            let mut reader = builder
+                .build_from_reader(bgzf_reader)
+                .map_err(|err| SequenceError::Io(err.to_string()))?;
             sequence = Some(
-                str::from_utf8(record.sequence().as_ref())
-                    .map_err(|err| SequenceError::Utf8(err.to_string()))?
-                    .to_string(),
+                str::from_utf8(
+                    reader
+                        .query(&region)
+                        .map_err(|err| SequenceError::Io(err.to_string()))?
+                        .sequence()
+                        .as_ref(),
+                )
+                .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                .to_string(),
+            )
+        } else if !compressed {
+            let sequence_reader = sequence_asset
+                .reader(workspace)
+                .map_err(|err| SequenceError::Io(err.to_string()))?;
+            let mut reader = builder
+                .build_from_reader(sequence_reader)
+                .map_err(|err| SequenceError::Io(err.to_string()))?;
+            sequence = Some(
+                str::from_utf8(
+                    reader
+                        .query(&region)
+                        .map_err(|err| SequenceError::Io(err.to_string()))?
+                        .sequence()
+                        .as_ref(),
+                )
+                .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                .to_string(),
             );
-            break;
+        }
+    }
+    if sequence.is_none() {
+        let sequence_reader = sequence_asset
+            .reader(workspace)
+            .map_err(|err| SequenceError::Io(err.to_string()))?;
+        let reader_stream: Box<dyn std::io::BufRead> = match sequence_extension.as_deref() {
+            Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(sequence_reader))),
+            Some("bgz") => Box::new(bgzf::io::Reader::new(sequence_reader)),
+            _ => Box::new(sequence_reader),
+        };
+        let mut reader = fasta::io::reader::Builder
+            .build_from_reader(reader_stream)
+            .map_err(|err| SequenceError::Io(err.to_string()))?;
+        for result in reader.records() {
+            let record = result.map_err(|err| SequenceError::Io(err.to_string()))?;
+            if String::from_utf8(record.name().to_vec())
+                .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                == name
+            {
+                sequence = Some(
+                    str::from_utf8(record.sequence().as_ref())
+                        .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                        .to_string(),
+                );
+                break;
+            }
         }
     }
     // This is an LRU cache setup; keep only the last sequence fetched so loading multiple plant
@@ -468,10 +561,13 @@ impl Sequence {
             "WITH arr AS (
                 SELECT value, rowid AS pos FROM rarray(:ids)
              )
-             SELECT sequences.*, asset_refs.*
+             SELECT sequences.*, asset_refs.*, index_assets.*
              FROM {sequence_table} AS sequences
              LEFT JOIN {asset_table} AS asset_refs
                ON sequences.asset_ref_id = asset_refs.id
+             LEFT JOIN {asset_table} AS index_assets
+               ON asset_refs.id = index_assets.upstream_asset_ref_id
+              AND index_assets.role = 'sequence-index'
              JOIN arr ON sequences.hash = arr.value
              ORDER BY arr.pos;"
         );
@@ -482,13 +578,22 @@ impl Sequence {
             query_params.push((":history_ref", history_ref));
         }
         let mut statement = conn.prepare(&query).unwrap();
-        statement
+        let mut sequences: IndexMap<Sha256Hash, Self> = IndexMap::new();
+        for row in statement
             .query_map(&query_params[..], |row| {
                 Ok(Self::process_joined_row(row, workspace))
             })
             .unwrap()
-            .map(|row| row.unwrap())
-            .collect()
+        {
+            let sequence = row.unwrap();
+            let sequence_hash = sequence.hash;
+            if let Some(existing) = sequences.get_mut(&sequence_hash) {
+                existing.index_asset_refs.extend(sequence.index_asset_refs);
+            } else {
+                sequences.insert(sequence_hash, sequence);
+            }
+        }
+        sequences.into_values().collect()
     }
 
     fn process_joined_row(row: &Row, workspace: &Workspace) -> Self {
@@ -519,6 +624,27 @@ impl Sequence {
             }
             sequence.asset_ref = Some(asset_ref);
             sequence.workspace = Some(workspace.clone());
+
+            let index_asset_ref_id: Option<HashId> = row.get(16).unwrap();
+            if let Some(index_asset_ref_id) = index_asset_ref_id {
+                let index_asset = AssetRef {
+                    id: index_asset_ref_id,
+                    uri: row.get(17).unwrap(),
+                    file_type: row.get(18).unwrap(),
+                    checksum: row.get(19).unwrap(),
+                    size: row.get(20).unwrap(),
+                    role: row.get(21).unwrap(),
+                    logical_path: row.get(22).unwrap(),
+                    name: row.get(23).unwrap(),
+                    created_on: row.get(24).unwrap(),
+                    upstream_asset_ref_id: row.get(25).unwrap(),
+                };
+                if !LocalAssetUri::is_local_path_or_file_uri(&index_asset.uri)
+                    || index_asset.versioned_store_path(workspace).is_ok()
+                {
+                    sequence.index_asset_refs.push(index_asset);
+                }
+            }
         }
         sequence
     }
@@ -551,6 +677,7 @@ impl Sequence {
             return cached_sequence(
                 workspace,
                 asset_ref,
+                &self.index_asset_refs,
                 &self.name,
                 start..end,
                 self.is_circular(),
@@ -576,22 +703,34 @@ impl Sequence {
     ) -> Vec<Sequence> {
         let asset_table = AssetRef::table_name_with_history_ref(None);
         let query = format!(
-            "SELECT sequences.*, asset_refs.*
+            "SELECT sequences.*, asset_refs.*, index_assets.*
              FROM block_group_edges bge
              LEFT JOIN edges ON bge.edge_id = edges.id
              LEFT JOIN nodes ON (edges.source_node_id = nodes.id OR edges.target_node_id = nodes.id)
              LEFT JOIN sequences ON (nodes.sequence_hash = sequences.hash)
              LEFT JOIN {asset_table} AS asset_refs ON sequences.asset_ref_id = asset_refs.id
+             LEFT JOIN {asset_table} AS index_assets
+               ON asset_refs.id = index_assets.upstream_asset_ref_id
+              AND index_assets.role = 'sequence-index'
              WHERE bge.block_group_id = ?1;"
         );
         let mut statement = conn.prepare(&query).unwrap();
-        statement
+        let mut sequences: IndexMap<Sha256Hash, Self> = IndexMap::new();
+        for row in statement
             .query_map(params![block_group_id], |row| {
                 Ok(Self::process_joined_row(row, workspace))
             })
             .unwrap()
-            .map(|row| row.unwrap())
-            .collect()
+        {
+            let sequence = row.unwrap();
+            let sequence_hash = sequence.hash;
+            if let Some(existing) = sequences.get_mut(&sequence_hash) {
+                existing.index_asset_refs.extend(sequence.index_asset_refs);
+            } else {
+                sequences.insert(sequence_hash, sequence);
+            }
+        }
+        sequences.into_values().collect()
     }
 }
 
@@ -614,6 +753,7 @@ impl Query for Sequence {
             length: row.get(5).unwrap(),
             external_sequence: asset_ref_id.is_some(),
             asset_ref: None,
+            index_asset_refs: Vec::new(),
             workspace: None,
             asset_resolution_error: None,
         }
@@ -647,10 +787,10 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Write as _, time::Instant};
+    use std::{fs, fs::OpenOptions, io::Write, time};
 
     use gen_core::traits::Capnp as _;
-    use rand::RngExt as _;
+    use rand::RngExt;
     use sha2::Digest as _;
 
     use super::{Sequence, SequenceError};
@@ -662,13 +802,30 @@ mod tests {
         traits::Query,
     };
 
-    fn prepare_asset(context: &crate::db::DbContext, path: &str) -> AssetRef {
-        let operation_file = OperationFile::new(path);
+    fn prepare_asset(context: &crate::db::DbContext, path: &str, role: AssetRole) -> AssetRef {
+        let operation_file = OperationFile::new(path).set_role(role);
         let asset_ref = operation_file
             .prepare_asset_ref(context.workspace(), 1)
             .expect("should retain test asset");
         AssetRef::create(context.graph().conn(), &asset_ref)
             .expect("should create test asset reference");
+        asset_ref
+    }
+
+    fn prepare_derived_asset(
+        context: &crate::db::DbContext,
+        path: &str,
+        role: AssetRole,
+        upstream_asset_ref_id: &gen_core::HashId,
+    ) -> AssetRef {
+        let operation_file = OperationFile::new(path)
+            .set_role(role)
+            .set_upstream_asset_ref_id(upstream_asset_ref_id);
+        let asset_ref = operation_file
+            .prepare_asset_ref(context.workspace(), 1)
+            .expect("should retain derived test asset");
+        AssetRef::create(context.graph().conn(), &asset_ref)
+            .expect("should create derived test asset reference");
         asset_ref
     }
 
@@ -746,7 +903,7 @@ mod tests {
             .unwrap()
             .join("reference.fa");
         fs::write(&fasta_path, ">chr1\nAACCGGTTAA\n").unwrap();
-        let asset_ref = prepare_asset(&context, fasta_path.to_str().unwrap());
+        let asset_ref = prepare_asset(&context, fasta_path.to_str().unwrap(), AssetRole::Input);
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .name("chr1")
@@ -827,7 +984,7 @@ mod tests {
             ">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGA\n",
         )
         .unwrap();
-        let asset_ref = prepare_asset(&context, temp_file_path.to_str().unwrap());
+        let asset_ref = prepare_asset(&context, temp_file_path.to_str().unwrap(), AssetRole::Input);
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .name("m123")
@@ -935,7 +1092,7 @@ mod tests {
         let context = setup_gen_on_disk();
         let temp_file_path = context.workspace().repo_root().unwrap().join("simple.fa");
         fs::write(&temp_file_path, ">m123\nAAACCCTTT\n").unwrap();
-        let asset_ref = prepare_asset(&context, temp_file_path.to_str().unwrap());
+        let asset_ref = prepare_asset(&context, temp_file_path.to_str().unwrap(), AssetRole::Input);
         let sequence = Sequence::new()
             .sequence_type("circular")
             .name("m123")
@@ -962,10 +1119,66 @@ mod tests {
     }
 
     #[test]
+    fn test_on_disk_sequence_uses_retained_index_asset() {
+        let context = setup_gen_on_disk();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let fasta_path = repo_root.join("indexed.fa");
+        let index_path = repo_root.join("indexed.fa.fai");
+        fs::write(&fasta_path, ">chr1\nACGTACGT\n").unwrap();
+        fs::write(&index_path, "chr1\t8\t6\t8\t9\n").unwrap();
+        let asset_ref = prepare_asset(&context, fasta_path.to_str().unwrap(), AssetRole::Input);
+        let index_asset_ref = prepare_derived_asset(
+            &context,
+            index_path.to_str().unwrap(),
+            AssetRole::SequenceIndex,
+            &asset_ref.id,
+        );
+        let unresolved_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .name("chr1")
+            .asset_ref_id(Some(&asset_ref.id))
+            .length(8)
+            .save(context.graph().conn())
+            .unwrap();
+        let sequence = Sequence::query_by_ids(
+            context.graph().conn(),
+            context.workspace(),
+            &[unresolved_sequence.hash],
+            None,
+        )
+        .remove(0);
+        fs::remove_file(&fasta_path).unwrap();
+        fs::remove_file(&index_path).unwrap();
+
+        assert_eq!(
+            sequence.get_sequence(2, 6).unwrap(),
+            "GTAC",
+            "should read the retained sequence through its index"
+        );
+        assert!(
+            sequence
+                .index_asset_refs
+                .iter()
+                .any(|asset_ref| asset_ref.id == index_asset_ref.id),
+            "resolved sequence should include its retained index AssetRef"
+        );
+        assert_eq!(
+            index_asset_ref.upstream_asset_ref_id,
+            Some(asset_ref.id),
+            "index AssetRef should link to the immutable sequence AssetRef"
+        );
+    }
+
+    #[test]
+    // #[cfg(feature = "benchmark")]
     fn test_cached_sequence_performance() {
         let context = setup_gen_on_disk();
-        let fasta_path = context.workspace().repo_root().unwrap().join("large.fa");
-        let mut file = fs::File::create(&fasta_path).unwrap();
+        let temp_file_path = context.workspace().repo_root().unwrap().join("large.fa");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&temp_file_path)
+            .unwrap();
         writeln!(file, ">chr22").unwrap();
         for _ in 1..3_000_000 {
             writeln!(
@@ -974,31 +1187,44 @@ mod tests {
             )
             .unwrap();
         }
-        let asset_ref = prepare_asset(&context, fasta_path.to_str().unwrap());
-        let sequence = Sequence::new()
+        // write index
+        let index_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("large.fa.fai");
+        fs::write(&index_path, "chr22	203999932	7	68	69\n").unwrap();
+        let asset_ref = prepare_asset(&context, temp_file_path.to_str().unwrap(), AssetRole::Input);
+        prepare_derived_asset(
+            &context,
+            index_path.to_str().unwrap(),
+            AssetRole::SequenceIndex,
+            &asset_ref.id,
+        );
+        let unresolved_sequence = Sequence::new()
             .sequence_type("DNA")
-            .name("chr22")
             .asset_ref_id(Some(&asset_ref.id))
+            .name("chr22")
             .length(203_999_932)
             .save(context.graph().conn())
             .unwrap();
         let sequence = Sequence::query_by_ids(
             context.graph().conn(),
             context.workspace(),
-            &[sequence.hash],
+            &[unresolved_sequence.hash],
             None,
         )
         .remove(0);
-
-        let start_time = Instant::now();
+        let s = time::Instant::now();
         for _ in 1..1_000_000 {
-            let start = rand::rng().random_range(1_i64..200_000_000_i64);
+            let start = rand::rng().random_range(1..200_000_000);
+
             sequence.get_sequence(start, start + 20).unwrap();
         }
-        let elapsed = start_time.elapsed().as_secs();
+        let elapsed = s.elapsed().as_secs();
         assert!(
             elapsed < 5,
-            "cached sequence benchmark failed: {elapsed}s elapsed"
+            "Cached sequence benchmark failed: {elapsed}s elapsed"
         );
     }
 
@@ -1015,6 +1241,7 @@ mod tests {
             length: 4,
             external_sequence: true,
             asset_ref: None,
+            index_asset_refs: Vec::new(),
             workspace: None,
             asset_resolution_error: None,
         };

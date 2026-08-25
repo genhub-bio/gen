@@ -733,6 +733,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -872,6 +873,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 

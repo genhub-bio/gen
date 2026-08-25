@@ -774,6 +774,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _operation = update_with_vcf(
@@ -836,6 +837,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _operation = update_with_vcf(
@@ -904,6 +906,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _operation = update_with_vcf(
@@ -962,6 +965,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -1004,6 +1008,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let res = update_with_vcf(
@@ -1039,6 +1044,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _operation = update_with_vcf(
@@ -1084,6 +1090,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         update_with_vcf(
@@ -1127,6 +1134,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -1173,6 +1181,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -1220,6 +1229,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -1276,6 +1286,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -1315,6 +1326,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -1366,6 +1378,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -1432,6 +1445,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -1525,6 +1539,7 @@ mod tests {
             &collection,
             "reference",
             false,
+            &[],
         )
         .unwrap();
 
@@ -1583,6 +1598,7 @@ mod tests {
             &collection,
             "parent-a",
             false,
+            &[],
         )
         .unwrap();
 
@@ -1592,6 +1608,7 @@ mod tests {
             &collection,
             "parent-b",
             false,
+            &[],
         )
         .unwrap();
 
@@ -1639,6 +1656,7 @@ mod tests {
             &collection,
             "reference",
             false,
+            &[],
         )
         .unwrap();
 

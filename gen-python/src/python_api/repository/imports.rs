@@ -36,18 +36,20 @@ impl PyRepository {
         run_operation_write(
             self,
             |ctx| {
-                let operation_summary = import_fasta(ctx, &filename, &collection, &sample, shallow)
-                    .map_err(|e| match e {
-                        FastaError::OperationError(OperationError::NoChanges) => {
-                            PyRuntimeError::new_err(format!(
-                                "'{}': contents already exist",
-                                filename
-                            ))
-                        }
-                        _ => {
-                            PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename))
-                        }
-                    })?;
+                let operation_summary = import_fasta(
+                    ctx,
+                    &filename,
+                    &collection,
+                    &sample,
+                    shallow,
+                    &[],
+                )
+                .map_err(|e| match e {
+                    FastaError::OperationError(OperationError::NoChanges) => {
+                        PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
+                    }
+                    _ => PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename)),
+                })?;
                 Ok((
                     self.block_groups_in_sample(&collection, &sample),
                     operation_summary,
@@ -90,6 +92,7 @@ impl PyRepository {
                     &collection,
                     &reference,
                     shallow,
+                    &[],
                 )
                 .map_err(|e| match e {
                     FastaError::OperationError(OperationError::NoChanges) => {

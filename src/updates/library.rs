@@ -528,6 +528,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -594,6 +595,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -662,6 +664,7 @@ mod tests {
             &collection,
             "simple",
             false,
+            &[],
         )
         .unwrap();
         add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
@@ -723,6 +726,7 @@ mod tests {
             &collection,
             "simple",
             false,
+            &[],
         )
         .unwrap();
         add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
@@ -779,6 +783,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -842,6 +847,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -900,6 +906,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 
@@ -963,6 +970,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 

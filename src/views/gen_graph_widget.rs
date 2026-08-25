@@ -1099,6 +1099,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         update_with_vcf(
@@ -1161,6 +1162,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
 

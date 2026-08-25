@@ -54,6 +54,8 @@ pub struct OperationFile {
     pub file_path: String,
     pub file_type: FileTypes,
     pub checksum_override: Option<Sha256Hash>,
+    pub role: AssetRole,
+    pub upstream_asset_ref_id: Option<HashId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -80,6 +82,8 @@ impl OperationFile {
             file_path,
             file_type,
             checksum_override: None,
+            role: AssetRole::Input,
+            upstream_asset_ref_id: None,
         }
     }
 
@@ -90,6 +94,16 @@ impl OperationFile {
 
     pub fn set_checksum_override(mut self, checksum: Sha256Hash) -> Self {
         self.checksum_override = Some(checksum);
+        self
+    }
+
+    pub fn set_role(mut self, role: AssetRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    pub fn set_upstream_asset_ref_id(mut self, upstream_asset_ref_id: &HashId) -> Self {
+        self.upstream_asset_ref_id = Some(*upstream_asset_ref_id);
         self
     }
 
@@ -113,20 +127,20 @@ impl OperationFile {
                 &file_addition.asset_uri,
                 file_type,
                 file_addition.checksum.as_ref(),
-                &AssetRole::Input,
+                &self.role,
                 Some(&logical_path),
                 Some(&self.filename),
-                None,
+                self.upstream_asset_ref_id.as_ref(),
             ),
             uri: file_addition.asset_uri,
             file_type: file_type.to_string(),
             checksum: file_addition.checksum,
             size: None,
-            role: AssetRole::Input,
+            role: self.role.clone(),
             logical_path: Some(logical_path),
             name: Some(self.filename.clone()),
             created_on,
-            upstream_asset_ref_id: None,
+            upstream_asset_ref_id: self.upstream_asset_ref_id,
         })
     }
 

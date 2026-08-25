@@ -83,6 +83,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
@@ -137,6 +138,7 @@ mod tests {
             &collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         let _ = update_with_fasta(

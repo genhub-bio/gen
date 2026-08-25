@@ -120,6 +120,7 @@ mod tests {
             "test",
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         crate::commands::graph_operations::derive_chunks::derive_chunks_operation(
