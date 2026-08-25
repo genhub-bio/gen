@@ -70,6 +70,33 @@ pub enum NodeError {
 }
 
 impl Node {
+    /// Creates nodes in bounded batches, retaining any row that already has the same identifier.
+    #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, nodes)))]
+    pub fn bulk_create(conn: &GraphConnection, nodes: &[Node]) -> Result<(), NodeError> {
+        let batch_size = traits::max_rows_per_batch(conn, 2);
+
+        for chunk in nodes.chunks(batch_size) {
+            let mut sql = String::from("INSERT OR IGNORE INTO nodes (id, sequence_hash) VALUES ");
+            for row_index in 0..chunk.len() {
+                if row_index > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?, ?)");
+            }
+            sql.push(';');
+
+            let mut values = Vec::with_capacity(chunk.len() * 2);
+            for node in chunk {
+                values.push(Value::from(node.id));
+                values.push(Value::from(node.sequence_hash));
+            }
+            let mut statement = conn.prepare_cached(&sql)?;
+            statement.execute(rusqlite::params_from_iter(values))?;
+        }
+
+        Ok(())
+    }
+
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(conn, sequence_hash, node_hash))

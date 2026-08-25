@@ -91,25 +91,36 @@ pub fn import_gfa(
     let bar = progress_bar.add(get_time_elapsed_bar());
     bar.set_message("Parsing GFA");
     let gfa: Gfa<String, (), ()> = Gfa::parse_gfa_file(gfa_path.to_str().unwrap());
-    let mut sequences_by_segment_id: HashMap<&String, Sequence> = HashMap::new();
+    let mut sequence_lengths_by_segment_id: HashMap<&String, i64> = HashMap::new();
     let mut node_ids_by_segment_id: HashMap<&String, HashId> = HashMap::new();
     bar.finish();
 
     let bar = progress_bar.add(get_progress_bar(gfa.segments.len() as u64));
     bar.set_message("Parsing Segments");
+    let mut sequences = Vec::with_capacity(gfa.segments.len());
+    let mut nodes = Vec::with_capacity(gfa.segments.len());
     for segment in &gfa.segments {
         let input_sequence = segment.sequence.get_string(&gfa.sequence);
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence(input_sequence)
-            .save(conn)?;
-        sequences_by_segment_id.insert(&segment.id, sequence.clone());
+            .build();
+        sequence_lengths_by_segment_id.insert(&segment.id, sequence.length);
         // TODO: Node hash is always new, it's sorted by insert time via being a v7 uuid but maybe want to
         // define the hash itself for idempotency?
-        let node_id = Node::create(conn, &sequence.hash, &HashId::uuid7())?;
+        let node_id = HashId::uuid7();
         node_ids_by_segment_id.insert(&segment.id, node_id);
+        nodes.push(Node {
+            id: node_id,
+            sequence_hash: sequence.hash,
+        });
+        sequences.push(sequence);
         bar.inc(1);
     }
+    Sequence::bulk_save(conn, &sequences)?;
+    Node::bulk_create(conn, &nodes)?;
+    drop(sequences);
+    drop(nodes);
     bar.finish();
 
     let mut edges = IndexSet::new();
@@ -119,14 +130,14 @@ pub fn import_gfa(
 
     bar.set_message("Parsing Links");
     for link in &gfa.links {
-        let source = sequences_by_segment_id.get(&link.from).unwrap();
+        let source_length = *sequence_lengths_by_segment_id.get(&link.from).unwrap();
         let source_node_id = *node_ids_by_segment_id.get(&link.from).unwrap();
         source_refs_in_links.insert(&link.from);
         let target_node_id = *node_ids_by_segment_id.get(&link.to).unwrap();
         target_refs_in_links.insert(&link.to);
         edges.insert(edge_data_from_fields(
             source_node_id,
-            source.length,
+            source_length,
             bool_to_strand(link.from_dir),
             target_node_id,
             bool_to_strand(link.to_dir),
@@ -154,10 +165,10 @@ pub fn import_gfa(
 
     for target_ref in pure_target_refs {
         let target_node_id = *node_ids_by_segment_id.get(target_ref).unwrap();
-        let target_sequence = sequences_by_segment_id.get(target_ref).unwrap();
+        let target_length = *sequence_lengths_by_segment_id.get(target_ref).unwrap();
         edges.insert(edge_data_from_fields(
             target_node_id,
-            target_sequence.length,
+            target_length,
             Strand::Forward,
             PATH_END_NODE_ID,
             Strand::Forward,
@@ -171,7 +182,7 @@ pub fn import_gfa(
         let mut source_coordinate = 0;
         let mut source_strand = Strand::Forward;
         for (index, segment_id) in input_path.segments.iter().enumerate() {
-            let target = sequences_by_segment_id.get(segment_id).unwrap();
+            let target_length = *sequence_lengths_by_segment_id.get(segment_id).unwrap();
             let target_node_id = *node_ids_by_segment_id.get(segment_id).unwrap();
             let target_strand = bool_to_strand(input_path.strands[index]);
             edges.insert(edge_data_from_fields(
@@ -182,7 +193,7 @@ pub fn import_gfa(
                 target_strand,
             ));
             source_node_id = target_node_id;
-            source_coordinate = target.length;
+            source_coordinate = target_length;
             source_strand = target_strand;
         }
         edges.insert(edge_data_from_fields(
@@ -203,7 +214,7 @@ pub fn import_gfa(
         let mut source_coordinate = 0;
         let mut source_strand = Strand::Forward;
         for (index, segment_id) in input_walk.segments.iter().enumerate() {
-            let target = sequences_by_segment_id.get(segment_id).unwrap();
+            let target_length = *sequence_lengths_by_segment_id.get(segment_id).unwrap();
             let target_node_id = *node_ids_by_segment_id.get(segment_id).unwrap();
             let target_strand = bool_to_strand(input_walk.strands[index]);
             edges.insert(edge_data_from_fields(
@@ -214,7 +225,7 @@ pub fn import_gfa(
                 target_strand,
             ));
             source_node_id = target_node_id;
-            source_coordinate = target.length;
+            source_coordinate = target_length;
             source_strand = target_strand;
         }
         edges.insert(edge_data_from_fields(
@@ -233,7 +244,20 @@ pub fn import_gfa(
     let edge_data = edges.into_iter().collect::<Vec<EdgeData>>();
     let edge_ids = Edge::bulk_create(conn, &edge_data);
 
-    let mut created_blockgroup_edges: IndexSet<HashId> = IndexSet::new();
+    // Every imported edge belongs to this block group regardless of how many paths traverse it.
+    // Insert that association once up front so path count does not multiply identical writes.
+    BlockGroupEdge::bulk_create(
+        conn,
+        &edge_ids
+            .iter()
+            .map(|id| BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: *id,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+            })
+            .collect::<Vec<BlockGroupEdgeData>>(),
+    );
 
     for input_path in &gfa.paths {
         let path_name = &input_path.name;
@@ -243,7 +267,7 @@ pub fn import_gfa(
         let mut path_edge_ids = vec![];
         let mut path_edge_data = vec![];
         for (index, segment_id) in input_path.segments.iter().enumerate() {
-            let target = sequences_by_segment_id.get(segment_id).unwrap();
+            let target_length = *sequence_lengths_by_segment_id.get(segment_id).unwrap();
             let target_node_id = *node_ids_by_segment_id.get(segment_id).unwrap();
             let target_strand = bool_to_strand(input_path.strands[index]);
             let key = edge_data_from_fields(
@@ -257,7 +281,7 @@ pub fn import_gfa(
             path_edge_ids.push(edge_id);
             path_edge_data.push(key);
             source_node_id = target_node_id;
-            source_coordinate = target.length;
+            source_coordinate = target_length;
             source_strand = target_strand;
         }
         let key = edge_data_from_fields(
@@ -270,20 +294,6 @@ pub fn import_gfa(
         let edge_id = key.id_hash();
         path_edge_ids.push(edge_id);
         path_edge_data.push(key);
-        created_blockgroup_edges.extend(path_edge_ids.iter());
-
-        BlockGroupEdge::bulk_create(
-            conn,
-            &path_edge_ids
-                .iter()
-                .map(|id| BlockGroupEdgeData {
-                    block_group_id: block_group.id,
-                    edge_id: *id,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                })
-                .collect::<Vec<BlockGroupEdgeData>>(),
-        );
         Path::validate_edges_in_memory(&path_edge_ids, &path_edge_data)?;
         Path::create_with_validated_edges(conn, path_name, &block_group.id, &path_edge_ids)?;
     }
@@ -296,7 +306,7 @@ pub fn import_gfa(
         let mut path_edge_ids = vec![];
         let mut path_edge_data = vec![];
         for (index, segment_id) in input_walk.segments.iter().enumerate() {
-            let target = sequences_by_segment_id.get(segment_id).unwrap();
+            let target_length = *sequence_lengths_by_segment_id.get(segment_id).unwrap();
             let target_node_id = *node_ids_by_segment_id.get(segment_id).unwrap();
             let target_strand = bool_to_strand(input_walk.strands[index]);
             let key = edge_data_from_fields(
@@ -310,7 +320,7 @@ pub fn import_gfa(
             path_edge_ids.push(edge_id);
             path_edge_data.push(key);
             source_node_id = target_node_id;
-            source_coordinate = target.length;
+            source_coordinate = target_length;
             source_strand = target_strand;
         }
         let key = edge_data_from_fields(
@@ -323,43 +333,9 @@ pub fn import_gfa(
         let edge_id = key.id_hash();
         path_edge_ids.push(edge_id);
         path_edge_data.push(key);
-        created_blockgroup_edges.extend(path_edge_ids.iter());
-
-        BlockGroupEdge::bulk_create(
-            conn,
-            &path_edge_ids
-                .iter()
-                .map(|id| BlockGroupEdgeData {
-                    block_group_id: block_group.id,
-                    edge_id: *id,
-                    chromosome_index: NO_CHROMOSOME_INDEX,
-                    phased: 0,
-                })
-                .collect::<Vec<BlockGroupEdgeData>>(),
-        );
         Path::validate_edges_in_memory(&path_edge_ids, &path_edge_data)?;
         Path::create_with_validated_edges(conn, path_name, &block_group.id, &path_edge_ids)?;
     }
-
-    // make any block group edges not in paths or walks
-    BlockGroupEdge::bulk_create(
-        conn,
-        &edge_ids
-            .iter()
-            .filter_map(|id| {
-                if !created_blockgroup_edges.contains(id) {
-                    Some(BlockGroupEdgeData {
-                        block_group_id: block_group.id,
-                        edge_id: *id,
-                        chromosome_index: NO_CHROMOSOME_INDEX,
-                        phased: 0,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<BlockGroupEdgeData>>(),
-    );
 
     // check the graph for cycles and make start/end nodes if so
     let bar = progress_bar.add(get_progress_bar(None));
