@@ -420,18 +420,21 @@ fn resolve_local_annotation_file_path(
     if !LocalAssetUri::is_local_path_or_file_uri(&file_addition.asset_uri) {
         return None;
     }
-    if let Ok(repo_root) = workspace.repo_root() {
-        let repo_path = repo_root.join(file_addition.file_path());
-        if repo_path.exists() {
-            return Some(repo_path);
-        }
+
+    // Use the versioned asset first. The local file may be replaced or updated since it was committed
+    if let Some(hashed_filename) = file_addition.hashed_filename() {
+        let asset_path = workspace.asset_dir().ok()?.join(hashed_filename);
+        return asset_path.exists().then_some(asset_path);
     }
-    let hashed_filename = file_addition.hashed_filename()?;
-    let asset_path = workspace.asset_dir().ok()?.join(hashed_filename);
-    if asset_path.exists() {
-        return Some(asset_path);
+
+    // This is a failthrough if for whatever reason the versioned store is not available.
+    let repo_root = workspace.repo_root().ok()?;
+    let repo_path = repo_root.join(file_addition.file_path());
+    if repo_path.exists() {
+        Some(repo_path)
+    } else {
+        None
     }
-    None
 }
 
 /// Builds the stable filename used when a remote annotation or index is cached locally.
@@ -569,8 +572,15 @@ fn load_annotation_index(
             .as_ref()
             .expect("should have index file addition when index type is tabix");
         if LocalAssetUri::is_local_path_or_file_uri(&index_file_addition.asset_uri) {
-            resolve_local_annotation_file_path(workspace, index_file_addition)
-                .ok_or("Annotation index file not found in repo or assets")?
+            resolve_local_annotation_file_path(workspace, index_file_addition).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "annotation index asset is unavailable: {}",
+                        index_file_addition.asset_uri
+                    ),
+                )
+            })?
         } else {
             cache_remote_annotation_asset(workspace, index_file_addition, "annotation-indexes")?
         }
@@ -724,9 +734,7 @@ pub fn load_annotation_file_track(
 ) -> Result<AnnotationFileTrackLoadResult, Box<dyn Error>> {
     let mut file_path =
         resolve_local_annotation_file_path(request.workspace, &request.entry.file_addition);
-    let index = load_annotation_index(request.workspace, request.entry, file_path.as_deref())
-        .ok()
-        .flatten();
+    let index = load_annotation_index(request.workspace, request.entry, file_path.as_deref())?;
     let index_available = index.is_some();
 
     if index_available && (request.block_group_name.is_none() || request.query_window.is_none()) {
@@ -756,7 +764,14 @@ pub fn load_annotation_file_track(
     } else {
         if file_path.is_none() {
             if LocalAssetUri::is_local_path_or_file_uri(&request.entry.file_addition.asset_uri) {
-                return Err("Annotation file not found in repo or assets".into());
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "annotation asset is unavailable: {}",
+                        request.entry.file_addition.asset_uri
+                    ),
+                )
+                .into());
             }
             file_path = Some(cache_remote_annotation_asset(
                 request.workspace,
@@ -862,9 +877,14 @@ mod tests {
     use gen_core::{HashId, Sha256Hash, Strand};
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
-        annotations::add_annotation, block_group::BlockGroup, file_types::FileTypes, sample::Sample,
+        annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
+        block_group::BlockGroup,
+        file_types::FileTypes,
+        operations::commit_operation_summary,
+        sample::Sample,
     };
-    use noodles::tabix;
+    use noodles::{bgzf, core::Position, csi, tabix};
+    use tempfile::{NamedTempFile, tempdir};
 
     use super::{
         AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
@@ -875,10 +895,12 @@ mod tests {
     use crate::{
         graphs::combinatorial_library::parse_library,
         imports::fasta::import_fasta,
-        test_helpers::setup_gen,
+        test_helpers::{setup_gen, setup_gen_on_disk},
         updates::{library::update_with_library, sequence::update_with_sequence},
         views::{
-            annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
+            annotation_files::{
+                AnnotationAssetEntry, AnnotationFileEntry, load_annotation_file_entries,
+            },
             annotation_groups::load_annotation_group_entries,
         },
     };
@@ -1541,5 +1563,132 @@ mod tests {
         )
         .expect("should reuse the cached file");
         assert!(!cached_bytes.is_empty());
+    }
+
+    #[test]
+    fn test_annotations_use_versioned_assets() {
+        // Add annotations and then delete the local file, ensuring assets come from the versioned asset store
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let mut fasta_file = NamedTempFile::new().expect("should create temporary FASTA file");
+        fasta_file
+            .write_all(b">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGA\n")
+            .expect("should write FASTA");
+        let fasta_path = fasta_file
+            .path()
+            .to_str()
+            .expect("should encode FASTA path")
+            .to_string();
+        let operation_summary = import_fasta(
+            &context,
+            &fasta_path,
+            "test",
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .expect("should import FASTA");
+        commit_operation_summary(&context, &operation_summary).expect("should commit FASTA");
+
+        let annotation_directory = tempdir().expect("should create annotation directory");
+        let annotation_path = annotation_directory.path().join("genes.gff3.gz");
+        let index_path = annotation_directory.path().join("genes.gff3.gz.tbi");
+        let mut annotation_writer = fs::File::create(&annotation_path)
+            .map(bgzf::io::Writer::new)
+            .expect("should create compressed GFF");
+        let mut indexer = tabix::index::Indexer::default();
+        indexer.set_header(csi::binning_index::index::header::Builder::gff().build());
+        let start_position = annotation_writer.virtual_position();
+        writeln!(
+            annotation_writer,
+            "##gff-version 3\nm123\tgen-test\tgene\t5\t20\t.\t+\t.\tID=gene-a0001"
+        )
+        .expect("should write GFF annotation");
+        let end_position = annotation_writer.virtual_position();
+        annotation_writer
+            .finish()
+            .expect("should finish compressed GFF");
+        indexer
+            .add_record(
+                "m123",
+                Position::try_from(5).expect("should create GFF start position"),
+                Position::try_from(20).expect("should create GFF end position"),
+                csi::binning_index::index::reference_sequence::bin::Chunk::new(
+                    start_position,
+                    end_position,
+                ),
+            )
+            .expect("should index GFF annotation");
+        let index = indexer.build();
+        let mut index_writer = fs::File::create(&index_path)
+            .map(tabix::io::Writer::new)
+            .expect("should create tabix index");
+        index_writer
+            .write_index(&index)
+            .expect("should write tabix index");
+        index_writer
+            .try_finish()
+            .expect("should finish tabix index");
+        let annotation_path = annotation_path
+            .to_str()
+            .expect("should encode annotation path")
+            .to_string();
+        let index_path = index_path
+            .to_str()
+            .expect("should encode index path")
+            .to_string();
+
+        add_annotation_file(
+            &context,
+            &annotation_path,
+            Some("gff3"),
+            Some(&index_path),
+            Some("genes"),
+            Some("add genes"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should commit annotation file");
+        fs::remove_file(&annotation_path).expect("should remove original annotation source");
+        fs::remove_file(&index_path).expect("should remove original annotation index");
+
+        let entry = load_annotation_file_entries(conn, None)
+            .into_iter()
+            .find(|entry| entry.name.as_deref() == Some("genes"))
+            .expect("should find committed annotation entry");
+        let block_group = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find imported block group");
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)
+            .expect("should load block group graph");
+        let node_filter = graph
+            .nodes()
+            .map(|node| node.node_id)
+            .collect::<HashSet<_>>();
+        let result = load_annotation_file_track(&AnnotationFileTrackRequest {
+            conn,
+            history_ref: None,
+            workspace: context.workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_name: Some("m123"),
+            query_window: Some((0, 34)),
+            node_filter: &node_filter,
+            entry: &entry,
+        })
+        .expect("should load annotation from the retained asset");
+
+        assert!(
+            result.index_available,
+            "retained tabix index should be detected"
+        );
+        assert!(
+            result
+                .track
+                .annotations
+                .iter()
+                .any(|annotation| annotation.name == "gene-a0001"),
+            "retained annotation should contain gene-a0001"
+        );
     }
 }
