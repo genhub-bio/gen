@@ -654,7 +654,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(operation_summary) => operation_summary,
                 Err(err) => {
                     graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
-                    return Err(err);
+                    return Err(err.into());
                 }
             };
             graph_conn.execute("END TRANSACTION", [])?;
