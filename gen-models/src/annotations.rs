@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::anyhow;
 use gen_core::{
     DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, calculate_hash,
     config::Workspace,
@@ -21,6 +20,7 @@ use crate::{
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     history::{HistoryStore, dolt::DoltHistoryStore},
     operations::{FileAddition, OperationFile, OperationInfo, OperationSummary, track_asset_refs},
+    region::GenRegionError,
     traits::Query,
 };
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -286,6 +286,18 @@ pub enum AnnotationError {
     AccessionError(#[from] AccessionError),
     #[error("Annotation extra serialization error: {0}")]
     SerializationError(String),
+}
+
+#[derive(Debug, Error)]
+pub enum AddAnnotationError {
+    #[error("Region parse error: {0}")]
+    RegionParse(#[from] gen_core::region::RegionParseError),
+    #[error("Region resolution error: {0}")]
+    RegionResolution(#[from] GenRegionError),
+    #[error("Accession error: {0}")]
+    Accession(#[from] AccessionError),
+    #[error("Annotation error: {0}")]
+    Annotation(#[from] AnnotationError),
 }
 
 impl Annotation {
@@ -633,6 +645,12 @@ pub enum AnnotationFileError {
     DatabaseError(#[from] rusqlite::Error),
     #[error("File addition error: {0}")]
     FileAdditionError(#[from] FileAdditionError),
+    #[error("Operation error: {0}")]
+    OperationError(#[from] OperationError),
+    #[error(
+        "Unable to detect annotation file format from the file extension. Use --format to specify it explicitly."
+    )]
+    MissingFileExtension,
     #[error("Unsupported annotation file type: {0}")]
     UnsupportedFileType(String),
 }
@@ -709,7 +727,7 @@ pub fn add_annotation(
     group: Option<&str>,
     sample: &str,
     region: &str,
-) -> Result<OperationSummary, Box<dyn std::error::Error>> {
+) -> Result<OperationSummary, AddAnnotationError> {
     let graph_conn = context.graph().conn();
     let parsed_region = Region::parse(region)?;
     let resolved_region = crate::region::resolve(&parsed_region, graph_conn, collection, sample)?;
@@ -766,18 +784,15 @@ pub fn add_annotation_file(
     name: Option<&str>,
     message: Option<&str>,
     checksum_overrides: AnnotationFileChecksumOverrides,
-) -> Result<DoltHashId, Box<dyn std::error::Error>> {
+) -> Result<DoltHashId, AnnotationFileError> {
     let workspace = context.workspace();
     let graph_conn = context.graph().conn();
 
     let file_type = match format {
         Some(format) => parse_annotation_file_type(format)?,
         None => {
-            let ext = annotation_file_extension(path).ok_or_else(|| {
-                anyhow!(
-                    "Unable to detect annotation file format from the file extension. Use --format to specify it explicitly."
-                )
-            })?;
+            let ext =
+                annotation_file_extension(path).ok_or(AnnotationFileError::MissingFileExtension)?;
             parse_annotation_file_type(&ext)?
         }
     };
@@ -1519,10 +1534,10 @@ mod tests {
             AnnotationFileChecksumOverrides::default(),
         )
         .unwrap_err();
-        let op_err = err
-            .downcast_ref::<OperationError>()
-            .expect("should be an OperationError");
-        assert_eq!(*op_err, OperationError::NoChanges);
+        assert!(matches!(
+            err,
+            AnnotationFileError::OperationError(OperationError::NoChanges)
+        ));
     }
 
     #[test]
