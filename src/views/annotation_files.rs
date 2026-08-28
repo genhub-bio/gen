@@ -65,10 +65,15 @@ pub fn load_annotation_file_entries(
         let index_file_addition = annotation_file.index.as_ref().map(asset_entry_from_ref);
         let name = asset_ref.name.clone();
         let display_name = name.clone().unwrap_or_else(|| {
-            FsPath::new(file_addition.file_path())
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| file_addition.file_path().to_string())
+            FsPath::new(
+                asset_ref
+                    .logical_path
+                    .as_deref()
+                    .unwrap_or_else(|| file_addition.file_path()),
+            )
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| file_addition.file_path().to_string())
         });
         entries.push(AnnotationFileEntry {
             file_addition,
@@ -84,7 +89,10 @@ pub fn load_annotation_file_entries(
 mod tests {
     use std::path::PathBuf;
 
-    use gen_models::annotations::{AnnotationFileChecksumOverrides, add_annotation_file};
+    use gen_models::{
+        annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
+        assets::Assets,
+    };
 
     use super::load_annotation_file_entries;
     use crate::test_helpers::setup_gen_on_disk;
@@ -143,5 +151,64 @@ mod tests {
             .expect("remote index should remain visible");
         assert_eq!(index.asset_uri, index_uri);
         assert_eq!(index.checksum, None);
+    }
+
+    #[test]
+    fn test_load_annotation_file_entries_uses_remote_filename() {
+        let context = setup_gen_on_disk();
+        let annotation_uri = "https://example.com/annotations/genes.gff3";
+
+        add_annotation_file(
+            &context,
+            annotation_uri,
+            None,
+            None,
+            None,
+            Some("add remote annotation"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should create remote annotation file operation");
+
+        let entries = load_annotation_file_entries(context.graph().conn(), None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name, "genes.gff3");
+        assert_eq!(entries[0].file_addition.asset_uri, annotation_uri);
+        assert_eq!(entries[0].file_addition.checksum, None);
+    }
+
+    #[test]
+    fn test_uses_logical_filename_for_unnamed_retained_annotation() {
+        let context = setup_gen_on_disk();
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+
+        add_annotation_file(
+            &context,
+            fixture_path.to_str().expect("should encode fixture path"),
+            None,
+            None,
+            None,
+            Some("add unnamed annotation"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should create annotation file operation");
+
+        let entries = load_annotation_file_entries(context.graph().conn(), None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name, "simple.gff");
+        assert_ne!(
+            entries[0].display_name,
+            entries[0].file_addition.file_path()
+        );
+
+        let annotation_asset = Assets::get_annotation_files(context.graph().conn(), None)
+            .expect("should load annotation asset refs")
+            .into_iter()
+            .next()
+            .expect("should find annotation asset ref")
+            .annotation;
+        let versioned_store_path = annotation_asset
+            .versioned_store_path(context.workspace())
+            .expect("should locate annotation asset in versioned store");
+        assert!(versioned_store_path.is_file());
     }
 }
