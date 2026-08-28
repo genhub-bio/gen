@@ -1565,11 +1565,9 @@ mod tests {
         assert!(!cached_bytes.is_empty());
     }
 
-    #[test]
-    fn test_annotations_use_versioned_assets() {
-        // Add annotations and then delete the local file, ensuring assets come from the versioned asset store
+    fn setup_versioned_annotation_assets()
+    -> (gen_models::db::DbContext, tempfile::TempDir, String, String) {
         let context = setup_gen_on_disk();
-        let conn = context.graph().conn();
         let mut fasta_file = NamedTempFile::new().expect("should create temporary FASTA file");
         fasta_file
             .write_all(b">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGA\n")
@@ -1648,9 +1646,16 @@ mod tests {
             AnnotationFileChecksumOverrides::default(),
         )
         .expect("should commit annotation file");
-        fs::remove_file(&annotation_path).expect("should remove original annotation source");
-        fs::remove_file(&index_path).expect("should remove original annotation index");
+        (context, annotation_directory, annotation_path, index_path)
+    }
 
+    #[test]
+    fn test_annotations_use_versioned_assets_after_source_removal() {
+        let (context, _annotation_directory, annotation_path, index_path) =
+            setup_versioned_annotation_assets();
+        fs::remove_file(annotation_path).expect("should remove original annotation source");
+        fs::remove_file(index_path).expect("should remove original annotation index");
+        let conn = context.graph().conn();
         let entry = load_annotation_file_entries(conn, None)
             .into_iter()
             .find(|entry| entry.name.as_deref() == Some("genes"))
@@ -1677,7 +1682,55 @@ mod tests {
             entry: &entry,
         })
         .expect("should load annotation from the retained asset");
+        assert!(
+            result.index_available,
+            "retained tabix index should be detected"
+        );
+        assert!(
+            result
+                .track
+                .annotations
+                .iter()
+                .any(|annotation| annotation.name == "gene-a0001"),
+            "retained annotation should contain gene-a0001"
+        );
+    }
 
+    #[test]
+    fn test_annotations_ignore_altered_local_sources() {
+        let (context, _annotation_directory, annotation_path, index_path) =
+            setup_versioned_annotation_assets();
+        fs::write(annotation_path, b"altered local annotation")
+            .expect("should alter original annotation source");
+        fs::write(index_path, b"altered local index")
+            .expect("should alter original annotation index");
+        let conn = context.graph().conn();
+        let entry = load_annotation_file_entries(conn, None)
+            .into_iter()
+            .find(|entry| entry.name.as_deref() == Some("genes"))
+            .expect("should find committed annotation entry");
+        let block_group = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find imported block group");
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)
+            .expect("should load block group graph");
+        let node_filter = graph
+            .nodes()
+            .map(|node| node.node_id)
+            .collect::<HashSet<_>>();
+        let result = load_annotation_file_track(&AnnotationFileTrackRequest {
+            conn,
+            history_ref: None,
+            workspace: context.workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_name: Some("m123"),
+            query_window: Some((0, 34)),
+            node_filter: &node_filter,
+            entry: &entry,
+        })
+        .expect("should load annotation from the retained asset");
         assert!(
             result.index_available,
             "retained tabix index should be detected"
