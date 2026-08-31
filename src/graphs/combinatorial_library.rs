@@ -9,7 +9,7 @@ use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
-    annotations::{Annotation, AnnotationGroupSample},
+    annotations::{Annotation, AnnotationGroupSample, NewAnnotation},
     db::GraphConnection,
     errors::{BlockGroupError, NodeError, PathError, SequenceError},
     node::Node,
@@ -324,6 +324,7 @@ pub(crate) fn create_part_annotations(
     part_nodes: &[PartNode],
 ) -> Result<(), BlockGroupError> {
     AnnotationGroupSample::create(conn, group_name, sample_name)?;
+    let mut annotations = Vec::with_capacity(part_nodes.len());
     for part_node in part_nodes {
         let part = &part_node.part;
         let accession_name = format!("slot-{}-option-{}", part_node.slot, part_node.option);
@@ -343,8 +344,13 @@ pub(crate) fn create_part_annotations(
                 }],
             },
         )?;
-        Annotation::get_or_create(conn, &part.name, group_name, &accession.id, None)?;
+        annotations.push(NewAnnotation {
+            name: &part.name,
+            accession_id: accession.id,
+            extra: None,
+        });
     }
+    Annotation::bulk_create(conn, group_name, &annotations)?;
     Ok(())
 }
 

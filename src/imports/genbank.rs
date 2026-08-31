@@ -13,7 +13,7 @@ use gen_core::{
 };
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
-    annotations::Annotation,
+    annotations::{Annotation, AnnotationGroupSample, NewAnnotation},
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -381,7 +381,8 @@ fn import_locus_annotations(
             )
         });
 
-    for annotation in input.annotations.iter() {
+    let mut annotations_to_create = Vec::with_capacity(input.annotations.len());
+    for annotation in input.annotations {
         let mapped_segments = map_annotation_segments(
             &annotation.segments,
             &final_segments,
@@ -429,14 +430,16 @@ fn import_locus_annotations(
         let accession_id =
             create_accession_for_segments(conn, input.path, &accession_name, &mapped_segments)?;
 
-        let _ = Annotation::create_with_samples(
-            conn,
-            &annotation.name,
-            &annotation_group,
-            &accession_id,
-            annotation.extra.as_ref(),
-            &[input.sample],
-        )?;
+        annotations_to_create.push(NewAnnotation {
+            name: &annotation.name,
+            accession_id,
+            extra: annotation.extra.as_ref(),
+        });
+    }
+
+    Annotation::bulk_create(conn, &annotation_group, &annotations_to_create)?;
+    if !annotations_to_create.is_empty() {
+        AnnotationGroupSample::create(conn, &annotation_group, input.sample)?;
     }
 
     Ok(())
@@ -677,8 +680,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
+    use std::{
+        collections::HashSet,
+        fs::File,
+        io::BufReader,
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
 
+    use flate2::read::MultiGzDecoder;
     use gen_models::{
         annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         assets::{OperationKind, OperationLog},
@@ -1147,6 +1157,40 @@ mod tests {
             ori_segments
                 .iter()
                 .any(|segment| segment.range.start == 0 && segment.range.end == 217)
+        );
+    }
+
+    #[test]
+    fn test_imports_compressed_u00096_in_under_five_seconds() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/genbank/U00096.3.gbk.gz");
+        let file = File::open(&path).unwrap();
+        conn.execute("BEGIN TRANSACTION", []).unwrap();
+        let started_at = Instant::now();
+
+        let _ = import_genbank(
+            &context,
+            BufReader::new(MultiGzDecoder::new(file)),
+            Some("benchmark"),
+            "u00096-benchmark",
+            OperationInfo {
+                files: vec![
+                    OperationFile::new(path.to_string_lossy().to_string())
+                        .set_file_type(FileTypes::GenBank),
+                ],
+                description: "benchmark".to_string(),
+            },
+            GenBankImportOptions::default().annotation_name_from_path(&path),
+        )
+        .unwrap();
+        conn.execute("END TRANSACTION", []).unwrap();
+
+        assert!(
+            started_at.elapsed() < Duration::from_secs(5),
+            "compressed U00096.3 import took {:?}",
+            started_at.elapsed()
         );
     }
 

@@ -1,13 +1,19 @@
-use std::fs::File;
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    path::Path,
+};
 
 use anyhow::Result;
 use clap::Args;
+use flate2::read::MultiGzDecoder;
 use gen_models::{
     errors::OperationError,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},
     sample::{NewSample, Sample},
 };
+use noodles::bgzf;
 
 use crate::{
     commands::{cli_context::CliContext, commit_operation, get_default_collection},
@@ -54,11 +60,14 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
-    let mut reader: Box<dyn std::io::Read> = if cmd.path.ends_with(".gz") {
-        let file = File::open(cmd.path.clone()).unwrap();
-        Box::new(flate2::read::GzDecoder::new(file))
-    } else {
-        Box::new(File::open(cmd.path.clone()).unwrap())
+    let file = File::open(&cmd.path)?;
+    let mut reader: Box<dyn Read> = match Path::new(&cmd.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(file))),
+        Some("bgz") => Box::new(bgzf::io::Reader::new(file)),
+        _ => Box::new(file),
     };
     let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
         cmd.sample.as_deref(),
