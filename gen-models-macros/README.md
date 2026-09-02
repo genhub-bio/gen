@@ -118,7 +118,7 @@ a one-element tuple such as `(SampleSelect::Name,)` when a `Vec<(String,)>` is p
 `Vec<String>`.
 
 `only` is the terminal query-shaping step: apply filters, joins, ordering, limits, and offsets
-before it, then call `load`. A projection can contain up to eight fields and can select fields from
+before it, then call `load`. A projection can contain up to 16 fields and can select fields from
 the base model. Joined selectors still contribute filters and ordering, but not projected fields.
 
 ## Ordering and pagination
@@ -309,7 +309,7 @@ without expanding every derive.
 - At least one field must remain selectable after applying `skip`.
 - Joins require one direct, unambiguous foreign-key relationship in the live schema.
 - The same source alias cannot be joined more than once.
-- `only` supports projections of one through eight base-model fields.
+- `only` supports projections of one through 16 base-model fields.
 - `Query::process_row` returns a model directly, so a model implementation that panics while
   decoding a row cannot be converted into `ModelSelectError` without changing the `Query` trait.
 - Generated code references `gen_models`, so downstream consumers should use the macro through the

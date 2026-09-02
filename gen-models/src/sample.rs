@@ -465,12 +465,36 @@ mod tests {
             .only((SampleSelect::Name, SampleSelect::IsReference))
             .load()
             .expect("should load selected sample fields");
+        let sixteen_names = Sample::select(conn)
+            .name("alpha")
+            .only((
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+                SampleSelect::Name,
+            ))
+            .load()
+            .expect("should load a 16-field projection");
 
         assert_eq!(names, vec!["alpha", "beta"]);
         assert_eq!(
             rows,
             vec![("alpha".to_string(), false), ("beta".to_string(), true)]
         );
+        assert_eq!(sixteen_names[0].0, "alpha");
+        assert_eq!(sixteen_names[0].15, "alpha");
     }
 
     #[test]

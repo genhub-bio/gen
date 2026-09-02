@@ -220,7 +220,7 @@ where
 
 macro_rules! impl_select_projection_for_tuple {
     ($($value:ident:$index:tt),+) => {
-        impl<M, $($value),+> SelectProjection<M> for ($(SelectField<M, $value>,)+)
+        impl<Model, $($value),+> SelectProjection<Model> for ($(SelectField<Model, $value>,)+)
         where
             $($value: FromSql,)+
         {
@@ -247,6 +247,14 @@ impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4);
 impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5);
 impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6);
 impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7);
+impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8);
+impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9);
+impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10);
+impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11);
+impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12);
+impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13);
+impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13, O:14);
+impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13, O:14, P:15);
 
 #[doc(hidden)]
 pub struct SelectedFields<M, S, P> {
