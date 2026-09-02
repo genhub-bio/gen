@@ -27,16 +27,28 @@ jobs:
       - name: Install capnp (Windows)
         if: runner.os == 'Windows'
         run: choco install capnproto
+      - name: Stage bundled client (macOS)
+        if: runner.os == 'macOS'
+        run: make py-package-cli
+      - name: Stage bundled client (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --bin gen
+          New-Item -ItemType Directory -Force "gen.gen.data/scripts"
+          Copy-Item "target/release/gen.exe" "gen.gen.data/scripts/gen.exe"
       - name: Build wheels (Linux)
         if: runner.os == 'Linux'
         uses: PyO3/maturin-action@v1
         with:
           command: build
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter python${{ matrix.python-version }} --out gen-python/target/wheels
-          sccache: true
           manylinux: auto
           container: quay.io/pypa/manylinux_2_28_x86_64:latest
+          sccache: true
           before-script-linux: |
+            uv tool install "sccache>=0.10.0"
             yum install -y epel-release
             yum install -y clang llvm-devel sqlite-devel capnproto capnproto-devel pkgconfig mold
             cargo install capnpc --version ^0.24 --locked
@@ -45,6 +57,7 @@ jobs:
             mkdir -p gen-capnp-schemas/src/generated
             (cd gen-capnp-schemas && capnp compile -I . -orust:src/generated gen-core.capnp gen-models.capnp gen-schema.capnp)
             ls -la gen-capnp-schemas/src/generated
+            make py-package-cli
           working-directory: .
         env:
           CAPNP: /usr/bin/capnp
@@ -58,6 +71,21 @@ jobs:
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
           sccache: true
           working-directory: .
+      - name: Smoke test wheel (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: |
+          python -m pip install --force-reinstall --no-deps gen-python/target/wheels/*.whl
+          python -c "import gen; print(gen.__version__)"
+          gen --version
+      - name: Smoke test wheel (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wheel = Get-ChildItem "gen-python/target/wheels/*.whl"
+          python -m pip install --force-reinstall --no-deps "$($wheel.FullName)"
+          python -c "import gen; print(gen.__version__)"
+          gen --version
       - name: Upload wheels to releases
         if: runner.os != 'Windows'
         env:

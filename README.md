@@ -8,19 +8,29 @@ Gen brings version control to genetic sequences. With it, you can track variants
 
 ## Install
 
-**Gen client**: prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/genhub-bio/gen/releases): [macOS (.pkg)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg), [Linux x86_64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip), [Linux arm64 (.zip)](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
+**Gen client**: prebuilt binaries and installers are on the [releases page](https://github.com/genhub-bio/gen/releases) for [macOS](https://github.com/genhub-bio/gen/releases/download/nightly/gen.macos.pkg) and Linux ([x64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-x86_64.zip) / [arm64](https://github.com/genhub-bio/gen/releases/download/nightly/gen.linux-arm64.zip)). Gen is built primarily for Unix-like systems; on Windows, you can install [WSL](https://learn.microsoft.com/en-us/windows/wsl/) to get a Linux environment, then use the Linux binary above from inside it.
 
-**Python package**: install on macOS, Linux, or Windows using:
+You can also install it with a package manager:
+
 ```sh
 pip install gen
 ```
 
-Install the `jupyter` extra to include an interactive graph widget for Jupyter and other anywidget-compatible notebooks:
+```sh
+uv tool install gen
+```
+
+```sh
+cargo install gen
+```
+
+**Python package**: `pip install gen` also installs the Python package. Install the `jupyter` extra to include an interactive graph widget for Jupyter and other anywidget-compatible notebooks:
+
 ```sh
 pip install gen[jupyter]
 ```
 
-**R package**: install on macOS (Apple silicon) using the `remotes` package:
+**R package**: Install on macOS (Apple silicon) using the `remotes` package:
 ```r
 install.packages("remotes")
 remotes::install_url(
