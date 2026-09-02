@@ -1552,7 +1552,7 @@ mod tests {
     use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
     use gen_models::{
         accession::{Accession, AccessionSpan, NewAccession},
-        annotations::{Annotation, AnnotationGroup},
+        annotations::{Annotation, AnnotationGroup, NewAnnotation},
         block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
@@ -1750,7 +1750,16 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         AnnotationGroup::create(conn, "gene").unwrap();
-        Annotation::create(conn, name, "gene", &accession.id, None).unwrap()
+        Annotation::create(
+            conn,
+            "gene",
+            &NewAnnotation {
+                name,
+                accession_id: accession.id,
+                extra: None,
+            },
+        )
+        .unwrap()
     }
 
     /// Linear forward gene: each DNA segment becomes a node, wired into both the
@@ -2265,8 +2274,16 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         AnnotationGroup::create(&conn, "gene").unwrap();
-        let annotation =
-            Annotation::create(&conn, "test-gene", "gene", &accession.id, None).unwrap();
+        let annotation = Annotation::create(
+            &conn,
+            "gene",
+            &NewAnnotation {
+                name: "test-gene",
+                accession_id: accession.id,
+                extra: None,
+            },
+        )
+        .unwrap();
 
         let params = TranslationParams::new("test");
         // Strand is resolved before subgraph extraction, so a valid block-group id is

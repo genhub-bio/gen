@@ -21,7 +21,7 @@ use crate::{
     history::{HistoryStore, dolt::DoltHistoryStore},
     operations::{FileAddition, OperationFile, OperationInfo, OperationSummary, track_asset_refs},
     region::GenRegionError,
-    traits::Query,
+    traits::{Query, max_rows_per_batch},
 };
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AnnotationGroup {
@@ -67,16 +67,13 @@ impl AnnotationGroup {
         conn: &GraphConnection,
         name: &str,
     ) -> Result<AnnotationGroup, AnnotationGroupError> {
-        match AnnotationGroup::create(conn, name) {
-            Ok(group) => Ok(group),
-            Err(rusqlite::Error::SqliteFailure(err, _details))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                AnnotationGroup::get_by_id(conn, &name.to_string(), None)
-                    .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
-            }
-            Err(err) => Err(err.into()),
-        }
+        let mut statement = conn.prepare(
+            "INSERT INTO annotation_groups (name) VALUES (?1) ON CONFLICT(name) DO NOTHING;",
+        )?;
+        statement.execute(params![name])?;
+        Ok(AnnotationGroup {
+            name: name.to_string(),
+        })
     }
 
     pub fn query_by_sample(
@@ -129,6 +126,17 @@ pub struct Annotation {
     pub group: String,
     pub accession_id: HashId,
     pub extra: Option<AnnotationExtra>,
+}
+
+/// For use with create/bulk_create methods.
+#[derive(Clone, Debug)]
+pub struct NewAnnotation<'a> {
+    /// User-facing annotation name.
+    pub name: &'a str,
+    /// Accession covered by this annotation.
+    pub accession_id: HashId,
+    /// Format-specific annotation metadata.
+    pub extra: Option<&'a AnnotationExtra>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -307,22 +315,26 @@ impl Annotation {
 
     pub fn create(
         conn: &GraphConnection,
-        name: &str,
         group: &str,
-        accession_id: &HashId,
-        extra: Option<&AnnotationExtra>,
+        annotation: &NewAnnotation<'_>,
     ) -> Result<Annotation, AnnotationError> {
-        let id = Annotation::generate_id(name, group, accession_id);
+        let id = Annotation::generate_id(annotation.name, group, &annotation.accession_id);
         let query = "INSERT INTO annotations (id, name, annotation_group, accession_id, extra) VALUES (?1, ?2, ?3, ?4, ?5);";
         let mut stmt = conn.prepare(query)?;
-        let extra_json = serialize_annotation_extra(extra)?;
-        stmt.execute(params![id, name, group, accession_id, extra_json])?;
+        let extra_json = serialize_annotation_extra(annotation.extra)?;
+        stmt.execute(params![
+            id,
+            annotation.name,
+            group,
+            annotation.accession_id,
+            extra_json
+        ])?;
         Ok(Annotation {
             id,
-            name: name.to_string(),
+            name: annotation.name.to_string(),
             group: group.to_string(),
-            accession_id: *accession_id,
-            extra: extra.cloned(),
+            accession_id: annotation.accession_id,
+            extra: annotation.extra.cloned(),
         })
     }
 
@@ -334,22 +346,56 @@ impl Annotation {
         extra: Option<&AnnotationExtra>,
     ) -> Result<Annotation, AnnotationError> {
         AnnotationGroup::get_or_create(conn, group)?;
-        match Annotation::create(conn, name, group, accession_id, extra) {
-            Ok(annotation) => Ok(annotation),
-            Err(AnnotationError::DatabaseError(rusqlite::Error::SqliteFailure(err, _details)))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                let id = Annotation::generate_id(name, group, accession_id);
-                Ok(Annotation {
-                    id,
-                    name: name.to_string(),
-                    group: group.to_string(),
-                    accession_id: *accession_id,
-                    extra: extra.cloned(),
-                })
-            }
-            Err(err) => Err(err),
+        let id = Annotation::generate_id(name, group, accession_id);
+        let mut statement = conn.prepare(
+            "INSERT INTO annotations (id, name, annotation_group, accession_id, extra) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(accession_id, annotation_group, name) DO NOTHING;",
+        )?;
+        let extra_json = serialize_annotation_extra(extra)?;
+        statement.execute(params![id, name, group, accession_id, extra_json])?;
+        Ok(Annotation {
+            id,
+            name: name.to_string(),
+            group: group.to_string(),
+            accession_id: *accession_id,
+            extra: extra.cloned(),
+        })
+    }
+
+    /// Creates annotations for one group, preserving existing rows with matching identities.
+    pub fn bulk_create(
+        conn: &GraphConnection,
+        group: &str,
+        annotations: &[NewAnnotation<'_>],
+    ) -> Result<(), AnnotationError> {
+        if annotations.is_empty() {
+            return Ok(());
         }
+
+        AnnotationGroup::get_or_create(conn, group)?;
+        let batch_size = max_rows_per_batch(conn, 5);
+        for annotation_batch in annotations.chunks(batch_size) {
+            let mut rows = Vec::with_capacity(annotation_batch.len());
+            let mut parameters: Vec<Box<dyn rusqlite::ToSql>> =
+                Vec::with_capacity(annotation_batch.len() * 5);
+            for annotation in annotation_batch {
+                parameters.push(Box::new(Annotation::generate_id(
+                    annotation.name,
+                    group,
+                    &annotation.accession_id,
+                )));
+                parameters.push(Box::new(annotation.name.to_string()));
+                parameters.push(Box::new(group.to_string()));
+                parameters.push(Box::new(annotation.accession_id));
+                parameters.push(Box::new(serialize_annotation_extra(annotation.extra)?));
+                rows.push("(?, ?, ?, ?, ?)");
+            }
+            let query = format!(
+                "INSERT INTO annotations (id, name, annotation_group, accession_id, extra) VALUES {} ON CONFLICT(accession_id, annotation_group, name) DO NOTHING;",
+                rows.join(",")
+            );
+            conn.execute(&query, rusqlite::params_from_iter(parameters))?;
+        }
+        Ok(())
     }
 
     pub fn create_with_samples(
@@ -374,7 +420,7 @@ impl Annotation {
             return Ok(());
         }
         AnnotationGroup::get_or_create(conn, &self.group)?;
-        let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
+        let query = "INSERT INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2) ON CONFLICT(annotation_group, sample_name) DO NOTHING;";
         let mut stmt = conn.prepare(query)?;
         for sample_name in sample_names {
             stmt.execute(params![self.group, sample_name])?;
@@ -615,7 +661,7 @@ impl AnnotationGroupSample {
         sample_name: &str,
     ) -> Result<(), AnnotationError> {
         AnnotationGroup::get_or_create(conn, annotation_group)?;
-        let query = "INSERT OR IGNORE INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2);";
+        let query = "INSERT INTO annotation_group_samples (annotation_group, sample_name) VALUES (?1, ?2) ON CONFLICT(annotation_group, sample_name) DO NOTHING;";
         let mut stmt = conn.prepare(query)?;
         stmt.execute(params![annotation_group, sample_name])?;
         Ok(())
@@ -1309,12 +1355,24 @@ mod tests {
         let accession =
             BlockGroup::add_accession(&conn, &path, "ann-accession", 0, 5, &mut cache).unwrap();
 
-        let annotation =
-            Annotation::get_or_create(&conn, "gene-a", "project-tracks", &accession.id, None)
-                .unwrap();
-        annotation
-            .add_samples(&conn, &["sample-1", "sample-2"])
-            .unwrap();
+        let annotations = [NewAnnotation {
+            name: "gene-a",
+            accession_id: accession.id,
+            extra: None,
+        }];
+        Annotation::bulk_create(&conn, "project-tracks", &annotations).unwrap();
+        AnnotationGroupSample::create(&conn, "project-tracks", "sample-1").unwrap();
+        AnnotationGroupSample::create(&conn, "project-tracks", "sample-2").unwrap();
+        let annotation = Annotation::query_by_group(&conn, "project-tracks", None)
+            .unwrap()
+            .pop()
+            .expect("should create annotation");
+        Annotation::bulk_create(&conn, "project-tracks", &annotations).unwrap();
+
+        assert_eq!(
+            Annotation::query_by_group(&conn, "project-tracks", None).unwrap(),
+            vec![annotation.clone()]
+        );
 
         let mut samples = Annotation::get_samples(&conn, &annotation.group).unwrap();
         samples.sort();
