@@ -34,6 +34,61 @@ jobs:
       - name: Stage bundled client (macOS)
         if: runner.os == 'macOS'
         run: make py-package-cli
+      - name: Sign bundled client (macOS)
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.PROD_MACOS_APP_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.PROD_MACOS_APP_CERTIFICATE_NAME }}
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/gen-application-certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/gen-application-signing.keychain-db"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_CERTIFICATE_PWD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$MACOS_CI_KEYCHAIN_PWD" \
+            "$KEYCHAIN_PATH"
+          codesign \
+            --force \
+            --timestamp \
+            --options runtime \
+            --sign "$MACOS_CERTIFICATE_NAME" \
+            gen.gen.data/scripts/gen
+          codesign --verify --strict --verbose=2 gen.gen.data/scripts/gen
+          security delete-keychain "$KEYCHAIN_PATH"
+      - name: Notarize bundled client (macOS)
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
+        env:
+          MACOS_CI_KEYCHAIN_PWD: ${{ secrets.PROD_MACOS_CI_KEYCHAIN_PWD }}
+          PROD_MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_APPLE_ID }}
+          PROD_MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.PROD_MACOS_NOTARIZATION_TEAM_ID }}
+          PROD_MACOS_NOTARIZATION_PWD: ${{ secrets.PROD_MACOS_NOTARIZATION_PWD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/gen-notarization.keychain-db"
+          NOTARIZATION_ARCHIVE="$RUNNER_TEMP/gen-client.zip"
+          ditto -c -k --keepParent gen.gen.data/scripts/gen "$NOTARIZATION_ARCHIVE"
+          security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          xcrun notarytool store-credentials "gen-notarytool-profile" \
+            --apple-id "$PROD_MACOS_NOTARIZATION_APPLE_ID" \
+            --team-id "$PROD_MACOS_NOTARIZATION_TEAM_ID" \
+            --password "$PROD_MACOS_NOTARIZATION_PWD" \
+            --keychain "$KEYCHAIN_PATH"
+          xcrun notarytool submit "$NOTARIZATION_ARCHIVE" \
+            --keychain-profile "gen-notarytool-profile" \
+            --wait
+          security delete-keychain "$KEYCHAIN_PATH"
       - name: Stage bundled client (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -75,6 +130,15 @@ jobs:
           args: --release --manifest-path gen-python/Cargo.toml --features abi3,extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
           sccache: true
           working-directory: .
+      - name: Verify bundled client signature (macOS)
+        if: runner.os == 'macOS' && github.ref_type == 'tag'
+        run: |
+          CHECK_DIRECTORY="$RUNNER_TEMP/gen-wheel-check"
+          mkdir -p "$CHECK_DIRECTORY"
+          unzip -q gen-python/target/wheels/*.whl -d "$CHECK_DIRECTORY"
+          CLIENT_PATH=$(find "$CHECK_DIRECTORY" -type f -path "*/scripts/gen" -print -quit)
+          test -n "$CLIENT_PATH"
+          codesign --verify --strict --verbose=2 "$CLIENT_PATH"
       - name: Smoke test wheel (macOS, Linux)
         if: runner.os != 'Windows'
         run: |
