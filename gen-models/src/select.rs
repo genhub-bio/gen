@@ -350,11 +350,97 @@ fn join_condition(source_alias: &str, target_alias: &str, columns: &[(String, St
     columns
         .iter()
         .map(|(source_column, target_column)| {
-            format!("{source_alias}.{source_column} = {target_alias}.{target_column}")
+            format!(
+                "{source_alias}.{} = {target_alias}.{}",
+                quote_sql_identifier(source_column),
+                quote_sql_identifier(target_column),
+            )
         })
         .join(" AND ")
 }
 
 fn quote_sql_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SqlSource, infer_sql_join, join_condition};
+    use crate::{history::dolt::branch_exists, test_helpers::get_connection};
+
+    const INJECTED_BRANCH: &str = "selector_metadata_injection";
+
+    fn child_source_clause(_history_ref: Option<&str>) -> String {
+        "selector_children".to_string()
+    }
+
+    fn parent_source_clause(_history_ref: Option<&str>) -> String {
+        "selector_parents".to_string()
+    }
+
+    #[test]
+    fn test_inferred_join_does_not_execute_foreign_key_column_names() {
+        let conn = get_connection(None).expect("should create graph database");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE selector_parents (
+                id INTEGER PRIMARY KEY
+            );
+            CREATE TABLE selector_children (
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER NOT NULL,
+                "parent_id = selector_parents.id AND dolt_branch('selector_metadata_injection') IS NOT NULL --" INTEGER NOT NULL,
+                FOREIGN KEY (
+                    "parent_id = selector_parents.id AND dolt_branch('selector_metadata_injection') IS NOT NULL --"
+                ) REFERENCES selector_parents(id)
+            );
+            INSERT INTO selector_parents (id) VALUES (1);
+            INSERT INTO selector_children (
+                id,
+                parent_id,
+                "parent_id = selector_parents.id AND dolt_branch('selector_metadata_injection') IS NOT NULL --"
+            ) VALUES (1, 1, 1);
+            "#,
+        )
+        .expect("should create malicious foreign key schema");
+        assert!(
+            !branch_exists(&conn, INJECTED_BRANCH).expect("should inspect branches"),
+            "test branch should not exist before the inferred join runs",
+        );
+
+        let child_source = SqlSource::new(
+            "selector_children",
+            "selector_children",
+            child_source_clause,
+        );
+        let parent_source =
+            SqlSource::new("selector_parents", "selector_parents", parent_source_clause);
+        let join = infer_sql_join(&conn, &[child_source], parent_source);
+        let query = format!(
+            "SELECT COUNT(*) FROM selector_children JOIN selector_parents ON {}",
+            join.condition,
+        );
+        let joined_rows: i64 = conn
+            .query_row(&query, [], |row| row.get(0))
+            .expect("should execute inferred join");
+
+        assert_eq!(joined_rows, 1, "legitimate foreign key join should work");
+        assert!(
+            !branch_exists(&conn, INJECTED_BRANCH).expect("should inspect branches"),
+            "schema identifiers must never execute as SQL expressions",
+        );
+    }
+
+    #[test]
+    fn test_join_condition_quotes_foreign_key_column_identifiers() {
+        let columns = [(
+            "source\" OR attacker_effect()".to_string(),
+            "target.column".to_string(),
+        )];
+
+        assert_eq!(
+            join_condition("children", "parents", &columns),
+            "children.\"source\"\" OR attacker_effect()\" = parents.\"target.column\"",
+        );
+    }
 }
