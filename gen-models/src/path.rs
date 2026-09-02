@@ -23,7 +23,6 @@ use crate::{
     errors::QueryError,
     gen_models_capnp::path as PathCapnp,
     node::Node,
-    select::SqlFilter,
     sequence::SequenceError,
     traits::*,
 };
@@ -97,31 +96,14 @@ pub struct PathData {
 }
 
 impl PathSelect<'_> {
-    fn with_block_groups(self) -> Self {
-        if self
-            .joins
-            .iter()
-            .any(|join| join.source().table_name() == BlockGroup::TABLE_NAME)
-        {
-            self
-        } else {
-            let conn = self.conn;
-            self.join(BlockGroup::select(conn))
-        }
-    }
-
     pub fn collection_name(self, collection_name: impl Into<String>) -> Self {
-        self.with_block_groups().push_filter(SqlFilter::new(
-            "block_groups.collection_name = ?",
-            vec![SQLValue::from(collection_name.into())],
-        ))
+        let conn = self.conn;
+        self.join(BlockGroup::select(conn).collection_name(collection_name))
     }
 
     pub fn sample_name(self, sample_name: impl Into<String>) -> Self {
-        self.with_block_groups().push_filter(SqlFilter::new(
-            "block_groups.sample_name = ?",
-            vec![SQLValue::from(sample_name.into())],
-        ))
+        let conn = self.conn;
+        self.join(BlockGroup::select(conn).sample_name(sample_name))
     }
 }
 
@@ -449,8 +431,11 @@ impl Path {
         sample_name: &str,
     ) -> Vec<Path> {
         Path::select(conn)
-            .collection_name(collection_name)
-            .sample_name(sample_name)
+            .join(
+                BlockGroup::select(conn)
+                    .collection_name(collection_name)
+                    .sample_name(sample_name),
+            )
             .order_by(PathSelect::CreatedOn, Direction::Desc)
             .load()
     }
