@@ -38,6 +38,7 @@ COPY gen-core ./gen-core
 COPY gen-diff ./gen-diff
 COPY gen-graph ./gen-graph
 COPY gen-models ./gen-models
+COPY gen-models-macros ./gen-models-macros
 COPY gen-tui ./gen-tui
 COPY gen-sugiyama ./gen-sugiyama
 COPY gen-annotations ./gen-annotations

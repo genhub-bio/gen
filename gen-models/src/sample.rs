@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     Direction, ModelSelect,
-    block_group::{BlockGroup, BlockGroupSelect},
+    block_group::BlockGroup,
     db::GraphConnection,
     errors::{BlockGroupError, QueryError},
     gen_models_capnp::sample,
@@ -293,8 +293,7 @@ impl Sample {
     ) -> Vec<BlockGroup> {
         let mut select = BlockGroup::select(conn)
             .collection_name(collection_name)
-            .sample_name(sample_name)
-            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc);
+            .sample_name(sample_name);
         if let Some(history_ref) = history_ref {
             select = select.with_ref(history_ref);
         }
