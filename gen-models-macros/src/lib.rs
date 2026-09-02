@@ -10,9 +10,10 @@ use syn::{
 /// Generates a `<Model>Select` query builder from a persisted model's named fields.
 ///
 /// String fields receive exact and `_contains` filters. Every generated field can be used for
-/// typed ordering. `#[model_select(column = "...")]` overrides a field's SQL column,
-/// `#[model_select(skip)]` excludes a field, and the struct-level `source`, `alias`, and `select`
-/// options support joined or aliased queries.
+/// typed ordering. Generated selectors can be composed with `.join(other_selector)` when their
+/// models have one unambiguous direct foreign-key relationship. `#[model_select(column = "...")]`
+/// overrides a field's SQL column, `#[model_select(skip)]` excludes a field, and the struct-level
+/// `source`, `alias`, and `select` options support custom or aliased queries.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
 pub fn derive_model_select(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -68,13 +69,9 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         }
 
         let variant = snake_to_pascal(&field_name);
-        let column = field_options.column.unwrap_or_else(|| {
-            let field_name = field_name_string(&field_name);
-            alias
-                .as_ref()
-                .map(|alias| format!("{alias}.{field_name}"))
-                .unwrap_or(field_name)
-        });
+        let column = field_options
+            .column
+            .unwrap_or_else(|| field_name_string(&field_name));
         let column_literal = LitStr::new(&column, Span::call_site());
         let value_type = option_inner(&field.ty).unwrap_or(&field.ty);
 
@@ -104,19 +101,35 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     }
 
     let source_clause = if let Some(source) = options.source {
-        quote! { #source(self.history_ref.as_deref()) }
+        quote! { #source(history_ref) }
     } else {
         quote! {
-            <#model as ::gen_models::traits::Query>::table_name_with_history_ref(
-                self.history_ref.as_deref(),
-            )
+            let source = <#model as ::gen_models::traits::Query>::table_name_with_history_ref(
+                history_ref,
+            );
+            let alias = <#model as ::gen_models::traits::Query>::TABLE_NAME;
+            ::std::format!("{source} {alias}")
         }
     };
-    let select_clause = options.select.unwrap_or_else(|| {
-        alias
-            .map(|alias| LitStr::new(&format!("{alias}.*"), Span::call_site()))
-            .unwrap_or_else(|| LitStr::new("*", Span::call_site()))
-    });
+    let source_alias = alias
+        .map(|alias| {
+            let alias = LitStr::new(&alias, Span::call_site());
+            quote! { #alias }
+        })
+        .unwrap_or_else(|| {
+            quote! { <#model as ::gen_models::traits::Query>::TABLE_NAME }
+        });
+    let select_clause = options
+        .select
+        .map(|select| quote! { ::std::string::String::from(#select) })
+        .unwrap_or_else(|| {
+            quote! {
+                ::std::format!(
+                    "{}.*",
+                    <Self as ::gen_models::select::SelectQuery>::source(self).alias(),
+                )
+            }
+        });
 
     Ok(quote! {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,26 +147,41 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 
         #[derive(Clone, Debug)]
         pub struct #selector<'conn> {
-            conn: &'conn ::gen_models::traits::SelectConnection,
+            conn: &'conn ::gen_models::select::Connection,
             history_ref: ::core::option::Option<::std::string::String>,
-            filters: ::std::vec::Vec<::gen_models::traits::SqlFilter>,
-            order_by: ::std::vec::Vec<::gen_models::traits::SqlOrder>,
-            page: ::gen_models::traits::PageRequest,
+            filters: ::std::vec::Vec<::gen_models::select::SqlFilter>,
+            order_by: ::std::vec::Vec<::gen_models::select::SqlOrder>,
+            joins: ::std::vec::Vec<::gen_models::select::SqlJoin>,
+            limit: ::core::option::Option<u32>,
+            offset: u32,
         }
 
         impl<'conn> #selector<'conn> {
             #(#column_constants)*
 
             pub const fn new(
-                conn: &'conn ::gen_models::traits::SelectConnection,
+                conn: &'conn ::gen_models::select::Connection,
             ) -> Self {
                 Self {
                     conn,
                     history_ref: ::core::option::Option::None,
                     filters: ::std::vec::Vec::new(),
                     order_by: ::std::vec::Vec::new(),
-                    page: ::gen_models::traits::PageRequest::unbounded(),
+                    joins: ::std::vec::Vec::new(),
+                    limit: ::core::option::Option::None,
+                    offset: 0,
                 }
+            }
+
+            fn source_clause_for(history_ref: ::core::option::Option<&str>) -> ::std::string::String {
+                #source_clause
+            }
+
+            fn column(&self, column: &str) -> ::std::string::String {
+                ::gen_models::select::qualify_sql_column(
+                    <Self as ::gen_models::select::SelectQuery>::source(self).alias(),
+                    column,
+                )
             }
 
             pub fn with_ref(mut self, history_ref: impl ::core::convert::Into<::std::string::String>) -> Self {
@@ -166,72 +194,150 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             pub fn order_by(
                 mut self,
                 field: #selector_field,
-                direction: ::gen_models::traits::Direction,
+                direction: ::gen_models::select::Direction,
             ) -> Self {
-                self.order_by.push(::gen_models::traits::SqlOrder::new(
-                    field.as_sql(),
+                let column = self.column(field.as_sql());
+                self.order_by.push(::gen_models::select::SqlOrder::new(
+                    column,
                     direction,
                 ));
                 self
             }
 
+            pub fn join<J: ::gen_models::select::SelectQuery>(mut self, joined: J) -> Self {
+                assert!(
+                    ::core::ptr::eq(
+                        self.conn,
+                        ::gen_models::select::SelectQuery::connection(&joined),
+                    ),
+                    "joined selectors must use the same database connection",
+                );
+                assert!(
+                    ::gen_models::select::SelectQuery::limit(&joined).is_none()
+                        && ::gen_models::select::SelectQuery::offset(&joined) == 0,
+                    "apply limit and offset after join, not to the joined selector",
+                );
+
+                if let ::core::option::Option::Some(joined_ref) =
+                    ::gen_models::select::SelectQuery::history_ref(&joined)
+                {
+                    if let ::core::option::Option::Some(history_ref) = &self.history_ref {
+                        assert!(
+                            history_ref == joined_ref,
+                            "joined selectors must use the same historical ref",
+                        );
+                    } else {
+                        self.history_ref = ::core::option::Option::Some(joined_ref.to_string());
+                    }
+                }
+
+                let mut existing_sources = ::std::vec::Vec::with_capacity(self.joins.len() + 1);
+                existing_sources.push(
+                    <Self as ::gen_models::select::SelectQuery>::source(&self),
+                );
+                existing_sources.extend(self.joins.iter().map(|join| join.source()));
+
+                let joined_source = ::gen_models::select::SelectQuery::source(&joined);
+                let inferred_join = ::gen_models::select::infer_sql_join(
+                    self.conn,
+                    &existing_sources,
+                    joined_source,
+                );
+
+                let mut used_aliases = existing_sources
+                    .iter()
+                    .map(|source| source.alias())
+                    .chain(::core::iter::once(joined_source.alias()))
+                    .collect::<::std::collections::HashSet<_>>();
+                for nested_join in ::gen_models::select::SelectQuery::joins(&joined) {
+                    assert!(
+                        used_aliases.insert(nested_join.source().alias()),
+                        "cannot join SQL source alias `{}` more than once",
+                        nested_join.source().alias(),
+                    );
+                }
+
+                self.joins.push(inferred_join);
+                self.joins.extend_from_slice(
+                    ::gen_models::select::SelectQuery::joins(&joined),
+                );
+                self.filters.extend_from_slice(
+                    ::gen_models::select::SelectQuery::filters(&joined),
+                );
+                self.order_by.extend_from_slice(
+                    ::gen_models::select::SelectQuery::order_by(&joined),
+                );
+                self
+            }
+
             pub fn limit(mut self, limit: u32) -> Self {
-                self.page.limit = ::core::option::Option::Some(limit);
+                self.limit = ::core::option::Option::Some(limit);
                 self
             }
 
             pub fn offset(mut self, offset: u32) -> Self {
-                self.page.offset = offset;
+                self.offset = offset;
                 self
             }
 
             pub fn load(self) -> ::std::vec::Vec<#model> {
-                <#model as ::gen_models::traits::QuerySelect>::select(self.conn, &self)
+                ::gen_models::select::load::<#model, _>(self.conn, &self)
             }
 
             pub(crate) fn push_filter(
                 mut self,
-                filter: ::gen_models::traits::SqlFilter,
+                filter: ::gen_models::select::SqlFilter,
             ) -> Self {
                 self.filters.push(filter);
                 self
             }
         }
 
-        impl ::gen_models::traits::ModelSelect for #selector<'_> {
-            fn source_clause(&self) -> ::std::string::String {
-                #source_clause
+        impl ::gen_models::select::SelectQuery for #selector<'_> {
+            fn connection(&self) -> &::gen_models::select::Connection {
+                self.conn
             }
 
-            fn source_params(&self) -> ::std::vec::Vec<::gen_models::traits::SqlValue> {
-                self.history_ref
-                    .as_ref()
-                    .map(|history_ref| {
-                        ::std::vec![::gen_models::traits::SqlValue::from(history_ref.clone())]
-                    })
-                    .unwrap_or_default()
+            fn source(&self) -> ::gen_models::select::SqlSource {
+                ::gen_models::select::SqlSource::new(
+                    <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                    #source_alias,
+                    Self::source_clause_for,
+                )
             }
 
-            fn select_clause(&self) -> &'static str {
+            fn history_ref(&self) -> ::core::option::Option<&str> {
+                self.history_ref.as_deref()
+            }
+
+            fn joins(&self) -> &[::gen_models::select::SqlJoin] {
+                &self.joins
+            }
+
+            fn select_clause(&self) -> ::std::string::String {
                 #select_clause
             }
 
-            fn filters(&self) -> &[::gen_models::traits::SqlFilter] {
+            fn filters(&self) -> &[::gen_models::select::SqlFilter] {
                 &self.filters
             }
 
-            fn order_by(&self) -> &[::gen_models::traits::SqlOrder] {
+            fn order_by(&self) -> &[::gen_models::select::SqlOrder] {
                 &self.order_by
             }
 
-            fn page(&self) -> ::gen_models::traits::PageRequest {
-                self.page
+            fn limit(&self) -> ::core::option::Option<u32> {
+                self.limit
+            }
+
+            fn offset(&self) -> u32 {
+                self.offset
             }
         }
 
         impl #model {
             pub fn select(
-                conn: &::gen_models::traits::SelectConnection,
+                conn: &::gen_models::select::Connection,
             ) -> #selector<'_> {
                 #selector::new(conn)
             }
@@ -315,9 +421,10 @@ fn filter_method(
         quote! {
             pub fn #field(mut self, value: impl ::core::convert::Into<::std::string::String>) -> Self {
                 let value = value.into();
-                self.filters.push(::gen_models::traits::SqlFilter::new(
-                    ::std::concat!(#column, " = ?"),
-                    ::std::vec![::gen_models::traits::sql_value(&value)],
+                let column = self.column(#column);
+                self.filters.push(::gen_models::select::SqlFilter::new(
+                    ::std::format!("{column} = ?"),
+                    ::std::vec![::gen_models::select::sql_value(&value)],
                 ));
                 self
             }
@@ -325,9 +432,10 @@ fn filter_method(
     } else {
         quote! {
             pub fn #field(mut self, value: #value_type) -> Self {
-                self.filters.push(::gen_models::traits::SqlFilter::new(
-                    ::std::concat!(#column, " = ?"),
-                    ::std::vec![::gen_models::traits::sql_value(&value)],
+                let column = self.column(#column);
+                self.filters.push(::gen_models::select::SqlFilter::new(
+                    ::std::format!("{column} = ?"),
+                    ::std::vec![::gen_models::select::sql_value(&value)],
                 ));
                 self
             }
@@ -342,9 +450,10 @@ fn filter_method(
                 value: impl ::core::convert::Into<::std::string::String>,
             ) -> Self {
                 let value = value.into();
-                self.filters.push(::gen_models::traits::SqlFilter::new(
-                    ::std::concat!("instr(lower(", #column, "), lower(?)) > 0"),
-                    ::std::vec![::gen_models::traits::sql_value(&value)],
+                let column = self.column(#column);
+                self.filters.push(::gen_models::select::SqlFilter::new(
+                    ::std::format!("instr(lower({column}), lower(?)) > 0"),
+                    ::std::vec![::gen_models::select::sql_value(&value)],
                 ));
                 self
             }
@@ -357,8 +466,9 @@ fn filter_method(
         let is_null_method = format_ident!("{}_is_null", field);
         quote! {
             pub fn #is_null_method(mut self) -> Self {
-                self.filters.push(::gen_models::traits::SqlFilter::new(
-                    ::std::concat!(#column, " IS NULL"),
+                let column = self.column(#column);
+                self.filters.push(::gen_models::select::SqlFilter::new(
+                    ::std::format!("{column} IS NULL"),
                     ::std::vec::Vec::new(),
                 ));
                 self
