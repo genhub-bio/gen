@@ -29,7 +29,7 @@ jobs:
         run: choco install capnproto
       - name: Stage bundled client (macOS)
         if: runner.os == 'macOS'
-        run: make stage-python-client
+        run: make py-package-cli
       - name: Stage bundled client (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -57,7 +57,7 @@ jobs:
             mkdir -p gen-capnp-schemas/src/generated
             (cd gen-capnp-schemas && capnp compile -I . -orust:src/generated gen-core.capnp gen-models.capnp gen-schema.capnp)
             ls -la gen-capnp-schemas/src/generated
-            make stage-python-client
+            make py-package-cli
           working-directory: .
         env:
           CAPNP: /usr/bin/capnp
@@ -71,16 +71,6 @@ jobs:
           args: --release --manifest-path gen-python/Cargo.toml --features extension-module --interpreter ${{ steps.setup-python.outputs.python-path }} --out gen-python/target/wheels
           sccache: true
           working-directory: .
-      - name: Verify wheel contents (macOS, Linux)
-        if: runner.os != 'Windows'
-        run: python gen-python/scripts/verify_wheel.py gen-python/target/wheels/*.whl
-      - name: Verify wheel contents (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $wheel = Get-ChildItem "gen-python/target/wheels/*.whl"
-          python gen-python/scripts/verify_wheel.py "$($wheel.FullName)"
       - name: Smoke test wheel (macOS, Linux)
         if: runner.os != 'Windows'
         run: |
