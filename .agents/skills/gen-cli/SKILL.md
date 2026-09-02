@@ -36,7 +36,7 @@ For detailed command recipes and workflow patterns, read `references/gen-cli-wor
 
 1. Establish repository defaults:
    - Use `gen init` when there is no `.gen` directory.
-   - Use `gen defaults --database <db>.db --collection <collection>` to avoid repeating `--db` and `--name`.
+   - Use `gen defaults --collection <collection>` to avoid repeating `--name`.
    - Use `gen operations` before and after meaningful edits so the user can audit changes.
 
 2. Import biological context:

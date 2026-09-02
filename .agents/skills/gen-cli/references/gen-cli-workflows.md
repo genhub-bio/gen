@@ -7,14 +7,18 @@ Use this reference after `SKILL.md` triggers and the user needs concrete `gen` u
 Top-level pattern:
 
 ```sh
-gen [--db <db-path>] <command> ...
+gen <command> ...
 ```
+
+There is no global `--db` flag; the database location is resolved from the
+`.gen` workspace directory discovered by walking up from the current
+directory (created by `gen init`).
 
 Common setup:
 
 ```sh
 gen init
-gen defaults --database project.db --collection plasmids
+gen defaults --collection plasmids
 gen operations
 ```
 
@@ -43,6 +47,7 @@ Useful flags:
 
 - `-n, --name <collection>`: override the default collection.
 - `--shallow` on FASTA import: store filename instead of sequence.
+- `--index <path>` on FASTA import (requires `--shallow`, repeatable): attach an index file for the shallow-referenced FASTA asset.
 - `--annotation-group <name>` on GenBank import: control imported annotation group name.
 
 ## Listing, Viewing, Searching, And Extracting
