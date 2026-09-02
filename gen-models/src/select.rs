@@ -4,9 +4,9 @@ use core::marker::PhantomData;
 use std::collections::BTreeMap;
 
 use itertools::Itertools;
-pub use rusqlite::Connection;
+pub use rusqlite::{Connection, Result as SqlResult, Row};
 use rusqlite::{
-    Row, ToSql, params_from_iter,
+    ToSql, params_from_iter,
     types::{FromSql, ToSqlOutput, Value},
 };
 
@@ -169,13 +169,17 @@ pub trait SelectQuery {
 #[doc(hidden)]
 #[derive(Debug, Eq, PartialEq)]
 pub struct SelectField<M, T> {
+    table_name: &'static str,
+    alias: &'static str,
     column: &'static str,
     field: PhantomData<fn() -> (M, T)>,
 }
 
 impl<M, T> SelectField<M, T> {
-    pub const fn new(column: &'static str) -> Self {
+    pub const fn new(table_name: &'static str, alias: &'static str, column: &'static str) -> Self {
         Self {
+            table_name,
+            alias,
             column,
             field: PhantomData,
         }
@@ -195,22 +199,69 @@ impl<M, T> Clone for SelectField<M, T> {
 impl<M, T> Copy for SelectField<M, T> {}
 
 #[doc(hidden)]
-pub trait SelectProjection<M> {
+pub trait ProjectionField {
     type Output;
 
-    fn columns(&self, alias: &str) -> Vec<String>;
+    fn table_name(&self) -> &'static str;
 
-    fn process_row(&self, row: &Row) -> rusqlite::Result<Self::Output>;
+    fn alias(&self) -> &'static str;
+
+    fn column(&self) -> &'static str;
+
+    fn process_row(&self, row: &Row, index: usize) -> rusqlite::Result<Self::Output>;
 }
 
-impl<M, T> SelectProjection<M> for SelectField<M, T>
+impl<M, T> ProjectionField for SelectField<M, T>
 where
     T: FromSql,
 {
     type Output = T;
 
-    fn columns(&self, alias: &str) -> Vec<String> {
-        vec![qualify_sql_column(alias, self.column())]
+    fn table_name(&self) -> &'static str {
+        self.table_name
+    }
+
+    fn alias(&self) -> &'static str {
+        self.alias
+    }
+
+    fn column(&self) -> &'static str {
+        self.column
+    }
+
+    fn process_row(&self, row: &Row, index: usize) -> rusqlite::Result<Self::Output> {
+        row.get(index)
+    }
+}
+
+#[doc(hidden)]
+pub trait SelectableModel: Sized {
+    fn table_name() -> &'static str;
+
+    fn alias() -> &'static str;
+
+    fn columns() -> &'static [&'static str];
+
+    fn process_row(row: &Row, offset: usize) -> SqlResult<Self>;
+}
+
+#[doc(hidden)]
+pub trait SelectProjection {
+    type Output;
+
+    fn fields(&self) -> Vec<(&'static str, &'static str, &'static str)>;
+
+    fn process_row(&self, row: &Row) -> rusqlite::Result<Self::Output>;
+}
+
+impl<M, T> SelectProjection for SelectField<M, T>
+where
+    T: FromSql,
+{
+    type Output = T;
+
+    fn fields(&self) -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![(self.table_name, self.alias, self.column)]
     }
 
     fn process_row(&self, row: &Row) -> rusqlite::Result<Self::Output> {
@@ -219,21 +270,25 @@ where
 }
 
 macro_rules! impl_select_projection_for_tuple {
-    ($($value:ident:$index:tt),+) => {
-        impl<Model, $($value),+> SelectProjection<Model> for ($(SelectField<Model, $value>,)+)
+    ($($field:ident:$index:tt),+) => {
+        impl<$($field),+> SelectProjection for ($($field,)+)
         where
-            $($value: FromSql,)+
+            $($field: ProjectionField,)+
         {
-            type Output = ($($value,)+);
+            type Output = ($(<$field as ProjectionField>::Output,)+);
 
-            fn columns(&self, alias: &str) -> Vec<String> {
+            fn fields(&self) -> Vec<(&'static str, &'static str, &'static str)> {
                 vec![$(
-                    qualify_sql_column(alias, self.$index.column())
+                    (
+                        self.$index.table_name(),
+                        self.$index.alias(),
+                        self.$index.column(),
+                    )
                 ),+]
             }
 
             fn process_row(&self, row: &Row) -> rusqlite::Result<Self::Output> {
-                Ok(($(row.get($index)?,)+))
+                Ok(($(self.$index.process_row(row, $index)?,)+))
             }
         }
     };
@@ -257,37 +312,156 @@ impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J
 impl_select_projection_for_tuple!(A:0, B:1, C:2, D:3, E:4, F:5, G:6, H:7, I:8, J:9, K:10, L:11, M:12, N:13, O:14, P:15);
 
 #[doc(hidden)]
-pub struct SelectedFields<M, S, P> {
-    select: S,
-    projection: P,
-    model: PhantomData<fn() -> M>,
+pub trait ModelProjection {
+    type Output;
+
+    fn fields() -> Vec<(&'static str, &'static str, &'static str)>;
+
+    fn process_row(row: &Row) -> SqlResult<Self::Output>;
 }
 
-impl<M, S, P> SelectedFields<M, S, P> {
+macro_rules! impl_model_projection_for_tuple {
+    ($($model:ident),+) => {
+        impl<$($model),+> ModelProjection for ($($model,)+)
+        where
+            $($model: SelectableModel,)+
+        {
+            type Output = ($($model,)+);
+
+            fn fields() -> Vec<(&'static str, &'static str, &'static str)> {
+                let mut fields = Vec::new();
+                $(
+                    for column in <$model as SelectableModel>::columns() {
+                        fields.push((
+                            <$model as SelectableModel>::table_name(),
+                            <$model as SelectableModel>::alias(),
+                            *column,
+                        ));
+                    }
+                )+
+                fields
+            }
+
+            fn process_row(row: &Row) -> SqlResult<Self::Output> {
+                let mut offset = 0;
+                let output = ($({
+                    let model = <$model as SelectableModel>::process_row(row, offset)?;
+                    offset += <$model as SelectableModel>::columns().len();
+                    model
+                },)+);
+                let _ = offset;
+                Ok(output)
+            }
+        }
+    };
+}
+
+impl_model_projection_for_tuple!(A);
+impl_model_projection_for_tuple!(A, B);
+impl_model_projection_for_tuple!(A, B, C);
+impl_model_projection_for_tuple!(A, B, C, D);
+impl_model_projection_for_tuple!(A, B, C, D, E);
+impl_model_projection_for_tuple!(A, B, C, D, E, F);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H, I);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_model_projection_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+
+#[doc(hidden)]
+pub struct SelectedFields<S, P> {
+    select: S,
+    projection: P,
+}
+
+impl<S, P> SelectedFields<S, P> {
     pub fn new(select: S, projection: P) -> Self {
+        Self { select, projection }
+    }
+}
+
+impl<S, P> SelectedFields<S, P>
+where
+    S: SelectQuery,
+    P: SelectProjection,
+{
+    pub fn load(self) -> Result<Vec<P::Output>, ModelSelectError> {
+        let Self { select, projection } = self;
+        load_projection(select, projection.fields(), |row| {
+            projection.process_row(row)
+        })
+    }
+}
+
+#[doc(hidden)]
+pub struct SelectedModels<S, P> {
+    select: S,
+    projection: PhantomData<fn() -> P>,
+}
+
+impl<S, P> SelectedModels<S, P> {
+    pub fn new(select: S) -> Self {
         Self {
             select,
-            projection,
-            model: PhantomData,
+            projection: PhantomData,
         }
     }
 }
 
-impl<M, S, P> SelectedFields<M, S, P>
+impl<S, P> SelectedModels<S, P>
 where
     S: SelectQuery,
-    P: SelectProjection<M>,
+    P: ModelProjection,
 {
     pub fn load(self) -> Result<Vec<P::Output>, ModelSelectError> {
-        let Self {
-            select, projection, ..
-        } = self;
-        let select_clause = projection.columns(select.source().alias()).join(", ");
-        let (query, params) = render_query(&select, select_clause);
-        query_rows(select.connection(), &query, params, |row| {
-            projection.process_row(row)
-        })
+        load_projection(self.select, P::fields(), P::process_row)
     }
+}
+
+fn load_projection<S, T>(
+    select: S,
+    fields: Vec<(&'static str, &'static str, &'static str)>,
+    process_row: impl FnMut(&Row) -> SqlResult<T>,
+) -> Result<Vec<T>, ModelSelectError>
+where
+    S: SelectQuery,
+{
+    validate_projection_sources(&select, &fields)?;
+    let select_clause = fields
+        .iter()
+        .map(|(_, alias, column)| qualify_sql_column(alias, column))
+        .join(", ");
+    let (query, params) = render_query(&select, select_clause);
+    query_rows(select.connection(), &query, params, process_row)
+}
+
+fn validate_projection_sources<S>(
+    select: &S,
+    fields: &[(&'static str, &'static str, &'static str)],
+) -> Result<(), ModelSelectError>
+where
+    S: SelectQuery,
+{
+    for (table_name, alias, _) in fields {
+        let source = select.source();
+        let source_is_available = source.table_name() == *table_name && source.alias() == *alias
+            || select.joins().iter().any(|join| {
+                let source = join.source();
+                source.table_name() == *table_name && source.alias() == *alias
+            });
+        if !source_is_available {
+            return Err(ModelSelectError::ProjectionSourceNotSelected {
+                table_name: (*table_name).to_string(),
+                alias: (*alias).to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[doc(hidden)]

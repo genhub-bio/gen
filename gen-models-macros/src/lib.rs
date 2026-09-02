@@ -10,10 +10,12 @@ use syn::{
 /// Generates a `<Model>Select` query builder from a persisted model's named fields.
 ///
 /// String fields receive exact and `_contains` filters. Every generated field can be used for
-/// typed ordering. Generated selectors can be composed with `.join(other_selector)` when their
-/// models have one unambiguous direct foreign-key relationship. `#[model_select(column = "...")]`
-/// overrides a field's SQL column, `#[model_select(skip)]` excludes a field, and the struct-level
-/// `source`, `alias`, and `select` options support custom or aliased queries.
+/// typed ordering and projections. Generated selectors can be composed with
+/// `.join(other_selector)` when their models have one unambiguous direct foreign-key relationship.
+/// Joined queries can project fields with `.only(...)` or complete models with `.models::<(...)>()`.
+/// `#[model_select(column = "...")]` overrides a field's SQL column, `#[model_select(skip)]`
+/// excludes a field, and the struct-level `source`, `alias`, and `select` options support custom or
+/// aliased queries.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
 pub fn derive_model_select(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -50,12 +52,24 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     }
 
     let options = ContainerOptions::from_attributes(&input.attrs)?;
-    let alias = options.alias.clone();
     let selector = format_ident!("{}Select", model);
+    let source_alias = options
+        .alias
+        .as_ref()
+        .map(|alias| {
+            let alias = LitStr::new(alias, Span::call_site());
+            quote! { #alias }
+        })
+        .unwrap_or_else(|| {
+            quote! { <#model as ::gen_models::traits::Query>::TABLE_NAME }
+        });
 
     let mut variants = Vec::new();
     let mut column_constants = Vec::new();
     let mut filter_methods = Vec::new();
+    let mut model_columns = Vec::new();
+    let mut model_initializers = Vec::new();
+    let mut has_skipped_field = false;
 
     for field in fields {
         let Some(field_name) = field.ident else {
@@ -63,6 +77,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         };
         let field_options = FieldOptions::from_attributes(&field.attrs)?;
         if field_options.skip {
+            has_skipped_field = true;
             continue;
         }
 
@@ -73,15 +88,24 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         let column_literal = LitStr::new(&column, Span::call_site());
         let field_type = &field.ty;
         let value_type = option_inner(field_type).unwrap_or(field_type);
+        let field_index = model_initializers.len();
 
         variants.push(variant.clone());
+        model_columns.push(column_literal.clone());
+        model_initializers.push(quote! {
+            #field_name: row.get(offset + #field_index)?
+        });
         column_constants.push(quote! {
             #[expect(
                 non_upper_case_globals,
                 reason = "selector field constants mirror generated Rust field variants"
             )]
             pub const #variant: ::gen_models::select::SelectField<#model, #field_type> =
-                ::gen_models::select::SelectField::new(#column_literal);
+                ::gen_models::select::SelectField::new(
+                    <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                    #source_alias,
+                    #column_literal,
+                );
         });
         filter_methods.push(filter_method(
             &field_name,
@@ -110,14 +134,6 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             ::std::format!("{source} {alias}")
         }
     };
-    let source_alias = alias
-        .map(|alias| {
-            let alias = LitStr::new(&alias, Span::call_site());
-            quote! { #alias }
-        })
-        .unwrap_or_else(|| {
-            quote! { <#model as ::gen_models::traits::Query>::TABLE_NAME }
-        });
     let select_clause = options
         .select
         .map(|select| quote! { ::std::string::String::from(#select) })
@@ -129,8 +145,38 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 )
             }
         });
+    let selectable_model_impl = if has_skipped_field {
+        quote! {}
+    } else {
+        quote! {
+            impl ::gen_models::select::SelectableModel for #model {
+                fn table_name() -> &'static str {
+                    <Self as ::gen_models::traits::Query>::TABLE_NAME
+                }
+
+                fn alias() -> &'static str {
+                    #source_alias
+                }
+
+                fn columns() -> &'static [&'static str] {
+                    &[#(#model_columns),*]
+                }
+
+                fn process_row(
+                    row: &::gen_models::select::Row,
+                    offset: usize,
+                ) -> ::gen_models::select::SqlResult<Self> {
+                    ::core::result::Result::Ok(Self {
+                        #(#model_initializers),*
+                    })
+                }
+            }
+        }
+    };
 
     Ok(quote! {
+        #selectable_model_impl
+
         #[derive(Clone, Debug)]
         pub struct #selector<'conn> {
             conn: &'conn ::gen_models::select::Connection,
@@ -259,11 +305,20 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             pub fn only<P>(
                 self,
                 projection: P,
-            ) -> ::gen_models::select::SelectedFields<#model, Self, P>
+            ) -> ::gen_models::select::SelectedFields<Self, P>
             where
-                P: ::gen_models::select::SelectProjection<#model>,
+                P: ::gen_models::select::SelectProjection,
             {
                 ::gen_models::select::SelectedFields::new(self, projection)
+            }
+
+            pub fn models<P>(
+                self,
+            ) -> ::gen_models::select::SelectedModels<Self, P>
+            where
+                P: ::gen_models::select::ModelProjection,
+            {
+                ::gen_models::select::SelectedModels::new(self)
             }
 
             pub fn limit(mut self, limit: u32) -> Self {

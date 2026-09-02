@@ -113,13 +113,43 @@ let samples: Vec<(String, bool)> = Sample::select(conn)
     .expect("should load selected sample fields");
 ```
 
+Fields may come from both the base selector and joined selectors:
+
+```rust
+let rows: Vec<(String, String)> = Sample::select(conn)
+    .join(BlockGroup::select(conn).collection_name("example"))
+    .only((SampleSelect::Name, BlockGroupSelect::Name))
+    .load()
+    .expect("should load fields from both joined models");
+```
+
 The field constants determine the return type and preserve the order of values in each tuple. Use
 a one-element tuple such as `(SampleSelect::Name,)` when a `Vec<(String,)>` is preferable to a
 `Vec<String>`.
 
 `only` is the terminal query-shaping step: apply filters, joins, ordering, limits, and offsets
-before it, then call `load`. A projection can contain up to 16 fields and can select fields from
-the base model. Joined selectors still contribute filters and ordering, but not projected fields.
+before it, then call `load`. A projection can contain up to 16 fields. Every projected field's
+model must be the base selector or one of its joins.
+
+## Selecting complete joined models
+
+Call `models` with a tuple of model types to return complete models from both sides of a join:
+
+```rust
+let rows: Vec<(Sample, BlockGroup)> = Sample::select(conn)
+    .join(BlockGroup::select(conn).collection_name("example"))
+    .models::<(Sample, BlockGroup)>()
+    .load()
+    .expect("should load both joined models");
+```
+
+The tuple order determines both the SQL column order and the returned tuple order. Every model must
+be the base selector or one of its joins. Like field projections, model tuples support one through
+16 entries. Write a one-element tuple such as `.models::<(Sample,)>()` when needed.
+
+The derive generates an offset-aware, fallible row decoder for this API. A model containing a
+`#[model_select(skip)]` field does not receive that decoder because a complete value cannot be
+constructed from the selected columns.
 
 ## Ordering and pagination
 
@@ -177,8 +207,9 @@ let samples = Sample::select(conn)
     .expect("should load joined samples");
 ```
 
-The returned rows are always instances of the selector on the left, so this query returns
-`Vec<Sample>`.
+Calling `load` directly on the joined selector returns instances of the selector on the left, so
+this query returns `Vec<Sample>`. Use `only` for typed fields from either side of the join, or
+`models` for complete joined models.
 
 Join conditions are inferred at runtime from `PRAGMA foreign_key_list`. The tables must have
 exactly one unambiguous direct foreign-key relationship. Both relationship directions and
@@ -221,8 +252,9 @@ a descriptive message.
 
 ## Error handling
 
-`load()` returns `ModelSelectError` for database preparation, query execution, and result-row
-iteration failures. Callers can propagate it directly:
+`load()` returns `ModelSelectError` for database preparation, query execution, result-row iteration,
+and projections that refer to a model that was not selected or joined. Callers can propagate it
+directly:
 
 ```rust,ignore
 use gen_models::ModelSelectError;
@@ -293,8 +325,8 @@ At runtime, [`gen-models::select`](../gen-models/src/select.rs):
 2. Infers requested joins from the open database's foreign-key metadata.
 3. Renders one `SELECT` statement for the base model and its joined sources.
 4. Binds every runtime value through `rusqlite`.
-5. Maps result rows through the base model's `Query::process_row` implementation and returns the
-   collected models or a `ModelSelectError`.
+5. Maps full base-model loads through `Query::process_row`, or typed field and model projections
+   through fallible decoders generated for their selected types.
 
 The runtime support cannot live in this proc-macro crate. A proc-macro executes inside the compiler
 and can export procedural macros, but it cannot export the normal reusable runtime types needed by
@@ -309,7 +341,8 @@ without expanding every derive.
 - At least one field must remain selectable after applying `skip`.
 - Joins require one direct, unambiguous foreign-key relationship in the live schema.
 - The same source alias cannot be joined more than once.
-- `only` supports projections of one through 16 base-model fields.
+- `only` supports projections of one through 16 fields from selected and joined models.
+- `models` supports tuples of one through 16 selected and joined models without skipped fields.
 - `Query::process_row` returns a model directly, so a model implementation that panics while
   decoding a row cannot be converted into `ModelSelectError` without changing the `Query` trait.
 - Generated code references `gen_models`, so downstream consumers should use the macro through the

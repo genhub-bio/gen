@@ -338,6 +338,8 @@ mod tests {
 
     use super::*;
     use crate::{
+        ModelSelectError,
+        block_group::BlockGroupSelect,
         collection::Collection,
         errors::SampleError,
         history::dolt::commit_staged_all,
@@ -560,6 +562,46 @@ mod tests {
             .map(|block_group| block_group.name)
             .collect::<Vec<_>>();
         assert_eq!(block_groups, vec!["target-group"]);
+
+        let projected_rows: Vec<(String, String)> = Sample::select(conn)
+            .join(BlockGroup::select(conn).name("target-group"))
+            .only((SampleSelect::Name, BlockGroupSelect::Name))
+            .load()
+            .expect("should load fields from both joined models");
+        assert_eq!(
+            projected_rows,
+            vec![("sample-alpha".to_string(), "target-group".to_string())]
+        );
+
+        let model_rows: Vec<(Sample, BlockGroup)> = Sample::select(conn)
+            .join(BlockGroup::select(conn).name("target-group"))
+            .models::<(Sample, BlockGroup)>()
+            .load()
+            .expect("should load both joined models");
+        assert_eq!(model_rows.len(), 1);
+        assert_eq!(model_rows[0].0.name, "sample-alpha");
+        assert_eq!(model_rows[0].1.name, "target-group");
+    }
+
+    #[test]
+    fn test_projections_reject_unjoined_sources() {
+        let conn = &get_connection(None).expect("should create graph database");
+
+        let error = Sample::select(conn)
+            .only((SampleSelect::Name, BlockGroupSelect::Name))
+            .load()
+            .expect_err("should reject a field from a model that was not joined");
+        let model_error = Sample::select(conn)
+            .models::<(Sample, BlockGroup)>()
+            .load()
+            .expect_err("should reject a model that was not joined");
+
+        let expected_error = ModelSelectError::ProjectionSourceNotSelected {
+            table_name: "block_groups".to_string(),
+            alias: "block_groups".to_string(),
+        };
+        assert_eq!(error, expected_error);
+        assert_eq!(model_error, expected_error);
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub use crate::{
 pub enum ModelSelectError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Projection source `{table_name}` with alias `{alias}` is not selected or joined")]
+    ProjectionSourceNotSelected { table_name: String, alias: String },
 }
 
 #[derive(Debug, Error, PartialEq)]
