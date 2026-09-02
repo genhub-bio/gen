@@ -147,6 +147,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
       - name: Install Dependencies
         run: choco install capnproto
       - name: Build
