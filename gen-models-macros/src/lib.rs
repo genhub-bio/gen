@@ -52,10 +52,8 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let options = ContainerOptions::from_attributes(&input.attrs)?;
     let alias = options.alias.clone();
     let selector = format_ident!("{}Select", model);
-    let selector_field = format_ident!("{}SelectField", model);
 
     let mut variants = Vec::new();
-    let mut column_matches = Vec::new();
     let mut column_constants = Vec::new();
     let mut filter_methods = Vec::new();
 
@@ -73,16 +71,17 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             .column
             .unwrap_or_else(|| field_name_string(&field_name));
         let column_literal = LitStr::new(&column, Span::call_site());
-        let value_type = option_inner(&field.ty).unwrap_or(&field.ty);
+        let field_type = &field.ty;
+        let value_type = option_inner(field_type).unwrap_or(field_type);
 
         variants.push(variant.clone());
-        column_matches.push(quote! { Self::#variant => #column_literal });
         column_constants.push(quote! {
             #[expect(
                 non_upper_case_globals,
                 reason = "selector field constants mirror generated Rust field variants"
             )]
-            pub const #variant: #selector_field = #selector_field::#variant;
+            pub const #variant: ::gen_models::select::SelectField<#model, #field_type> =
+                ::gen_models::select::SelectField::new(#column_literal);
         });
         filter_methods.push(filter_method(
             &field_name,
@@ -132,19 +131,6 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         });
 
     Ok(quote! {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        pub enum #selector_field {
-            #(#variants),*
-        }
-
-        impl #selector_field {
-            const fn as_sql(self) -> &'static str {
-                match self {
-                    #(#column_matches),*
-                }
-            }
-        }
-
         #[derive(Clone, Debug)]
         pub struct #selector<'conn> {
             conn: &'conn ::gen_models::select::Connection,
@@ -191,12 +177,12 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 
             #(#filter_methods)*
 
-            pub fn order_by(
+            pub fn order_by<T>(
                 mut self,
-                field: #selector_field,
+                field: ::gen_models::select::SelectField<#model, T>,
                 direction: ::gen_models::select::Direction,
             ) -> Self {
-                let column = self.column(field.as_sql());
+                let column = self.column(field.column());
                 self.order_by.push(::gen_models::select::SqlOrder::new(
                     column,
                     direction,
@@ -270,6 +256,16 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 self
             }
 
+            pub fn only<P>(
+                self,
+                projection: P,
+            ) -> ::gen_models::select::SelectedFields<#model, Self, P>
+            where
+                P: ::gen_models::select::SelectProjection<#model>,
+            {
+                ::gen_models::select::SelectedFields::new(self, projection)
+            }
+
             pub fn limit(mut self, limit: u32) -> Self {
                 self.limit = ::core::option::Option::Some(limit);
                 self
@@ -280,7 +276,12 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 self
             }
 
-            pub fn load(self) -> ::std::vec::Vec<#model> {
+            pub fn load(
+                self,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<#model>,
+                ::gen_models::ModelSelectError,
+            > {
                 ::gen_models::select::load::<#model, _>(self.conn, &self)
             }
 

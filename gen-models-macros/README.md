@@ -46,19 +46,20 @@ let samples = Sample::select(conn)
     .order_by(SampleSelect::Name, Direction::Asc)
     .limit(10)
     .offset(3)
-    .load();
+    .load()
+    .expect("should load samples");
 ```
 
-`load()` returns `Vec<Sample>`. Filter values, history refs, limits, and offsets are passed to
-SQLite as bound parameters rather than interpolated into SQL.
+`load()` returns `Result<Vec<Sample>, ModelSelectError>`. Filter values, history refs, limits, and
+offsets are passed to SQLite as bound parameters rather than interpolated into SQL.
 
 ## Generated API
 
 For a model named `Sample`, the derive generates:
 
 - `SampleSelect<'conn>`, the fluent query builder.
-- `SampleSelectField`, an enum containing one variant for every selectable field.
-- Associated field constants such as `SampleSelect::Name`, which provide the concise ordering API.
+- Typed field constants such as `SampleSelect::Name`. Each constant carries its model, SQL column,
+  and Rust value type.
 - `Sample::select(conn)`, the preferred selector constructor.
 
 Every selectable field receives an exact-match method:
@@ -79,12 +80,46 @@ Sample::select(conn).name_contains("reference");
 ```rust
 let children = BlockGroup::select(conn)
     .parent_block_group_id(parent_id)
-    .load();
+    .load()
+    .expect("should load child block groups");
 
 let roots = BlockGroup::select(conn)
     .parent_block_group_id_is_null()
-    .load();
+    .load()
+    .expect("should load root block groups");
 ```
+
+## Selecting specific fields
+
+Call `only` after configuring the query to return selected fields instead of complete models. A
+single field returns that field's Rust type:
+
+```rust
+let names: Vec<String> = Sample::select(conn)
+    .name_contains("foo")
+    .order_by(SampleSelect::Name, Direction::Asc)
+    .only(SampleSelect::Name)
+    .load()
+    .expect("should load sample names");
+```
+
+Pass a tuple of field constants to return typed tuples:
+
+```rust
+let samples: Vec<(String, bool)> = Sample::select(conn)
+    .order_by(SampleSelect::Name, Direction::Asc)
+    .only((SampleSelect::Name, SampleSelect::IsReference))
+    .load()
+    .expect("should load selected sample fields");
+```
+
+The field constants determine the return type and preserve the order of values in each tuple. Use
+a one-element tuple such as `(SampleSelect::Name,)` when a `Vec<(String,)>` is preferable to a
+`Vec<String>`.
+
+`only` is the terminal query-shaping step: apply filters, joins, ordering, limits, and offsets
+before it, then call `load`. A projection can contain up to eight fields and can select fields from
+the base model. Joined selectors still contribute filters and ordering, but not projected fields.
 
 ## Ordering and pagination
 
@@ -97,7 +132,8 @@ let samples = Sample::select(conn)
     .order_by(SampleSelect::IsReference, Direction::Desc)
     .limit(25)
     .offset(50)
-    .load();
+    .load()
+    .expect("should load ordered samples");
 ```
 
 Available directions are:
@@ -118,7 +154,8 @@ Use `with_ref` to read a Dolt history ref. Omitting `with_ref` reads the current
 let historical_samples = Sample::select(conn)
     .with_ref("main~1")
     .name_contains("foo")
-    .load();
+    .load()
+    .expect("should load historical samples");
 ```
 
 For the default source, a historical query reads `dolt_at_<table>(:history_ref)`. When selectors
@@ -136,7 +173,8 @@ let samples = Sample::select(conn)
     .name_contains("sample")
     .join(BlockGroup::select(conn).collection_name("example"))
     .order_by(SampleSelect::Name, Direction::Asc)
-    .load();
+    .load()
+    .expect("should load joined samples");
 ```
 
 The returned rows are always instances of the selector on the left, so this query returns
@@ -157,7 +195,8 @@ let paths = Path::select(conn)
             .collection_name("example")
             .sample_name("reference"),
     )
-    .load();
+    .load()
+    .expect("should load joined paths");
 ```
 
 Do not express the same query as two joins:
@@ -179,6 +218,22 @@ Joined selectors must:
 
 Violating these requirements, or attempting an ambiguous or unrelated join, currently panics with
 a descriptive message.
+
+## Error handling
+
+`load()` returns `ModelSelectError` for database preparation, query execution, and result-row
+iteration failures. Callers can propagate it directly:
+
+```rust,ignore
+use gen_models::ModelSelectError;
+
+fn matching_samples(conn: &Connection) -> Result<Vec<Sample>, ModelSelectError> {
+    Sample::select(conn).name_contains("foo").load()
+}
+```
+
+Selector construction errors, such as joining an unrelated model or joining the same alias twice,
+are currently programming errors enforced with assertions before `load()` runs.
 
 ## Configuration attributes
 
@@ -228,7 +283,7 @@ At compile time, `ModelSelect`:
 
 1. Accepts a non-generic struct with named fields.
 2. Reads the model and field-level `model_select` attributes.
-3. Generates the selector struct, typed ordering fields, filter methods, and `SelectQuery`
+3. Generates the selector struct, typed field constants, filter methods, and `SelectQuery`
    implementation.
 4. Generates `Model::select(conn)` as the public entry point.
 
@@ -238,7 +293,8 @@ At runtime, [`gen-models::select`](../gen-models/src/select.rs):
 2. Infers requested joins from the open database's foreign-key metadata.
 3. Renders one `SELECT` statement for the base model and its joined sources.
 4. Binds every runtime value through `rusqlite`.
-5. Maps result rows through the base model's `Query::process_row` implementation.
+5. Maps result rows through the base model's `Query::process_row` implementation and returns the
+   collected models or a `ModelSelectError`.
 
 The runtime support cannot live in this proc-macro crate. A proc-macro executes inside the compiler
 and can export procedural macros, but it cannot export the normal reusable runtime types needed by
@@ -253,7 +309,8 @@ without expanding every derive.
 - At least one field must remain selectable after applying `skip`.
 - Joins require one direct, unambiguous foreign-key relationship in the live schema.
 - The same source alias cannot be joined more than once.
-- `load()` returns `Vec<Model>` and currently panics on SQL preparation, execution, or row-mapping
-  failures rather than returning a `Result`.
+- `only` supports projections of one through eight base-model fields.
+- `Query::process_row` returns a model directly, so a model implementation that panics while
+  decoding a row cannot be converted into `ModelSelectError` without changing the `Query` trait.
 - Generated code references `gen_models`, so downstream consumers should use the macro through the
   `gen-models` crate under its standard crate name.

@@ -423,6 +423,7 @@ impl Path {
             .collection_name(collection_name)
             .order_by(PathSelect::CreatedOn, Direction::Desc)
             .load()
+            .expect("should load collection paths")
     }
 
     pub fn query_for_collection_and_sample(
@@ -438,6 +439,7 @@ impl Path {
             )
             .order_by(PathSelect::CreatedOn, Direction::Desc)
             .load()
+            .expect("should load collection and sample paths")
     }
 
     pub fn sequence(
@@ -1513,7 +1515,8 @@ mod tests {
             .order_by(PathSelect::CreatedOn, Direction::Asc)
             .limit(2)
             .offset(1)
-            .load();
+            .load()
+            .expect("should load paginated paths");
 
         assert_eq!(matches, vec![alpha, beta]);
         assert_eq!(gamma.name, "gamma");
@@ -1533,7 +1536,8 @@ mod tests {
             .with_ref(historical_commit.to_string())
             .collection_name("test")
             .order_by(PathSelect::CreatedOn, Direction::Asc)
-            .load();
+            .load()
+            .expect("should load historical paths");
 
         assert_eq!(historical_matches, vec![historical_path]);
         assert!(!historical_matches.contains(&current_path));

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Direction, ModelSelect,
+    Direction, ModelSelect, ModelSelectError,
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::AnnotationError,
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
@@ -64,6 +64,8 @@ pub struct SubgraphBoundary<'a> {
 pub enum BlockGroupError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Path creation error: {0}")]
     PathError(#[from] PathError),
     #[error("Edge creation error: {0}")]
@@ -442,7 +444,7 @@ impl BlockGroup {
             .name(group_name)
             .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
             .order_by(BlockGroupSelect::Id, Direction::Asc)
-            .load();
+            .load()?;
 
         if !existing_block_groups.is_empty() {
             return Ok(existing_block_groups);
@@ -1470,9 +1472,17 @@ mod tests {
             .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
             .limit(2)
             .offset(1)
-            .load();
+            .load()
+            .expect("should load paginated block groups");
+        let parent_ids: Vec<Option<HashId>> = BlockGroup::select(conn)
+            .collection_name("test")
+            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+            .only(BlockGroupSelect::ParentBlockGroupId)
+            .load()
+            .expect("should load optional parent block group ids");
 
         assert_eq!(matches, vec![beta, gamma]);
+        assert_eq!(parent_ids, vec![None, None, None]);
         assert_eq!(alpha.name, "alpha");
     }
 

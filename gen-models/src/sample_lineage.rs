@@ -99,6 +99,7 @@ impl SampleLineage {
         }
         select
             .load()
+            .expect("should load parent sample lineage")
             .into_iter()
             .map(|lineage| lineage.parent_sample_name)
             .collect()
@@ -117,6 +118,7 @@ impl SampleLineage {
         }
         select
             .load()
+            .expect("should load child sample lineage")
             .into_iter()
             .map(|lineage| lineage.child_sample_name)
             .collect()
@@ -416,7 +418,8 @@ mod tests {
             .name_contains("FoO")
             .order_by(SampleLineageSelect::ParentSampleName, Direction::Asc)
             .order_by(SampleLineageSelect::ChildSampleName, Direction::Asc)
-            .load();
+            .load()
+            .expect("should load matching sample lineage");
 
         assert_eq!(
             matches,
@@ -441,7 +444,8 @@ mod tests {
             .order_by(SampleLineageSelect::ChildSampleName, Direction::Desc)
             .order_by(SampleLineageSelect::ParentSampleName, Direction::Desc)
             .limit(2)
-            .load();
+            .load()
+            .expect("should load limited sample lineage");
 
         assert_eq!(
             limited_matches,
@@ -483,7 +487,8 @@ mod tests {
             .order_by(SampleLineageSelect::ParentSampleName, Direction::Desc)
             .limit(2)
             .offset(1)
-            .load();
+            .load()
+            .expect("should load paginated sample lineage");
 
         assert_eq!(
             matches,

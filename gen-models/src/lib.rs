@@ -1,5 +1,6 @@
 extern crate self as gen_models;
 
+pub use errors::ModelSelectError;
 pub use gen_models_macros::ModelSelect;
 pub use select::Direction;
 

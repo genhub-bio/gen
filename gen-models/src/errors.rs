@@ -14,6 +14,12 @@ pub use crate::{
 };
 
 #[derive(Debug, Error, PartialEq)]
+pub enum ModelSelectError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, Error, PartialEq)]
 pub enum QueryError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),

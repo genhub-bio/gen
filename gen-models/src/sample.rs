@@ -150,7 +150,7 @@ impl Sample {
         if let Some(history_ref) = history_ref {
             select = select.with_ref(history_ref);
         }
-        select.load()
+        select.load().expect("should load reference samples")
     }
 
     pub fn get_sample_reference_block_groups(
@@ -297,7 +297,7 @@ impl Sample {
         if let Some(history_ref) = history_ref {
             select = select.with_ref(history_ref);
         }
-        select.load()
+        select.load().expect("should load block groups")
     }
 
     pub fn get_all_names(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<String> {
@@ -305,7 +305,7 @@ impl Sample {
         if let Some(history_ref) = history_ref {
             select = select.with_ref(history_ref);
         }
-        let samples = select.load();
+        let samples = select.load().expect("should load sample names");
         samples.iter().map(|s| s.name.clone()).collect()
     }
 
@@ -328,7 +328,7 @@ impl Sample {
         if let Some(history_ref) = history_ref {
             select = select.with_ref(history_ref);
         }
-        select.load()
+        select.load().expect("should load matching samples")
     }
 }
 
@@ -408,13 +408,17 @@ mod tests {
             .name_contains("FoO")
             .order_by(SampleSelect::Name, Direction::CaseInsensitiveAsc)
             .load()
+            .expect("should load matching samples")
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
 
         assert_eq!(matches, vec!["BarFooBaz", "foo", "QuxFood"]);
 
-        let exact_matches = Sample::select(conn).name("foo").load();
+        let exact_matches = Sample::select(conn)
+            .name("foo")
+            .load()
+            .expect("should load exact sample match");
         assert_eq!(exact_matches.len(), 1);
         assert_eq!(exact_matches[0].name, "foo");
 
@@ -423,11 +427,50 @@ mod tests {
             .order_by(SampleSelect::Name, Direction::CaseInsensitiveDesc)
             .limit(2)
             .load()
+            .expect("should load limited sample matches")
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
 
         assert_eq!(limited_matches, vec!["QuxFood", "foo"]);
+    }
+
+    #[test]
+    fn test_select_only_returns_typed_fields() {
+        let conn = &get_connection(None).expect("should create graph database");
+        Sample::create(
+            conn,
+            NewSample {
+                name: "alpha",
+                is_reference: false,
+            },
+        )
+        .expect("should create alpha sample");
+        Sample::create(
+            conn,
+            NewSample {
+                name: "beta",
+                is_reference: true,
+            },
+        )
+        .expect("should create beta sample");
+
+        let names: Vec<String> = Sample::select(conn)
+            .order_by(SampleSelect::Name, Direction::Asc)
+            .only(SampleSelect::Name)
+            .load()
+            .expect("should load selected sample names");
+        let rows: Vec<(String, bool)> = Sample::select(conn)
+            .order_by(SampleSelect::Name, Direction::Asc)
+            .only((SampleSelect::Name, SampleSelect::IsReference))
+            .load()
+            .expect("should load selected sample fields");
+
+        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(
+            rows,
+            vec![("alpha".to_string(), false), ("beta".to_string(), true)]
+        );
     }
 
     #[test]
@@ -458,6 +501,7 @@ mod tests {
             .limit(2)
             .offset(1)
             .load()
+            .expect("should load paginated sample matches")
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
@@ -477,6 +521,7 @@ mod tests {
             .name_contains("sample")
             .join(BlockGroup::select(conn).name("target-group"))
             .load()
+            .expect("should load joined samples")
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
@@ -486,6 +531,7 @@ mod tests {
             .name_contains("group")
             .join(Sample::select(conn).is_reference(true))
             .load()
+            .expect("should load joined block groups")
             .into_iter()
             .map(|block_group| block_group.name)
             .collect::<Vec<_>>();
@@ -520,6 +566,7 @@ mod tests {
             .name_contains("foo")
             .order_by(SampleSelect::Name, Direction::Asc)
             .load()
+            .expect("should load historical samples")
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
@@ -540,6 +587,7 @@ mod tests {
             .join(BlockGroup::select(conn).name("matching-group"))
             .with_ref(historical_commit.to_string())
             .load()
+            .expect("should load historical joined samples")
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
