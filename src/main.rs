@@ -896,8 +896,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Diff {
             name,
-            sample1,
-            sample2,
+            query,
+            base,
             gfa,
         }) => {
             let collection_name = &(match name {
@@ -909,8 +909,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 db_context.workspace(),
                 collection_name,
                 &PathBuf::from(gfa),
-                sample1.as_str(),
-                sample2.as_str(),
+                query.as_str(),
+                base.as_str(),
             )?;
             Ok(())
         }

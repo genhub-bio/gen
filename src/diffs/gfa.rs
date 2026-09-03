@@ -33,24 +33,24 @@ pub fn gfa_sample_diff(
     workspace: &Workspace,
     collection_name: &str,
     filename: &PathBuf,
-    from_sample_name: &str,
-    to_sample_name: &str,
+    query_name: &str,
+    base_name: &str,
 ) -> Result<(), GfaDiffError> {
     /*
     Generate a GFA file that represents the differences between two samples in a collection.
 
-    General approach: For each pair of shared block groups between the samples, get the current path
+    General approach: For each pair of shared block groups between the query and base, get the current path
     for each and call find_block_mappings on the pair of paths to get mappings between shared
     regions on the paths.  Each shared region may cover multiple nodes.  We assume the mappings will
     be in order from upstream to downstream on the sequences.  We iterate over them to produce a
-    list of ranges on each path's sequence.  For each mapping, and for each path, if there is an
+    list of ranges on each path's sequence. For each mapping, and for each path, if there is an
     unshared region before the common region, we append the range for that unshared region to the
     path's list of ranges, and then the range for the common region.  Obviously there may be an
     unshared region on each path at the very end, and if so, we append the range for that region to
     the appropriate path's list.
 
     We then convert the list of ranges for a path to a list of segments, with each range being
-    converted to a segment with the range's start coordinate, and the subsequence of the path for
+    converted to a segment with the range's start coordinate and the subsequence of the path for
     that range.  We also create links, with one link per pair of adjacent segments in the path.
     Each shared segment will have two links going in (one for each path) and two links going out.
     Each unshared segment will have one link in and one link out.
@@ -58,11 +58,10 @@ pub fn gfa_sample_diff(
     We also create a GFA path for each path, which is just a list of the segments generated for that
     path.
     */
-    let source_block_groups =
-        Sample::get_block_groups(conn, collection_name, from_sample_name, None);
-    let target_block_groups = Sample::get_block_groups(conn, collection_name, to_sample_name, None);
+    let query_block_groups = Sample::get_block_groups(conn, collection_name, query_name, None);
+    let base_block_groups = Sample::get_block_groups(conn, collection_name, base_name, None);
 
-    let source_paths_by_name = source_block_groups
+    let query_paths_by_name = query_block_groups
         .iter()
         .map(|bg| {
             Ok((
@@ -71,7 +70,7 @@ pub fn gfa_sample_diff(
             ))
         })
         .collect::<Result<HashMap<String, Path>, BlockGroupError>>()?;
-    let target_paths_by_name = target_block_groups
+    let base_paths_by_name = base_block_groups
         .iter()
         .map(|bg| {
             Ok((
@@ -85,100 +84,99 @@ pub fn gfa_sample_diff(
     let mut links = HashSet::new();
     let mut paths = vec![];
 
-    let target_path_names = target_paths_by_name
+    let base_path_names = base_paths_by_name
         .keys()
         .cloned()
         .collect::<HashSet<String>>();
-    let source_path_names = source_paths_by_name
+    let query_path_names = query_paths_by_name
         .keys()
         .cloned()
         .collect::<HashSet<String>>();
-    let path_names = source_path_names
-        .union(&target_path_names)
+    let path_names = query_path_names
+        .union(&base_path_names)
         .cloned()
         .collect::<Vec<String>>();
 
     for path_name in &path_names {
-        let source_path_result = source_paths_by_name.get(path_name);
-        let target_path_result = target_paths_by_name.get(path_name);
+        let query_path_result = query_paths_by_name.get(path_name);
+        let base_path_result = base_paths_by_name.get(path_name);
 
-        let mappings = match (source_path_result, target_path_result) {
-            (Some(source_path), Some(target_path)) => {
-                source_path.find_block_mappings(conn, target_path)?
+        let mappings = match (query_path_result, base_path_result) {
+            (Some(query_path), Some(base_path)) => {
+                query_path.find_block_mappings(conn, base_path)?
             }
             _ => vec![],
         };
 
-        let mut source_ranges = vec![];
-        let mut target_ranges = vec![];
+        let mut query_ranges = vec![];
+        let mut base_ranges = vec![];
 
-        let mut last_source_position = 0;
-        let mut last_target_position = 0;
+        let mut last_query_position = 0;
+        let mut last_base_position = 0;
         for mapping in &mappings {
-            // Iterate over the shared regions between the source and target path.  If there is an
+            // Iterate over the shared regions between the query and base path. If there is an
             // unshared region before the shared region, append the range for the unshared region.
             // Then append the range for the shared region.
-            if mapping.source_range.start > last_source_position {
-                source_ranges.push(Range {
-                    start: last_source_position,
+            if mapping.source_range.start > last_query_position {
+                query_ranges.push(Range {
+                    start: last_query_position,
                     end: mapping.source_range.start,
                 });
             }
-            source_ranges.push(mapping.source_range);
-            last_source_position = mapping.source_range.end;
-            if mapping.target_range.start > last_target_position {
-                target_ranges.push(Range {
-                    start: last_target_position,
+            query_ranges.push(mapping.source_range);
+            last_query_position = mapping.source_range.end;
+            if mapping.target_range.start > last_base_position {
+                base_ranges.push(Range {
+                    start: last_base_position,
                     end: mapping.target_range.start,
                 });
             }
-            target_ranges.push(mapping.target_range);
-            last_target_position = mapping.target_range.end;
+            base_ranges.push(mapping.target_range);
+            last_base_position = mapping.target_range.end;
         }
 
-        if let Some(source_path) = source_path_result {
-            let source_sequence = source_path.sequence(conn, workspace, None)?;
+        if let Some(query_path) = query_path_result {
+            let query_sequence = query_path.sequence(conn, workspace, None)?;
 
-            let source_len = source_sequence.len() as i64;
-            if last_source_position < source_len {
-                source_ranges.push(Range {
-                    start: last_source_position,
-                    end: source_len,
+            let query_length = query_sequence.len() as i64;
+            if last_query_position < query_length {
+                query_ranges.push(Range {
+                    start: last_query_position,
+                    end: query_length,
                 });
             }
 
-            let source_node_blocks = source_path.node_block_partition(conn, source_ranges)?;
-            let source_segments = segments_from_blocks(&source_node_blocks, &source_sequence);
-            segments.extend(source_segments.iter().cloned());
+            let query_node_blocks = query_path.node_block_partition(conn, query_ranges)?;
+            let query_segments = segments_from_blocks(&query_node_blocks, &query_sequence);
+            segments.extend(query_segments.iter().cloned());
 
-            let source_links = links_from_blocks(&source_node_blocks);
-            links.extend(source_links.iter().cloned());
+            let query_links = links_from_blocks(&query_node_blocks);
+            links.extend(query_links.iter().cloned());
 
-            let source_gfa_path =
-                path_from_segments(from_sample_name, source_path, &source_segments);
-            paths.push(source_gfa_path);
+            let query_gfa_path = path_from_segments(query_name, query_path, &query_segments);
+            paths.push(query_gfa_path);
         }
 
-        if let Some(target_path) = target_path_result {
-            let target_sequence = target_path.sequence(conn, workspace, None)?;
+        if let Some(base_path) = base_path_result {
+            let base_sequence = base_path.sequence(conn, workspace, None)?;
 
-            let target_len = target_sequence.len() as i64;
-            if last_target_position < target_len {
-                target_ranges.push(Range {
-                    start: last_target_position,
-                    end: target_len,
+            let base_length = base_sequence.len() as i64;
+            if last_base_position < base_length {
+                base_ranges.push(Range {
+                    start: last_base_position,
+                    end: base_length,
                 });
             }
 
-            let target_node_blocks = target_path.node_block_partition(conn, target_ranges)?;
-            let target_segments = segments_from_blocks(&target_node_blocks, &target_sequence);
-            segments.extend(target_segments.iter().cloned());
+            let base_node_blocks = base_path.node_block_partition(conn, base_ranges)?;
+            let base_segments = segments_from_blocks(&base_node_blocks, &base_sequence);
+            segments.extend(base_segments.iter().cloned());
 
-            let target_links = links_from_blocks(&target_node_blocks);
-            links.extend(target_links.iter().cloned());
+            let base_links = links_from_blocks(&base_node_blocks);
+            links.extend(base_links.iter().cloned());
 
-            let target_gfa_path = path_from_segments(to_sample_name, target_path, &target_segments);
-            paths.push(target_gfa_path);
+            let base_gfa_path = path_from_segments(base_name, base_path, &base_segments);
+            paths.push(base_gfa_path);
         }
     }
 
