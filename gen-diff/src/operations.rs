@@ -711,9 +711,8 @@ mod tests {
     };
     use crate::{
         graph::{
-            BlockGroupComparisonGraphs, DiffChangeKind, DiffGenGraph, DiffInputGraph, GraphEdgeKey,
-            build_diff_input_graph, build_unified_diff_graph, path_end_graph_node,
-            path_start_graph_node,
+            DiffChangeKind, DiffGenGraph, DiffInputGraph, GraphEdgeKey, build_diff_input_graph,
+            build_unified_diff_graph, path_end_graph_node, path_start_graph_node,
         },
         test_helpers::{get_config_connection, get_connection as test_get_connection},
     };
@@ -1446,12 +1445,12 @@ mod tests {
         );
 
         assert_eq!(
-            graph_edge_keys(&reconstructed_graph.graph),
-            graph_edge_keys(&target_graph.graph)
+            graph_edge_keys(reconstructed_graph.graph()),
+            graph_edge_keys(target_graph.graph())
         );
         assert_eq!(
-            reconstructed_graph.graph.nodes().collect::<HashSet<_>>(),
-            target_graph.graph.nodes().collect::<HashSet<_>>()
+            reconstructed_graph.graph().nodes().collect::<HashSet<_>>(),
+            target_graph.graph().nodes().collect::<HashSet<_>>()
         );
     }
 
@@ -1534,7 +1533,7 @@ mod tests {
             &HashMap::from([(node_id, operation)]),
         );
 
-        let source_nodes = source_input_graph.graph.nodes().collect::<HashSet<_>>();
+        let source_nodes = source_input_graph.graph().nodes().collect::<HashSet<_>>();
         assert!(
             source_nodes.contains(&GraphNode {
                 node_id,
@@ -1551,7 +1550,7 @@ mod tests {
             }),
             "source graph should not synthesize slices from target-only boundaries"
         );
-        let target_nodes = target_input_graph.graph.nodes().collect::<HashSet<_>>();
+        let target_nodes = target_input_graph.graph().nodes().collect::<HashSet<_>>();
         assert!(
             target_nodes.contains(&GraphNode {
                 node_id,
@@ -1594,7 +1593,7 @@ mod tests {
         let regular_node = test_graph_node(node_id, 0, 3);
         assert!(
             input_graph
-                .graph
+                .graph()
                 .edge_weight(regular_node, path_start_graph_node())
                 .is_some(),
             "terminal blocks should participate in endpoint lookup regardless of edge direction"
@@ -1603,6 +1602,10 @@ mod tests {
 
     #[test]
     fn test_unified_diff_graph_connects_deletion_and_addition_through_common_terminals() {
+        // Before: start -> prefix -> deleted -> middle ------------> suffix -> end
+        // After:  start -> prefix ------------> middle -> inserted -> suffix -> end
+        // Ensure replacing the explicit middle -> suffix edge removes it even
+        // though both endpoints survive, and adds both edges through inserted.
         let operation = DoltHashId([100; 20]);
         let prefix_node_id = HashId::convert_str("prefix");
         let deleted_node_id = HashId::convert_str("deleted");
@@ -1727,23 +1730,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
         );
-        let block_group = BlockGroup {
-            id: HashId::pad_str(99),
-            collection_name: "collection".to_string(),
-            sample_name: "sample".to_string(),
-            name: "block-group".to_string(),
-            created_on: 0,
-            parent_block_group_id: None,
-            is_default: false,
-        };
-        let comparison_graphs = BlockGroupComparisonGraphs {
-            source_block_group: Some(block_group.clone()),
-            target_block_group: Some(block_group),
-            source_graph,
-            reconstructed_target_graph: target_graph,
-        };
-
-        let graph = build_unified_diff_graph(&comparison_graphs, operation);
+        let graph = build_unified_diff_graph(&source_graph, &target_graph, Some(operation));
 
         assert_eq!(
             graph
@@ -1775,6 +1762,9 @@ mod tests {
         assert_diff_edge_kind(&graph, prefix_node, deleted_node, DiffChangeKind::Removed);
         assert_diff_edge_kind(&graph, deleted_node, middle_node, DiffChangeKind::Removed);
         assert_diff_edge_kind(&graph, prefix_node, middle_node, DiffChangeKind::Added);
+        assert_diff_edge_kind(&graph, middle_node, suffix_node, DiffChangeKind::Removed);
+        assert_diff_edge_kind(&graph, middle_node, inserted_node, DiffChangeKind::Added);
+        assert_diff_edge_kind(&graph, inserted_node, suffix_node, DiffChangeKind::Added);
         assert_all_nodes_connected_to(&graph, path_start_graph_node());
         assert_diff_edge_kind(
             &graph,

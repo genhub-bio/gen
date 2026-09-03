@@ -33,8 +33,8 @@ pub fn gfa_sample_diff(
     workspace: &Workspace,
     collection_name: &str,
     filename: &PathBuf,
-    query_name: &str,
     base_name: &str,
+    query_name: &str,
 ) -> Result<(), GfaDiffError> {
     /*
     Generate a GFA file that represents the differences between two samples in a collection.
@@ -255,6 +255,8 @@ fn path_from_segments(sample_name: &str, path: &Path, segments: &[Segment]) -> G
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use gen_core::{HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::{
@@ -272,6 +274,164 @@ mod tests {
         imports::gfa::import_gfa,
         test_helpers::{create_bg, setup_gen},
     };
+
+    #[test]
+    fn test_gfa_diff_reference_frame() {
+        // Assert that the comparison is in the right direction. Normally GFA doesn't annotate
+        // removed/added, so the order of inputs doesn't matter as the graph has no indication
+        // of what segment something belongs to. This comes out in paths, so we assert that the
+        // paths are correct based on the input they should belong to.
+        // Only the child's path replaces the middle AA with CC:
+        //   base:  A -> AA -> A
+        //   child: A -> CC -> A
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection_name = "argument order";
+        Collection::create(conn, collection_name).unwrap();
+        let block_group = create_bg(conn, collection_name, Sample::DEFAULT_NAME, "sequence");
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAAA")
+            .save(conn)
+            .unwrap();
+        let node_id =
+            Node::create(conn, &sequence.hash, &HashId::convert_str("argument-order")).unwrap();
+        let entry = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let exit = Edge::create(
+            conn,
+            node_id,
+            4,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let edge_ids = [entry.id, exit.id];
+        BlockGroupEdge::bulk_create(
+            conn,
+            &edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        Path::create(conn, "sequence", &block_group.id, &edge_ids).unwrap();
+        Sample::get_or_create_child(
+            conn,
+            collection_name,
+            "child",
+            vec![Sample::DEFAULT_NAME.to_string()],
+        )
+        .unwrap();
+        let child_block_group =
+            BlockGroup::get_by_name(conn, collection_name, "child", "sequence", None).unwrap();
+        let child_sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("CC")
+            .save(conn)
+            .unwrap();
+        let child_node = Node::create(
+            conn,
+            &child_sequence.hash,
+            &HashId::convert_str("child-only-edit"),
+        )
+        .unwrap();
+        let edit_entry = Edge::create(
+            conn,
+            node_id,
+            1,
+            Strand::Forward,
+            child_node,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let edit_exit = Edge::create(
+            conn,
+            child_node,
+            2,
+            Strand::Forward,
+            node_id,
+            3,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[edit_entry.id, edit_exit.id]
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: child_block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let child_path = BlockGroup::get_current_path(conn, &child_block_group.id, None).unwrap();
+        child_path
+            .new_path_with(conn, 1, 3, &edit_entry, &edit_exit)
+            .unwrap();
+        let directory = tempdir().unwrap();
+        let filename = directory.path().join("diff.gfa");
+        gfa_sample_diff(
+            conn,
+            context.workspace(),
+            collection_name,
+            &filename,
+            Sample::DEFAULT_NAME,
+            "child",
+        )
+        .unwrap();
+        let output = fs::read_to_string(&filename).unwrap();
+        let segments = output
+            .lines()
+            .filter(|line| line.starts_with("S\t"))
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                (fields[1], fields[2])
+            })
+            .collect::<HashMap<_, _>>();
+        let path_sequences = output
+            .lines()
+            .filter(|line| line.starts_with("P\t"))
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                let sequence = fields[2]
+                    .split(',')
+                    .map(|segment| {
+                        let segment_id = segment
+                            .strip_suffix('+')
+                            .expect("should traverse forward in this fixture");
+                        segments[segment_id]
+                    })
+                    .collect::<String>();
+                (fields[1], sequence)
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(path_sequences.len(), 2);
+        assert_eq!(path_sequences["Reference.sequence"], "AAAA");
+        // Path updates give the child path a new name containing the edit site.
+        let (_, child_sequence) = path_sequences
+            .iter()
+            .find(|(name, _)| name.starts_with("Child."))
+            .expect("should export the child's updated path");
+        assert_eq!(child_sequence, "ACCA");
+    }
 
     #[test]
     fn test_gfa_diff() {
