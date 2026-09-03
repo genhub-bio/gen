@@ -442,17 +442,17 @@ pub enum Commands {
         #[arg(long)]
         region: Option<String>,
     },
-    /// Output a file representing the "diff" between two samples
+    /// Output a file representing the diff between a query and base
     Diff {
         /// The name of the collection to diff
         #[arg(short, long)]
         name: Option<String>,
-        /// The name of the first sample to diff
-        #[arg(long)]
-        sample1: String,
-        /// The name of the second sample to diff
-        #[arg(long)]
-        sample2: String,
+        /// Query whose contents are compared against the base
+        #[arg(long, visible_alias = "sample1")]
+        query: String,
+        /// Base used as the comparison reference
+        #[arg(long, visible_alias = "sample2")]
+        base: String,
         /// The name of the output GFA file
         #[arg(long)]
         gfa: String,
@@ -560,6 +560,26 @@ mod tests {
             parse_diff_revisions("main..feature", None),
             Ok(("main".into(), "feature".into(), DiffRange::TwoDot))
         );
+    }
+
+    #[test]
+    fn test_gfa_diff_uses_query_and_base_names() {
+        let cli = Cli::try_parse_from([
+            "gen",
+            "diff",
+            "--query",
+            "foo",
+            "--base",
+            "unknown",
+            "--gfa",
+            "sample-diff.gfa",
+        ])
+        .expect("should parse query and base for a GFA diff");
+        let Some(Commands::Diff { query, base, .. }) = cli.command else {
+            panic!("should parse diff command");
+        };
+        assert_eq!(query, "foo");
+        assert_eq!(base, "unknown");
     }
 
     #[test]

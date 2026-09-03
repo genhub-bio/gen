@@ -711,8 +711,8 @@ mod tests {
     };
     use crate::{
         graph::{
-            AnnotatedStageGraph, BlockGroupStageGraphs, DiffChangeKind, DiffGenGraph, GraphEdgeKey,
-            build_stage_graph_from_nodes, build_unified_diff_graph, path_end_graph_node,
+            BlockGroupComparisonGraphs, DiffChangeKind, DiffGenGraph, DiffInputGraph, GraphEdgeKey,
+            build_diff_input_graph, build_unified_diff_graph, path_end_graph_node,
             path_start_graph_node,
         },
         test_helpers::{get_config_connection, get_connection as test_get_connection},
@@ -1102,13 +1102,13 @@ mod tests {
             .map_err(OperationDiffError::from)
     }
 
-    fn build_stage_graph(
-        stage_blocks: &[GroupBlock],
-        stage_edges: &[AugmentedEdge],
+    fn build_diff_input(
+        input_blocks: &[GroupBlock],
+        input_edges: &[AugmentedEdge],
         node_operations_by_id: &HashMap<HashId, DoltHashId>,
         edge_operations_by_id: &HashMap<HashId, DoltHashId>,
-    ) -> AnnotatedStageGraph {
-        let stage_nodes = stage_blocks
+    ) -> DiffInputGraph {
+        let input_nodes = input_blocks
             .iter()
             .map(|block| GraphNode {
                 node_id: block.node_id,
@@ -1116,11 +1116,11 @@ mod tests {
                 sequence_end: block.end,
             })
             .collect::<HashSet<_>>();
-        let continuation_spans = stage_nodes.clone();
-        build_stage_graph_from_nodes(
-            stage_nodes,
+        let continuation_spans = input_nodes.clone();
+        build_diff_input_graph(
+            input_nodes,
             &continuation_spans,
-            stage_edges,
+            input_edges,
             node_operations_by_id,
             edge_operations_by_id,
         )
@@ -1432,13 +1432,13 @@ mod tests {
             Some(&target_ref),
         )
         .expect("should build target blocks");
-        let reconstructed_graph = build_stage_graph(
+        let reconstructed_graph = build_diff_input(
             &reconstructed_blocks,
             &reconstructed_edges,
             &HashMap::new(),
             &HashMap::new(),
         );
-        let target_graph = build_stage_graph(
+        let target_graph = build_diff_input(
             &target_blocks,
             &target_edges,
             &HashMap::new(),
@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stage_graph_keeps_endpoint_local_node_slices() {
+    fn test_diff_input_graph_keeps_endpoint_local_node_slices() {
         let operation = DoltHashId([100; 20]);
         let node_id = HashId::convert_str("reference-node");
         let sequence = Sequence::new()
@@ -1517,24 +1517,24 @@ mod tests {
             GroupBlock::new(0, node_id, &sequence, 0, 3),
             GroupBlock::new(1, node_id, &sequence, 4, 10),
         ];
-        let stage_edges = vec![
+        let input_edges = vec![
             test_augmented_edge(start_edge_id, PATH_START_NODE_ID, 0, node_id, 0),
             test_augmented_edge(end_edge_id, node_id, 10, PATH_END_NODE_ID, 0),
         ];
-        let source_stage_graph = build_stage_graph(
+        let source_input_graph = build_diff_input(
             &source_blocks,
-            &stage_edges,
+            &input_edges,
             &HashMap::new(),
             &HashMap::new(),
         );
-        let target_stage_graph = build_stage_graph(
+        let target_input_graph = build_diff_input(
             &target_blocks,
-            &stage_edges,
+            &input_edges,
             &HashMap::new(),
             &HashMap::from([(node_id, operation)]),
         );
 
-        let source_nodes = source_stage_graph.graph.nodes().collect::<HashSet<_>>();
+        let source_nodes = source_input_graph.graph.nodes().collect::<HashSet<_>>();
         assert!(
             source_nodes.contains(&GraphNode {
                 node_id,
@@ -1551,7 +1551,7 @@ mod tests {
             }),
             "source graph should not synthesize slices from target-only boundaries"
         );
-        let target_nodes = target_stage_graph.graph.nodes().collect::<HashSet<_>>();
+        let target_nodes = target_input_graph.graph.nodes().collect::<HashSet<_>>();
         assert!(
             target_nodes.contains(&GraphNode {
                 node_id,
@@ -1567,16 +1567,16 @@ mod tests {
     }
 
     #[test]
-    fn test_stage_graph_keeps_terminal_blocks_for_endpoint_lookup() {
+    fn test_diff_input_graph_keeps_terminal_blocks_for_endpoint_lookup() {
         let node_id = HashId::convert_str("regular-node");
         let sequence = Sequence::new().sequence_type("DNA").sequence("ATC").build();
         let edge_id = HashId::convert_str("edge-to-start");
-        let stage_blocks = vec![
+        let input_blocks = vec![
             test_terminal_block(0, PATH_START_NODE_ID),
             GroupBlock::new(1, node_id, &sequence, 0, 3),
             test_terminal_block(2, PATH_END_NODE_ID),
         ];
-        let stage_edges = vec![test_augmented_edge(
+        let input_edges = vec![test_augmented_edge(
             edge_id,
             node_id,
             3,
@@ -1584,16 +1584,16 @@ mod tests {
             0,
         )];
 
-        let stage_graph = build_stage_graph(
-            &stage_blocks,
-            &stage_edges,
+        let input_graph = build_diff_input(
+            &input_blocks,
+            &input_edges,
             &HashMap::new(),
             &HashMap::new(),
         );
 
         let regular_node = test_graph_node(node_id, 0, 3);
         assert!(
-            stage_graph
+            input_graph
                 .graph
                 .edge_weight(regular_node, path_start_graph_node())
                 .is_some(),
@@ -1715,13 +1715,13 @@ mod tests {
                 0,
             ),
         ];
-        let source_graph = build_stage_graph(
+        let source_graph = build_diff_input(
             &source_blocks,
             &source_edges,
             &HashMap::new(),
             &HashMap::new(),
         );
-        let target_graph = build_stage_graph(
+        let target_graph = build_diff_input(
             &target_blocks,
             &target_edges,
             &HashMap::new(),
@@ -1736,14 +1736,14 @@ mod tests {
             parent_block_group_id: None,
             is_default: false,
         };
-        let stage_graphs = BlockGroupStageGraphs {
+        let comparison_graphs = BlockGroupComparisonGraphs {
             source_block_group: Some(block_group.clone()),
             target_block_group: Some(block_group),
             source_graph,
             reconstructed_target_graph: target_graph,
         };
 
-        let graph = build_unified_diff_graph(&stage_graphs, operation);
+        let graph = build_unified_diff_graph(&comparison_graphs, operation);
 
         assert_eq!(
             graph
