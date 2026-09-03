@@ -26,6 +26,7 @@ use crate::views::{
     annotation_groups::load_annotation_group_entries,
     annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
     block_group::extract_viewport_node_ids,
+    diff_graph::{DiffGraphComponent, apply_diff_highlights, build_diff_graph_component},
     gen_graph_widget::{
         GenGraphNodeSizer, create_gen_graph_widget, draw_annotation_labels, reapply_overlays,
     },
@@ -119,6 +120,14 @@ pub struct InlineGenGraphState<'a> {
     overlays: Vec<GraphOverlay>,
     annotation_colors: AnnotationColorCache,
     annotation_groups_loaded: bool,
+    diff_component: Option<DiffGraphComponent>,
+}
+
+#[derive(Default)]
+struct InlineWidgetOptions<'a> {
+    block_group_id: Option<HashId>,
+    history_ref: Option<&'a str>,
+    diff_component: Option<DiffGraphComponent>,
 }
 
 impl<'a> InlineGenGraphState<'a> {
@@ -143,6 +152,7 @@ impl<'a> InlineGenGraphState<'a> {
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
             annotation_groups_loaded: false,
+            diff_component: None,
         }
     }
 
@@ -210,7 +220,36 @@ pub fn show_inline_gen_graph_widget(
     paths: Vec<Path>,
     height: u16,
 ) -> Result<bool> {
-    show_inline_widget(conn, workspace, graph, paths, height, None, None)
+    show_inline_widget(
+        conn,
+        workspace,
+        graph,
+        paths,
+        height,
+        InlineWidgetOptions::default(),
+    )
+}
+
+/// Display an inline sample diff using the standard added/removed highlights.
+pub fn show_inline_diff_graph_widget(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    diff_graph: &gen_diff::graph::DiffGenGraph,
+    height: u16,
+) -> Result<bool> {
+    let component = build_diff_graph_component(diff_graph, String::new());
+    let graph = component.graph.clone();
+    show_inline_widget(
+        conn,
+        workspace,
+        &graph,
+        Vec::new(),
+        height,
+        InlineWidgetOptions {
+            diff_component: Some(component),
+            ..Default::default()
+        },
+    )
 }
 
 /// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
@@ -232,8 +271,11 @@ pub fn show_inline_block_group_widget(
         &graph,
         paths,
         height,
-        Some(block_group_id),
-        history_ref,
+        InlineWidgetOptions {
+            block_group_id: Some(block_group_id),
+            history_ref,
+            ..Default::default()
+        },
     )
 }
 
@@ -243,8 +285,7 @@ fn show_inline_widget(
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
-    block_group_id: Option<HashId>,
-    history_ref: Option<&str>,
+    options: InlineWidgetOptions<'_>,
 ) -> Result<bool> {
     let terminal_result = panic::catch_unwind(|| {
         ratatui::init_with_options(TerminalOptions {
@@ -254,8 +295,14 @@ fn show_inline_widget(
 
     match terminal_result {
         Ok(mut terminal) => {
-            let mut state =
-                InlineGenGraphState::new(graph, conn, workspace, block_group_id, history_ref);
+            let mut state = InlineGenGraphState::new(
+                graph,
+                conn,
+                workspace,
+                options.block_group_id,
+                options.history_ref,
+            );
+            state.diff_component = options.diff_component;
             for path in paths {
                 state.add_path(&path, conn)?;
             }
@@ -281,6 +328,9 @@ fn show_inline_widget(
                                 &mut state.overlays,
                                 &mut state.annotation_colors,
                             );
+                            if let Some(diff_component) = &state.diff_component {
+                                apply_diff_highlights(&mut state.controller, diff_component);
+                            }
 
                             // Draw the frame
                             terminal.draw(|frame| {

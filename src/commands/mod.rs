@@ -123,8 +123,14 @@ pub enum Commands {
         #[arg(long = "ref")]
         history_ref: Option<String>,
         /// Optional sample to open directly. If omitted, choose it in the UI.
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with_all = ["query", "base"])]
         sample: Option<String>,
+        /// Query whose graph changes should be shown relative to the base
+        #[arg(long, requires = "base")]
+        query: Option<String>,
+        /// Base against which the query is compared
+        #[arg(long, requires = "query")]
+        base: Option<String>,
         /// Look for the sample in a specific collection
         #[arg(short, long)]
         collection: Option<String>,
@@ -559,6 +565,35 @@ mod tests {
         assert_eq!(
             parse_diff_revisions("main..feature", None),
             Ok(("main".into(), "feature".into(), DiffRange::TwoDot))
+        );
+    }
+
+    #[test]
+    fn test_view_accepts_query_and_base() {
+        let cli =
+            Cli::try_parse_from(["gen", "view", "m123", "--query", "foo", "--base", "unknown"])
+                .expect("should parse a sample graph diff");
+        let Some(Commands::View {
+            graph, query, base, ..
+        }) = cli.command
+        else {
+            panic!("should parse view command");
+        };
+        assert_eq!(graph.as_deref(), Some("m123"));
+        assert_eq!(query.as_deref(), Some("foo"));
+        assert_eq!(base.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn test_view_sample_diff_requires_both_endpoints() {
+        let error = match Cli::try_parse_from(["gen", "view", "m123", "--query", "foo"]) {
+            Ok(_) => panic!("query without base should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("--base"),
+            "missing endpoint error should name --base: {error}"
         );
     }
 

@@ -246,6 +246,58 @@ pub fn view_diff(
     Ok(())
 }
 
+/// Display one annotated graph diff without the operation/sample explorer.
+pub fn view_diff_graph(
+    conn: &GraphConnection,
+    workspace: &gen_core::Workspace,
+    diff_graph: &DiffGenGraph,
+    title: String,
+) -> Result<(), io::Error> {
+    let component = build_diff_graph_component(diff_graph, title);
+    let mut session = TuiSession::enter()?;
+    let terminal = session.terminal_mut();
+    let mut graph_controller = create_gen_graph_controller(component.graph.clone());
+    apply_diff_highlights(&mut graph_controller, &component);
+    let mut last_frame_time = Instant::now();
+
+    loop {
+        let now = Instant::now();
+        let frame_delta = now.duration_since(last_frame_time);
+        last_frame_time = now;
+
+        terminal.draw(|frame| {
+            let areas = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(frame.area());
+            let graph_block = ratatui::widgets::Block::bordered().title(component.title.clone());
+            let canvas_area = graph_block.inner(areas[0]);
+            graph_controller.viewport_state.focus();
+            graph_controller.viewport_state.viewport_bounds = canvas_area;
+            graph_controller.update_animations(frame_delta);
+
+            frame.render_widget(graph_block, areas[0]);
+            let widget = create_gen_graph_widget(conn, workspace)
+                .detail_level(graph_controller.get_detail_level())
+                .style(ratatui::style::Style::default().bg(current_theme()[0x00]))
+                .cursor();
+            frame.render_stateful_widget(widget, canvas_area, &mut graph_controller);
+            render_status_bar(frame, areas[1], "*←→↑↓* pan | *+/-* zoom | *q/esc* quit");
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                break;
+            }
+            let _ = graph_controller.handle_key_event(key);
+        }
+    }
+
+    Ok(())
+}
+
 fn collect_samples(graphs: &[BlockGroupDiff]) -> Vec<SampleComponent> {
     let mut grouped = BTreeMap::<(SampleStatus, String, String), Vec<DiffComponent>>::new();
     for graph_diff in graphs {
