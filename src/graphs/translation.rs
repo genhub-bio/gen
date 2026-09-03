@@ -2403,8 +2403,16 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         AnnotationGroup::create(&conn, "gene").unwrap();
-        let annotation =
-            Annotation::create(&conn, "rev-gene", "gene", &accession.id, None).unwrap();
+        let annotation = Annotation::create(
+            &conn,
+            "gene",
+            &NewAnnotation {
+                name: "rev-gene",
+                accession_id: accession.id,
+                extra: None,
+            },
+        )
+        .unwrap();
 
         let params = TranslationParams::new("test");
         let protein = translate_annotation(
