@@ -21,14 +21,17 @@ use r#gen::{
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group, block_group_inline::show_inline_block_group_widget,
-        diff::view_diff, operations::view_operations, patch::view_patch,
+        block_group::view_block_group,
+        block_group_inline::{show_inline_block_group_widget, show_inline_diff_graph_widget},
+        diff::{view_diff, view_diff_graph},
+        operations::view_operations,
+        patch::view_patch,
         tui_runtime::install_global_panic_hook,
     },
 };
 use gen_annotations::translate;
 use gen_core::{BranchName, CommitRef, config::Workspace, range::Range, region::Region};
-use gen_diff::operations::collect_operation_diff;
+use gen_diff::{operations::collect_operation_diff, sample::build_sample_diff};
 use gen_models::{
     annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
     block_group::BlockGroup,
@@ -276,6 +279,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             graph,
             history_ref,
             sample,
+            query,
+            base,
             collection,
             position,
             full,
@@ -287,6 +292,38 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 collection,
                 history_ref.as_deref(),
             )?;
+
+            if let (Some(query_name), Some(base_name)) = (query, base) {
+                let graph_name = graph.as_deref().ok_or_else(|| {
+                    anyhow!("a graph name is required when comparing a query against a base")
+                })?;
+                let diff = build_sample_diff(
+                    graph_conn,
+                    collection_name,
+                    graph_name,
+                    &query_name,
+                    &base_name,
+                    history_ref.as_deref(),
+                )?;
+                let title = format!("{graph_name}: query {query_name} against base {base_name}");
+                if full {
+                    view_diff_graph(graph_conn, db_context.workspace(), &diff.graph, title)?;
+                } else {
+                    match show_inline_diff_graph_widget(
+                        graph_conn,
+                        db_context.workspace(),
+                        &diff.graph,
+                        clamp_inline_view_height(height),
+                    ) {
+                        Ok(true) => {
+                            view_diff_graph(graph_conn, db_context.workspace(), &diff.graph, title)?
+                        }
+                        Ok(false) => {}
+                        Err(error) => eprintln!("Error showing inline widget: {error}"),
+                    }
+                }
+                return Ok(());
+            }
 
             if !full && let (Some(name), Some(sample_name)) = (graph.as_ref(), sample.as_ref()) {
                 // Use the inline widget by default if a graph is specified
@@ -895,8 +932,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Diff {
             name,
-            sample1,
-            sample2,
+            query,
+            base,
             gfa,
         }) => {
             let collection_name = &(match name {
@@ -908,8 +945,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 db_context.workspace(),
                 collection_name,
                 &PathBuf::from(gfa),
-                sample1.as_str(),
-                sample2.as_str(),
+                query.as_str(),
+                base.as_str(),
             )?;
             Ok(())
         }

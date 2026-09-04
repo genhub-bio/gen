@@ -1,12 +1,13 @@
 //! Builds a connected, renderable graph describing changes between two states.
 //!
 //! This module is the graph-construction half of `gen-diff`.
-//! [`crate::operations`] first uses Dolt's table-diff functions to find affected
-//! block groups, edges, and nodes and to associate those rows with operations.
-//! It then calls `build_block_group_diff` for each affected block-group ID.
-//! The resulting [`BlockGroupDiff`] is consumed by the CLI, patch preview,
-//! GenHub, and the diff TUI to show unchanged context together with added,
-//! removed, and modified graph elements.
+//! [`crate::operations`] uses Dolt's table-diff functions to find affected block
+//! groups, edges, and nodes and associate those rows with operations. Sample
+//! comparison supplies complete base and query edge sets instead. Both paths
+//! share the boundary normalization, input construction, and graph unification
+//! implemented here. The resulting graph is consumed by the CLI, patch
+//! preview, GenHub, and the diff TUI to show unchanged context together with
+//! added, removed, and modified graph elements.
 //!
 //! # Source and target terminology
 //!
@@ -37,7 +38,7 @@
 //! A parent is selected only to make an added or removed child graph
 //! biologically meaningful. The changed rows would show a child's entire graph
 //! being removed or created. Thus, comparing to the parent shows the edits that
-//! introduced in the child. `load_block_group_stage_graphs` therefore
+//! introduced in the child. `build_block_group_comparison` therefore
 //! keeps two concepts separate:
 //!
 //! - `source_block_group` and `target_block_group` preserve actual membership
@@ -63,7 +64,7 @@
 //!
 //! # Graph-building approach
 //!
-//! Graph construction has three stages:
+//! Graph construction has three steps:
 //!
 //! 1. Load the selected endpoint edge sets and convert edge coordinates into
 //!    [`GraphNode`] sequence slices. Coordinates are slices of the backing
@@ -78,7 +79,7 @@
 //!    [`DiffChange`]. Start/end nodes and unchanged context remain in the result
 //!    because the renderer needs a connected graph for layout.
 //!
-//! Loading both endpoint graphs makes path membership and marker filtering
+//! Loading both endpoint edge sets makes path membership and marker filtering
 //! straightforward. An alternative is to load the baseline once and apply the
 //! `block_group_edges` diff rows to reconstruct the changed graph; the copied
 //! child rows are sufficient for that and it may be preferable if endpoint
@@ -122,7 +123,7 @@ pub struct DiffChange {
 impl DiffChange {
     /// Creates the neutral annotation used for graph elements shared by both endpoints.
     ///
-    /// Stage builders and merge helpers use this constructor so unchanged
+    /// Input builders and merge helpers use this constructor so unchanged
     /// context has neither a change kind nor misleading operation attribution.
     pub const fn unchanged() -> Self {
         Self {
@@ -133,7 +134,7 @@ impl DiffChange {
 
     /// Creates an annotation from the change kind and attribution collected from Dolt.
     ///
-    /// Stage-graph construction uses this common constructor before the source
+    /// Input-graph construction uses this common constructor before the source
     /// and target annotations are consolidated into the rendered diff graph.
     pub const fn new(kind: DiffChangeKind, operation: Option<DoltHashId>) -> Self {
         Self { kind, operation }
@@ -262,10 +263,42 @@ pub(crate) struct BlockGroupDiffInputs<'a> {
     pub(crate) node_changes: &'a [NodeChange],
 }
 
+/// Complete edge membership and optional operation attribution for one diff input.
+#[derive(Clone, Copy)]
+pub(crate) struct EdgeDiffInput<'a> {
+    edges: &'a [AugmentedEdge],
+    node_operations_by_id: Option<&'a HashMap<HashId, DoltHashId>>,
+    edge_operations_by_id: Option<&'a HashMap<HashId, DoltHashId>>,
+}
+
+impl<'a> EdgeDiffInput<'a> {
+    /// Creates an input whose changes have no operation attribution.
+    pub(crate) const fn unattributed(edges: &'a [AugmentedEdge]) -> Self {
+        Self {
+            edges,
+            node_operations_by_id: None,
+            edge_operations_by_id: None,
+        }
+    }
+
+    /// Creates an input with operation attribution for its affected nodes and edges.
+    pub(crate) const fn attributed(
+        edges: &'a [AugmentedEdge],
+        node_operations_by_id: &'a HashMap<HashId, DoltHashId>,
+        edge_operations_by_id: &'a HashMap<HashId, DoltHashId>,
+    ) -> Self {
+        Self {
+            edges,
+            node_operations_by_id: Some(node_operations_by_id),
+            edge_operations_by_id: Some(edge_operations_by_id),
+        }
+    }
+}
+
 /// Builds the renderable diff for one block group identified by table-diff discovery.
 ///
 /// `build_dolt_operation_diff` calls this once per affected block group. It
-/// resolves normalized endpoint stage graphs, unifies them, and omits a
+/// resolves normalized endpoint input graphs, unifies them, and omits a
 /// source-and-target block group when the resulting graph has no visible
 /// changes, avoiding empty entries in command and TUI output.
 pub(crate) fn build_block_group_diff(
@@ -273,38 +306,36 @@ pub(crate) fn build_block_group_diff(
     block_group_id: HashId,
     inputs: &BlockGroupDiffInputs<'_>,
 ) -> Result<Option<BlockGroupDiff>, OperationDiffError> {
-    let Some(stage_graphs) = load_block_group_stage_graphs(graph_conn, block_group_id, inputs)?
-    else {
+    let Some(comparison) = build_block_group_comparison(graph_conn, block_group_id, inputs)? else {
         return Ok(None);
     };
-    let graph = build_unified_diff_graph(&stage_graphs, inputs.default_operation);
-    if !diff_graph_has_changes(&graph)
-        && stage_graphs.source_block_group.is_some()
-        && stage_graphs.target_block_group.is_some()
+    if !diff_graph_has_changes(&comparison.graph)
+        && comparison.source_block_group.is_some()
+        && comparison.target_block_group.is_some()
     {
         return Ok(None);
     }
 
     Ok(Some(BlockGroupDiff {
         id: block_group_id,
-        source_block_group: stage_graphs.source_block_group,
-        target_block_group: stage_graphs.target_block_group,
-        graph,
+        source_block_group: comparison.source_block_group,
+        target_block_group: comparison.target_block_group,
+        graph: comparison.graph,
     }))
 }
 
-/// Loads comparable source and target stage graphs for one block-group diff.
+/// Builds a comparable graph while retaining block-group endpoint membership.
 ///
 /// `build_block_group_diff` uses this preparation step to keep endpoint
 /// membership separate from the lineage-aware graph chosen for display. It
 /// loads complete endpoint edges, filters copied child memberships, aligns
 /// sequence-slice boundaries, and attaches Dolt operation attribution because
 /// the unified builder needs matching graph units and real path membership.
-fn load_block_group_stage_graphs(
+fn build_block_group_comparison(
     graph_conn: &GraphConnection,
     block_group_id: HashId,
     inputs: &BlockGroupDiffInputs<'_>,
-) -> Result<Option<BlockGroupStageGraphs>, OperationDiffError> {
+) -> Result<Option<BlockGroupComparison>, OperationDiffError> {
     let target_block_group =
         BlockGroup::get_by_id(graph_conn, &block_group_id, Some(inputs.target_ref)).ok();
     let source_block_group =
@@ -360,7 +391,7 @@ fn load_block_group_stage_graphs(
     //     target: A -> I -> B, plus internal edit-site marker edges
     //
     // The target endpoint tells us which path edges are real graph choices and
-    // lets the stage builder filter marker edges before rendering.
+    // lets the input builder filter marker edges before rendering.
     let source_edges = load_block_group_edges(
         graph_conn,
         source_effective_block_group_id,
@@ -378,45 +409,41 @@ fn load_block_group_stage_graphs(
         target_effective_block_group_id,
         target_effective_history_ref,
     );
-    let source_spans = stage_spans_from_edges(&source_edges);
-    let target_spans = stage_spans_from_edges(&target_edges);
-    let stage_operation_change_lookup = collect_stage_operation_change_lookup(
+    let source_spans = spans_from_edges(&source_edges);
+    let target_spans = spans_from_edges(&target_edges);
+    let operation_change_lookup = collect_input_operation_changes(
         block_group_id,
         inputs,
         &block_group_edge_changes,
         &source_spans,
         &target_spans,
     );
-    let (source_nodes, target_nodes) =
-        split_stage_nodes_at_shared_boundaries(&source_spans, &target_spans);
-    let source_graph = build_stage_graph_from_nodes(
-        source_nodes,
-        &source_spans,
-        &source_edges,
-        &stage_operation_change_lookup.source_node_operation_by_id,
-        &stage_operation_change_lookup.source_edge_operation_by_id,
-    );
-    let reconstructed_target_graph = build_stage_graph_from_nodes(
-        target_nodes,
-        &target_spans,
-        &target_edges,
-        &stage_operation_change_lookup.target_node_operation_by_id,
-        &stage_operation_change_lookup.target_edge_operation_by_id,
+    let graph = build_diff_graph_from_edges(
+        EdgeDiffInput::attributed(
+            &source_edges,
+            &operation_change_lookup.source_node_operation_by_id,
+            &operation_change_lookup.source_edge_operation_by_id,
+        ),
+        EdgeDiffInput::attributed(
+            &target_edges,
+            &operation_change_lookup.target_node_operation_by_id,
+            &operation_change_lookup.target_edge_operation_by_id,
+        ),
+        Some(inputs.default_operation),
     );
 
-    Ok(Some(BlockGroupStageGraphs {
+    Ok(Some(BlockGroupComparison {
         source_block_group,
         target_block_group,
-        source_graph,
-        reconstructed_target_graph,
+        graph,
     }))
 }
 
 /// Loads all augmented path edges for an optional block group at one history ref.
 ///
-/// `load_block_group_stage_graphs` uses an empty vector for a genuinely missing
+/// `build_block_group_comparison` uses an empty vector for a genuinely missing
 /// endpoint and a complete edge set otherwise. Centralizing that choice keeps
-/// absence handling out of the span and stage-graph builders.
+/// absence handling out of the span and input-graph builders.
 fn load_block_group_edges(
     graph_conn: &GraphConnection,
     block_group_id: Option<HashId>,
@@ -427,13 +454,46 @@ fn load_block_group_edges(
     })
 }
 
+/// Builds a graph diff from two complete edge sets.
+///
+/// Both inputs use one shared sequence-boundary plan so their normalized
+/// `GraphNode` slices are directly comparable. Callers may attach operation
+/// attribution to either input; elements present only in the query are added,
+/// while elements present only in the base are removed.
+pub(crate) fn build_diff_graph_from_edges(
+    base: EdgeDiffInput<'_>,
+    query: EdgeDiffInput<'_>,
+    default_operation: Option<DoltHashId>,
+) -> DiffGenGraph {
+    let base_spans = spans_from_edges(base.edges);
+    let query_spans = spans_from_edges(query.edges);
+    let (base_nodes, query_nodes) = split_nodes_at_shared_boundaries(&base_spans, &query_spans);
+    let no_operations = HashMap::new();
+    let base_graph = build_diff_input_graph(
+        base_nodes,
+        &base_spans,
+        base.edges,
+        base.node_operations_by_id.unwrap_or(&no_operations),
+        base.edge_operations_by_id.unwrap_or(&no_operations),
+    );
+    let query_graph = build_diff_input_graph(
+        query_nodes,
+        &query_spans,
+        query.edges,
+        query.node_operations_by_id.unwrap_or(&no_operations),
+        query.edge_operations_by_id.unwrap_or(&no_operations),
+    );
+    build_unified_diff_graph(&base_graph, &query_graph, default_operation)
+}
+
 /// Derives the sequence slices covered by an endpoint's path edges.
 ///
-/// The stage loader uses these spans as lightweight graph nodes, pairing
-/// observed entry and exit coordinates without fetching sequence text. This
-/// preserves enough endpoint membership for later normalization and rendering
-/// while keeping attribution attached to the original edges.
-fn stage_spans_from_edges(edges: &[AugmentedEdge]) -> HashSet<GraphNode> {
+/// The operation-diff loader uses these spans as lightweight graph nodes, and
+/// the sample diff builder uses them to identify within-span continuations
+/// during boundary normalization. Pairing observed entry and exit coordinates
+/// preserves enough endpoint membership for normalization and rendering
+/// without fetching sequence text or detaching attribution from the edges.
+fn spans_from_edges(edges: &[AugmentedEdge]) -> HashSet<GraphNode> {
     // A diff graph node only needs a backing node id and a sequence slice. Do
     // not call Edge::blocks_from_edges here: that query fetches sequence text
     // so GroupBlock::sequence can work, but the diff graph resolves sequence
@@ -486,7 +546,7 @@ fn stage_spans_from_edges(edges: &[AugmentedEdge]) -> HashSet<GraphNode> {
 
 /// Turns observed entry and exit coordinates into ordered sequence intervals.
 ///
-/// `stage_spans_from_edges` uses adjacent coordinates rather than graph-space
+/// `spans_from_edges` uses adjacent coordinates rather than graph-space
 /// positions because `GraphNode` ranges slice the backing sequence. The
 /// resulting intervals are the endpoint-local spans later split at shared
 /// source/target boundaries.
@@ -509,15 +569,15 @@ fn coordinate_spans(starts: &HashSet<i64>, ends: &HashSet<i64>) -> Vec<(i64, i64
 
 /// Normalizes endpoint nodes to the same sequence-slice boundaries.
 ///
-/// `load_block_group_stage_graphs` uses the paired result so the unified graph
-/// can compare identical `GraphNode` keys. It takes the union of boundaries
-/// from both endpoints because an edit visible on only one side must still
-/// expose the corresponding slice on the other.
-fn split_stage_nodes_at_shared_boundaries(
+/// `build_diff_graph_from_edges` uses the paired result so the unified
+/// graph can compare identical `GraphNode` keys. It takes the union of
+/// boundaries from both endpoints because an edit visible on only one side
+/// must still expose the corresponding slice on the other.
+fn split_nodes_at_shared_boundaries(
     source_spans: &HashSet<GraphNode>,
     target_spans: &HashSet<GraphNode>,
 ) -> (HashSet<GraphNode>, HashSet<GraphNode>) {
-    let boundaries_by_node_id = collect_stage_boundaries(source_spans, target_spans);
+    let boundaries_by_node_id = collect_shared_boundaries(source_spans, target_spans);
     (
         split_spans_at_boundaries(source_spans, &boundaries_by_node_id),
         split_spans_at_boundaries(target_spans, &boundaries_by_node_id),
@@ -526,10 +586,10 @@ fn split_stage_nodes_at_shared_boundaries(
 
 /// Collects every endpoint boundary for each backing sequence node.
 ///
-/// `split_stage_nodes_at_shared_boundaries` uses this union as the shared cut
+/// `split_nodes_at_shared_boundaries` uses this union as the shared cut
 /// plan, ensuring source-only and target-only boundaries are applied
 /// symmetrically before graph elements are classified.
-fn collect_stage_boundaries(
+fn collect_shared_boundaries(
     source_spans: &HashSet<GraphNode>,
     target_spans: &HashSet<GraphNode>,
 ) -> HashMap<HashId, HashSet<i64>> {
@@ -608,7 +668,7 @@ fn split_spans_at_boundaries(
 
 /// Removes copied child-edge changes already represented by the effective source graph.
 ///
-/// `load_block_group_stage_graphs` uses this filter when a missing child
+/// `build_block_group_comparison` uses this filter when a missing child
 /// endpoint is displayed through its parent. Dolt reports the child's copied
 /// memberships as additions, but suppressing keys already in that parent keeps
 /// inherited paths from receiving false change attribution.
@@ -636,19 +696,19 @@ fn effective_edge_changes_for_source(
         .collect()
 }
 
-/// Builds endpoint-specific operation attribution for nodes and edges in one stage graph.
+/// Builds endpoint-specific operation attribution for nodes and edges in each input graph.
 ///
-/// `load_block_group_stage_graphs` passes this lookup to both stage builders.
+/// `build_block_group_comparison` attaches this lookup to both edge inputs.
 /// It intersects Dolt changes with the block group's represented operations and
 /// endpoint membership so unrelated table rows do not color this graph.
-fn collect_stage_operation_change_lookup(
+fn collect_input_operation_changes(
     block_group_id: HashId,
     inputs: &BlockGroupDiffInputs<'_>,
     changed_edge_ids: &[BlockGroupEdgeChange],
     source_spans: &HashSet<GraphNode>,
     target_spans: &HashSet<GraphNode>,
-) -> StageOperationChangeLookup {
-    let mut change_lookup = StageOperationChangeLookup::default();
+) -> InputOperationChangeLookup {
+    let mut change_lookup = InputOperationChangeLookup::default();
     let Some(block_group_operations) = inputs.block_group_operations_by_id.get(&block_group_id)
     else {
         return change_lookup;
@@ -699,9 +759,9 @@ fn collect_stage_operation_change_lookup(
     change_lookup
 }
 
-/// Extracts non-terminal backing node IDs from a stage's sequence spans.
+/// Extracts non-terminal backing node IDs from an input's sequence spans.
 ///
-/// `collect_stage_operation_change_lookup` uses these sets to attribute a node
+/// `collect_input_operation_changes` uses these sets to attribute a node
 /// only when its membership actually changes between the two endpoint graphs.
 fn span_node_ids(spans: &HashSet<GraphNode>) -> HashSet<HashId> {
     spans
@@ -711,42 +771,44 @@ fn span_node_ids(spans: &HashSet<GraphNode>) -> HashSet<HashId> {
         .collect()
 }
 
-/// Unifies normalized endpoint stages into the connected graph rendered as a diff.
+/// Unifies normalized inputs into the connected graph rendered as a diff.
 ///
-/// `build_block_group_diff` uses this after endpoint loading, and focused graph
-/// tests exercise it directly. It unions node and edge identities, then merges
-/// presence and operation annotations instead of discarding unchanged context;
-/// the retained context and terminal structure are required by CLI and TUI
-/// layout while changed elements receive added, removed, or modified styling.
+/// History diffs call this with operation-attributed inputs, while query/base
+/// comparison calls it with unattributed inputs built from the two samples. It
+/// unions node and edge identities, then merges presence and annotations
+/// instead of discarding unchanged context. The retained context and terminal
+/// structure are required by CLI and TUI layout while changed elements receive
+/// added, removed, or modified styling.
 pub(crate) fn build_unified_diff_graph(
-    stage_graphs: &BlockGroupStageGraphs,
-    default_operation: DoltHashId,
+    source_graph: &impl DiffInput,
+    target_graph: &impl DiffInput,
+    default_operation: Option<DoltHashId>,
 ) -> DiffGenGraph {
-    let mut merged_nodes = stage_graphs
-        .source_graph
-        .node_changes
-        .keys()
-        .chain(stage_graphs.reconstructed_target_graph.node_changes.keys())
-        .copied()
+    let mut merged_nodes = source_graph
+        .nodes()
+        .chain(target_graph.nodes())
         .collect::<Vec<_>>();
     merged_nodes.sort();
     merged_nodes.dedup();
 
-    let mut merged_edge_keys = stage_graphs
-        .source_graph
-        .edge_changes
-        .keys()
-        .chain(stage_graphs.reconstructed_target_graph.edge_changes.keys())
-        .copied()
+    let mut merged_edge_keys = source_graph
+        .edges()
+        .map(|(edge_key, _)| edge_key)
+        .chain(target_graph.edges().map(|(edge_key, _)| edge_key))
         .collect::<Vec<_>>();
     merged_edge_keys.sort();
     merged_edge_keys.dedup();
-    let source_edge_pairs = annotated_edge_pairs(&stage_graphs.source_graph);
-    let target_edge_pairs = annotated_edge_pairs(&stage_graphs.reconstructed_target_graph);
+    let source_edge_pairs = persisted_edge_pairs(source_graph);
+    let target_edge_pairs = persisted_edge_pairs(target_graph);
 
     let mut diff_graph = DiffGenGraph::new();
     for node in merged_nodes {
-        diff_graph.add_node(diff_graph_node(node, stage_graphs, default_operation));
+        diff_graph.add_node(diff_graph_node(
+            node,
+            source_graph,
+            target_graph,
+            default_operation,
+        ));
     }
 
     let mut merged_edges_by_node_pair = HashMap::<(GraphNode, GraphNode), Vec<GraphEdgeKey>>::new();
@@ -759,26 +821,18 @@ pub(crate) fn build_unified_diff_graph(
     let mut merged_edge_pairs = merged_edges_by_node_pair.into_iter().collect::<Vec<_>>();
     merged_edge_pairs.sort_by_key(|((source, target), _)| (*source, *target));
     for ((source, target), edge_keys) in merged_edge_pairs {
-        let source_node = diff_graph_node(source, stage_graphs, default_operation);
-        let target_node = diff_graph_node(target, stage_graphs, default_operation);
+        let source_node = diff_graph_node(source, source_graph, target_graph, default_operation);
+        let target_node = diff_graph_node(target, source_graph, target_graph, default_operation);
         let unchanged_endpoints = source_node.change.kind == DiffChangeKind::Unchanged
             && target_node.change.kind == DiffChangeKind::Unchanged;
         let diff_edges = edge_keys
             .iter()
             .copied()
             .map(|edge_key| DiffGraphEdge {
-                edge: graph_edge_for_key(stage_graphs, edge_key),
-                change: merge_edge_stage_changes(
-                    stage_graphs
-                        .source_graph
-                        .edge_changes
-                        .get(&edge_key)
-                        .copied(),
-                    stage_graphs
-                        .reconstructed_target_graph
-                        .edge_changes
-                        .get(&edge_key)
-                        .copied(),
+                edge: graph_edge_for_key(source_graph, target_graph, edge_key),
+                change: merge_input_edge_changes(
+                    source_graph.edge_metadata(edge_key),
+                    target_graph.edge_metadata(edge_key),
                     unchanged_endpoints,
                     source_edge_pairs.contains(&(source, target)),
                     target_edge_pairs.contains(&(source, target)),
@@ -815,32 +869,31 @@ fn diff_graph_has_changes(graph: &DiffGenGraph) -> bool {
 /// styling share the same presence and attribution rules.
 fn diff_graph_node(
     node: GraphNode,
-    stage_graphs: &BlockGroupStageGraphs,
-    default_operation: DoltHashId,
+    source_graph: &impl DiffInput,
+    target_graph: &impl DiffInput,
+    default_operation: Option<DoltHashId>,
 ) -> DiffGraphNode {
-    let source_change = stage_graphs.source_graph.node_changes.get(&node).copied();
-    let target_change = stage_graphs
-        .reconstructed_target_graph
-        .node_changes
-        .get(&node)
-        .copied();
+    let source_change = source_graph.node_change(node);
+    let target_change = target_graph.node_change(node);
     DiffGraphNode {
         node,
-        change: merge_stage_changes(source_change, target_change, default_operation),
+        change: merge_input_changes(source_change, target_change, default_operation),
     }
 }
 
-/// Collects endpoint pairs that have at least one annotated edge.
+/// Collects endpoint pairs that have at least one persisted edge.
 ///
 /// Edge merging uses these pairs to recognize topology that survives with a
 /// different edge identity. Comparing pairs as well as complete edge keys lets
-/// the renderer describe that case as modification instead of unrelated
-/// removal and addition.
-fn annotated_edge_pairs(stage_graph: &AnnotatedStageGraph) -> HashSet<(GraphNode, GraphNode)> {
-    stage_graph
-        .edge_changes
-        .keys()
-        .map(GraphEdgeKey::node_pair)
+/// the renderer describe that case as modification instead of unrelated removal
+/// and addition. Continuation edges are excluded because they normalize graph
+/// shape rather than establish persisted topology.
+fn persisted_edge_pairs(input_graph: &impl DiffInput) -> HashSet<(GraphNode, GraphNode)> {
+    input_graph
+        .edges()
+        .filter_map(|(edge_key, metadata)| {
+            (metadata.origin == EdgeOrigin::Persisted).then_some(edge_key.node_pair())
+        })
         .collect()
 }
 
@@ -848,41 +901,29 @@ fn annotated_edge_pairs(stage_graph: &AnnotatedStageGraph) -> HashSet<(GraphNode
 ///
 /// `build_unified_diff_graph` prefers the target copy so current metadata is
 /// rendered, then falls back to the source for removed edges. The key was
-/// collected from one of those stages, so absence from both is an invariant
+/// collected from one of those inputs, so absence from both is an invariant
 /// violation.
-fn graph_edge_for_key(stage_graphs: &BlockGroupStageGraphs, edge_key: GraphEdgeKey) -> GraphEdge {
-    stage_graph_edge_for_key(&stage_graphs.reconstructed_target_graph, edge_key)
-        .or_else(|| stage_graph_edge_for_key(&stage_graphs.source_graph, edge_key))
-        .expect("should contain graph edge for merged diff key")
-}
-
-/// Finds the exact edge for a key within one annotated stage graph.
-///
-/// `graph_edge_for_key` uses this helper because `GenGraph` stores multiple
-/// edges per node pair. Matching the identity fields selects the edge whose
-/// change annotation participated in the unified key set.
-fn stage_graph_edge_for_key(
-    stage_graph: &AnnotatedStageGraph,
+fn graph_edge_for_key(
+    source_graph: &impl DiffInput,
+    target_graph: &impl DiffInput,
     edge_key: GraphEdgeKey,
-) -> Option<GraphEdge> {
-    stage_graph
-        .graph
-        .edge_weight(edge_key.source, edge_key.target)?
-        .iter()
-        .copied()
-        .find(|edge| edge_key.matches_edge(*edge))
+) -> GraphEdge {
+    target_graph
+        .edge(edge_key)
+        .or_else(|| source_graph.edge(edge_key))
+        .expect("should contain graph edge for merged diff key")
 }
 
 /// Reconciles source and target presence plus attribution for one graph element.
 ///
 /// Unified-node construction and the default edge path use this function.
 /// Presence on only one side determines addition or removal; elements on both
-/// sides become modified only when either stage carries change metadata, which
+/// sides become modified only when either input carries change metadata, which
 /// keeps shared layout context neutral.
-fn merge_stage_changes(
+fn merge_input_changes(
     source_change: Option<DiffChange>,
     target_change: Option<DiffChange>,
-    default_operation: DoltHashId,
+    default_operation: Option<DoltHashId>,
 ) -> DiffChange {
     match (source_change, target_change) {
         (None, None) => DiffChange::unchanged(),
@@ -924,23 +965,33 @@ fn merge_stage_changes(
     }
 }
 
-/// Applies edge-specific reconciliation on top of the general stage rules.
+/// Applies edge-specific reconciliation on top of the general input rules.
 ///
-/// `build_unified_diff_graph` uses endpoint-pair membership and node status to
-/// distinguish real path changes from neutral continuation edges introduced by
-/// normalization. This prevents insertions from coloring surviving context as
-/// removed while still exposing deletions and edge replacements.
-fn merge_edge_stage_changes(
-    source_change: Option<DiffChange>,
-    target_change: Option<DiffChange>,
+/// Continuation edges are explicitly tagged during input construction and
+/// always stay neutral because they reconnect slices created by normalization,
+/// not biological changes. Persisted edges still use endpoint-pair membership
+/// and node status to distinguish surviving context from deletions and edge
+/// replacements.
+fn merge_input_edge_changes(
+    source_metadata: Option<DiffInputEdgeMetadata>,
+    target_metadata: Option<DiffInputEdgeMetadata>,
     edge_has_unchanged_endpoints: bool,
     source_has_pair: bool,
     target_has_pair: bool,
-    default_operation: DoltHashId,
+    default_operation: Option<DoltHashId>,
 ) -> DiffChange {
+    if source_metadata
+        .into_iter()
+        .chain(target_metadata)
+        .any(|metadata| metadata.origin == EdgeOrigin::Continuation)
+    {
+        return DiffChange::unchanged();
+    }
+    let source_change = source_metadata.map(|metadata| metadata.change);
+    let target_change = target_metadata.map(|metadata| metadata.change);
     match (source_change, target_change) {
-        // Source-only continuation edges are context when both endpoint slices
-        // survive in the target. They should stay grey for insertions:
+        // A source-only connection is context when both endpoint slices survive
+        // in the target. It should stay grey for insertions:
         //
         //   source: A -------- B
         //   target: A -> I -> B
@@ -958,17 +1009,20 @@ fn merge_edge_stage_changes(
             merge_pair_matched_edge_change(change, default_operation)
         }
         (source_change, target_change) => {
-            merge_stage_changes(source_change, target_change, default_operation)
+            merge_input_changes(source_change, target_change, default_operation)
         }
     }
 }
 
 /// Classifies a one-sided edge as a replacement when its node pair survives.
 ///
-/// `merge_edge_stage_changes` uses this for edge-identity churn between the
+/// `merge_input_edge_changes` uses this for edge-identity churn between the
 /// same normalized endpoints. Promoting attributed changes to `Modified`
 /// avoids rendering one biological connection as an unrelated add/remove pair.
-fn merge_pair_matched_edge_change(change: DiffChange, default_operation: DoltHashId) -> DiffChange {
+fn merge_pair_matched_edge_change(
+    change: DiffChange,
+    default_operation: Option<DoltHashId>,
+) -> DiffChange {
     if change.kind == DiffChangeKind::Unchanged && change.operation.is_none() {
         DiffChange::unchanged()
     } else {
@@ -982,37 +1036,38 @@ fn merge_pair_matched_edge_change(change: DiffChange, default_operation: DoltHas
 
 /// Creates an attributed non-neutral change, filling missing Dolt attribution.
 ///
-/// Stage and edge merge helpers use the comparison's default operation so
+/// Input and edge merge helpers use the comparison's default operation so
 /// every colored element can be grouped by operation in downstream views.
 fn changed(
     kind: DiffChangeKind,
     operation: Option<DoltHashId>,
-    default_operation: DoltHashId,
+    default_operation: Option<DoltHashId>,
 ) -> DiffChange {
-    DiffChange::new(kind, Some(operation.unwrap_or(default_operation)))
+    DiffChange::new(kind, operation.or(default_operation))
 }
 
-/// Builds one endpoint's connected, annotated stage graph from normalized nodes.
+/// Builds one endpoint's connected diff input from normalized nodes.
 ///
-/// `load_block_group_stage_graphs` uses this for both endpoints, while graph
-/// reconstruction tests call it directly. It maps persisted edges onto exact
-/// sequence-slice boundaries, drops edit-site markers that are not path
-/// choices, adds terminal and within-span continuation topology for layout, and
-/// records operation attribution separately for later source/target merging.
-pub(crate) fn build_stage_graph_from_nodes(
-    mut stage_nodes: HashSet<GraphNode>,
+/// `build_diff_graph_from_edges` uses this for both endpoints, while
+/// graph reconstruction tests call it directly. It maps persisted edges onto
+/// exact sequence-slice boundaries, drops edit-site markers that are not path
+/// choices, adds terminal and within-span continuation topology for layout,
+/// and records operation attribution separately for later source/target
+/// merging.
+pub(crate) fn build_diff_input_graph(
+    mut input_nodes: HashSet<GraphNode>,
     continuation_spans: &HashSet<GraphNode>,
-    stage_edges: &[AugmentedEdge],
+    input_edges: &[AugmentedEdge],
     node_operations_by_id: &HashMap<HashId, DoltHashId>,
     edge_operations_by_id: &HashMap<HashId, DoltHashId>,
-) -> AnnotatedStageGraph {
+) -> DiffInputGraph {
     let mut graph = GenGraph::new();
     let mut node_changes = HashMap::new();
-    let mut edge_changes = HashMap::new();
+    let mut edge_metadata = HashMap::new();
 
-    stage_nodes.insert(path_start_graph_node());
-    stage_nodes.insert(path_end_graph_node());
-    for node in &stage_nodes {
+    input_nodes.insert(path_start_graph_node());
+    input_nodes.insert(path_end_graph_node());
+    for node in &input_nodes {
         graph.add_node(*node);
         node_changes.insert(
             *node,
@@ -1024,16 +1079,16 @@ pub(crate) fn build_stage_graph_from_nodes(
         );
     }
 
-    let blocks_by_start = stage_nodes
+    let blocks_by_start = input_nodes
         .iter()
         .map(|node| ((node.node_id, node.sequence_start), *node))
         .collect::<HashMap<_, _>>();
-    let blocks_by_end = stage_nodes
+    let blocks_by_end = input_nodes
         .iter()
         .map(|node| ((node.node_id, node.sequence_end), *node))
         .collect::<HashMap<_, _>>();
 
-    for augmented_edge in stage_edges {
+    for augmented_edge in input_edges {
         // Edit-site marker edges preserve coordinates for later graph
         // operations. They are not path choices, so rendering them as diff
         // edges makes inserted/deleted sequence look unchanged.
@@ -1066,35 +1121,38 @@ pub(crate) fn build_stage_graph_from_nodes(
             } else {
                 graph.add_edge(source_node, target_node, vec![graph_edge]);
             }
-            edge_changes.insert(
+            edge_metadata.insert(
                 GraphEdgeKey::new(source_node, target_node, graph_edge),
-                edge_operations_by_id
-                    .get(&graph_edge.edge_id)
-                    .map_or_else(DiffChange::unchanged, |operation| {
-                        DiffChange::new(DiffChangeKind::Modified, Some(*operation))
-                    }),
+                DiffInputEdgeMetadata {
+                    change: edge_operations_by_id
+                        .get(&graph_edge.edge_id)
+                        .map_or_else(DiffChange::unchanged, |operation| {
+                            DiffChange::new(DiffChangeKind::Modified, Some(*operation))
+                        }),
+                    origin: EdgeOrigin::Persisted,
+                },
             );
         }
     }
 
     add_continuation_edges(
-        &stage_nodes,
+        &input_nodes,
         continuation_spans,
         &mut graph,
-        &mut edge_changes,
+        &mut edge_metadata,
     );
-    remove_unconnected_stage_nodes(&mut graph, &mut node_changes);
+    remove_unconnected_input_nodes(&mut graph, &mut node_changes);
 
-    AnnotatedStageGraph {
+    DiffInputGraph {
         graph,
         node_changes,
-        edge_changes,
+        edge_metadata,
     }
 }
 
-/// Returns the canonical start terminal used in every stage and unified graph.
+/// Returns the canonical start terminal used in every input and unified graph.
 ///
-/// The stage builder and graph-layout tests use this shared value so endpoint
+/// The input builder and graph-layout tests use this shared value so endpoint
 /// graphs remain connected to the same synthetic path boundary.
 pub(crate) fn path_start_graph_node() -> GraphNode {
     GraphNode {
@@ -1104,9 +1162,9 @@ pub(crate) fn path_start_graph_node() -> GraphNode {
     }
 }
 
-/// Returns the canonical end terminal used in every stage and unified graph.
+/// Returns the canonical end terminal used in every input and unified graph.
 ///
-/// The stage builder and graph-layout tests use this shared value so endpoint
+/// The input builder and graph-layout tests use this shared value so endpoint
 /// graphs remain connected to the same synthetic path boundary.
 pub(crate) fn path_end_graph_node() -> GraphNode {
     GraphNode {
@@ -1118,15 +1176,15 @@ pub(crate) fn path_end_graph_node() -> GraphNode {
 
 /// Reconnects normalized slices that came from one continuous endpoint span.
 ///
-/// `build_stage_graph_from_nodes` invokes this after mapping persisted edges.
+/// `build_diff_input_graph` invokes this after mapping persisted edges.
 /// It adds neutral synthetic edges only between adjacent slices covered by the
 /// same original span, preserving renderable connectivity without bridging
 /// genuine deletions or endpoint gaps.
 fn add_continuation_edges(
-    stage_nodes: &HashSet<GraphNode>,
+    input_nodes: &HashSet<GraphNode>,
     continuation_spans: &HashSet<GraphNode>,
     graph: &mut GenGraph,
-    edge_changes: &mut HashMap<GraphEdgeKey, DiffChange>,
+    edge_metadata: &mut HashMap<GraphEdgeKey, DiffInputEdgeMetadata>,
 ) {
     for span in continuation_spans {
         // Delayed block construction starts from the endpoint edges and keeps
@@ -1146,7 +1204,7 @@ fn add_continuation_edges(
         if is_terminal(span.node_id) || span.sequence_start == span.sequence_end {
             continue;
         }
-        let mut nodes = stage_nodes
+        let mut nodes = input_nodes
             .iter()
             .copied()
             .filter(|node| {
@@ -1185,9 +1243,12 @@ fn add_continuation_edges(
             } else {
                 graph.add_edge(source_node, target_node, vec![synthetic_edge]);
             }
-            edge_changes.insert(
+            edge_metadata.insert(
                 GraphEdgeKey::new(source_node, target_node, synthetic_edge),
-                DiffChange::unchanged(),
+                DiffInputEdgeMetadata {
+                    change: DiffChange::unchanged(),
+                    origin: EdgeOrigin::Continuation,
+                },
             );
         }
     }
@@ -1195,11 +1256,11 @@ fn add_continuation_edges(
 
 /// Removes non-terminal slices that no mapped or continuation edge reaches.
 ///
-/// `build_stage_graph_from_nodes` uses this cleanup after edge construction.
+/// `build_diff_input_graph` uses this cleanup after edge construction.
 /// Coordinate normalization can produce candidate slices unsupported by actual
 /// endpoint topology; pruning them keeps the unified graph from displaying
 /// isolated artifacts while retaining terminal anchors.
-fn remove_unconnected_stage_nodes(
+fn remove_unconnected_input_nodes(
     graph: &mut GenGraph,
     node_changes: &mut HashMap<GraphNode, DiffChange>,
 ) {
@@ -1232,7 +1293,7 @@ pub(crate) struct GraphEdgeKey {
 impl GraphEdgeKey {
     /// Creates the stable edge identity used to union and annotate endpoint graphs.
     ///
-    /// Stage construction and continuation-edge insertion use this key instead
+    /// Input construction and continuation-edge insertion use this key instead
     /// of the full persisted record so volatile `created_on` metadata does not
     /// turn an otherwise identical connection into a structural diff.
     pub(crate) fn new(source: GraphNode, target: GraphNode, edge: GraphEdge) -> Self {
@@ -1249,7 +1310,7 @@ impl GraphEdgeKey {
 
     /// Returns topology-only endpoints for pair-level edge matching.
     ///
-    /// `annotated_edge_pairs` uses this projection to detect connections that
+    /// `persisted_edge_pairs` uses this projection to detect connections that
     /// survive even when their persisted edge identities differ.
     fn node_pair(&self) -> (GraphNode, GraphNode) {
         (self.source, self.target)
@@ -1257,8 +1318,8 @@ impl GraphEdgeKey {
 
     /// Tests whether a concrete edge has the structural identity represented by this key.
     ///
-    /// `stage_graph_edge_for_key` uses this after selecting a node pair because
-    /// a `GenGraph` edge weight may contain multiple parallel edges.
+    /// `DiffInput::edge` uses this after selecting a node pair because a
+    /// `GenGraph` edge weight may contain multiple parallel edges.
     fn matches_edge(self, edge: GraphEdge) -> bool {
         self.edge_id == edge.edge_id
             && self.source_strand == edge.source_strand
@@ -1268,21 +1329,105 @@ impl GraphEdgeKey {
     }
 }
 
-pub(crate) struct BlockGroupStageGraphs {
-    pub(crate) source_block_group: Option<BlockGroup>,
-    pub(crate) target_block_group: Option<BlockGroup>,
-    pub(crate) source_graph: AnnotatedStageGraph,
-    pub(crate) reconstructed_target_graph: AnnotatedStageGraph,
+struct BlockGroupComparison {
+    source_block_group: Option<BlockGroup>,
+    target_block_group: Option<BlockGroup>,
+    graph: DiffGenGraph,
 }
 
-pub(crate) struct AnnotatedStageGraph {
-    pub(crate) graph: GenGraph,
-    pub(crate) node_changes: HashMap<GraphNode, DiffChange>,
-    pub(crate) edge_changes: HashMap<GraphEdgeKey, DiffChange>,
+pub(crate) struct DiffInputGraph {
+    graph: GenGraph,
+    node_changes: HashMap<GraphNode, DiffChange>,
+    edge_metadata: HashMap<GraphEdgeKey, DiffInputEdgeMetadata>,
+}
+
+/// Keeps an edge's displayed change separate from why the input contains it.
+///
+/// In particular, a continuation can occur on only one normalized endpoint but
+/// must remain neutral, while a persisted edge with the same topology may be a
+/// real addition or removal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DiffInputEdgeMetadata {
+    change: DiffChange,
+    origin: EdgeOrigin,
+}
+
+/// Records whether an input edge came from storage or graph normalization.
+///
+/// A persisted edge represents path topology stored for a block group, so its
+/// presence on only one side may be a biological addition or removal. A
+/// continuation edge is created only to reconnect adjacent slices after a
+/// shared comparison boundary splits one stored span, so it stays neutral even
+/// when the other input does not need the same connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EdgeOrigin {
+    /// A real path edge loaded from the block group's stored edge membership.
+    Persisted,
+    /// A synthetic connection between slices of one originally continuous span.
+    Continuation,
+}
+
+/// Supplies one normalized endpoint to the shared diff unifier.
+///
+/// The trait keeps input storage private while exposing only the presence,
+/// metadata and edge lookup operations required to build a `DiffGenGraph`.
+/// History-backed and query/base comparisons can therefore share the unifier
+/// without coupling it to how either workflow prepares an input.
+pub(crate) trait DiffInput {
+    /// Iterates over the graph nodes present in this endpoint.
+    fn nodes(&self) -> impl Iterator<Item = GraphNode> + '_;
+
+    /// Returns this endpoint's annotation for a node when it is present.
+    fn node_change(&self, node: GraphNode) -> Option<DiffChange>;
+
+    /// Iterates over stable edge keys and their input metadata.
+    fn edges(&self) -> impl Iterator<Item = (GraphEdgeKey, DiffInputEdgeMetadata)> + '_;
+
+    /// Returns this endpoint's metadata for an edge when it is present.
+    fn edge_metadata(&self, edge_key: GraphEdgeKey) -> Option<DiffInputEdgeMetadata>;
+
+    /// Returns the concrete graph edge represented by a stable key.
+    fn edge(&self, edge_key: GraphEdgeKey) -> Option<GraphEdge>;
+}
+
+impl DiffInput for DiffInputGraph {
+    fn nodes(&self) -> impl Iterator<Item = GraphNode> + '_ {
+        self.node_changes.keys().copied()
+    }
+
+    fn node_change(&self, node: GraphNode) -> Option<DiffChange> {
+        self.node_changes.get(&node).copied()
+    }
+
+    fn edges(&self) -> impl Iterator<Item = (GraphEdgeKey, DiffInputEdgeMetadata)> + '_ {
+        self.edge_metadata
+            .iter()
+            .map(|(edge_key, metadata)| (*edge_key, *metadata))
+    }
+
+    fn edge_metadata(&self, edge_key: GraphEdgeKey) -> Option<DiffInputEdgeMetadata> {
+        self.edge_metadata.get(&edge_key).copied()
+    }
+
+    fn edge(&self, edge_key: GraphEdgeKey) -> Option<GraphEdge> {
+        self.graph
+            .edge_weight(edge_key.source, edge_key.target)?
+            .iter()
+            .copied()
+            .find(|edge| edge_key.matches_edge(*edge))
+    }
+}
+
+#[cfg(test)]
+impl DiffInputGraph {
+    /// Exposes input topology to reconstruction tests without exposing its maps.
+    pub(crate) const fn graph(&self) -> &GenGraph {
+        &self.graph
+    }
 }
 
 #[derive(Debug, Default)]
-struct StageOperationChangeLookup {
+struct InputOperationChangeLookup {
     source_node_operation_by_id: HashMap<HashId, DoltHashId>,
     target_node_operation_by_id: HashMap<HashId, DoltHashId>,
     source_edge_operation_by_id: HashMap<HashId, DoltHashId>,
@@ -1332,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_stage_nodes_at_shared_boundaries_exposes_removed_slice() {
+    fn test_split_nodes_at_shared_boundaries_exposes_removed_slice() {
         let node_id = HashId::convert_str("reference-node");
         let source_spans = HashSet::from([GraphNode {
             node_id,
@@ -1353,7 +1498,7 @@ mod tests {
         ]);
 
         let (source_nodes, target_nodes) =
-            split_stage_nodes_at_shared_boundaries(&source_spans, &target_spans);
+            split_nodes_at_shared_boundaries(&source_spans, &target_spans);
         let removed_slice = GraphNode {
             node_id,
             sequence_start: 3,

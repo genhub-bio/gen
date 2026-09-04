@@ -54,6 +54,28 @@ repeatable `--index <path-or-uri>` option. For example, a BGZF FASTA can use bot
 
 # View diff
 
+Compare one sequence graph between two samples with:
+
+```sh
+gen view <graph> --query <query> --base <base>
+```
+
+The base establishes the reference for the comparison. For example,
+`gen view m123 --query foo --base unknown` shows how `foo` differs from
+`unknown`. A sequence present only in the query is shown as an addition in
+green, while a sequence present only in the base is shown as a removal in red.
+Add `--full` to open the comparison in the full-screen viewer.
+
+To export a sample comparison as GFA, use the same endpoint names:
+
+```sh
+gen diff --query <query> --base <base> --gfa <output.gfa>
+```
+
+The older `--sample1` and `--sample2` names remain aliases for compatibility.
+
+## Revision diff
+
 Compare two commits or branches with:
 
 ```sh

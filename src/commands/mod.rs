@@ -123,8 +123,14 @@ pub enum Commands {
         #[arg(long = "ref")]
         history_ref: Option<String>,
         /// Optional sample to open directly. If omitted, choose it in the UI.
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with_all = ["query", "base"])]
         sample: Option<String>,
+        /// Query whose graph changes should be shown relative to the base
+        #[arg(long, requires = "base")]
+        query: Option<String>,
+        /// Base against which the query is compared
+        #[arg(long, requires = "query")]
+        base: Option<String>,
         /// Look for the sample in a specific collection
         #[arg(short, long)]
         collection: Option<String>,
@@ -442,17 +448,17 @@ pub enum Commands {
         #[arg(long)]
         region: Option<String>,
     },
-    /// Output a file representing the "diff" between two samples
+    /// Output a file representing the diff between a query and base
     Diff {
         /// The name of the collection to diff
         #[arg(short, long)]
         name: Option<String>,
-        /// The name of the first sample to diff
-        #[arg(long)]
-        sample1: String,
-        /// The name of the second sample to diff
-        #[arg(long)]
-        sample2: String,
+        /// Query whose contents are compared against the base
+        #[arg(long, visible_alias = "sample1")]
+        query: String,
+        /// Base used as the comparison reference
+        #[arg(long, visible_alias = "sample2")]
+        base: String,
         /// The name of the output GFA file
         #[arg(long)]
         gfa: String,
@@ -560,6 +566,55 @@ mod tests {
             parse_diff_revisions("main..feature", None),
             Ok(("main".into(), "feature".into(), DiffRange::TwoDot))
         );
+    }
+
+    #[test]
+    fn test_view_accepts_query_and_base() {
+        let cli =
+            Cli::try_parse_from(["gen", "view", "m123", "--query", "foo", "--base", "unknown"])
+                .expect("should parse a sample graph diff");
+        let Some(Commands::View {
+            graph, query, base, ..
+        }) = cli.command
+        else {
+            panic!("should parse view command");
+        };
+        assert_eq!(graph.as_deref(), Some("m123"));
+        assert_eq!(query.as_deref(), Some("foo"));
+        assert_eq!(base.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn test_view_sample_diff_requires_both_endpoints() {
+        let error = match Cli::try_parse_from(["gen", "view", "m123", "--query", "foo"]) {
+            Ok(_) => panic!("query without base should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("--base"),
+            "missing endpoint error should name --base: {error}"
+        );
+    }
+
+    #[test]
+    fn test_gfa_diff_uses_query_and_base_names() {
+        let cli = Cli::try_parse_from([
+            "gen",
+            "diff",
+            "--query",
+            "foo",
+            "--base",
+            "unknown",
+            "--gfa",
+            "sample-diff.gfa",
+        ])
+        .expect("should parse query and base for a GFA diff");
+        let Some(Commands::Diff { query, base, .. }) = cli.command else {
+            panic!("should parse diff command");
+        };
+        assert_eq!(query, "foo");
+        assert_eq!(base, "unknown");
     }
 
     #[test]
