@@ -55,7 +55,7 @@ jobs:
           old_version_pattern=${old_version//./\\.}
           sed -E -i.bak "s/(gen(-[A-Za-z0-9_-]+)?[[:space:]]*=[[:space:]]*[{][^}]*version[[:space:]]*=[[:space:]]*\")${old_version_pattern}(\")/\\1${version}\\3/g" Cargo.toml gen-*/Cargo.toml gen-models-macros/tests/fixture/Cargo.toml gen-r/src/rust/Cargo.toml
           rm -f Cargo.toml.bak gen-*/Cargo.toml.bak gen-models-macros/tests/fixture/Cargo.toml.bak gen-r/src/rust/Cargo.toml.bak
-          cargo update --workspace
+          cargo update -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models-macros -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen
           cargo update --manifest-path gen-python/Cargo.toml -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models-macros -p gen-models -p gen-sugiyama -p gen-tui -p gen-annotations -p gen
           cargo update --manifest-path gen-r/src/rust/Cargo.toml -p gen-capnp-schemas -p gen-core -p gen-diff -p gen-graph -p gen-models-macros -p gen-models -p gen-sugiyama -p gen-tui -p gen
 
