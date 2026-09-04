@@ -19,7 +19,10 @@ use crate::python_api::{
     graph_search::{PyGraphLocus, PyGraphPos},
     hash_id::PyHashId,
     jupyter_widget::PyGraphController,
-    repository::PyRepository,
+    repository::{
+        PyRepository, clone_repository,
+        history::{PyBranch, PyOperation},
+    },
     sample::{PySample, PySampleIter},
     sequence_part::PySequencePart,
 };
@@ -30,6 +33,8 @@ use crate::python_api::{
 #[pymodule]
 pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRepository>()?;
+    m.add_class::<PyBranch>()?;
+    m.add_class::<PyOperation>()?;
     m.add_class::<PySequenceGraph>()?;
     m.add_class::<PyAnnotation>()?;
     m.add_class::<PyHashId>()?;
@@ -41,6 +46,7 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraphController>()?;
     m.add_class::<PySample>()?;
     m.add_class::<PySampleIter>()?;
+    m.add_function(wrap_pyfunction!(clone_repository, m)?)?;
 
     Ok(())
 }
