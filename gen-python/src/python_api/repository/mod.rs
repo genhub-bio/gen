@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use r#gen::{get_config_connection, get_connection};
+use r#gen::{get_config_connection, get_connection_for_branch};
 use gen_core::config::Workspace;
 use gen_models::{
     block_group::BlockGroup,
@@ -25,9 +25,32 @@ use super::{
 
 pub mod exports;
 pub mod graph_ops;
+pub mod history;
 pub mod imports;
 pub mod search;
 pub mod updates;
+
+/// Clones a remote Gen repository and opens it.
+///
+/// When `path` is omitted, the remote repository name is used beneath the
+/// current directory. When supplied, `path` is the exact destination.
+#[pyfunction(name = "clone")]
+#[pyo3(signature = (url, path=None))]
+pub fn clone_repository(url: &str, path: Option<String>) -> PyResult<PyRepository> {
+    let workspace = match path {
+        Some(path) => Workspace::new(path),
+        None => {
+            let parent = Workspace::from_current_dir();
+            let destination =
+                r#gen::commands::remote::operations::clone_destination_path(&parent, url)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            Workspace::new(destination)
+        }
+    };
+    r#gen::commands::clone::clone_to_workspace(url, &workspace)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    PyRepository::open_workspace(workspace)
+}
 
 fn tx_begin(context: &DbContext) -> PyResult<()> {
     let conn = context.graph().conn();
@@ -130,6 +153,29 @@ pub struct PyRepository {
 }
 
 impl PyRepository {
+    fn open_workspace(workspace: Workspace) -> PyResult<Self> {
+        let gen_dir = workspace.ensure_gen_dir();
+        let config_path = gen_dir.join("gen.db");
+        let config_conn = get_config_connection(Some(config_path))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let intended_branch = Defaults::get_current_branch(&config_conn);
+        let db_path = gen_dir.join("default.db");
+        let graph_conn = get_connection_for_branch(db_path.clone(), intended_branch.as_deref())
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!(
+                    "Failed to open database '{}': {error}",
+                    db_path.display()
+                ))
+            })?;
+
+        Ok(Self {
+            context: DbContext::new(workspace, graph_conn, config_conn)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
+            in_transaction: false,
+            pending_operation_summaries: RefCell::new(Vec::new()),
+        })
+    }
+
     pub(crate) fn get_default_collection(&self) -> String {
         Defaults::get(self.context.config().conn())
             .and_then(|d| d.collection_name)
@@ -203,26 +249,7 @@ impl PyRepository {
             None => Workspace::from_current_dir(),
         };
 
-        let gen_dir = workspace.ensure_gen_dir();
-        let config_path = gen_dir.join("gen.db");
-        let config_conn = get_config_connection(Some(config_path))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-        let db_path = gen_dir.join("default.db");
-
-        let graph_conn = get_connection(db_path.clone()).map_err(|err| {
-            PyRuntimeError::new_err(format!(
-                "Failed to open database '{}': {err}",
-                db_path.display()
-            ))
-        })?;
-
-        Ok(PyRepository {
-            context: DbContext::new(workspace, graph_conn, config_conn)
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
-            in_transaction: false,
-            pending_operation_summaries: RefCell::new(Vec::new()),
-        })
+        Self::open_workspace(workspace)
     }
 
     #[getter]
@@ -404,7 +431,7 @@ mod python_tests {
     use pyo3::{PyTypeInfo, prelude::*, py_run};
     use tempfile::tempdir;
 
-    use crate::python_api::repository::PyRepository;
+    use crate::python_api::repository::{PyRepository, clone_repository};
 
     fn make_repo(py: Python<'_>) -> Py<PyRepository> {
         let ctx = setup_gen_on_disk();
@@ -450,6 +477,46 @@ mod python_tests {
                     assert hasattr(repo, "db_path")
                     "#
                 )
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_clone_returns_open_repository() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let source = make_repo(py);
+            let fasta_dir = tempdir().unwrap();
+            let fasta = write_fasta(&fasta_dir, "test.fa", "chr1", "ACGTACGT");
+            source
+                .borrow(py)
+                .import_fasta(
+                    fasta.to_str().unwrap().to_string(),
+                    Some("test".to_string()),
+                    false,
+                    None,
+                )
+                .unwrap();
+            let source_root = source.borrow(py).context.workspace().repo_root().unwrap();
+            drop(source);
+
+            let destination_parent = tempdir().unwrap();
+            let destination = destination_parent.path().join("clone");
+            let remote_url = format!("file://{}", source_root.display());
+            let cloned =
+                clone_repository(&remote_url, Some(destination.to_str().unwrap().to_string()))
+                    .expect("should clone and open repository");
+
+            let block_groups = cloned.get_sequence_graphs().unwrap();
+            assert_eq!(
+                block_groups.len(),
+                1,
+                "clone should contain the source sequence graph"
+            );
+            assert_eq!(
+                block_groups[0].name, "chr1",
+                "clone should preserve the source sequence graph name"
             );
         });
     }

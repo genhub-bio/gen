@@ -12,6 +12,21 @@ use crate::{
 
 pub fn execute(url: &str, parent: &Workspace) -> Result<(), Box<dyn std::error::Error>> {
     let destination = clone_destination_path(parent, url)?;
+    clone_to_workspace(url, &Workspace::new(&destination))?;
+    println!(
+        "Cloned {} into {}.",
+        canonical_remote_url(url)?,
+        destination.display()
+    );
+    Ok(())
+}
+
+/// Clones a remote repository into an explicit destination workspace.
+pub fn clone_to_workspace(
+    url: &str,
+    workspace: &Workspace,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let destination = workspace.base_dir();
     if destination.exists() {
         return Err(format!(
             "Clone destination already exists: {}",
@@ -19,9 +34,9 @@ pub fn execute(url: &str, parent: &Workspace) -> Result<(), Box<dyn std::error::
         )
         .into());
     }
-    fs::create_dir(&destination)?;
+    fs::create_dir(destination)?;
     let result = (|| {
-        let workspace = Workspace::new(&destination);
+        let workspace = Workspace::new(destination);
         workspace.ensure_gen_dir();
         let config = get_config_connection(Some(workspace.gen_db_path()?))?;
         let canonical_url = canonical_remote_url(url)?;
@@ -30,11 +45,10 @@ pub fn execute(url: &str, parent: &Workspace) -> Result<(), Box<dyn std::error::
         let branch = clone_into_workspace(&config, &remote, &workspace)?;
         RemoteBranch::set_remote_validated(&config, &branch, Some("origin"))?;
         Defaults::set_current_branch(&config, Some(&branch))?;
-        println!("Cloned {canonical_url} into {}.", destination.display());
         Ok::<(), Box<dyn std::error::Error>>(())
     })();
     if result.is_err()
-        && let Err(error) = fs::remove_dir_all(&destination)
+        && let Err(error) = fs::remove_dir_all(destination)
     {
         eprintln!(
             "Warning: failed to remove incomplete clone at {}: {error}",

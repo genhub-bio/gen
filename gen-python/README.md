@@ -26,6 +26,21 @@ graphs = repo.get_sequence_graphs()          # -> list[SequenceGraph]
 sample.plot()  # or sg.plot()
 ```
 
+Clone and version-control repositories with the same object-oriented workflow:
+
+```python
+repo = gen.clone("https://www.genhub.bio/api/repos/owner/repository")
+feature = repo.create_branch("experiment")
+repo.checkout(feature)
+
+# Import or update sequences on the feature branch.
+repo.checkout("main")
+repo.merge(feature)
+
+operations = repo.get_operations()
+repo.reset(operations[1])
+```
+
 ## Architecture
 
 The package is built from three layers:
