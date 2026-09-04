@@ -10,9 +10,9 @@ use syn::{
 /// Generates a `<Model>Select` query builder from a persisted model's named fields.
 ///
 /// String fields receive exact and `_contains` filters. Every generated field can be used for
-/// typed ordering and projections. Generated selectors can be composed with
-/// `.join(other_selector)` when their models have one unambiguous direct foreign-key relationship.
-/// Joined queries can project fields with `.only(...)` or complete models with `.models::<(...)>()`.
+/// typed ordering, projections, and explicit join conditions. Generated selectors can be composed
+/// with `.join_on(left_field, right_field)` or `.join_filtered_on(...)`. Joined queries can project
+/// fields with `.only(...)` or complete models with `.models::<(...)>()`.
 /// `#[model_select(column = "...")]` overrides a field's SQL column, `#[model_select(skip)]`
 /// excludes a field, and the struct-level `source`, `alias`, and `select` options support custom or
 /// aliased queries.
@@ -127,11 +127,12 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         quote! { #source(history_ref) }
     } else {
         quote! {
-            let source = <#model as ::gen_models::traits::Query>::table_name_with_history_ref(
+            ::gen_models::select::default_sql_source(
+                <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                <#model as ::gen_models::traits::Query>::HISTORY_TABLE_NAME,
+                #source_alias,
                 history_ref,
-            );
-            let alias = <#model as ::gen_models::traits::Query>::TABLE_NAME;
-            ::std::format!("{source} {alias}")
+            )
         }
     };
     let select_clause = options
@@ -139,8 +140,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         .map(|select| quote! { ::std::string::String::from(#select) })
         .unwrap_or_else(|| {
             quote! {
-                ::std::format!(
-                    "{}.*",
+                ::gen_models::select::select_all_sql(
                     <Self as ::gen_models::select::SelectQuery>::source(self).alias(),
                 )
             }
@@ -183,7 +183,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             history_ref: ::core::option::Option<::std::string::String>,
             filters: ::std::vec::Vec<::gen_models::select::SqlFilter>,
             order_by: ::std::vec::Vec<::gen_models::select::SqlOrder>,
-            joins: ::std::vec::Vec<::gen_models::select::SqlJoin>,
+            joins: ::gen_models::select::SqlJoins,
             limit: ::core::option::Option<u32>,
             offset: u32,
         }
@@ -191,7 +191,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         impl<'conn> #selector<'conn> {
             #(#column_constants)*
 
-            pub const fn new(
+            pub fn new(
                 conn: &'conn ::gen_models::select::Connection,
             ) -> Self {
                 Self {
@@ -199,7 +199,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                     history_ref: ::core::option::Option::None,
                     filters: ::std::vec::Vec::new(),
                     order_by: ::std::vec::Vec::new(),
-                    joins: ::std::vec::Vec::new(),
+                    joins: ::gen_models::select::SqlJoins::default(),
                     limit: ::core::option::Option::None,
                     offset: 0,
                 }
@@ -236,7 +236,28 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 self
             }
 
-            pub fn join<J: ::gen_models::select::SelectQuery>(mut self, joined: J) -> Self {
+            pub fn join_on<SourceType, JoinedModel, JoinedType>(
+                self,
+                source_field: ::gen_models::select::SelectField<#model, SourceType>,
+                joined_field: ::gen_models::select::SelectField<JoinedModel, JoinedType>,
+            ) -> Self
+            where
+                JoinedModel: ::gen_models::select::ModelSelectSource,
+            {
+                let joined =
+                    <JoinedModel as ::gen_models::select::ModelSelectSource>::selector(self.conn);
+                self.join_filtered_on(source_field, joined_field, joined)
+            }
+
+            pub fn join_filtered_on<SourceType, JoinedModel, JoinedType>(
+                mut self,
+                source_field: ::gen_models::select::SelectField<#model, SourceType>,
+                joined_field: ::gen_models::select::SelectField<JoinedModel, JoinedType>,
+                joined: <JoinedModel as ::gen_models::select::ModelSelectSource>::Selector<'conn>,
+            ) -> Self
+            where
+                JoinedModel: ::gen_models::select::ModelSelectSource,
+            {
                 assert!(
                     ::core::ptr::eq(
                         self.conn,
@@ -270,27 +291,25 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 existing_sources.extend(self.joins.iter().map(|join| join.source()));
 
                 let joined_source = ::gen_models::select::SelectQuery::source(&joined);
-                let inferred_join = ::gen_models::select::infer_sql_join(
-                    self.conn,
+                let explicit_join = ::gen_models::select::sql_join_on(
                     &existing_sources,
                     joined_source,
+                    source_field,
+                    joined_field,
                 );
 
-                let mut used_aliases = existing_sources
-                    .iter()
-                    .map(|source| source.alias())
-                    .chain(::core::iter::once(joined_source.alias()))
-                    .collect::<::std::collections::HashSet<_>>();
-                for nested_join in ::gen_models::select::SelectQuery::joins(&joined) {
+                let base_alias =
+                    <Self as ::gen_models::select::SelectQuery>::source(&self).alias();
+                for nested_join in
+                    ::gen_models::select::SelectQuery::joins(&joined).iter()
+                {
                     assert!(
-                        used_aliases.insert(nested_join.source().alias()),
-                        "cannot join SQL source alias `{}` more than once",
-                        nested_join.source().alias(),
+                        nested_join.source().alias() != base_alias,
+                        "cannot join the base SQL source alias `{base_alias}`",
                     );
                 }
-
-                self.joins.push(inferred_join);
-                self.joins.extend_from_slice(
+                self.joins.insert(explicit_join);
+                self.joins.extend_from(
                     ::gen_models::select::SelectQuery::joins(&joined),
                 );
                 self.filters.extend_from_slice(
@@ -358,6 +377,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 ::gen_models::select::SqlSource::new(
                     <#model as ::gen_models::traits::Query>::TABLE_NAME,
                     #source_alias,
+                    ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#model)),
                     Self::source_clause_for,
                 )
             }
@@ -366,7 +386,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 self.history_ref.as_deref()
             }
 
-            fn joins(&self) -> &[::gen_models::select::SqlJoin] {
+            fn joins(&self) -> &::gen_models::select::SqlJoins {
                 &self.joins
             }
 
@@ -388,6 +408,16 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 
             fn offset(&self) -> u32 {
                 self.offset
+            }
+        }
+
+        impl ::gen_models::select::ModelSelectSource for #model {
+            type Selector<'conn> = #selector<'conn>;
+
+            fn selector(
+                conn: &::gen_models::select::Connection,
+            ) -> Self::Selector<'_> {
+                #selector::new(conn)
             }
         }
 

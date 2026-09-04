@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::{
     Direction, ModelSelect,
-    block_group::BlockGroup,
+    block_group::{BlockGroup, BlockGroupSelect},
     block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     edge::{Edge, EdgeData},
@@ -98,12 +98,20 @@ pub struct PathData {
 impl PathSelect<'_> {
     pub fn collection_name(self, collection_name: impl Into<String>) -> Self {
         let conn = self.conn;
-        self.join(BlockGroup::select(conn).collection_name(collection_name))
+        self.join_filtered_on(
+            PathSelect::BlockGroupId,
+            BlockGroupSelect::Id,
+            BlockGroup::select(conn).collection_name(collection_name),
+        )
     }
 
     pub fn sample_name(self, sample_name: impl Into<String>) -> Self {
         let conn = self.conn;
-        self.join(BlockGroup::select(conn).sample_name(sample_name))
+        self.join_filtered_on(
+            PathSelect::BlockGroupId,
+            BlockGroupSelect::Id,
+            BlockGroup::select(conn).sample_name(sample_name),
+        )
     }
 }
 
@@ -432,7 +440,9 @@ impl Path {
         sample_name: &str,
     ) -> Vec<Path> {
         Path::select(conn)
-            .join(
+            .join_filtered_on(
+                PathSelect::BlockGroupId,
+                BlockGroupSelect::Id,
                 BlockGroup::select(conn)
                     .collection_name(collection_name)
                     .sample_name(sample_name),

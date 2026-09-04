@@ -536,6 +536,48 @@ mod tests {
     }
 
     #[test]
+    fn test_name_contains_treats_like_wildcards_as_literals() {
+        let conn = &get_connection(None).expect("should create graph database");
+        for name in ["foo%", "foo_", "fooX"] {
+            Sample::create(
+                conn,
+                NewSample {
+                    name,
+                    is_reference: false,
+                },
+            )
+            .expect("should create wildcard sample");
+        }
+
+        let percent_matches = Sample::select(conn)
+            .name_contains("%")
+            .load()
+            .expect("should match a literal percent sign");
+        let underscore_matches = Sample::select(conn)
+            .name_contains("_")
+            .load()
+            .expect("should match a literal underscore");
+        let exact_percent = Sample::select(conn)
+            .name("foo%")
+            .load()
+            .expect("should exactly match a percent sign");
+        let exact_underscore = Sample::select(conn)
+            .name("foo_")
+            .load()
+            .expect("should exactly match an underscore");
+        let sql_looking_input = Sample::select(conn)
+            .name("' OR 1 = 1 --")
+            .load()
+            .expect("should treat SQL-looking input as a value");
+
+        assert_eq!(percent_matches[0].name, "foo%");
+        assert_eq!(underscore_matches[0].name, "foo_");
+        assert_eq!(exact_percent[0].name, "foo%");
+        assert_eq!(exact_underscore[0].name, "foo_");
+        assert!(sql_looking_input.is_empty());
+    }
+
+    #[test]
     fn test_select_joins_related_model_selectors() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "join-test").unwrap();
@@ -545,7 +587,16 @@ mod tests {
 
         let samples = Sample::select(conn)
             .name_contains("sample")
-            .join(BlockGroup::select(conn).name("target-group"))
+            .join_filtered_on(
+                SampleSelect::Name,
+                BlockGroupSelect::SampleName,
+                BlockGroup::select(conn).name("target-group"),
+            )
+            .join_filtered_on(
+                SampleSelect::Name,
+                BlockGroupSelect::SampleName,
+                BlockGroup::select(conn).collection_name("join-test"),
+            )
             .load()
             .expect("should load joined samples")
             .into_iter()
@@ -555,7 +606,11 @@ mod tests {
 
         let block_groups = BlockGroup::select(conn)
             .name_contains("group")
-            .join(Sample::select(conn).is_reference(true))
+            .join_filtered_on(
+                BlockGroupSelect::SampleName,
+                SampleSelect::Name,
+                Sample::select(conn).is_reference(true),
+            )
             .load()
             .expect("should load joined block groups")
             .into_iter()
@@ -564,7 +619,8 @@ mod tests {
         assert_eq!(block_groups, vec!["target-group"]);
 
         let projected_rows: Vec<(String, String)> = Sample::select(conn)
-            .join(BlockGroup::select(conn).name("target-group"))
+            .name("sample-alpha")
+            .join_on(SampleSelect::Name, BlockGroupSelect::SampleName)
             .only((SampleSelect::Name, BlockGroupSelect::Name))
             .load()
             .expect("should load fields from both joined models");
@@ -574,7 +630,11 @@ mod tests {
         );
 
         let model_rows: Vec<(Sample, BlockGroup)> = Sample::select(conn)
-            .join(BlockGroup::select(conn).name("target-group"))
+            .join_filtered_on(
+                SampleSelect::Name,
+                BlockGroupSelect::SampleName,
+                BlockGroup::select(conn).name("target-group"),
+            )
             .models::<(Sample, BlockGroup)>()
             .load()
             .expect("should load both joined models");
@@ -650,7 +710,11 @@ mod tests {
         create_bg(conn, "history-join", "current-sample", "matching-group");
 
         let samples = Sample::select(conn)
-            .join(BlockGroup::select(conn).name("matching-group"))
+            .join_filtered_on(
+                SampleSelect::Name,
+                BlockGroupSelect::SampleName,
+                BlockGroup::select(conn).name("matching-group"),
+            )
             .with_ref(historical_commit.to_string())
             .load()
             .expect("should load historical joined samples")
