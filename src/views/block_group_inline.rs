@@ -421,7 +421,7 @@ fn render_inline(frame: &mut Frame, state: &mut InlineGenGraphState) {
         if detail_level == VisualDetail::Full {
             "* some annotations hidden due to space constraints"
         } else {
-            "* zoom in for more features"
+            "* only variant(edge)-spanning or whole-node annotations shown"
         }
     });
     draw_controls_help(frame, main_layout[1], state, hidden_legend);

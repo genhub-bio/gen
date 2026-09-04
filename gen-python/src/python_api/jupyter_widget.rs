@@ -529,7 +529,7 @@ impl GraphPage {
             let note = if detail_level == VisualDetail::Full {
                 " some annotations hidden due to space constraints "
             } else {
-                " some annotations hidden in truncated view "
+                " only annotations spanning a variant (edge) or filling a full node are shown "
             };
             let theme = current_theme();
             let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
