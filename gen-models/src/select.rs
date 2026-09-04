@@ -44,6 +44,35 @@ impl Direction {
 }
 
 #[doc(hidden)]
+pub enum HistoryRefValue {}
+
+#[doc(hidden)]
+pub enum OptionalHistoryRefValue {}
+
+#[doc(hidden)]
+pub trait IntoHistoryRef<Kind> {
+    fn into_history_ref(self) -> Option<String>;
+}
+
+impl<T> IntoHistoryRef<HistoryRefValue> for T
+where
+    T: Into<String>,
+{
+    fn into_history_ref(self) -> Option<String> {
+        Some(self.into())
+    }
+}
+
+impl<T> IntoHistoryRef<OptionalHistoryRefValue> for Option<T>
+where
+    T: Into<String>,
+{
+    fn into_history_ref(self) -> Option<String> {
+        self.map(Into::into)
+    }
+}
+
+#[doc(hidden)]
 pub fn sql_value(value: &impl ToSql) -> Value {
     match value
         .to_sql()

@@ -96,10 +96,7 @@ fn export_annotations(
 ) -> Result<(), GenbankExportError> {
     let annotations = Annotation::query_by_sample(conn, sample_name, history_ref)?;
     for annotation in annotations {
-        let mut select = Accession::select(conn);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+        let select = Accession::select(conn).with_ref(history_ref);
         let Some(accession) = select.get_by_id(annotation.accession_id)? else {
             continue;
         };

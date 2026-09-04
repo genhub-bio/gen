@@ -184,10 +184,7 @@ fn load_group_annotations(
     Ok(annotations
         .into_iter()
         .filter_map(|annotation| {
-            let mut select = Accession::select(conn);
-            if let Some(history_ref) = history_ref {
-                select = select.with_ref(history_ref);
-            }
+            let select = Accession::select(conn).with_ref(history_ref);
             let _ = select
                 .get_by_id(annotation.accession_id)
                 .expect("should load accession by id")?;

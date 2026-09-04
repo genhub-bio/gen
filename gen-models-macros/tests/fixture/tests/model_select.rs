@@ -384,6 +384,7 @@ fn test_generated_history_ref_applies_to_every_source() {
         .expect("should commit historical fixture rows");
     insert_sample(&conn, "current-sample", false);
     insert_group(&conn, 2, "current-sample", "matching-group", "history-test");
+    let requested_ref = Some(historical_ref.as_str());
 
     let samples = FixtureSample::select(&conn)
         .join_filtered_on(
@@ -391,11 +392,22 @@ fn test_generated_history_ref_applies_to_every_source() {
             FixtureGroupSelect::SampleName,
             FixtureGroup::select(&conn).name("matching-group"),
         )
-        .with_ref(historical_ref)
+        .with_ref(requested_ref)
         .load()
         .expect("should load historical joined fixture samples");
 
     assert_eq!(samples[0].name, "historical-sample");
+
+    let current_sample = FixtureSample::select(&conn)
+        .name("current-sample")
+        .with_ref(None::<&str>)
+        .get()
+        .expect("should load from the current state when the optional ref is absent");
+
+    assert_eq!(
+        current_sample.expect("should find current sample").name,
+        "current-sample"
+    );
 }
 
 #[test]

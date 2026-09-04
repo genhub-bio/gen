@@ -116,12 +116,10 @@ impl Collection {
         collection_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<BlockGroup> {
-        let mut select = BlockGroup::select(conn)
+        let select = BlockGroup::select(conn)
             .collection_name(collection_name)
-            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+            .with_ref(history_ref);
         select.load().expect("should load collection block groups")
     }
 

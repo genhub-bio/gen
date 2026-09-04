@@ -245,6 +245,16 @@ let historical_samples = Sample::select(conn)
     .expect("should load historical samples");
 ```
 
+`with_ref` also accepts `Option<T>` when `T` can be converted into a string. This lets callers
+forward an optional ref without branching; `None` retains the current working state:
+
+```rust
+let samples = Sample::select(conn)
+    .with_ref(history_ref)
+    .load()
+    .expect("should load samples at the optional history ref");
+```
+
 For the default source, a historical query reads `dolt_at_<table>(:history_ref)`. When selectors
 are joined, the same history ref is applied to every source. If both selectors specify refs, they
 must be equal.

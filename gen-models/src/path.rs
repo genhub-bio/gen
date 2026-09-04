@@ -231,10 +231,7 @@ impl Path {
         history_ref: Option<&str>,
     ) -> Vec<Edge> {
         let edge_ids = Self::edge_ids_for_path(conn, path_id, history_ref);
-        let mut select = Edge::select(conn);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+        let select = Edge::select(conn).with_ref(history_ref);
         select
             .query_by_ids(edge_ids)
             .expect("should load path edges by id")

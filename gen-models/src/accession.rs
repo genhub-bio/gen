@@ -435,12 +435,10 @@ impl Accession {
         accession_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<AccessionNode> {
-        let mut select = AccessionNode::select(conn)
+        let select = AccessionNode::select(conn)
             .accession_id(*accession_id)
-            .order_by(AccessionNodeSelect::IndexInPath, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(AccessionNodeSelect::IndexInPath, Direction::Asc)
+            .with_ref(history_ref);
         select.load().expect("should load accession nodes")
     }
 

@@ -57,10 +57,9 @@ impl AnnotationGroup {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<AnnotationGroup> {
-        let mut samples = AnnotationGroupSample::select(conn).sample_name(sample_name);
-        if let Some(history_ref) = history_ref {
-            samples = samples.with_ref(history_ref);
-        }
+        let samples = AnnotationGroupSample::select(conn)
+            .sample_name(sample_name)
+            .with_ref(history_ref);
         AnnotationGroup::select(conn)
             .join_filtered_on(
                 AnnotationGroupSelect::Name,
@@ -411,10 +410,9 @@ impl Annotation {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let mut samples = AnnotationGroupSample::select(conn).sample_name(sample_name);
-        if let Some(history_ref) = history_ref {
-            samples = samples.with_ref(history_ref);
-        }
+        let samples = AnnotationGroupSample::select(conn)
+            .sample_name(sample_name)
+            .with_ref(history_ref);
         Ok(Annotation::select(conn)
             .join_filtered_on(
                 AnnotationSelect::Group,
@@ -429,10 +427,7 @@ impl Annotation {
         group: &str,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let mut select = Annotation::select(conn).group(group);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+        let select = Annotation::select(conn).group(group).with_ref(history_ref);
         Ok(select.load()?)
     }
 
@@ -442,10 +437,9 @@ impl Annotation {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let mut accessions = Accession::select(conn).block_group_id(*block_group_id);
-        if let Some(history_ref) = history_ref {
-            accessions = accessions.with_ref(history_ref);
-        }
+        let accessions = Accession::select(conn)
+            .block_group_id(*block_group_id)
+            .with_ref(history_ref);
         Ok(Annotation::select(conn)
             .group(group)
             .join_filtered_on(

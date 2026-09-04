@@ -180,21 +180,16 @@ impl BlockGroupEdge {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<AugmentedEdge> {
-        let mut select = BlockGroupEdge::select(conn)
+        let select = BlockGroupEdge::select(conn)
             .block_group_id(*block_group_id)
-            .order_by(BlockGroupEdgeSelect::CreatedOn, Direction::Desc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(BlockGroupEdgeSelect::CreatedOn, Direction::Desc)
+            .with_ref(history_ref);
         let block_group_edges = select.load().expect("should load block group edges");
         let edge_ids = block_group_edges
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let mut edge_select = Edge::select(conn);
-        if let Some(history_ref) = history_ref {
-            edge_select = edge_select.with_ref(history_ref);
-        }
+        let edge_select = Edge::select(conn).with_ref(history_ref);
         let edges = edge_select
             .query_by_ids(edge_ids.iter().copied())
             .expect("should load edges by id");
@@ -244,10 +239,7 @@ impl BlockGroupEdge {
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let mut edge_select = Edge::select(conn);
-        if let Some(history_ref) = history_ref {
-            edge_select = edge_select.with_ref(history_ref);
-        }
+        let edge_select = Edge::select(conn).with_ref(history_ref);
         let edges = edge_select
             .query_by_ids(edge_ids.iter().copied())
             .expect("should load edges by id");

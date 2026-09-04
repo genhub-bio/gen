@@ -375,14 +375,12 @@ impl AssetRef {
         upstream_asset_ref_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<Self> {
-        let mut select = Self::select(conn)
+        let select = Self::select(conn)
             .upstream_asset_ref_id(*upstream_asset_ref_id)
             .order_by(AssetRefSelect::Role, Direction::Asc)
             .order_by(AssetRefSelect::LogicalPath, Direction::Asc)
-            .order_by(AssetRefSelect::Id, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(AssetRefSelect::Id, Direction::Asc)
+            .with_ref(history_ref);
         select.load().expect("should load derived assets")
     }
 

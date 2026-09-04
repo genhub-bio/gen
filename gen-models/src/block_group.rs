@@ -341,10 +341,7 @@ impl BlockGroup {
         id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<BlockGroup, BlockGroupError> {
-        let mut select = Self::select(conn).id(*id);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+        let select = Self::select(conn).id(*id).with_ref(history_ref);
         select.load()?.into_iter().next().ok_or_else(|| {
             BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
                 "BlockGroup with id {id} not found"
@@ -359,13 +356,11 @@ impl BlockGroup {
         name: &str,
         history_ref: Option<&str>,
     ) -> Result<BlockGroup, BlockGroupError> {
-        let mut select = BlockGroup::select(conn)
+        let select = BlockGroup::select(conn)
             .collection_name(collection_name)
             .sample_name(sample_name)
-            .name(name);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .name(name)
+            .with_ref(history_ref);
         select.load()?.into_iter().next().ok_or_else(|| {
                 BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
                     "BlockGroup named {name} for sample {sample_name} in collection {collection_name} not found"
@@ -489,16 +484,14 @@ impl BlockGroup {
             return Ok(vec![]);
         }
 
-        let mut select = BlockGroup::select(conn)
+        let select = BlockGroup::select(conn)
             .collection_name(collection_name)
             .sample_name_in(parent_samples)
             .name(group_name)
             .order_by(BlockGroupSelect::SampleName, Direction::Asc)
             .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
-            .order_by(BlockGroupSelect::Id, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(BlockGroupSelect::Id, Direction::Asc)
+            .with_ref(history_ref);
         select.load().map_err(BlockGroupError::from)
     }
 
@@ -1125,14 +1118,12 @@ impl BlockGroup {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<Path, BlockGroupError> {
-        let mut select = Path::select(conn)
+        let select = Path::select(conn)
             .block_group_id(*block_group_id)
             .order_by(PathSelect::CreatedOn, Direction::Desc)
             .order_by(PathSelect::Id, Direction::Desc)
-            .limit(1);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .limit(1)
+            .with_ref(history_ref);
         let paths = select.load()?;
         paths.first().cloned().ok_or_else(|| {
             BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(

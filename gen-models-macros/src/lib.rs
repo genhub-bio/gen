@@ -377,8 +377,15 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 )
             }
 
-            pub fn with_ref(mut self, history_ref: impl ::core::convert::Into<::std::string::String>) -> Self {
-                self.history_ref = ::core::option::Option::Some(history_ref.into());
+            pub fn with_ref<R, K>(
+                mut self,
+                history_ref: R,
+            ) -> Self
+            where
+                R: ::gen_models::select::IntoHistoryRef<K>,
+            {
+                self.history_ref =
+                    ::gen_models::select::IntoHistoryRef::into_history_ref(history_ref);
                 self
             }
 

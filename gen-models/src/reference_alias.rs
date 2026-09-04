@@ -104,10 +104,7 @@ impl ReferenceAlias {
         history_ref: Option<&str>,
     ) -> Result<HashMap<String, String>, ReferenceAliasError> {
         let mut references_by_alias = HashMap::new();
-        let mut select = ReferenceAlias::select(conn);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+        let select = ReferenceAlias::select(conn).with_ref(history_ref);
         let reference_aliases = select.load().expect("should load reference aliases");
         for reference_alias in reference_aliases {
             let aliases = ReferenceAlias::compute_aliases(reference_alias);

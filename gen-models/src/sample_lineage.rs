@@ -79,12 +79,10 @@ impl SampleLineage {
         child_sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<String> {
-        let mut select = SampleLineage::select(conn)
+        let select = SampleLineage::select(conn)
             .child_sample_name(child_sample_name)
-            .order_by(SampleLineageSelect::ParentSampleName, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(SampleLineageSelect::ParentSampleName, Direction::Asc)
+            .with_ref(history_ref);
         select
             .load()
             .expect("should load parent sample lineage")
@@ -98,12 +96,10 @@ impl SampleLineage {
         parent_sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<String> {
-        let mut select = SampleLineage::select(conn)
+        let select = SampleLineage::select(conn)
             .parent_sample_name(parent_sample_name)
-            .order_by(SampleLineageSelect::ChildSampleName, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(SampleLineageSelect::ChildSampleName, Direction::Asc)
+            .with_ref(history_ref);
         select
             .load()
             .expect("should load child sample lineage")

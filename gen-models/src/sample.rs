@@ -133,12 +133,10 @@ impl Sample {
     }
 
     pub fn get_reference_samples(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<Sample> {
-        let mut select = Sample::select(conn)
+        let select = Sample::select(conn)
             .is_reference(true)
-            .order_by(SampleSelect::Name, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(SampleSelect::Name, Direction::Asc)
+            .with_ref(history_ref);
         select.load().expect("should load reference samples")
     }
 
@@ -272,20 +270,15 @@ impl Sample {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<BlockGroup> {
-        let mut select = BlockGroup::select(conn)
+        let select = BlockGroup::select(conn)
             .collection_name(collection_name)
-            .sample_name(sample_name);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .sample_name(sample_name)
+            .with_ref(history_ref);
         select.load().expect("should load block groups")
     }
 
     pub fn get_all_names(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<String> {
-        let mut select = Sample::select(conn);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+        let select = Sample::select(conn).with_ref(history_ref);
         let samples = select.load().expect("should load sample names");
         samples.iter().map(|s| s.name.clone()).collect()
     }
@@ -304,12 +297,10 @@ impl Sample {
         name: &str,
         history_ref: Option<&str>,
     ) -> Vec<Sample> {
-        let mut select = Sample::select(conn)
+        let select = Sample::select(conn)
             .name_contains(name)
-            .order_by(SampleSelect::Name, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
+            .order_by(SampleSelect::Name, Direction::Asc)
+            .with_ref(history_ref);
         select.load().expect("should load matching samples")
     }
 }
