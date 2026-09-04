@@ -62,7 +62,6 @@ use gen_models::{
         Defaults, OperationFile, OperationInfo, OperationSummary, commit_operation_summary,
     },
     sample::{NewSample, Sample},
-    traits::Query,
 };
 use gen_tui::{
     LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
@@ -1069,7 +1068,9 @@ impl Repository {
 
     fn get_sequence_graphs(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let values = BlockGroup::all(conn)
+        let values = BlockGroup::select(conn)
+            .load()
+            .map_err(|error| Error::Other(error.to_string()))?
             .into_iter()
             .map(|bg| r!(self.to_sequence_graph(bg)))
             .collect::<Vec<_>>();
@@ -1081,14 +1082,13 @@ impl Repository {
         collection_name: String,
     ) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let values = BlockGroup::query(
-            conn,
-            "SELECT * FROM block_groups WHERE collection_name = ?1",
-            rusqlite::params![collection_name],
-        )
-        .into_iter()
-        .map(|bg| r!(self.to_sequence_graph(bg)))
-        .collect::<Vec<_>>();
+        let values = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .load()
+            .map_err(|error| Error::Other(error.to_string()))?
+            .into_iter()
+            .map(|bg| r!(self.to_sequence_graph(bg)))
+            .collect::<Vec<_>>();
         Ok(List::from_values(values))
     }
 
@@ -1096,7 +1096,10 @@ impl Repository {
     fn get_samples(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
         let mut samples: Vec<(String, String, Vec<Robj>)> = Vec::new();
-        for bg in BlockGroup::all(conn) {
+        for bg in BlockGroup::select(conn)
+            .load()
+            .map_err(|error| Error::Other(error.to_string()))?
+        {
             let collection_name = bg.collection_name.clone();
             let sample_name = bg.sample_name.clone();
             let sg = r!(self.to_sequence_graph(bg));
@@ -1863,11 +1866,18 @@ impl Repository {
         )
         .map_err(|e| Error::Other(format!("Error stitching block groups: {e}")))?;
         let conn = self.context.graph().conn();
-        BlockGroup::query(conn, "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3", rusqlite::params![collection_name, new_sample, new_region])
+        BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(new_sample)
+            .name(new_region)
+            .load()
+            .map_err(|error| Error::Other(error.to_string()))?
             .into_iter()
             .next()
             .map(|bg| self.to_sequence_graph(bg))
-            .ok_or_else(|| Error::Other("Stitched block group not found after creation".to_string()))
+            .ok_or_else(|| {
+                Error::Other("Stitched block group not found after creation".to_string())
+            })
     }
 
     fn build_index(
@@ -1887,7 +1897,9 @@ impl Repository {
         fs::create_dir_all(&index_dir)
             .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
         let bgs: Vec<_> = if sequence_graph_ids.is_empty() {
-            BlockGroup::all(conn)
+            BlockGroup::select(conn)
+                .load()
+                .map_err(|error| Error::Other(error.to_string()))?
         } else {
             sequence_graph_ids
                 .iter()
@@ -1924,7 +1936,9 @@ impl Repository {
         let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
         let conn = self.context.graph().conn();
         let bgs: Vec<_> = if sequence_graph_ids.is_empty() {
-            BlockGroup::all(conn)
+            BlockGroup::select(conn)
+                .load()
+                .map_err(|error| Error::Other(error.to_string()))?
         } else {
             sequence_graph_ids
                 .iter()
@@ -2455,21 +2469,22 @@ impl SequenceGraph {
         )
         .map_err(|e| Error::Other(format!("Error deriving subgraph: {e}")))?;
         let conn = self.context.graph().conn();
-        BlockGroup::query(
-            conn,
-            "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-            rusqlite::params![self.collection_name, new_sample, self.name],
-        )
-        .into_iter()
-        .next()
-        .map(|bg| SequenceGraph {
-            context: self.context.clone(),
-            id: bg.id,
-            collection_name: bg.collection_name,
-            sample_name: bg.sample_name,
-            name: bg.name,
-        })
-        .ok_or_else(|| Error::Other("Derived subgraph not found after creation".to_string()))
+        BlockGroup::select(conn)
+            .collection_name(&self.collection_name)
+            .sample_name(new_sample)
+            .name(&self.name)
+            .load()
+            .map_err(|error| Error::Other(error.to_string()))?
+            .into_iter()
+            .next()
+            .map(|bg| SequenceGraph {
+                context: self.context.clone(),
+                id: bg.id,
+                collection_name: bg.collection_name,
+                sample_name: bg.sample_name,
+                name: bg.name,
+            })
+            .ok_or_else(|| Error::Other("Derived subgraph not found after creation".to_string()))
     }
 
     fn chunks(
@@ -2496,23 +2511,23 @@ impl SequenceGraph {
         .map_err(|e| Error::Other(format!("Error deriving chunks: {e}")))?;
         let conn = self.context.graph().conn();
         let prefix = format!("{}.", self.name);
-        let gen_bgs: Vec<Robj> = BlockGroup::query(
-            conn,
-            "SELECT * FROM block_groups WHERE collection_name = ?1 AND sample_name = ?2",
-            rusqlite::params![self.collection_name, new_sample],
-        )
-        .into_iter()
-        .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
-        .map(|bg| {
-            r!(SequenceGraph {
-                context: self.context.clone(),
-                id: bg.id,
-                collection_name: bg.collection_name,
-                sample_name: bg.sample_name,
-                name: bg.name,
+        let gen_bgs: Vec<Robj> = BlockGroup::select(conn)
+            .collection_name(&self.collection_name)
+            .sample_name(new_sample)
+            .load()
+            .map_err(|error| Error::Other(error.to_string()))?
+            .into_iter()
+            .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
+            .map(|bg| {
+                r!(SequenceGraph {
+                    context: self.context.clone(),
+                    id: bg.id,
+                    collection_name: bg.collection_name,
+                    sample_name: bg.sample_name,
+                    name: bg.name,
+                })
             })
-        })
-        .collect();
+            .collect();
         Ok(List::from_values(gen_bgs))
     }
 

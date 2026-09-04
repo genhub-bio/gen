@@ -19,6 +19,7 @@ use tempfile::NamedTempFile;
 use url::{Position, Url};
 
 use crate::{
+    Direction, ModelSelect,
     db::GraphConnection,
     errors::{FileAdditionError, FileStoreError, QueryError},
     history::dolt::hash_of,
@@ -177,7 +178,7 @@ impl FromSql for AssetRole {
 ///
 /// Use [`Self::get_cumulative_assets_at`] when that provenance is needed and
 /// [`Self::get_materialized_assets_at`] when constructing the one-file-per-path workspace view.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
 pub struct AssetRef {
     pub id: HashId,
     pub uri: String,
@@ -211,7 +212,7 @@ pub struct AnnotationFileAssets {
     pub index: Option<AssetRef>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
 pub struct OperationLog {
     pub id: HashId,
     pub operation_kind: OperationKind,
@@ -219,7 +220,7 @@ pub struct OperationLog {
     pub created_on: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
 pub struct OperationAsset {
     pub log_id: HashId,
     pub asset_ref_id: HashId,
@@ -280,6 +281,22 @@ impl Query for OperationAsset {
 }
 
 impl AssetRef {
+    pub fn get_by_id(
+        conn: &GraphConnection,
+        id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Option<Self> {
+        let mut select = Self::select(conn).id(*id);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
+        }
+        select
+            .load()
+            .expect("should load asset reference by id")
+            .into_iter()
+            .next()
+    }
+
     /// Return the versioned store path for an asset.
     ///
     /// Logical paths describe the materialized workspace view and can point at a newer version.
@@ -423,18 +440,15 @@ impl AssetRef {
         upstream_asset_ref_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<Self> {
-        let table = Self::table_name_with_history_ref(history_ref);
-        let query = format!(
-            "SELECT * FROM {table} \
-             WHERE upstream_asset_ref_id = :upstream_asset_ref_id \
-             ORDER BY role, logical_path, id"
-        );
-        let mut query_params: Vec<(&str, &dyn ToSql)> =
-            vec![(":upstream_asset_ref_id", upstream_asset_ref_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            query_params.push((":history_ref", history_ref));
+        let mut select = Self::select(conn)
+            .upstream_asset_ref_id(*upstream_asset_ref_id)
+            .order_by(AssetRefSelect::Role, Direction::Asc)
+            .order_by(AssetRefSelect::LogicalPath, Direction::Asc)
+            .order_by(AssetRefSelect::Id, Direction::Asc);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        Self::query(conn, &query, &query_params[..])
+        select.load().expect("should load derived assets")
     }
 
     /// Returns assets grouped by commit.
@@ -807,11 +821,10 @@ impl OperationAsset {
     }
 
     pub fn by_log_id(conn: &GraphConnection, log_id: &HashId) -> Vec<Self> {
-        Self::query(
-            conn,
-            "SELECT * FROM gen_operation_assets WHERE log_id = ?1",
-            params![log_id],
-        )
+        Self::select(conn)
+            .log_id(*log_id)
+            .load()
+            .expect("should load operation assets")
     }
 }
 

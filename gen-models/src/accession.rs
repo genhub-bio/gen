@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    Direction, ModelSelect, ModelSelectError,
+    block_group::{BlockGroup, BlockGroupSelect},
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
     errors::QueryError,
@@ -21,7 +23,7 @@ use crate::{
     traits::*,
 };
 
-#[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq, ModelSelect)]
 pub struct Accession {
     pub id: HashId,
     pub name: String,
@@ -33,6 +35,8 @@ pub struct Accession {
 pub enum AccessionError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Accession node creation error: {0}")]
     AccessionNodeError(#[from] AccessionNodeError),
     #[error("Duplicate entry with uuid: {0}")]
@@ -104,7 +108,7 @@ impl<'a> Capnp<'a> for Accession {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Hash, ModelSelect)]
 pub struct AccessionNode {
     pub id: HashId,
     pub accession_id: HashId,
@@ -245,6 +249,22 @@ pub struct NewAccession {
 }
 
 impl Accession {
+    pub fn get_by_id(
+        conn: &GraphConnection,
+        id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Option<Self> {
+        let mut select = Self::select(conn).id(*id);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
+        }
+        select
+            .load()
+            .expect("should load accession by id")
+            .into_iter()
+            .next()
+    }
+
     /// An accession is an ordered array of slices of nodes. The purpose
     /// of an accession is to provide additional layers of information to
     /// a graph. These extra pieces of information can be features such
@@ -429,15 +449,13 @@ impl Accession {
         accession_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<AccessionNode> {
-        let query = format!(
-            "select * from {} where accession_id = :accession_id order by index_in_path;",
-            AccessionNode::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":accession_id", accession_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = AccessionNode::select(conn)
+            .accession_id(*accession_id)
+            .order_by(AccessionNodeSelect::IndexInPath, Direction::Asc);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        AccessionNode::query(conn, &query, &params[..])
+        select.load().expect("should load accession nodes")
     }
 
     pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
@@ -604,16 +622,17 @@ impl RegionResolver for Accession {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = Accession::query(
-            conn,
-            "SELECT a.* \
-             FROM accessions a \
-             JOIN block_groups bg ON a.block_group_id = bg.id \
-             WHERE bg.collection_name = ?1 \
-               AND bg.sample_name = ?2 \
-               AND lower(a.name) = lower(?3)",
-            params![collection_name, sample_name, region.name],
-        );
+        let matches = Accession::select(conn)
+            .name_case_insensitive(&region.name)
+            .join_filtered_on(
+                AccessionSelect::BlockGroupId,
+                BlockGroupSelect::Id,
+                BlockGroup::select(conn)
+                    .collection_name(collection_name)
+                    .sample_name(sample_name),
+            )
+            .load()
+            .map_err(AccessionError::from)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),

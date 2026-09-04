@@ -16,13 +16,14 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    ModelSelect, ModelSelectError,
     assets::{AssetRef, AssetUri, LocalAssetUri},
     db::GraphConnection,
     gen_models_capnp::sequence,
     traits::{Query, max_rows_per_batch},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ModelSelect)]
 pub struct Sequence {
     pub hash: Sha256Hash,
     pub sequence_type: String,
@@ -33,14 +34,19 @@ pub struct Sequence {
     pub length: i64,
     // Indicates whether the sequence is stored externally, a quick flag instead of checking the
     // sequence and asset reference in each caller.
+    #[model_select(skip)]
     pub external_sequence: bool,
     #[serde(skip)]
+    #[model_select(skip)]
     asset_ref: Option<AssetRef>,
     #[serde(skip)]
+    #[model_select(skip)]
     index_asset_refs: Vec<AssetRef>,
     #[serde(skip)]
+    #[model_select(skip)]
     workspace: Option<Workspace>,
     #[serde(skip)]
+    #[model_select(skip)]
     asset_resolution_error: Option<String>,
 }
 
@@ -74,6 +80,8 @@ impl Hash for Sequence {
 pub enum SequenceError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Sequence or asset_ref_id must be set.")]
     NoSequence(),
     #[error("An asset reference must have an accompanying sequence name.")]
@@ -274,32 +282,28 @@ impl<'a> NewSequence<'a> {
             }
         }
         let hash = self.hash();
-        match conn.query_row(
-            "SELECT hash from sequences where hash = ?1;",
-            [hash],
-            |row| row.get::<_, Sha256Hash>(0),
-        ) {
-            Ok(_) => {}
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                let mut stmt = conn.prepare("INSERT INTO sequences (hash, sequence_type, sequence, name, asset_ref_id, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6);")?;
-                match stmt.execute(params![
-                    hash,
-                    self.sequence_type.unwrap().to_string(),
-                    if self.shallow {
-                        ""
-                    } else {
-                        self.sequence.unwrap()
-                    },
-                    self.name.unwrap_or(""),
-                    self.asset_ref_id,
-                    self.length.unwrap_or(length)
-                ]) {
-                    Ok(_) => {}
-                    Err(err) => return Err(SequenceError::DatabaseError(err)),
-                }
+        let existing = Sequence::select(conn)
+            .hash(hash)
+            .only(SequenceSelect::Hash)
+            .load()?;
+        if existing.is_empty() {
+            let mut stmt = conn.prepare("INSERT INTO sequences (hash, sequence_type, sequence, name, asset_ref_id, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6);")?;
+            match stmt.execute(params![
+                hash,
+                self.sequence_type.unwrap().to_string(),
+                if self.shallow {
+                    ""
+                } else {
+                    self.sequence.unwrap()
+                },
+                self.name.unwrap_or(""),
+                self.asset_ref_id,
+                self.length.unwrap_or(length)
+            ]) {
+                Ok(_) => {}
+                Err(err) => return Err(SequenceError::DatabaseError(err)),
             }
-            Err(err) => return Err(SequenceError::DatabaseError(err)),
-        };
+        }
 
         Ok(Sequence {
             hash,

@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use rusqlite::{Result, Row};
 use thiserror::Error;
 
-use crate::{db::GraphConnection, traits::*};
+use crate::{ModelSelect, db::GraphConnection, traits::*};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ModelSelect)]
 pub struct ReferenceAlias {
     pub reference_name: String,
     pub refseq_accession_id: Option<String>,
@@ -121,13 +121,11 @@ impl ReferenceAlias {
         history_ref: Option<&str>,
     ) -> Result<HashMap<String, String>, ReferenceAliasError> {
         let mut references_by_alias = HashMap::new();
-        let table = ReferenceAlias::table_name_with_history_ref(history_ref);
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = ReferenceAlias::select(conn);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        let reference_aliases =
-            ReferenceAlias::query(conn, &format!("SELECT * FROM {table}"), &params[..]);
+        let reference_aliases = select.load().expect("should load reference aliases");
         for reference_alias in reference_aliases {
             let aliases = ReferenceAlias::compute_aliases(reference_alias);
             for reference in &references {

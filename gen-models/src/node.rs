@@ -9,13 +9,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    ModelSelect,
     db::GraphConnection,
     gen_models_capnp::node,
     sequence::Sequence,
     traits::{self, *},
 };
 
-#[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq)]
+#[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq, ModelSelect)]
 pub struct Node {
     pub id: HashId,
     pub sequence_hash: Sha256Hash,

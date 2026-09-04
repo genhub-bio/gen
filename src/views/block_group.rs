@@ -7,7 +7,7 @@ use std::{
 use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use gen_core::{HashId, PATH_START_NODE_ID, Workspace};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
+use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node};
 use gen_tui::{
     LineStyle, graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle,
     theme::current_theme,
@@ -19,7 +19,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Padding, Paragraph, Wrap},
 };
-use rusqlite::params;
 
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
@@ -70,16 +69,9 @@ fn get_block_group_path_nodes(
     block_group_id: &gen_core::HashId,
     graph: &GenGraph,
 ) -> Result<Vec<gen_graph::GraphNode>, String> {
-    use gen_models::path::Path;
-
     // Query the database for the most recent path for this block group
-    let path = Path::get(
-        conn,
-        "SELECT id, block_group_id, name, created_on FROM paths \
-         WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
-        rusqlite::params![block_group_id],
-    )
-    .map_err(|e| format!("Failed to query path: {}", e))?;
+    let path = BlockGroup::get_current_path(conn, block_group_id, None)
+        .map_err(|error| format!("Failed to query path: {error}"))?;
 
     let path_blocks = path.coordinate_blocks(conn, None);
 
@@ -230,12 +222,20 @@ pub fn view_block_group(
         if parts.len() != 2 {
             panic!("Invalid position: {}", position_str);
         }
-        let node_id = parts[0].parse::<i64>().unwrap();
+        let node_id = HashId::try_from(parts[0])?;
         let offset = parts[1].parse::<i64>().unwrap();
-        Some((
-            Node::get(conn, "select * from nodes where id = ?1", params![node_id]).unwrap(),
-            offset,
-        ))
+        let node = Node::select(conn)
+            .id(node_id)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("node {node_id} was not found"),
+                )
+            })?;
+        Some((node, offset))
     } else {
         None
     };

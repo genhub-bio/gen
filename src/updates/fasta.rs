@@ -11,10 +11,8 @@ use gen_models::{
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
-    traits::*,
 };
 use noodles::fasta;
-use rusqlite::{self, types::Value as SQLValue};
 
 use crate::{
     fasta::FastaError,
@@ -184,18 +182,16 @@ pub fn update_with_fasta(
             if node_id == HashId::convert_str("") {
                 let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
             } else {
-                let edge_to_new_node = Edge::query(
-                    conn,
-                    "select * from edges where target_node_id = ?1",
-                    rusqlite::params![node_id],
-                )[0]
-                .clone();
-                let edge_from_new_node = Edge::query(
-                    conn,
-                    "select * from edges where source_node_id = ?1",
-                    rusqlite::params!(SQLValue::from(node_id)),
-                )[0]
-                .clone();
+                let edge_to_new_node = Edge::select(conn)
+                    .target_node_id(node_id)
+                    .load()
+                    .expect("should load edge to inserted node")[0]
+                    .clone();
+                let edge_from_new_node = Edge::select(conn)
+                    .source_node_id(node_id)
+                    .load()
+                    .expect("should load edge from inserted node")[0]
+                    .clone();
                 path.new_path_with(
                     conn,
                     start_coordinate,
@@ -248,7 +244,9 @@ mod tests {
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
+        traits::Query,
     };
+    use rusqlite::types::Value as SQLValue;
     use tempfile::NamedTempFile;
 
     use super::*;

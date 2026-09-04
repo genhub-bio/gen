@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    ModelSelect,
     block_group_edge::{AugmentedEdge, BlockGroupEdge},
     db::GraphConnection,
     errors::NodeError,
@@ -25,7 +26,9 @@ use crate::{
     traits::*,
 };
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Ord, PartialOrd)]
+#[derive(
+    Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Ord, PartialOrd, ModelSelect,
+)]
 pub struct Edge {
     pub id: HashId,
     pub source_node_id: HashId,

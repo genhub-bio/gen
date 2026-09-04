@@ -22,14 +22,15 @@ use std::{
 use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use itertools::Itertools;
 use rusqlite::{
-    OptionalExtension, Result as SQLResult, Row, params,
-    types::{FromSql, FromSqlResult, ValueRef},
+    OptionalExtension, Result as SQLResult, Row, ToSql, params,
+    types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    Direction, ModelSelect,
     assets::{
         AssetRef, AssetRole, AssetUri, LocalAssetUri, OperationAsset, OperationKind, OperationLog,
     },
@@ -392,7 +393,7 @@ fn calculate_stream_hash<R: std::io::Read>(mut reader: R) -> Result<[u8; 32], st
     Ok(hash_array)
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, ModelSelect)]
 pub struct FileAddition {
     pub id: HashId,
     pub asset_uri: String,
@@ -470,7 +471,7 @@ impl FileAddition {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, ModelSelect)]
 pub struct Remote {
     pub name: String,
     pub url: String,
@@ -479,6 +480,7 @@ pub struct Remote {
 impl Query for Remote {
     type Model = Remote;
 
+    const HISTORY_TABLE_NAME: Option<&'static str> = None;
     const TABLE_NAME: &'static str = "remotes";
 
     fn process_row(row: &Row) -> Self::Model {
@@ -558,14 +560,12 @@ impl Remote {
 
     /// Get a remote by name
     pub fn get_by_name(conn: &ConfigConnection, name: &str) -> Result<Remote, RemoteError> {
-        let query = "SELECT name, url FROM remotes WHERE name = ?1";
-        match Remote::get(conn, query, params![name]) {
-            Ok(remote) => Ok(remote),
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Err(RemoteError::RemoteNotFound(name.to_string()))
-            }
-            Err(e) => Err(RemoteError::DatabaseError(e)),
-        }
+        Remote::select(conn)
+            .name(name)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| RemoteError::RemoteNotFound(name.to_string()))
     }
 
     /// Get a remote by name, returning None if not found (for backward compatibility)
@@ -575,11 +575,10 @@ impl Remote {
 
     /// List all remotes
     pub fn list_all(conn: &ConfigConnection) -> Vec<Remote> {
-        Remote::query(
-            conn,
-            "SELECT name, url FROM remotes ORDER BY name",
-            params![],
-        )
+        Remote::select(conn)
+            .order_by(RemoteSelect::Name, Direction::Asc)
+            .load()
+            .expect("should load remotes")
     }
 
     /// Delete a remote by name
@@ -600,10 +599,25 @@ impl Remote {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
 pub struct RemoteBranch {
     pub remote_name: Option<String>,
     pub name: String,
+}
+
+impl Query for RemoteBranch {
+    type Model = RemoteBranch;
+
+    const HISTORY_TABLE_NAME: Option<&'static str> = None;
+    const PRIMARY_KEY: &'static str = "name";
+    const TABLE_NAME: &'static str = "remote_branch";
+
+    fn process_row(row: &Row) -> Self::Model {
+        Self {
+            remote_name: row.get(0).unwrap(),
+            name: row.get(1).unwrap(),
+        }
+    }
 }
 
 impl RemoteBranch {
@@ -632,14 +646,14 @@ impl RemoteBranch {
     }
 
     pub fn get_remote(conn: &ConfigConnection, branch_name: &str) -> Option<String> {
-        conn.query_row(
-            "SELECT remote_name FROM remote_branch WHERE name = ?1",
-            params![branch_name],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
+        RemoteBranch::select(conn)
+            .name(branch_name)
+            .only(RemoteBranchSelect::RemoteName)
+            .load()
+            .ok()?
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     pub fn clear_by_remote(conn: &ConfigConnection, remote_name: &str) -> Result<(), RemoteError> {
@@ -683,8 +697,14 @@ impl FromSql for RemoteOperationKind {
     }
 }
 
+impl ToSql for RemoteOperationKind {
+    fn to_sql(&self) -> SQLResult<ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
 /// Tracks a remote operation until its graph and asset phases are complete.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
 pub struct RemoteOperationRecord {
     /// Config database row identifier.
     pub id: i64,
@@ -715,6 +735,7 @@ pub struct RemoteOperationRecord {
 impl Query for RemoteOperationRecord {
     type Model = RemoteOperationRecord;
 
+    const HISTORY_TABLE_NAME: Option<&'static str> = None;
     const TABLE_NAME: &'static str = "remote_operations";
 
     fn process_row(row: &Row) -> Self::Model {
@@ -857,7 +878,7 @@ impl RemoteOperationRecord {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ModelSelect)]
 pub struct Defaults {
     pub id: i64,
     pub collection_name: Option<String>,
@@ -870,6 +891,7 @@ pub struct Defaults {
 impl Query for Defaults {
     type Model = Defaults;
 
+    const HISTORY_TABLE_NAME: Option<&'static str> = None;
     const TABLE_NAME: &'static str = "defaults";
 
     fn process_row(row: &Row) -> Self::Model {
@@ -913,17 +935,14 @@ impl Defaults {
 
     /// Get the default remote name
     pub fn get_default_remote(conn: &ConfigConnection) -> Option<String> {
-        let query = "SELECT remote_name FROM defaults WHERE id = 1";
-        let mut stmt = conn.prepare(query).ok()?;
-        let mut rows = stmt
-            .query_map(params![], |row| row.get::<_, Option<String>>(0))
-            .ok()?;
-
-        if let Some(Ok(remote_name)) = rows.next() {
-            remote_name
-        } else {
-            None
-        }
+        Defaults::select(conn)
+            .id(1)
+            .only(DefaultsSelect::RemoteName)
+            .load()
+            .ok()?
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     /// Helper method to get the default remote URL by resolving the remote name
@@ -947,17 +966,14 @@ impl Defaults {
     }
 
     pub fn get_current_branch(conn: &ConfigConnection) -> Option<String> {
-        let query = "SELECT current_branch_name FROM defaults WHERE id = 1";
-        let mut stmt = conn.prepare(query).ok()?;
-        let mut rows = stmt
-            .query_map(params![], |row| row.get::<_, Option<String>>(0))
-            .ok()?;
-
-        if let Some(Ok(branch_name)) = rows.next() {
-            branch_name
-        } else {
-            None
-        }
+        Defaults::select(conn)
+            .id(1)
+            .only(DefaultsSelect::CurrentBranchName)
+            .load()
+            .ok()?
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     pub fn set_default_committer_name(conn: &ConfigConnection, name: &str) -> SQLResult<()> {
@@ -968,12 +984,13 @@ impl Defaults {
     }
 
     pub fn get_default_committer_name(conn: &ConfigConnection) -> String {
-        conn.query_row(
-            "SELECT default_committer_name FROM defaults WHERE id = 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| GEN_DEFAULT_COMMITTER_NAME.to_string())
+        Defaults::select(conn)
+            .id(1)
+            .only(DefaultsSelect::DefaultCommitterName)
+            .load()
+            .ok()
+            .and_then(|names| names.into_iter().next())
+            .unwrap_or_else(|| GEN_DEFAULT_COMMITTER_NAME.to_string())
     }
 
     pub fn set_default_committer_email(conn: &ConfigConnection, email: &str) -> SQLResult<()> {
@@ -984,34 +1001,18 @@ impl Defaults {
     }
 
     pub fn get_default_committer_email(conn: &ConfigConnection) -> String {
-        conn.query_row(
-            "SELECT default_committer_email FROM defaults WHERE id = 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| DEFAULT_COMMITTER_EMAIL.to_string())
+        Defaults::select(conn)
+            .id(1)
+            .only(DefaultsSelect::DefaultCommitterEmail)
+            .load()
+            .ok()
+            .and_then(|emails| emails.into_iter().next())
+            .unwrap_or_else(|| DEFAULT_COMMITTER_EMAIL.to_string())
     }
 
     /// Get the defaults record
     pub fn get(conn: &ConfigConnection) -> Option<Defaults> {
-        let query = "SELECT id, collection_name, remote_name, current_branch_name, default_committer_name, default_committer_email FROM defaults WHERE id = 1";
-        Self::get_single(conn, query, params![]).ok()
-    }
-
-    /// Helper method to get a single defaults record using the Query trait
-    fn get_single(
-        conn: &ConfigConnection,
-        query: &str,
-        params: &[&dyn rusqlite::ToSql],
-    ) -> SQLResult<Defaults> {
-        let mut stmt = conn.prepare(query)?;
-        let mut rows = stmt.query_map(params, |row| Ok(Self::process_row(row)))?;
-
-        if let Some(row) = rows.next() {
-            row
-        } else {
-            Err(rusqlite::Error::QueryReturnedNoRows)
-        }
+        Self::select(conn).id(1).load().ok()?.into_iter().next()
     }
 }
 

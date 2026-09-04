@@ -96,6 +96,9 @@ pub enum RemoteError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
 
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
+
     #[error("Cannot delete remote '{0}' as it is set as the default remote")]
     CannotDeleteDefaultRemote(String),
 

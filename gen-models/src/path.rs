@@ -10,12 +10,12 @@ use gen_core::{
 };
 use intervaltree::IntervalTree;
 use itertools::Itertools;
-use rusqlite::{Row, ToSql, params, types::Value as SQLValue};
+use rusqlite::{Row, ToSql, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Direction, ModelSelect,
+    Direction, ModelSelect, ModelSelectError,
     block_group::{BlockGroup, BlockGroupSelect},
     block_group_edge::BlockGroupEdge,
     db::GraphConnection,
@@ -39,6 +39,8 @@ pub struct Path {
 pub enum PathError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Missing path data: {0}")]
     Missing(String),
     #[error("Duplicate entry with uuid: {0}")]
@@ -418,12 +420,13 @@ impl Path {
     }
 
     pub fn get_by_id(conn: &GraphConnection, path_id: &HashId) -> Path {
-        Path::get(
-            conn,
-            "SELECT id, block_group_id, name, created_on FROM paths WHERE id = ?1;",
-            params![path_id],
-        )
-        .unwrap()
+        Path::select(conn)
+            .id(*path_id)
+            .load()
+            .expect("should load path by id")
+            .into_iter()
+            .next()
+            .expect("should find path by id")
     }
 
     pub fn query_for_collection(conn: &GraphConnection, collection_name: &str) -> Vec<Path> {
@@ -916,16 +919,12 @@ impl Path {
 
         let node_deletion_start = deletion_start - block_with_start.start;
         let node_deletion_end = deletion_end - block_with_end.start;
-        let deletion_edge_result = Edge::query(
-            conn,
-            "SELECT * FROM edges WHERE source_node_id = ?1 AND source_coordinate = ?2 AND target_node_id = ?3 AND target_coordinate = ?4",
-            rusqlite::params!(
-                SQLValue::from(block_with_start.node_id),
-                SQLValue::from(node_deletion_start),
-                SQLValue::from(block_with_end.node_id),
-                SQLValue::from(node_deletion_end)
-            ),
-        );
+        let deletion_edge_result = Edge::select(conn)
+            .source_node_id(block_with_start.node_id)
+            .source_coordinate(node_deletion_start)
+            .target_node_id(block_with_end.node_id)
+            .target_coordinate(node_deletion_end)
+            .load()?;
 
         if deletion_edge_result.is_empty() {
             let error_string = format!(
@@ -1079,24 +1078,18 @@ impl RegionResolver for Path {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on, \
-                    block_groups.is_default \
-             FROM paths \
-             JOIN block_groups ON paths.block_group_id = block_groups.id \
-             WHERE block_groups.collection_name = ?1 \
-               AND block_groups.sample_name = ?2 \
-               AND lower(paths.name) = lower(?3)",
+        let matches = Path::select(conn)
+            .name_case_insensitive(&region.name)
+            .join_filtered_on(
+                PathSelect::BlockGroupId,
+                BlockGroupSelect::Id,
+                BlockGroup::select(conn)
+                    .collection_name(collection_name)
+                    .sample_name(sample_name),
             )
-            .map_err(PathError::DatabaseError)?;
-        let matches = stmt
-            .query_map(params![collection_name, sample_name, region.name], |row| {
-                Ok((Self::process_row(row), row.get::<_, bool>(4)?))
-            })
-            .map_err(PathError::DatabaseError)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PathError::DatabaseError)?;
+            .models::<(Path, BlockGroup)>()
+            .load()
+            .map_err(PathError::from)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),
@@ -1104,7 +1097,7 @@ impl RegionResolver for Path {
             _ => {
                 let default_matches = matches
                     .into_iter()
-                    .filter(|(_, is_default)| *is_default)
+                    .filter(|(_, block_group)| block_group.is_default)
                     .collect::<Vec<_>>();
                 match default_matches.len() {
                     1 => Ok(default_matches.into_iter().next().unwrap().0),

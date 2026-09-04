@@ -503,6 +503,7 @@ fn filter_method(
     string: bool,
     optional: bool,
 ) -> proc_macro2::TokenStream {
+    let in_method = format_ident!("{}_in", field);
     let exact = if string {
         quote! {
             pub fn #field(mut self, value: impl ::core::convert::Into<::std::string::String>) -> Self {
@@ -528,6 +529,42 @@ fn filter_method(
         }
     };
 
+    let any_of = if string {
+        quote! {
+            pub fn #in_method<I, V>(mut self, values: I) -> Self
+            where
+                I: ::core::iter::IntoIterator<Item = V>,
+                V: ::core::convert::Into<::std::string::String>,
+            {
+                let column = self.column(#column);
+                let params = values
+                    .into_iter()
+                    .map(|value| {
+                        let value = value.into();
+                        ::gen_models::select::sql_value(&value)
+                    })
+                    .collect::<::std::vec::Vec<_>>();
+                self.filters.push(::gen_models::select::sql_in_filter(column, params));
+                self
+            }
+        }
+    } else {
+        quote! {
+            pub fn #in_method<I>(mut self, values: I) -> Self
+            where
+                I: ::core::iter::IntoIterator<Item = #value_type>,
+            {
+                let column = self.column(#column);
+                let params = values
+                    .into_iter()
+                    .map(|value| ::gen_models::select::sql_value(&value))
+                    .collect::<::std::vec::Vec<_>>();
+                self.filters.push(::gen_models::select::sql_in_filter(column, params));
+                self
+            }
+        }
+    };
+
     let contains = if string {
         let contains_method = format_ident!("{}_contains", field);
         quote! {
@@ -539,6 +576,26 @@ fn filter_method(
                 let column = self.column(#column);
                 self.filters.push(::gen_models::select::SqlFilter::new(
                     ::std::format!("instr(lower({column}), lower(?)) > 0"),
+                    ::std::vec![::gen_models::select::sql_value(&value)],
+                ));
+                self
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let case_insensitive = if string {
+        let case_insensitive_method = format_ident!("{}_case_insensitive", field);
+        quote! {
+            pub fn #case_insensitive_method(
+                mut self,
+                value: impl ::core::convert::Into<::std::string::String>,
+            ) -> Self {
+                let value = value.into();
+                let column = self.column(#column);
+                self.filters.push(::gen_models::select::SqlFilter::new(
+                    ::std::format!("lower({column}) = lower(?)"),
                     ::std::vec![::gen_models::select::sql_value(&value)],
                 ));
                 self
@@ -566,7 +623,9 @@ fn filter_method(
 
     quote! {
         #exact
+        #any_of
         #contains
+        #case_insensitive
         #is_null
     }
 }

@@ -79,6 +79,53 @@ fn test_generated_filters_order_and_paginate() {
 }
 
 #[test]
+fn test_generated_filters_accept_multiple_values() {
+    let conn = connection();
+    for name in ["alpha", "beta", "gamma"] {
+        insert_sample(&conn, name, false);
+    }
+    insert_group(&conn, 1, "alpha", "first", "collection");
+    insert_group(&conn, 2, "beta", "second", "collection");
+    insert_group(&conn, 3, "gamma", "third", "collection");
+
+    let names = FixtureSample::select(&conn)
+        .name_in(["alpha", "gamma"])
+        .order_by(FixtureSampleSelect::Name, Direction::Asc)
+        .only(FixtureSampleSelect::Name)
+        .load()
+        .expect("should load rows matching any supplied value");
+    let group_names = FixtureGroup::select(&conn)
+        .id_in([1, 3])
+        .order_by(FixtureGroupSelect::Id, Direction::Asc)
+        .only(FixtureGroupSelect::Name)
+        .load()
+        .expect("should load rows matching typed non-string values");
+    let empty = FixtureSample::select(&conn)
+        .name_in(core::iter::empty::<&str>())
+        .load()
+        .expect("should treat an empty value collection as matching no rows");
+
+    assert_eq!(names, vec!["alpha", "gamma"]);
+    assert_eq!(group_names, vec!["first", "third"]);
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn test_generated_filters_match_exact_strings_case_insensitively() {
+    let conn = connection();
+    insert_sample(&conn, "alpha", false);
+    insert_sample(&conn, "alphabet", false);
+
+    let names = FixtureSample::select(&conn)
+        .name_case_insensitive("ALPHA")
+        .only(FixtureSampleSelect::Name)
+        .load()
+        .expect("should match one complete string without considering case");
+
+    assert_eq!(names, vec!["alpha"]);
+}
+
+#[test]
 fn test_generated_field_projections_are_typed() {
     let conn = connection();
     insert_sample(&conn, "alpha", false);

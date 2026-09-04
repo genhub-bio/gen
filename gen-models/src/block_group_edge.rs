@@ -6,13 +6,16 @@ use rusqlite::{self, Row, ToSql, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Direction, ModelSelect,
     db::GraphConnection,
     edge::{Edge, EdgeData},
     gen_models_capnp::block_group_edge,
     traits::*,
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Debug, Deserialize, Serialize, Eq, Hash, PartialEq, Ord, PartialOrd, ModelSelect,
+)]
 pub struct BlockGroupEdge {
     pub id: HashId,
     pub block_group_id: HashId,
@@ -193,15 +196,13 @@ impl BlockGroupEdge {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<AugmentedEdge> {
-        let query = format!(
-            "select * from {} where block_group_id = :block_group_id ORDER BY created_on DESC;",
-            Self::table_name_with_history_ref(history_ref),
-        );
-        let mut params: Vec<(&str, &dyn ToSql)> = vec![(":block_group_id", block_group_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = BlockGroupEdge::select(conn)
+            .block_group_id(*block_group_id)
+            .order_by(BlockGroupEdgeSelect::CreatedOn, Direction::Desc);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        let block_group_edges = BlockGroupEdge::query(conn, &query, &params[..]);
+        let block_group_edges = select.load().expect("should load block group edges");
         let edge_ids = block_group_edges
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)

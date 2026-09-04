@@ -70,6 +70,16 @@ impl SqlFilter {
 }
 
 #[doc(hidden)]
+pub fn sql_in_filter(column: impl Into<String>, params: Vec<Value>) -> SqlFilter {
+    if params.is_empty() {
+        SqlFilter::new("0 = 1", params)
+    } else {
+        let placeholders = vec!["?"; params.len()].join(", ");
+        SqlFilter::new(format!("{} IN ({placeholders})", column.into()), params)
+    }
+}
+
+#[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqlOrder {
     column: String,

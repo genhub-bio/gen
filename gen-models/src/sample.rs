@@ -1,14 +1,14 @@
-use std::{collections::HashSet, rc::Rc};
+use std::collections::HashSet;
 
 use gen_core::{Workspace, traits::Capnp};
 use gen_graph::GenGraph;
-use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
+use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Direction, ModelSelect,
-    block_group::BlockGroup,
+    Direction, ModelSelect, ModelSelectError,
+    block_group::{BlockGroup, BlockGroupSelect},
     db::GraphConnection,
     errors::{BlockGroupError, QueryError},
     gen_models_capnp::sample,
@@ -34,6 +34,8 @@ pub enum SampleError {
     QueryError(#[from] QueryError),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Sample already exists")]
     Duplicate(Sample),
     #[error("Sample not found: {0}")]
@@ -240,22 +242,14 @@ impl Sample {
         ) {
             Ok(new_sample) => {
                 if !parent_samples.is_empty() {
-                    let parent_block_groups = BlockGroup::query(
-                        conn,
-                        "select * from block_groups
-                         where collection_name = ?1 AND sample_name IN rarray(?2)
-                         ORDER BY name, sample_name, created_on, id",
-                        params![
-                            collection_name,
-                            Rc::new(
-                                parent_samples
-                                    .iter()
-                                    .cloned()
-                                    .map(SQLValue::from)
-                                    .collect::<Vec<_>>()
-                            ),
-                        ],
-                    );
+                    let parent_block_groups = BlockGroup::select(conn)
+                        .collection_name(collection_name)
+                        .sample_name_in(parent_samples.iter())
+                        .order_by(BlockGroupSelect::Name, Direction::Asc)
+                        .order_by(BlockGroupSelect::SampleName, Direction::Asc)
+                        .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+                        .order_by(BlockGroupSelect::Id, Direction::Asc)
+                        .load()?;
                     let group_names = parent_block_groups
                         .into_iter()
                         .map(|parent_block_group| parent_block_group.name)
@@ -309,12 +303,13 @@ impl Sample {
         samples.iter().map(|s| s.name.clone()).collect()
     }
 
-    pub fn get_by_name(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
-        Sample::get(
-            conn,
-            "select * from samples where name = ?1;",
-            rusqlite::params!(name),
-        )
+    pub fn get_by_name(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
+        Sample::select(conn)
+            .name(name)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| SampleError::NotFound(name.to_string()))
     }
 
     pub fn search_name(

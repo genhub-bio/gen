@@ -48,10 +48,9 @@ use rusqlite::{params, types::Value};
 use sha2::digest::typenum::Gr;
 
 fn get_default_collection(conn: &ConfigConnection) -> Result<String, rusqlite::Error> {
-    let mut stmt = conn.prepare("select collection_name from defaults where id = 1")?;
-    Ok(stmt
-        .query_row((), |row| row.get(0))
-        .unwrap_or("default".to_string()))
+    Ok(Defaults::get(conn)
+        .and_then(|defaults| defaults.collection_name)
+        .unwrap_or_else(|| "default".to_string()))
 }
 
 fn resolve_initial_collection(
@@ -758,11 +757,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let block_groups = match (collection, sample.as_deref()) {
                 (Some(c), Some(s)) => Sample::get_block_groups(graph_conn, &c, s, None),
                 (Some(c), None) => Collection::get_block_groups(graph_conn, &c, None),
-                (None, Some(s)) => BlockGroup::all(graph_conn)
-                    .into_iter()
-                    .filter(|bg| bg.sample_name == s)
-                    .collect(),
-                (None, None) => BlockGroup::all(graph_conn),
+                (None, Some(s)) => BlockGroup::select(graph_conn)
+                    .sample_name(s)
+                    .load()
+                    .expect("should load sample block groups"),
+                (None, None) => BlockGroup::select(graph_conn)
+                    .load()
+                    .expect("should load block groups"),
             };
             let index_dir = workspace.find_search_index();
             let query_bytes = query.as_bytes();

@@ -10,9 +10,7 @@ use gen_models::{
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
-    traits::*,
 };
-use rusqlite::{self, params};
 
 use crate::{
     errors::SequenceUpdateError,
@@ -132,18 +130,16 @@ pub fn update_with_sequence(
             if node_id == HashId::convert_str("") {
                 let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
             } else {
-                let edge_to_new_node = Edge::query(
-                    conn,
-                    "select * from edges where target_node_id = ?1",
-                    params![node_id],
-                )[0]
-                .clone();
-                let edge_from_new_node = Edge::query(
-                    conn,
-                    "select * from edges where source_node_id = ?1",
-                    params![node_id],
-                )[0]
-                .clone();
+                let edge_to_new_node = Edge::select(conn)
+                    .target_node_id(node_id)
+                    .load()
+                    .expect("should load edge to inserted node")[0]
+                    .clone();
+                let edge_from_new_node = Edge::select(conn)
+                    .source_node_id(node_id)
+                    .load()
+                    .expect("should load edge from inserted node")[0]
+                    .clone();
                 path.new_path_with(
                     conn,
                     start_coordinate,
@@ -199,8 +195,10 @@ mod tests {
         path::Path,
         region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
+        traits::Query,
     };
     use petgraph::Direction;
+    use rusqlite::params;
 
     use super::*;
     use crate::{

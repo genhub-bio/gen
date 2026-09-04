@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionError, AccessionSpan, NewAccession},
+    Direction, ModelSelect, ModelSelectError,
+    accession::{Accession, AccessionError, AccessionSelect, AccessionSpan, NewAccession},
     assets::{AssetRef, AssetRole, OperationKind},
     db::{DbContext, GraphConnection},
     errors::{FileAdditionError, OperationError},
@@ -23,7 +24,7 @@ use crate::{
     region::GenRegionError,
     traits::{Query, max_rows_per_batch},
 };
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
 pub struct AnnotationGroup {
     pub name: String,
 }
@@ -44,16 +45,12 @@ impl Query for AnnotationGroup {
 impl AnnotationGroup {
     /// Lists annotation groups visible at an optional historical reference.
     pub fn all(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<AnnotationGroup> {
-        let table = AnnotationGroup::table_name_with_history_ref(history_ref);
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select =
+            AnnotationGroup::select(conn).order_by(AnnotationGroupSelect::Name, Direction::Asc);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        AnnotationGroup::query(
-            conn,
-            &format!("SELECT * FROM {table} ORDER BY name"),
-            &params[..],
-        )
+        select.load().expect("should load annotation groups")
     }
 
     pub fn create(conn: &GraphConnection, name: &str) -> rusqlite::Result<AnnotationGroup> {
@@ -81,26 +78,19 @@ impl AnnotationGroup {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<AnnotationGroup> {
-        let groups_table = AnnotationGroup::table_name_with_history_ref(history_ref);
-        let samples_table = if history_ref.is_some() {
-            "dolt_at_annotation_group_samples(:history_ref)"
-        } else {
-            "annotation_group_samples"
-        };
-        let query = format!(
-            "\
-            select ag.* \
-            from {groups_table} ag \
-            join {samples_table} s \
-                on ag.name = s.annotation_group \
-            where s.sample_name = :sample_name \
-            order by ag.name;"
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":sample_name", &sample_name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut samples = AnnotationGroupSample::select(conn).sample_name(sample_name);
+        if let Some(history_ref) = history_ref {
+            samples = samples.with_ref(history_ref);
         }
-        AnnotationGroup::query(conn, &query, &params[..])
+        AnnotationGroup::select(conn)
+            .join_filtered_on(
+                AnnotationGroupSelect::Name,
+                AnnotationGroupSampleSelect::AnnotationGroup,
+                samples,
+            )
+            .order_by(AnnotationGroupSelect::Name, Direction::Asc)
+            .load()
+            .expect("should load annotation groups for sample")
     }
 }
 
@@ -119,12 +109,14 @@ impl<'a> Capnp<'a> for AnnotationGroup {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
 pub struct Annotation {
     pub id: HashId,
     pub name: String,
+    #[model_select(column = "annotation_group")]
     pub group: String,
     pub accession_id: HashId,
+    #[model_select(skip)]
     pub extra: Option<AnnotationExtra>,
 }
 
@@ -288,6 +280,8 @@ impl Query for Annotation {
 pub enum AnnotationError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Annotation group error: {0}")]
     AnnotationGroupError(#[from] AnnotationGroupError),
     #[error("Accession error: {0}")]
@@ -309,6 +303,22 @@ pub enum AddAnnotationError {
 }
 
 impl Annotation {
+    pub fn get_by_id(
+        conn: &GraphConnection,
+        id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Option<Self> {
+        let mut select = Self::select(conn).id(*id);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
+        }
+        select
+            .load()
+            .expect("should load annotation by id")
+            .into_iter()
+            .next()
+    }
+
     pub fn generate_id(name: &str, group: &str, accession_id: &HashId) -> HashId {
         HashId(calculate_hash(&format!("{name}:{group}:{accession_id}",)))
     }
@@ -432,14 +442,10 @@ impl Annotation {
         conn: &GraphConnection,
         annotation_group: &str,
     ) -> Result<Vec<String>, AnnotationError> {
-        let query = "SELECT sample_name FROM annotation_group_samples WHERE annotation_group = ?1;";
-        let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map(params![annotation_group], |row| row.get(0))?;
-        let mut samples = Vec::new();
-        for row in rows {
-            samples.push(row?);
-        }
-        Ok(samples)
+        Ok(AnnotationGroupSample::select(conn)
+            .annotation_group(annotation_group)
+            .only(AnnotationGroupSampleSelect::SampleName)
+            .load()?)
     }
 
     pub fn query_by_sample(
@@ -447,23 +453,17 @@ impl Annotation {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let annotations_table = Annotation::table_name_with_history_ref(history_ref);
-        let samples_table = if history_ref.is_some() {
-            "dolt_at_annotation_group_samples(:history_ref)"
-        } else {
-            "annotation_group_samples"
-        };
-        let query = format!(
-            "select annotations.* from {annotations_table} annotations \
-             join {samples_table} samples \
-               on annotations.annotation_group = samples.annotation_group \
-             where samples.sample_name = :sample_name"
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":sample_name", &sample_name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut samples = AnnotationGroupSample::select(conn).sample_name(sample_name);
+        if let Some(history_ref) = history_ref {
+            samples = samples.with_ref(history_ref);
         }
-        Ok(Annotation::query(conn, &query, &params[..]))
+        Ok(Annotation::select(conn)
+            .join_filtered_on(
+                AnnotationSelect::Group,
+                AnnotationGroupSampleSelect::AnnotationGroup,
+                samples,
+            )
+            .load()?)
     }
 
     pub fn query_by_group(
@@ -471,15 +471,11 @@ impl Annotation {
         group: &str,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let query = format!(
-            "select * from {} where annotation_group = :group",
-            Annotation::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":group", &group)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = Annotation::select(conn).group(group);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        Ok(Annotation::query(conn, &query, &params[..]))
+        Ok(select.load()?)
     }
 
     pub fn query_by_group_and_block_group(
@@ -488,20 +484,18 @@ impl Annotation {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let annotations_table = Annotation::table_name_with_history_ref(history_ref);
-        let accessions_table = Accession::table_name_with_history_ref(history_ref);
-        let query = format!(
-            "SELECT annotations.* FROM {annotations_table} annotations \
-             JOIN {accessions_table} accessions ON accessions.id = annotations.accession_id \
-             WHERE annotations.annotation_group = :group \
-               AND accessions.block_group_id = :block_group_id"
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
-            vec![(":group", &group), (":block_group_id", block_group_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut accessions = Accession::select(conn).block_group_id(*block_group_id);
+        if let Some(history_ref) = history_ref {
+            accessions = accessions.with_ref(history_ref);
         }
-        Ok(Annotation::query(conn, &query, &params[..]))
+        Ok(Annotation::select(conn)
+            .group(group)
+            .join_filtered_on(
+                AnnotationSelect::AccessionId,
+                AccessionSelect::Id,
+                accessions,
+            )
+            .load()?)
     }
 
     /// List every annotation on a block group, following the sample lineage.
@@ -566,11 +560,12 @@ impl Annotation {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AnnotationError> {
-        let accession = Accession::get(
-            conn,
-            "select * from accessions where id = ?1",
-            params![self.accession_id],
-        )?;
+        let accession = Accession::select(conn)
+            .id(self.accession_id)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         accession.intervaltree(conn).map_err(Into::into)
     }
 }
@@ -629,10 +624,24 @@ impl RegionResolver for Annotation {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
 pub struct AnnotationGroupSample {
     pub annotation_group: String,
     pub sample_name: String,
+}
+
+impl Query for AnnotationGroupSample {
+    type Model = AnnotationGroupSample;
+
+    const PRIMARY_KEY: &'static str = "annotation_group";
+    const TABLE_NAME: &'static str = "annotation_group_samples";
+
+    fn process_row(row: &Row) -> Self::Model {
+        Self {
+            annotation_group: row.get(0).unwrap(),
+            sample_name: row.get(1).unwrap(),
+        }
+    }
 }
 
 impl<'a> Capnp<'a> for AnnotationGroupSample {

@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
-    rc::Rc,
 };
 
 use gen_core::{
@@ -18,7 +17,7 @@ use gen_graph::{
 };
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
-use rusqlite::{Row, params, types::Value as SQLValue};
+use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -34,9 +33,9 @@ use crate::{
         SequenceError,
     },
     gen_models_capnp::block_group,
-    path::{Path, PathData},
+    path::{Path, PathData, PathSelect},
     region::{ResolvedGenRegion, ResolvedRegionKind},
-    sample::Sample,
+    sample::{Sample, SampleSelect},
     traits::*,
 };
 
@@ -222,13 +221,12 @@ impl<'a> PathCache<'a> {
             Ok(path.clone())
         } else {
             let conn = path_cache.conn;
-            let new_path = Path::query(
-                conn,
-                "SELECT id, block_group_id, name, created_on FROM paths \
-                 WHERE block_group_id = ?1 AND name = ?2",
-                params![block_group_id, name],
-            )[0]
-            .clone();
+            let new_path = Path::select(conn)
+                .block_group_id(*block_group_id)
+                .name(name)
+                .load()
+                .expect("should load path for cache")[0]
+                .clone();
 
             path_cache.cache.insert(path_key, new_path.clone());
             let tree = new_path.intervaltree(conn)?;
@@ -271,20 +269,12 @@ impl BlockGroup {
         let is_default = if new_block_group.is_default {
             true
         } else {
-            let existing_default = BlockGroup::try_query(
-                conn,
-                "SELECT * FROM block_groups \
-                 WHERE collection_name = ?1 \
-                   AND sample_name = ?2 \
-                   AND name = ?3 \
-                   AND is_default = 1",
-                params![
-                    new_block_group.collection_name,
-                    new_block_group.sample_name,
-                    new_block_group.name,
-                ],
-            )
-            .map_err(BlockGroupError::from)?;
+            let existing_default = BlockGroup::select(conn)
+                .collection_name(new_block_group.collection_name)
+                .sample_name(new_block_group.sample_name)
+                .name(new_block_group.name)
+                .is_default(true)
+                .load()?;
             existing_default.is_empty()
         };
         let query = "INSERT INTO block_groups (
@@ -351,7 +341,11 @@ impl BlockGroup {
         id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<BlockGroup, BlockGroupError> {
-        <Self as Query>::get_by_id(conn, id, history_ref).ok_or_else(|| {
+        let mut select = Self::select(conn).id(*id);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
+        }
+        select.load()?.into_iter().next().ok_or_else(|| {
             BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
                 "BlockGroup with id {id} not found"
             )))
@@ -365,23 +359,14 @@ impl BlockGroup {
         name: &str,
         history_ref: Option<&str>,
     ) -> Result<BlockGroup, BlockGroupError> {
-        let query = format!(
-            "select * from {} where collection_name = :collection_name \
-             and sample_name = :sample_name and name = :name",
-            BlockGroup::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
-            (":collection_name", &collection_name),
-            (":sample_name", &sample_name),
-            (":name", &name),
-        ];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .name(name);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        BlockGroup::try_query(conn, &query, &params[..])?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
+        select.load()?.into_iter().next().ok_or_else(|| {
                 BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
                     "BlockGroup named {name} for sample {sample_name} in collection {collection_name} not found"
                 )))
@@ -392,16 +377,18 @@ impl BlockGroup {
         conn: &GraphConnection,
         collection_name: &str,
     ) -> Result<Vec<BlockGroup>, BlockGroupError> {
-        BlockGroup::try_query(
-            conn,
-            "select bg.*
-             from block_groups bg
-             join samples s on s.name = bg.sample_name
-             where bg.collection_name = ?1 and s.is_reference = 1
-             order by bg.name, bg.sample_name, bg.created_on, bg.id;",
-            params![collection_name],
-        )
-        .map_err(BlockGroupError::from)
+        Ok(BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .join_filtered_on(
+                BlockGroupSelect::SampleName,
+                SampleSelect::Name,
+                Sample::select(conn).is_reference(true),
+            )
+            .order_by(BlockGroupSelect::Name, Direction::Asc)
+            .order_by(BlockGroupSelect::SampleName, Direction::Asc)
+            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+            .order_by(BlockGroupSelect::Id, Direction::Asc)
+            .load()?)
     }
 
     fn copy_paths_and_accessions_into(
@@ -409,12 +396,7 @@ impl BlockGroup {
         conn: &GraphConnection,
         target_block_group_id: &HashId,
     ) -> Result<(), BlockGroupError> {
-        let existing_paths = Path::query(
-            conn,
-            "SELECT id, block_group_id, name, created_on FROM paths \
-             WHERE block_group_id = ?1;",
-            params![self.id],
-        );
+        let existing_paths = Path::select(conn).block_group_id(self.id).load()?;
 
         for path in &existing_paths {
             let edge_ids = Path::edges_for_path(conn, &path.id, None)
@@ -507,28 +489,17 @@ impl BlockGroup {
             return Ok(vec![]);
         }
 
-        let query = format!(
-            "select * from {}
-             where collection_name = :collection_name AND sample_name IN rarray(:parent_samples) AND name = :group_name
-             order by sample_name, created_on, id",
-            BlockGroup::table_name_with_history_ref(history_ref)
-        );
-        let parent_sample_values = Rc::new(
-            parent_samples
-                .iter()
-                .cloned()
-                .map(SQLValue::from)
-                .collect::<Vec<_>>(),
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
-            (":collection_name", &collection_name),
-            (":parent_samples", &parent_sample_values),
-            (":group_name", &group_name),
-        ];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name_in(parent_samples)
+            .name(group_name)
+            .order_by(BlockGroupSelect::SampleName, Direction::Asc)
+            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+            .order_by(BlockGroupSelect::Id, Direction::Asc);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        BlockGroup::try_query(conn, &query, &params[..]).map_err(BlockGroupError::from)
+        select.load().map_err(BlockGroupError::from)
     }
 
     fn copy_contents_from(
@@ -869,25 +840,22 @@ impl BlockGroup {
         }
 
         for ((block_group_id, accession_name), path_edges) in new_accession_edges {
-            match Accession::get(
-                conn,
-                "select * from accessions where name = ?1 AND block_group_id = ?2",
-                params![accession_name, block_group_id],
-            ) {
-                Ok(_) => {
-                    println!(
-                        "accession already exists, consider a better matching algorithm to determine if this is an error."
-                    );
-                }
-                Err(_) => {
-                    Accession::create_from_edges(
-                        conn,
-                        &accession_name,
-                        &block_group_id,
-                        None,
-                        &path_edges,
-                    )?;
-                }
+            let existing_accessions = Accession::select(conn)
+                .name(&accession_name)
+                .block_group_id(block_group_id)
+                .load()?;
+            if existing_accessions.is_empty() {
+                Accession::create_from_edges(
+                    conn,
+                    &accession_name,
+                    &block_group_id,
+                    None,
+                    &path_edges,
+                )?;
+            } else {
+                println!(
+                    "accession already exists, consider a better matching algorithm to determine if this is an error."
+                );
             }
         }
 
@@ -1157,18 +1125,15 @@ impl BlockGroup {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<Path, BlockGroupError> {
-        let query = format!(
-            "SELECT id, block_group_id, name, created_on FROM {} \
-             WHERE block_group_id = :block_group_id \
-             ORDER BY created_on DESC, id DESC LIMIT 1",
-            Path::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
-            vec![(":block_group_id", block_group_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
+        let mut select = Path::select(conn)
+            .block_group_id(*block_group_id)
+            .order_by(PathSelect::CreatedOn, Direction::Desc)
+            .order_by(PathSelect::Id, Direction::Desc)
+            .limit(1);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
         }
-        let paths = Path::try_query(conn, &query, &params[..])?;
+        let paths = select.load()?;
         paths.first().cloned().ok_or_else(|| {
             BlockGroupError::QueryError(QueryError::ResultsNotFound(format!(
                 "No current path found for block group {block_group_id}"
@@ -1181,13 +1146,13 @@ impl BlockGroup {
         block_group_id: &HashId,
         path_name: &str,
     ) -> Result<Option<Path>, BlockGroupError> {
-        let paths = Path::try_query(
-            conn,
-            "SELECT id, block_group_id, name, created_on FROM paths \
-             WHERE block_group_id = ?1 AND name = ?2 \
-             ORDER BY created_on DESC, id DESC LIMIT 1",
-            params![block_group_id, path_name],
-        )?;
+        let paths = Path::select(conn)
+            .block_group_id(*block_group_id)
+            .name(path_name)
+            .order_by(PathSelect::CreatedOn, Direction::Desc)
+            .order_by(PathSelect::Id, Direction::Desc)
+            .limit(1)
+            .load()?;
 
         Ok(paths.into_iter().next())
     }
@@ -1315,14 +1280,12 @@ impl RegionResolver for BlockGroup {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = BlockGroup::query(
-            conn,
-            "SELECT * FROM block_groups \
-             WHERE collection_name = ?1 \
-               AND sample_name = ?2 \
-               AND lower(name) = lower(?3)",
-            params![collection_name, sample_name, region.name],
-        );
+        let matches = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .name_case_insensitive(&region.name)
+            .load()
+            .map_err(BlockGroupError::from)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),
@@ -1361,6 +1324,7 @@ mod tests {
     use capnp::message::TypedBuilder;
     use chrono::Utc;
     use gen_core::{NO_CHROMOSOME_INDEX, region::RegionResolutionError};
+    use rusqlite::types::Value as SQLValue;
 
     use super::*;
     use crate::{

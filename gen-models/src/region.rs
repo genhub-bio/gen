@@ -16,7 +16,6 @@ use crate::{
     edge::EdgeData,
     errors::PathError,
     path::Path,
-    traits::Query,
 };
 
 #[derive(Clone, Debug)]

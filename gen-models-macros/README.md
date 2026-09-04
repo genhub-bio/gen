@@ -68,11 +68,27 @@ Every selectable field receives an exact-match method:
 Sample::select(conn).is_reference(true);
 ```
 
+Every selectable field also receives an `_in` method for matching any value from a typed
+iterator. Empty iterators match no rows:
+
+```rust
+Sample::select(conn).name_in(["sample-a", "sample-b"]);
+```
+
 `String` fields also receive a case-insensitive `_contains` method:
 
 ```rust
 Sample::select(conn).name_contains("reference");
 ```
+
+Use `_case_insensitive` when the complete string must match while ignoring case:
+
+```rust
+Sample::select(conn).name_case_insensitive("REFERENCE");
+```
+
+Exact, multi-value, contains, and case-insensitive values are bound SQL parameters. In
+particular, `%` and `_` in user input are ordinary characters rather than `LIKE` wildcards.
 
 `Option<T>` fields receive an `_is_null` method in addition to an exact-match method that accepts
 `T`:

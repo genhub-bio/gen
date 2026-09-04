@@ -899,7 +899,6 @@ mod tests {
         operations::Defaults,
         sample::{NewSample, Sample},
         test_helpers::{get_connection, setup_gen_on_disk},
-        traits::Query,
     };
 
     #[test]

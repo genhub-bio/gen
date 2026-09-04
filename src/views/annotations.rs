@@ -30,7 +30,6 @@ use gen_models::{
     db::GraphConnection,
     file_types::FileTypes,
     reference_alias::ReferenceAlias,
-    traits::Query,
 };
 use noodles::{bed, core::Region, csi, gff, tabix};
 use petgraph::Direction;
