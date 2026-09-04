@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
-use gen_graph::models::{get_all_sequences, get_sample_all_sequences};
-use gen_models::{
+use gen_models::models::{get_all_sequences, get_sample_all_sequences};
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupChange},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -243,7 +243,7 @@ fn test_changes_against_derivative_blockgroups() {
     };
 
     // note we are making our change against the new blockgroup, and not the parent blockgroup
-    gen_graph::models::insert_change(conn, &change).unwrap();
+    gen_models::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -305,7 +305,7 @@ fn test_changes_against_derivative_blockgroups() {
         phased: 0,
         preserve_edge: false,
     };
-    gen_graph::models::insert_change(conn, &change).unwrap();
+    gen_models::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &gc_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -374,7 +374,7 @@ fn test_changes_against_derivative_diploid_blockgroups() {
         phased: 0,
         preserve_edge: true,
     };
-    gen_graph::models::insert_change(conn, &change).unwrap();
+    gen_models::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -451,7 +451,7 @@ fn test_changes_against_derivative_diploid_blockgroups() {
         phased: 0,
         preserve_edge: true,
     };
-    gen_graph::models::insert_change(conn, &change).unwrap();
+    gen_models::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &gc_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -529,7 +529,7 @@ fn test_prohibits_out_of_frame_changes_against_derivative_diploid_blockgroups() 
     };
 
     // note we are making our change against the new blockgroup, and not the parent blockgroup
-    gen_graph::models::insert_change(conn, &change).unwrap();
+    gen_models::models::insert_change(conn, &change).unwrap();
     let all_sequences = get_all_sequences(conn, &new_bg_id).unwrap();
     assert_eq!(
         all_sequences,
@@ -602,5 +602,5 @@ fn test_prohibits_out_of_frame_changes_against_derivative_diploid_blockgroups() 
         phased: 0,
         preserve_edge: true,
     };
-    gen_graph::models::insert_change(conn, &change).unwrap();
+    gen_models::models::insert_change(conn, &change).unwrap();
 }

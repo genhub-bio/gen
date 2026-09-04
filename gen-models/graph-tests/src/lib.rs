@@ -1,10 +1,10 @@
-use std::fs;
+use std::{fs, sync::OnceLock};
 
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, config::Workspace,
     errors::ConnectionError,
 };
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -18,6 +18,15 @@ use gen_models::{
 };
 use rusqlite::Connection;
 use tempfile::tempdir;
+
+pub fn test_workspace() -> &'static Workspace {
+    static WORKSPACE: OnceLock<Workspace> = OnceLock::new();
+    WORKSPACE.get_or_init(|| {
+        let workspace = Workspace::new(tempdir().expect("should create workspace").keep());
+        workspace.ensure_gen_dir();
+        workspace
+    })
+}
 
 pub fn get_connection<'a>(
     database_path: impl Into<Option<&'a str>>,

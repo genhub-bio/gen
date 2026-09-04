@@ -5,7 +5,7 @@ use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace, is_terminal,
 };
 use gen_graph::{GraphNode, all_intermediate_edges};
-use gen_models::{
+use gen_models_doltlite::{
     annotations::Annotation,
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -615,10 +615,10 @@ pub fn translate_block_group(
 /// terminals) as an in-memory sub-DAG. No database writes.
 fn extract_full_graph(
     conn: &GraphConnection,
-    workspace: &Workspace,
+    _workspace: &Workspace,
     block_group_id: &HashId,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)
+    let gen_graph = gen_models::models::load_block_group_graph(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
     let start_node = gen_graph
         .nodes()
@@ -701,12 +701,12 @@ fn extract_full_graph(
 /// nothing past the entry point is ever consulted.
 fn extract_from_entry(
     conn: &GraphConnection,
-    workspace: &Workspace,
+    _workspace: &Workspace,
     block_group_id: &HashId,
     entry_node_id: HashId,
     entry_coord: i64,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)
+    let gen_graph = gen_models::models::load_block_group_graph(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let entry_node = gen_graph
@@ -812,12 +812,12 @@ fn extract_from_entry(
 /// runs to its own first in-frame stop codon.
 fn extract_to_anchor(
     conn: &GraphConnection,
-    workspace: &Workspace,
+    _workspace: &Workspace,
     block_group_id: &HashId,
     anchor_node_id: HashId,
     anchor_coord: i64,
 ) -> Result<TranslationSubgraph, TranslationError> {
-    let gen_graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)
+    let gen_graph = gen_models::models::load_block_group_graph(conn, block_group_id, None)
         .map_err(|e| TranslationError::BlockGroupError(e.to_string()))?;
 
     let anchor_node = gen_graph
@@ -1550,7 +1550,7 @@ mod tests {
     use std::collections::HashSet;
 
     use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
-    use gen_models::{
+    use gen_models_doltlite::{
         accession::{Accession, AccessionSpan, NewAccession},
         annotations::{Annotation, AnnotationGroup, NewAnnotation},
         block_group::BlockGroup,
@@ -2010,7 +2010,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
 
     /// Whether PATH_END is reachable from PATH_START in the protein graph.
     fn start_reaches_end(conn: &GraphConnection, block_group_id: &HashId) -> bool {
-        let graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, block_group_id, None)
             .expect("should load protein graph");
         let start = graph.nodes().find(|n| n.node_id == PATH_START_NODE_ID);
         let end = graph.nodes().find(|n| n.node_id == PATH_END_NODE_ID);
@@ -2034,7 +2034,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -2113,7 +2113,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["GM".to_string()])
         );
     }
@@ -2133,7 +2133,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -2153,7 +2153,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["ME*".to_string()])
         );
     }
@@ -2173,7 +2173,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["WE*".to_string()])
         );
     }
@@ -2192,7 +2192,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["MW".to_string()])
         );
     }
@@ -2304,7 +2304,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from([expected.to_string()]),
             "reverse-strand protein should read N → C left to right"
         );
@@ -2378,7 +2378,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            BlockGroup::get_all_sequences(&conn, test_workspace(), &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["MK*".to_string()]),
             "trailing context on the anchor node must not be translated"
         );
@@ -2561,7 +2561,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             start_reaches_end(&conn, &protein.id),
             "protein graph has no PATH_START → PATH_END path (disconnected)"
         );
-        let protein_graph = gen_graph::models::load_block_group_graph(&conn, &protein.id, None)
+        let protein_graph = gen_models::models::load_block_group_graph(&conn, &protein.id, None)
             .expect("should load protein graph");
         assert_eq!(
             connected_components(&protein_graph),
@@ -2586,7 +2586,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["M*".to_string()])
         );
     }
@@ -2648,7 +2648,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["ME*".to_string()]),
             "translation should only follow the annotation's own entry node"
         );
@@ -2670,7 +2670,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["*".to_string()])
         );
     }
@@ -2697,7 +2697,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["MP*".to_string(), "MPVG*".to_string()]),
             "frameshift deletion should truncate the variant protein at the premature stop"
         );
@@ -2724,7 +2724,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["MK*".to_string(), "MND*".to_string()]),
             "frameshift deletion should read through the wild-type stop to a later one"
         );
@@ -2919,14 +2919,14 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
                 .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
                 .unwrap(),
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
                 .unwrap(),
             "upstream deletion changed the annotated protein",
         );
@@ -3006,19 +3006,19 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
                 .unwrap(),
             HashSet::from(["ME*".to_string()])
         );
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
                 .unwrap(),
             HashSet::from(["MQ*".to_string()])
         );
         assert_ne!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &child_protein.id, true)
                 .unwrap(),
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &parent_protein.id, true)
                 .unwrap(),
             "point mutation inside the CDS did not change the protein",
         );
@@ -3086,7 +3086,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["ME*".to_string()]),
             "translation should only follow the annotation's own entry node"
         );
@@ -3152,7 +3152,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["ME*".to_string(), "MEW".to_string()]),
             "last-base variant was dropped from the extracted subgraph",
         );
@@ -3211,7 +3211,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &from_path.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &from_path.id, true).unwrap(),
             HashSet::from(["*".to_string()]),
             "translate_from_path(0) should only translate the literal entry node (A), \
              not the unrelated D/P/Z branch reachable from PATH_START"
@@ -3234,7 +3234,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             translate_block_group(&conn, test_workspace(), &block_group_id, params).unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
@@ -3267,7 +3267,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }
@@ -3285,7 +3285,7 @@ ncbieaa  "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG"
             translate_from_path(&conn, test_workspace(), &block_group_id, 0, params).unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
+            gen_models::models::get_all_sequences_with_pruning(&conn, &protein.id, true).unwrap(),
             HashSet::from(["MKPEGF*".to_string(), "MKPQGF*".to_string()])
         );
     }

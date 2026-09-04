@@ -1,7 +1,7 @@
 use std::{fs::File, path::PathBuf};
 
 use gen_core::Workspace;
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupError},
     collection::Collection,
     db::GraphConnection,

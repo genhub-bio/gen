@@ -9,7 +9,7 @@ use gen_diff::{
     graph::DiffGenGraph,
     operations::{BlockGroupChangeKind, BlockGroupDiff, OperationDiff},
 };
-use gen_models::db::GraphConnection;
+use gen_models_doltlite::db::GraphConnection;
 use gen_tui::theme::current_theme;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -407,7 +407,7 @@ mod tests {
     use gen_core::{DoltHashId, HashId};
     use gen_diff::graph::{DiffChange, DiffChangeKind, DiffGenGraph, DiffGraphEdge, DiffGraphNode};
     use gen_graph::{GraphEdge, GraphNode};
-    use gen_models::block_group::BlockGroup;
+    use gen_models_doltlite::block_group::BlockGroup;
 
     use super::{
         SampleStatus, build_explorer_entries, collect_samples, resolve_current_component,

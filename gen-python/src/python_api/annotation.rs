@@ -1,6 +1,6 @@
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
-use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
+use gen_models_doltlite::{annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
 use serde_json::{Map, Value, to_string as json_to_string, to_value as json_to_value};
 

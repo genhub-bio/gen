@@ -15,7 +15,7 @@ use r#gen::{
 };
 use gen_annotations::projection::annotation_segments;
 use gen_graph::GraphNode;
-use gen_models::{
+use gen_models_doltlite::{
     annotations::Annotation,
     block_group::BlockGroup,
     db::DbContext,
@@ -233,7 +233,7 @@ impl PySequenceGraph {
             )
         })?;
         let conn = context.graph().conn();
-        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
 
@@ -295,7 +295,7 @@ impl PySequenceGraph {
         fs::create_dir_all(&index_dir)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
         let conn = context.graph().conn();
-        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let normalized = kind != SequenceKind::Exact;
@@ -359,7 +359,7 @@ impl PySequenceGraph {
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_dict()")?.graph().conn();
-        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
         let dict = PyDict::new(py);
         let nodes: Vec<PyGraphNode> = graph
@@ -395,7 +395,7 @@ impl PySequenceGraph {
 
     fn to_rustworkx(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_rustworkx()")?.graph().conn();
-        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
         {
             let rustworkx = PyModule::import(py, "rustworkx").map_err(|_| {
@@ -437,7 +437,7 @@ impl PySequenceGraph {
 
     fn to_networkx(&self, py: Python<'_>) -> PyResult<PyObject> {
         let conn = self.require_context("to_networkx()")?.graph().conn();
-        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &self.id, None)
             .map_err(block_group_err_to_pyerr)?;
         {
             let networkx = PyModule::import(py, "networkx").map_err(|_| {

@@ -11,6 +11,7 @@ license = "Apache-2.0"
 gen-core = { path = "../gen-core", version = "0.2.1" }
 gen-graph = { path = "../gen-graph", version = "0.2.1" }
 gen-models = { path = "../gen-models", version = "0.2.1" }
+gen-models-doltlite = { path = "../gen-models-doltlite", version = "0.2.1" }
 interavl = "0.3.0"
 noodles = { version = "0.101.0", features = ["bed", "core", "gff"] }
 thiserror = "2.0.18"

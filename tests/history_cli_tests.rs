@@ -16,7 +16,7 @@ use r#gen::{
     history::operations_history_entries,
     patch::load_patches,
 };
-use gen_models::{
+use gen_models_doltlite::{
     assets::AssetRef,
     block_group::BlockGroup,
     collection::Collection,
@@ -187,7 +187,7 @@ mod diff_views {
     #[test]
     fn test_view_diff_reports_vcf_added_and_removed_nodes_from_deltas() {
         let repo_dir = tempdir().expect("should create temp repo directory");
-        let workspace = Workspace::new(repo_dir.path());
+        let _workspace = Workspace::new(repo_dir.path());
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let fasta_path = fixtures_dir.join("simple.fa");
         let vcf_path = fixtures_dir.join("simple.vcf");
@@ -288,7 +288,7 @@ mod diff_views {
             .parent_block_group_id
             .expect("lineage-derived sample should retain parent block group id");
         let parent_graph =
-            gen_graph::models::load_block_group_graph(&graph_conn, &parent_block_group_id, None)
+            gen_models::models::load_block_group_graph(&graph_conn, &parent_block_group_id, None)
                 .expect("should load parent block group graph");
         assert!(
             parent_graph.nodes().next().is_some(),
@@ -2295,7 +2295,7 @@ mod remotes {
     };
 
     use gen_core::config::Workspace;
-    use gen_models::{
+    use gen_models_doltlite::{
         assets::{Assets, LocalAssetUri, materialization_destination_path},
         history::dolt::{add_remote, push},
     };

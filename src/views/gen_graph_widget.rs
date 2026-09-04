@@ -5,7 +5,9 @@ use gen_core::{
     Workspace, is_end_node, is_start_node,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
-use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
+use gen_models_doltlite::{
+    db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError,
+};
 use gen_tui::{
     ViewportState,
     geometry::{WorldPos, WorldRect},
@@ -256,7 +258,7 @@ pub fn create_gen_graph_widget<'a>(
     GraphWidget::with_renderer(renderer)
 }
 
-/// Compute which edges would be removed by `gen_graph::models::prune_graph`.
+/// Compute which edges would be removed by `gen_models::models::prune_graph`.
 ///
 /// Mirrors the per-source-node, per-chromosome_index deduplication logic: for each
 /// chromosome_index appearing on outgoing edges of a node, the edge with the highest
@@ -831,7 +833,7 @@ mod tests {
     use std::path::PathBuf;
 
     use gen_core::{HashId, PATH_START_NODE_ID, Strand};
-    use gen_models::sample::Sample;
+    use gen_models_doltlite::sample::Sample;
     use gen_tui::{
         geometry::WorldPos,
         graph_controller::HighlightKind,
@@ -1114,7 +1116,7 @@ mod tests {
         .unwrap();
 
         let gen_graph =
-            gen_graph::models::load_sample_graph(conn, collection, "SAMPLE1", None).unwrap();
+            gen_models::models::load_sample_graph(conn, collection, "SAMPLE1", None).unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);
@@ -1161,7 +1163,7 @@ mod tests {
         .unwrap();
 
         let gen_graph =
-            gen_graph::models::load_sample_graph(conn, collection, Sample::DEFAULT_NAME, None)
+            gen_models::models::load_sample_graph(conn, collection, Sample::DEFAULT_NAME, None)
                 .unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 

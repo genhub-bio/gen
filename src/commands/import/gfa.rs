@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args;
-use gen_models::{
+use gen_models_doltlite::{
     errors::OperationError,
     sample::{NewSample, Sample},
 };

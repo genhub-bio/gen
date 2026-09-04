@@ -29,7 +29,7 @@ use r#gen::{
 use gen_annotations::translate;
 use gen_core::{BranchName, CommitRef, config::Workspace, range::Range, region::Region};
 use gen_diff::operations::collect_operation_diff;
-use gen_models::{
+use gen_models_doltlite::{
     annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
     block_group::BlockGroup,
     collection::Collection,
@@ -643,7 +643,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }) => {
             let collection_name = get_default_collection(config_conn)?;
             graph_conn.execute("BEGIN TRANSACTION", [])?;
-            let operation_summary = match gen_graph::models::add_annotation(
+            let operation_summary = match gen_models::models::add_annotation(
                 &db_context,
                 &collection_name,
                 &name,
@@ -715,8 +715,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .ensure_search_index()
                 .map_err(|_| "No .gen directory found. Run 'gen init' first.")?;
             for bg in block_groups {
-                let graph = gen_graph::models::load_block_group_graph(graph_conn, &bg.id, None)?;
-                let matcher = GenGraphMatcher::new(graph_conn, graph);
+                let graph = gen_models::models::load_block_group_graph(graph_conn, &bg.id, None)?;
+                let matcher = GenGraphMatcher::new(graph_conn, &workspace, graph);
                 let index = SeedIndex::build(&matcher, kmer_size, true);
                 let path = index_dir.join(format!("{}.bin", bg.id));
                 index.save_to_path(&path).map_err(|e| anyhow!("{e}"))?;
@@ -767,8 +767,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let query_bytes = query.as_bytes();
             println!("sample\tgraph\tblocks\toffset");
             for bg in block_groups {
-                let graph = gen_graph::models::load_block_group_graph(graph_conn, &bg.id, None)?;
-                let matcher = GenGraphMatcher::new(graph_conn, graph);
+                let graph = gen_models::models::load_block_group_graph(graph_conn, &bg.id, None)?;
+                let matcher = GenGraphMatcher::new(graph_conn, &workspace, graph);
                 let matches = index_dir
                     .as_ref()
                     .and_then(|dir| {
@@ -984,7 +984,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use r#gen::test_helpers::setup_gen;
-    use gen_models::collection::Collection;
+    use gen_models_doltlite::collection::Collection;
 
     use super::resolve_initial_collection;
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -32,7 +32,7 @@ pub fn import_sequences(
 
     match Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: sample,
             ..Default::default()
         },
@@ -142,7 +142,7 @@ pub fn import_genomic_regions(
 
     match Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: sample,
             ..Default::default()
         },
@@ -254,7 +254,7 @@ pub fn import_genomic_regions(
 mod tests {
     use std::collections::HashSet;
 
-    use gen_models::{
+    use gen_models_doltlite::{
         assets::{OperationKind, OperationLog},
         errors::OperationError,
         history::{HistoryStore, dolt::DoltHistoryStore},
@@ -285,7 +285,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "chr1", None);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["ATCG".to_string()])
         );
@@ -323,7 +323,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "region-a", None);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter(vec!["TCGA".to_string()])
         );

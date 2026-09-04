@@ -1,5 +1,5 @@
 use gen_core::{HashId, INDETERMINATE_CHROMOSOME_INDEX, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,

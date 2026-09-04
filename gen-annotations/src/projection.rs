@@ -5,7 +5,7 @@ use gen_core::{
     path::PathBlock,
     range::{OrderedMerge, Range, merge_ordered_items},
 };
-use gen_models::{
+use gen_models_doltlite::{
     accession::{Accession, AccessionNode},
     annotations::Annotation,
     db::GraphConnection,

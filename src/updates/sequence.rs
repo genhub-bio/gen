@@ -1,7 +1,7 @@
 use std::str;
 
 use gen_core::{HashId, PathBlock, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup,
     db::DbContext,
     edge::Edge,
@@ -171,11 +171,11 @@ pub fn update_with_sequence(
 }
 
 fn insert_sequence_change(
-    conn: &gen_models::db::GraphConnection,
+    conn: &gen_models_doltlite::db::GraphConnection,
     workspace: &gen_core::Workspace,
     region: &ResolvedGenRegion,
     target_block_group: &BlockGroup,
-    path: &gen_models::path::Path,
+    path: &gen_models_doltlite::path::Path,
     block: PathBlock,
 ) -> Result<(), SequenceUpdateError> {
     let source = target_update_region(conn, region, target_block_group.id, Some(path))?;
@@ -190,7 +190,7 @@ mod tests {
 
     use gen_core::NO_CHROMOSOME_INDEX;
     use gen_graph::GraphNode;
-    use gen_models::{
+    use gen_models_doltlite::{
         annotations::Annotation,
         assets::{OperationKind, OperationLog},
         block_group::{BlockGroup, BlockGroupChange, PathCache},
@@ -211,7 +211,7 @@ mod tests {
     };
 
     fn insertion_block(
-        conn: &gen_models::db::GraphConnection,
+        conn: &gen_models_doltlite::db::GraphConnection,
         name: &str,
         sequence: &str,
     ) -> PathBlock {
@@ -252,10 +252,10 @@ mod tests {
             preserve_edge: true,
         };
 
-        gen_graph::models::insert_change(&conn, &change).unwrap();
+        gen_models::models::insert_change(&conn, &change).unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter([
                 "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
@@ -287,10 +287,10 @@ mod tests {
             preserve_edge: true,
         };
 
-        gen_graph::models::insert_change(&conn, &change).unwrap();
+        gen_models::models::insert_change(&conn, &change).unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(&conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(&conn, &block_group_id, false)
                 .unwrap(),
             HashSet::from_iter([
                 "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
@@ -316,7 +316,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        gen_graph::models::add_annotation(
+        gen_models::models::add_annotation(
             &context,
             &collection,
             "foobar",
@@ -357,7 +357,7 @@ mod tests {
         );
         let block_group = get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap(),
             HashSet::from_iter([
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
@@ -419,7 +419,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
@@ -539,7 +539,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
@@ -599,7 +599,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
@@ -665,7 +665,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
@@ -725,7 +725,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
@@ -785,7 +785,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
@@ -834,7 +834,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
@@ -870,7 +870,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        gen_graph::models::add_annotation(
+        gen_models::models::add_annotation(
             &context,
             &collection,
             "SITE",
@@ -902,7 +902,8 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, &collection, "deleted");
-        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
+        let graph =
+            gen_models::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
         let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {
@@ -946,7 +947,8 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, &collection, "deleted2");
-        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
+        let graph =
+            gen_models::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
         let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {

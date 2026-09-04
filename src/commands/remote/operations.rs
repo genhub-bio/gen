@@ -73,7 +73,7 @@ use gen_core::{
     config::{DEFAULT_GRAPH_DB_NAME, Workspace},
     errors::{ConfigError, ConnectionError},
 };
-use gen_models::{
+use gen_models_doltlite::{
     assets::{AssetRef, AssetView, LocalAssetUri, materialization_destination_path},
     db::{ConfigConnection, GraphConnection},
     errors::{QueryError, RemoteError as ModelRemoteError},
@@ -1537,7 +1537,7 @@ mod tests {
 
     use chrono::Utc;
     use gen_core::{DoltHashId, HashId, config::Workspace};
-    use gen_models::{
+    use gen_models_doltlite::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
         db::GraphConnection,
@@ -1579,7 +1579,9 @@ mod tests {
         };
 
         use gen_core::config::Workspace;
-        use gen_models::{collection::Collection, history::dolt::commit_all, operations::Remote};
+        use gen_models_doltlite::{
+            collection::Collection, history::dolt::commit_all, operations::Remote,
+        };
         use tempfile::{TempDir, tempdir};
         use url::Url;
 
@@ -2840,7 +2842,7 @@ mod tests {
                 .expect("should create remote");
         }
         Defaults::set_default_remote(&config, Some("default")).expect("should set default remote");
-        gen_models::operations::RemoteBranch::set_remote_validated(
+        gen_models_doltlite::operations::RemoteBranch::set_remote_validated(
             &config,
             "feature",
             Some("tracked"),

@@ -5,7 +5,7 @@ use std::{
 };
 
 use gen_core::{HashId, NodeIntervalBlock, PathBlock, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupChange, BlockGroupData, PathCache},
     db::{DbContext, GraphConnection},
     errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
@@ -687,10 +687,10 @@ pub fn update_with_vcf(
                         }
                     })
                     .collect::<Vec<_>>();
-                gen_graph::models::insert_changes(conn, &in_place_changes, Some(&mut tree_map))
+                gen_models::models::insert_changes(conn, &in_place_changes, Some(&mut tree_map))
                     .unwrap();
             } else {
-                gen_graph::models::insert_changes(conn, chunk, Some(&mut tree_map)).unwrap();
+                gen_models::models::insert_changes(conn, chunk, Some(&mut tree_map)).unwrap();
             }
             bar.inc(chunk.len() as u64);
         }
@@ -740,7 +740,7 @@ mod tests {
     use std::time;
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{
+    use gen_models_doltlite::{
         accession::Accession, node::Node, sample::Sample, sample_lineage::SampleLineage,
         traits::Query,
     };
@@ -781,9 +781,8 @@ mod tests {
             false,
         )?;
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -792,7 +791,7 @@ mod tests {
         );
         // `G1` genotype has no changes
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "G1").id,
                 false
@@ -802,7 +801,7 @@ mod tests {
         );
         // `foo` is homozygous for the first variant and does not contain the second
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "foo").id,
                 false
@@ -843,9 +842,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -854,7 +852,7 @@ mod tests {
         );
         // `bar` sample has the refrence + a deletion of the C
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "bar").id,
                 false
@@ -867,7 +865,7 @@ mod tests {
         );
         // `baz` sample has a deletion of CG and an insertion of A
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "baz").id,
                 false
@@ -910,9 +908,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -920,9 +917,8 @@ mod tests {
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, "sample 1").id,
                 false
             )
@@ -971,9 +967,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, "sample 1").id,
                 false
             )
@@ -1049,9 +1044,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, "unknown").id,
                 false
             )
@@ -1094,7 +1088,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "foo").id,
                 false
@@ -1139,7 +1133,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "foo").id,
                 true
@@ -1408,7 +1402,7 @@ mod tests {
         assert!(matches!(
             err,
             VcfError::BlockGroupError(BlockGroupError::AccessionError(
-                gen_models::accession::AccessionError::Duplicate(_)
+                gen_models_doltlite::accession::AccessionError::Duplicate(_)
             ))
         ));
     }
@@ -1471,9 +1465,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 true,
             )
@@ -1481,7 +1474,7 @@ mod tests {
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "f1").id,
                 true
@@ -1490,7 +1483,7 @@ mod tests {
             HashSet::from_iter(vec!["ATCTCGATCGATCGCGGGAACACACAGAGA".to_string()])
         );
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "f2").id,
                 true
@@ -1499,7 +1492,7 @@ mod tests {
             HashSet::from_iter(vec!["ATCTGGATCGATCGCGGAATCAGAACACACAGGA".to_string()])
         );
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(
+            gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &get_sample_bg(conn, &collection, "f3").id,
                 true
@@ -1530,7 +1523,7 @@ mod tests {
 
         Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "child",
                 ..Default::default()
             },
@@ -1549,9 +1542,8 @@ mod tests {
         )
         .unwrap();
 
-        let child_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let child_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &get_sample_bg(conn, &collection, "child").id,
             true,
         )
@@ -1608,9 +1600,8 @@ mod tests {
         )
         .unwrap();
 
-        let child_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let child_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
-            crate::test_helpers::test_workspace(),
             &get_sample_bg(conn, &collection, "child").id,
             true,
         )
@@ -1647,7 +1638,7 @@ mod tests {
 
         Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "child",
                 ..Default::default()
             },

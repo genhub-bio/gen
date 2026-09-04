@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use gen_models::{
+use gen_models_doltlite::{
     db::ConfigConnection,
     operations::{Defaults, Remote},
 };

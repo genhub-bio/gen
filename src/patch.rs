@@ -9,7 +9,7 @@ use gen_core::{
     CommitRef, DoltHashId, HashId, Sha256Hash,
     errors::{ConfigError, ConnectionError},
 };
-use gen_models::{
+use gen_models_doltlite::{
     assets::{AssetUri, LocalAssetUri, OperationKind},
     db::DbContext,
     errors::{FileAdditionError, OperationError},
@@ -227,7 +227,7 @@ fn is_nothing_to_commit_error(error: &SQLError) -> bool {
 /// to be unstaged and new, and verifies that the application tables contain no rows. Any other
 /// working-set shape is treated as user work and remains protected from patch application.
 fn is_schema_bootstrap_working_set(
-    conn: &gen_models::db::GraphConnection,
+    conn: &gen_models_doltlite::db::GraphConnection,
     status_rows: &[HistoryStatus],
 ) -> Result<bool, SQLError> {
     if status_rows.len() != BOOTSTRAP_TABLES.len()
@@ -681,7 +681,7 @@ mod tests {
     use std::{fs, io::Cursor, path::PathBuf};
 
     use gen_core::BranchName;
-    use gen_models::{
+    use gen_models_doltlite::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         assets::{AssetRef, AssetRole, OperationAsset, OperationKind, OperationLog},
         collection::Collection,

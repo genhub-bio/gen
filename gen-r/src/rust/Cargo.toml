@@ -20,6 +20,7 @@ gen-core = { path = "../../../gen-core", version = "0.2.1" }
 gen-diff = { path = "../../../gen-diff", version = "0.2.1" }
 gen-graph = { path = "../../../gen-graph", version = "0.2.1" }
 gen-models = { path = "../../../gen-models", version = "0.2.1" }
+gen-models-doltlite = { path = "../../../gen-models-doltlite", version = "0.2.1" }
 gen-annotations = { path = "../../../gen-annotations", version = "0.2.1" }
 gen-tui = { path = "../../../gen-tui", version = "0.2.1", default-features = false }
 petgraph = "0.6.5"

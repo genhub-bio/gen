@@ -10,7 +10,7 @@ use gen_diff::operations::{
     BlockGroupChangeKind, BlockGroupDiff, DiffRange, collect_operation_diff,
 };
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{db::DbContext, history::HistoryEntry};
+use gen_models_doltlite::{db::DbContext, history::HistoryEntry};
 use gen_tui::{graph_controller::GraphController, theme::current_theme};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
@@ -702,7 +702,7 @@ mod tests {
         operations::BlockGroupDiff,
     };
     use gen_graph::{GraphEdge, GraphNode};
-    use gen_models::{
+    use gen_models_doltlite::{
         block_group::BlockGroup,
         collection::Collection,
         history::{HistoryStore, dolt::DoltHistoryStore},

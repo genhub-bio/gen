@@ -1,5 +1,5 @@
 use gen_core::{GraphNode, HashId, Strand};
-use gen_graph::graph_loader::{GraphLoadBlock, GraphLoadEdge, build_graph};
+use gen_models::graph_loader::{GraphLoadBlock, GraphLoadEdge, build_graph};
 
 fn graph_block(id: i64, node_id: HashId, start: i64, end: i64) -> GraphLoadBlock {
     GraphLoadBlock {

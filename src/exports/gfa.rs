@@ -7,7 +7,7 @@ use std::{
 
 use gen_core::{HashId, Workspace, is_terminal, strand::Strand};
 use gen_graph::{GenGraph, project_path};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup,
     block_group_edge::BlockGroupEdge,
     db::GraphConnection,
@@ -97,7 +97,7 @@ pub fn export_gfa(
 
     let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
     let (gen_graph, _edges_by_node_pair) =
-        gen_graph::graph_loader::build_graph(&load_edges, &load_blocks);
+        gen_models::graph_loader::build_graph(&load_edges, &load_blocks);
 
     // Create GenGraph from the built graph
     let mut graph = GenGraph::new();
@@ -339,7 +339,7 @@ mod tests {
 
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
     use gen_graph::GraphNode;
-    use gen_models::{
+    use gen_models_doltlite::{
         block_group::{BlockGroup, BlockGroupChange},
         block_group_edge::BlockGroupEdgeData,
         collection::Collection,
@@ -370,7 +370,7 @@ mod tests {
 
         Sample::create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: Sample::DEFAULT_NAME,
                 is_reference: false,
             },
@@ -378,7 +378,7 @@ mod tests {
         .unwrap();
         let block_group = BlockGroup::create(
             conn,
-            gen_models::block_group::NewBlockGroup {
+            gen_models_doltlite::block_group::NewBlockGroup {
                 collection_name,
                 sample_name: Sample::DEFAULT_NAME,
                 name: "test block group",
@@ -505,7 +505,7 @@ mod tests {
         .unwrap();
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -534,7 +534,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
@@ -578,7 +578,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        gen_graph::models::add_annotation(
+        gen_models::models::add_annotation(
             &context,
             collection,
             "SITE",
@@ -604,7 +604,8 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, collection, "deleted");
-        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
+        let graph =
+            gen_models::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
         let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {
@@ -726,7 +727,7 @@ mod tests {
 
         let (bg_id, _path) = setup_block_group(conn);
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &bg_id, false).unwrap();
+            gen_models::models::get_all_sequences_with_pruning(conn, &bg_id, false).unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
         let gfa_path = PathBuf::from(temp_dir.path()).join("split.gfa");
@@ -753,13 +754,13 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
 
         let graph =
-            gen_graph::models::load_block_group_graph(conn, &block_group2.id, None).unwrap();
+            gen_models::models::load_block_group_graph(conn, &block_group2.id, None).unwrap();
         let graph_nodes = graph
             .nodes()
             .filter_map(|node| {
@@ -794,7 +795,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -822,7 +823,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
@@ -840,7 +841,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -868,7 +869,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
@@ -886,7 +887,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
 
         let temp_dir = tempdir().expect("Couldn't get handle to temp directory");
@@ -914,7 +915,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences2 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
 
         assert_eq!(all_sequences, all_sequences2);
@@ -954,7 +955,7 @@ mod tests {
             phased: 0,
             preserve_edge: true,
         };
-        gen_graph::models::insert_change(conn, &change).unwrap();
+        gen_models::models::insert_change(conn, &change).unwrap();
 
         let augmented_edges = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None);
         let mut node_ids = HashSet::new();

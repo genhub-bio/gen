@@ -2,15 +2,17 @@ use core::ops::Range;
 use std::collections::HashSet;
 
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, Strand, calculate_hash};
-use gen_graph::models::{derive_subgraph, get_all_sequences};
-use gen_models::{
+use gen_models::models::{derive_subgraph, get_all_sequences};
+use gen_models_doltlite::{
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     edge::Edge,
     node::Node,
     sequence::Sequence,
     traits::Query as _,
 };
-use gen_models_graph_tests::{create_block_group, get_connection, setup_block_group};
+use gen_models_graph_tests::{
+    create_block_group, get_connection, setup_block_group, test_workspace,
+};
 use rusqlite::params;
 
 #[test]
@@ -105,7 +107,7 @@ fn test_derive_subgraph_one_insertion() {
         .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
         .unwrap();
     assert_eq!(
-        insert_path.sequence(conn, None).unwrap(),
+        insert_path.sequence(conn, test_workspace(), None).unwrap(),
         "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
     );
 
@@ -241,7 +243,7 @@ fn test_derive_subgraph_two_independent_insertions() {
         .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
         .unwrap();
     assert_eq!(
-        insert_path.sequence(conn, None).unwrap(),
+        insert_path.sequence(conn, test_workspace(), None).unwrap(),
         "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
     );
 
@@ -325,7 +327,7 @@ fn test_derive_subgraph_two_independent_insertions() {
         .new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2)
         .unwrap();
     assert_eq!(
-        insert2_path.sequence(conn, None).unwrap(),
+        insert2_path.sequence(conn, test_workspace(), None).unwrap(),
         "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
     );
 
@@ -467,7 +469,7 @@ fn test_derive_subgraph_two_independent_insertions_and_one_deletion() {
         .new_path_with(conn, 16, 24, &edge_into_insert, &edge_out_of_insert)
         .unwrap();
     assert_eq!(
-        insert_path.sequence(conn, None).unwrap(),
+        insert_path.sequence(conn, test_workspace(), None).unwrap(),
         "AAAAAAAAAATTTTTTAAAAAAAACCCCCCGGGGGGGGGG"
     );
 
@@ -550,7 +552,7 @@ fn test_derive_subgraph_two_independent_insertions_and_one_deletion() {
         .new_path_with(conn, 28, 32, &edge_into_insert2, &edge_out_of_insert2)
         .unwrap();
     assert_eq!(
-        insert2_path.sequence(conn, None).unwrap(),
+        insert2_path.sequence(conn, test_workspace(), None).unwrap(),
         "AAAAAAAAAATTTTTTAAAAAAAACCTTTTTTTTGGGGGG"
     );
 

@@ -60,7 +60,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gen_core::{CommitRef, DoltHashId, HashId, errors::ConfigError};
-use gen_models::{
+use gen_models_doltlite::{
     block_group_edge::AugmentedEdge,
     db::GraphConnection,
     errors::OperationError,
@@ -689,7 +689,7 @@ mod tests {
         Workspace,
     };
     use gen_graph::{GenGraph, GraphEdge, GraphNode};
-    use gen_models::{
+    use gen_models_doltlite::{
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
@@ -730,7 +730,7 @@ mod tests {
     }
 
     fn create_linear_block_group(
-        context: &gen_models::db::DbContext,
+        context: &gen_models_doltlite::db::DbContext,
         collection_name: &str,
         sample_name: &str,
         block_group_name: &str,
@@ -817,7 +817,7 @@ mod tests {
     }
 
     fn replace_linear_block_group_path(
-        context: &gen_models::db::DbContext,
+        context: &gen_models_doltlite::db::DbContext,
         block_group: &BlockGroup,
         node_name: &str,
         sequence_bases: &str,
@@ -894,7 +894,7 @@ mod tests {
         .expect("should recreate path");
     }
 
-    fn commit_operation(context: &gen_models::db::DbContext, message: &str) -> DoltHashId {
+    fn commit_operation(context: &gen_models_doltlite::db::DbContext, message: &str) -> DoltHashId {
         let history_store = DoltHistoryStore::new(context.graph().conn());
         history_store
             .commit_all(message)
@@ -947,9 +947,9 @@ mod tests {
         history_store
             .reset_hard(&commit_hash_ref(base))
             .expect("should reset main to the common base");
-        let reopened_graph = gen_models::db::get_connection(&graph_db_path)
+        let reopened_graph = gen_models_doltlite::db::get_connection(&graph_db_path)
             .expect("should reopen graph database after reset");
-        gen_models::history::dolt::connect_branch(&reopened_graph, "main")
+        gen_models_doltlite::history::dolt::connect_branch(&reopened_graph, "main")
             .expect("should reconnect the main branch");
         context.set_graph(reopened_graph);
         let target_block_group =
@@ -965,7 +965,7 @@ mod tests {
         }
     }
 
-    fn switch_branch(context: &gen_models::db::DbContext, branch_name: &str) {
+    fn switch_branch(context: &gen_models_doltlite::db::DbContext, branch_name: &str) {
         let history_store = DoltHistoryStore::new(context.graph().conn());
         history_store
             .checkout_branch(&BranchName(branch_name.to_string()))
@@ -973,7 +973,7 @@ mod tests {
     }
 
     fn create_feature_branch(
-        context: &gen_models::db::DbContext,
+        context: &gen_models_doltlite::db::DbContext,
         base_operation_hash: DoltHashId,
         branch_name: &str,
     ) {
@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     fn apply_edge_changes(
-        graph_conn: &gen_models::db::GraphConnection,
+        graph_conn: &gen_models_doltlite::db::GraphConnection,
         source_edges: &[AugmentedEdge],
         edge_changes: &[BlockGroupEdgeChange],
         target_ref: &str,
@@ -1050,7 +1050,7 @@ mod tests {
     }
 
     fn load_augmented_edge(
-        graph_conn: &gen_models::db::GraphConnection,
+        graph_conn: &gen_models_doltlite::db::GraphConnection,
         block_group_id: HashId,
         edge_key: BlockGroupEdgeKey,
         history_ref: &str,
@@ -2037,18 +2037,22 @@ mod tests {
         history_store
             .reset_hard(&commit_hash_ref(retained_commit))
             .expect("should reset to retained commit");
-        let reopened_graph =
-            gen_models::db::get_connection(&graph_db_path).expect("should reopen graph db");
-        gen_models::history::dolt::connect_branch(&reopened_graph, "main")
+        let reopened_graph = gen_models_doltlite::db::get_connection(&graph_db_path)
+            .expect("should reopen graph db");
+        gen_models_doltlite::history::dolt::connect_branch(&reopened_graph, "main")
             .expect("should reconnect reopened main branch");
         context.set_graph(reopened_graph);
         let replacement_block_group =
             create_linear_block_group(&context, "c", "s", "replacement", "three", "TTTTT");
         let replacement_commit = commit_operation(&context, "replacement");
         let reopened_graph_after_replacement =
-            gen_models::db::get_connection(&graph_db_path).expect("should reopen graph db");
-        gen_models::history::dolt::connect_branch(&reopened_graph_after_replacement, "main")
-            .expect("should reconnect reopened main branch");
+            gen_models_doltlite::db::get_connection(&graph_db_path)
+                .expect("should reopen graph db");
+        gen_models_doltlite::history::dolt::connect_branch(
+            &reopened_graph_after_replacement,
+            "main",
+        )
+        .expect("should reconnect reopened main branch");
         let discarded_exists = reopened_graph_after_replacement
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM block_groups WHERE id = ?1)",

@@ -1,5 +1,5 @@
 use gen_core::CommitRef;
-use gen_models::history::{HistoryEntry, HistoryStore};
+use gen_models_doltlite::history::{HistoryEntry, HistoryStore};
 
 pub fn operations_history_entries(
     history_store: &impl HistoryStore,

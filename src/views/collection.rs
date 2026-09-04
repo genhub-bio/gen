@@ -5,7 +5,7 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent};
 use gen_core::HashId;
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup, collection::Collection, db::GraphConnection, file_types::FileTypes,
     sample::Sample, sample_lineage::SampleLineage,
 };
@@ -412,7 +412,7 @@ pub struct CollectionExplorer {
 impl CollectionExplorer {
     pub fn new(
         conn: &GraphConnection,
-        _config_conn: &gen_models::db::ConfigConnection,
+        _config_conn: &gen_models_doltlite::db::ConfigConnection,
         sample_name: Option<&str>,
         selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
@@ -432,7 +432,7 @@ impl CollectionExplorer {
     pub fn refresh(
         &mut self,
         conn: &GraphConnection,
-        _config_conn: &gen_models::db::ConfigConnection,
+        _config_conn: &gen_models_doltlite::db::ConfigConnection,
         sample_name: Option<&str>,
         selected_block_group: Option<&BlockGroup>,
         full_collection_name: &str,
@@ -1015,7 +1015,7 @@ impl StatefulWidget for &CollectionExplorer {
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyModifiers;
-    use gen_models::{
+    use gen_models_doltlite::{
         block_group::{BlockGroup, NewBlockGroup},
         history::dolt::commit_all,
         sample::{NewSample, Sample},
@@ -1122,7 +1122,7 @@ mod tests {
         // Create samples
         let sample_reference = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: Sample::DEFAULT_NAME,
                 is_reference: true,
             },
@@ -1130,7 +1130,7 @@ mod tests {
         .unwrap();
         let sample_alpha = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "SampleAlpha",
                 ..Default::default()
             },
@@ -1138,7 +1138,7 @@ mod tests {
         .unwrap();
         let sample_beta = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "SampleBeta",
                 ..Default::default()
             },
@@ -1148,7 +1148,7 @@ mod tests {
         // Create block groups for three explicit samples
         BlockGroup::create(
             conn,
-            gen_models::block_group::NewBlockGroup {
+            gen_models_doltlite::block_group::NewBlockGroup {
                 collection_name: "/foo/bar",
                 sample_name: &sample_reference.name,
                 name: "BG_ReferenceA",
@@ -1158,7 +1158,7 @@ mod tests {
         .unwrap();
         BlockGroup::create(
             conn,
-            gen_models::block_group::NewBlockGroup {
+            gen_models_doltlite::block_group::NewBlockGroup {
                 collection_name: "/foo/bar",
                 sample_name: &sample_reference.name,
                 name: "BG_ReferenceB",
@@ -1168,7 +1168,7 @@ mod tests {
         .unwrap();
         BlockGroup::create(
             conn,
-            gen_models::block_group::NewBlockGroup {
+            gen_models_doltlite::block_group::NewBlockGroup {
                 collection_name: "/foo/bar",
                 sample_name: &sample_alpha.name,
                 name: "BG_Alpha1",
@@ -1178,7 +1178,7 @@ mod tests {
         .unwrap();
         BlockGroup::create(
             conn,
-            gen_models::block_group::NewBlockGroup {
+            gen_models_doltlite::block_group::NewBlockGroup {
                 collection_name: "/foo/bar",
                 sample_name: &sample_beta.name,
                 name: "BG_Beta1",

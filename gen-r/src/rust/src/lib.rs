@@ -51,7 +51,7 @@ use gen_annotations::{
 };
 use gen_core::{HashId, Strand, config::Workspace, is_end_node, is_start_node, region::Region};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
-use gen_models::{
+use gen_models_doltlite::{
     annotations::Annotation,
     block_group::BlockGroup,
     db::{DbContext as GenDbContext, GraphConnection},
@@ -94,7 +94,7 @@ fn nullable_i64_to_option(value: Nullable<i64>) -> Option<i64> {
 }
 
 fn resolve_collection_name(
-    config_conn: &gen_models::db::ConfigConnection,
+    config_conn: &gen_models_doltlite::db::ConfigConnection,
     collection_name: Option<String>,
 ) -> std::result::Result<String, String> {
     match collection_name {
@@ -270,7 +270,7 @@ fn list_annotation_records(
     sample_name: &str,
     name: &str,
 ) -> std::result::Result<List, Error> {
-    let graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)
+    let graph = gen_models::models::load_block_group_graph(conn, block_group_id, None)
         .map_err(|e| Error::Other(e.to_string()))?;
     let annotations = Annotation::query_with_lineage(conn, collection_name, sample_name, name)
         .map_err(|e| Error::Other(e.to_string()))?;
@@ -1370,7 +1370,7 @@ impl Repository {
             OperationInfo {
                 files: vec![
                     OperationFile::new(filename.clone())
-                        .set_file_type(gen_models::file_types::FileTypes::GenBank),
+                        .set_file_type(gen_models_doltlite::file_types::FileTypes::GenBank),
                 ],
                 description: "GenBank Import".to_string(),
             },
@@ -1444,7 +1444,7 @@ impl Repository {
         )
         .map_err(Error::Other)?;
         let sample_name = nullable_string_to_option(sample)
-            .unwrap_or_else(|| gen_models::sample::Sample::DEFAULT_NAME.to_string());
+            .unwrap_or_else(|| gen_models_doltlite::sample::Sample::DEFAULT_NAME.to_string());
         begin_transactions(&self.context).map_err(Error::Other)?;
         match r#gen::imports::library::import_library(
             &self.context,
@@ -1644,7 +1644,7 @@ impl Repository {
             &OperationInfo {
                 files: vec![
                     OperationFile::new(filename.clone())
-                        .set_file_type(gen_models::file_types::FileTypes::GenBank),
+                        .set_file_type(gen_models_doltlite::file_types::FileTypes::GenBank),
                 ],
                 description: "Update from GenBank".to_string(),
             },
@@ -1713,7 +1713,7 @@ impl Repository {
         )
         .map_err(Error::Other)?;
         let sample_name = nullable_string_to_option(sample)
-            .unwrap_or_else(|| gen_models::sample::Sample::DEFAULT_NAME.to_string());
+            .unwrap_or_else(|| gen_models_doltlite::sample::Sample::DEFAULT_NAME.to_string());
         begin_transactions(&self.context).map_err(Error::Other)?;
         match r#gen::updates::library::update_with_library(
             &self.context,
@@ -1896,7 +1896,7 @@ impl Repository {
                 .collect()
         };
         for bg in bgs {
-            let graph = gen_graph::models::load_block_group_graph(conn, &bg.id, None)
+            let graph = gen_models::models::load_block_group_graph(conn, &bg.id, None)
                 .map_err(|e| Error::Other(e.to_string()))?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(
                 conn,
@@ -1940,7 +1940,7 @@ impl Repository {
             .join("search_index");
         let mut results = Vec::new();
         for bg in bgs {
-            let graph = gen_graph::models::load_block_group_graph(conn, &bg.id, None)
+            let graph = gen_models::models::load_block_group_graph(conn, &bg.id, None)
                 .map_err(|e| Error::Other(e.to_string()))?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(
                 conn,
@@ -2105,7 +2105,7 @@ impl Repository {
     ) -> std::result::Result<String, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = gen_graph::models::load_block_group_graph(conn, &bg_id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &bg_id, None)
             .map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
@@ -2198,7 +2198,7 @@ impl Repository {
     ) -> std::result::Result<bool, Error> {
         let conn = self.context.graph().conn();
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
-        let graph = gen_graph::models::load_block_group_graph(conn, &bg_id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &bg_id, None)
             .map_err(|e| Error::Other(e.to_string()))?;
         let node_sizer = GenGraphNodeSizer;
         let mut controller = GraphController::new(graph, node_sizer);
@@ -2367,7 +2367,7 @@ impl SequenceGraph {
             .join("search_index");
         fs::create_dir_all(&index_dir)
             .map_err(|e| Error::Other(format!("Failed to create index dir: {e}")))?;
-        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &self.id, None)
             .map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let index = SeedIndex::build(&matcher, k as usize, normalized);
@@ -2381,7 +2381,7 @@ impl SequenceGraph {
     fn search(&self, query: String, sequence_kind: String) -> std::result::Result<List, Error> {
         let kind = parse_sequence_kind_r(&sequence_kind).map_err(Error::Other)?;
         let conn = self.context.graph().conn();
-        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &self.id, None)
             .map_err(|e| Error::Other(e.to_string()))?;
         let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
         let index_dir = self
@@ -2516,7 +2516,7 @@ impl SequenceGraph {
 
     fn to_dict(&self) -> std::result::Result<List, Error> {
         let conn = self.context.graph().conn();
-        let graph = gen_graph::models::load_block_group_graph(conn, &self.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &self.id, None)
             .map_err(|e| Error::Other(e.to_string()))?;
 
         let nodes = graph

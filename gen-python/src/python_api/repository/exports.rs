@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use r#gen::exports::{fasta::export_fasta, genbank::export_genbank, gfa::export_gfa};
-use gen_models::sample::Sample;
+use gen_models_doltlite::sample::Sample;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::PyRepository;

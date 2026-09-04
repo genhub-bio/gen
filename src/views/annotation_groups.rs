@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gen_core::HashId;
-use gen_models::{
+use gen_models_doltlite::{
     annotations::AnnotationGroup, block_group::BlockGroup, db::GraphConnection,
     lineage::SqlLineage, sample_lineage::SampleLineage,
 };
@@ -143,7 +143,7 @@ fn origin_rank(origin: AnnotationGroupOrigin) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{
+    use gen_models_doltlite::{
         annotations::AnnotationGroupSample,
         block_group::{BlockGroup, NewBlockGroup},
         collection::Collection,
@@ -163,7 +163,7 @@ mod tests {
         for sample in ["grand", "parent", "child"] {
             let _ = Sample::get_or_create(
                 conn,
-                gen_models::sample::NewSample {
+                gen_models_doltlite::sample::NewSample {
                     name: sample,
                     ..Default::default()
                 },

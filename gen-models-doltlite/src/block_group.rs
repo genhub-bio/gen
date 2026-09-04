@@ -6,7 +6,7 @@ use std::{
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand, calculate_hash, is_end_node,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand, Workspace, calculate_hash, is_end_node,
     is_start_node, is_terminal,
     range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
@@ -44,15 +44,6 @@ pub struct BlockGroup {
     pub created_on: i64,
     pub parent_block_group_id: Option<HashId>,
     pub is_default: bool,
-}
-
-/// A graph interval block and the coordinate within its backing sequence that bounds a subgraph.
-#[derive(Clone, Copy, Debug)]
-pub struct SubgraphBoundary<'a> {
-    /// The graph interval block containing the boundary.
-    pub block: &'a NodeIntervalBlock,
-    /// The zero-based coordinate within the block's backing sequence.
-    pub sequence_coordinate: i64,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -966,7 +957,6 @@ impl BlockGroup {
 
     pub fn persist_subgraph(
         conn: &GraphConnection,
-        workspace: &Workspace,
         source_block_group_id: &HashId,
         subgraph_edge_ids: &[HashId],
         start: &SubgraphBoundary,
@@ -980,6 +970,7 @@ impl BlockGroup {
             conn,
             source_block_group_id,
             subgraph_edge_ids,
+            None,
         );
         let source_edge_ids = source_edges
             .iter()

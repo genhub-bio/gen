@@ -1,6 +1,6 @@
 pub use gen_core::region::Region;
 use gen_core::{
-    GraphNodePosition, HashId, NodeIntervalBlock,
+    GraphNodePosition, HashId, NodeIntervalBlock, Workspace,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
 use intervaltree::IntervalTree;
@@ -464,7 +464,7 @@ impl ResolvedGenRegion {
     pub fn intervaltree(
         &self,
         conn: &GraphConnection,
-        workspace: &Workspace,
+        _workspace: &Workspace,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, GenRegionError> {
         match self.kind {
             ResolvedRegionKind::Path => {
@@ -510,7 +510,7 @@ mod tests {
     use crate::{
         annotations::Annotation,
         block_group::{BlockGroup, PathCache},
-        test_helpers::{get_connection, setup_block_group, test_workspace},
+        test_helpers::{get_connection, setup_block_group},
     };
 
     fn setup_targets() -> (

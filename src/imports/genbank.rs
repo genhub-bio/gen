@@ -11,7 +11,7 @@ use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     range::{Range, merge_ordered_items},
 };
-use gen_models::{
+use gen_models_doltlite::{
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::{Annotation, AnnotationGroupSample, NewAnnotation},
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
@@ -326,7 +326,7 @@ fn map_annotation_segments(
 }
 
 fn create_accession_for_segments(
-    conn: &gen_models::db::GraphConnection,
+    conn: &gen_models_doltlite::db::GraphConnection,
     path: &Path,
     accession_name: &str,
     segments: &[AnnotationSegment],
@@ -360,7 +360,7 @@ fn create_accession_for_segments(
 }
 
 fn import_locus_annotations(
-    conn: &gen_models::db::GraphConnection,
+    conn: &gen_models_doltlite::db::GraphConnection,
     input: LocusAnnotationImport<'_>,
 ) -> Result<(), GenBankError> {
     if input.annotations.is_empty() {
@@ -468,7 +468,7 @@ where
     };
     match Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: sample,
             ..Default::default()
         },
@@ -633,7 +633,7 @@ where
                             None,
                         ),
                     };
-                    gen_graph::models::insert_change(conn, &change).unwrap();
+                    gen_models::models::insert_change(conn, &change).unwrap();
                     applied_changes.push((edit, change_node_id));
                 }
 
@@ -689,7 +689,7 @@ mod tests {
     };
 
     use flate2::read::MultiGzDecoder;
-    use gen_models::{
+    use gen_models_doltlite::{
         annotations::{Annotation, AnnotationGroup, GenBankLocationOperator},
         assets::{OperationKind, OperationLog},
         file_types::FileTypes,
@@ -1244,7 +1244,7 @@ mod tests {
             let seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let seqs =
-                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                     .unwrap();
             assert_eq!(
                 seqs,
@@ -1294,7 +1294,7 @@ mod tests {
             );
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
             let seqs =
-                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                     .unwrap();
             assert_eq!(
                 seqs,
@@ -1342,9 +1342,8 @@ mod tests {
              GGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTACGATGCCATTGGGAT
              ATATCAACGGTGGTATATCCAGTGATTTTTTTCTC",
             );
-            let seqs = gen_graph::models::get_all_sequences_with_pruning(
+            let seqs = gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion_and_insertion", None),
                 false,
             )
@@ -1397,9 +1396,8 @@ mod tests {
              GGTACATTGAGCAACTGACTGAAATGCCTCAAAATGTTCTTTACGATGCCATTGGGAT
              ATATCAACGGTGGTATATCCAGTGATTTTTTTCTC",
             );
-            let seqs = gen_graph::models::get_all_sequences_with_pruning(
+            let seqs = gen_models::models::get_all_sequences_with_pruning(
                 conn,
-                crate::test_helpers::test_workspace(),
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "substitution", None),
                 false,
             )
@@ -1437,7 +1435,7 @@ mod tests {
             // there would be 4! sequences so we just check we have the fully changed and unchanged sequence
             let f = reader::parse_file(&path).unwrap();
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
-            let sequences: HashSet<String> = gen_graph::models::get_all_sequences_with_pruning(
+            let sequences: HashSet<String> = gen_models::models::get_all_sequences_with_pruning(
                 conn,
                 &BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None),
                 false,

@@ -1,5 +1,5 @@
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Workspace};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupChange},
     db::GraphConnection,
     errors::BlockGroupError,
@@ -81,7 +81,7 @@ impl InsertChangeData {
 
 pub(crate) fn insert_update_change(
     conn: &GraphConnection,
-    workspace: &Workspace,
+    _workspace: &Workspace,
     region: ResolvedGenRegion,
     data: InsertChangeData,
 ) -> Result<(), BlockGroupError> {
@@ -93,5 +93,5 @@ pub(crate) fn insert_update_change(
         phased: data.phased,
         preserve_edge: data.preserve_edge,
     };
-    gen_graph::models::insert_change(conn, &change)
+    gen_models::models::insert_change(conn, &change)
 }

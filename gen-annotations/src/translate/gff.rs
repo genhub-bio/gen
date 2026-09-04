@@ -6,7 +6,7 @@ use std::{
 
 use gen_core::{HashId, Strand, Workspace, is_terminal};
 use gen_graph::{GraphNode, project_path};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup,
     db::GraphConnection,
     errors::{BlockGroupError, PathError},
@@ -31,7 +31,7 @@ pub enum GffError {
 
 pub fn translate_gff<R, W>(
     conn: &GraphConnection,
-    workspace: &Workspace,
+    _workspace: &Workspace,
     collection: &str,
     sample: &str,
     history_ref: Option<&str>,
@@ -74,7 +74,7 @@ where
                 Entry::Vacant(entry) => {
                     let path = BlockGroup::get_current_path(conn, &bg.id, history_ref)?;
                     let graph =
-                        gen_graph::models::load_block_group_graph(conn, &bg.id, history_ref)?;
+                        gen_models::models::load_block_group_graph(conn, &bg.id, history_ref)?;
                     let mut tree = IntervalTree::default();
                     let mut position: i64 = 0;
                     for (node, strand) in
@@ -127,7 +127,7 @@ where
 mod tests {
     use std::{fs::File, io::BufReader, path::PathBuf};
 
-    use gen_models::{reference_alias::ReferenceAlias, sample::Sample};
+    use gen_models_doltlite::{reference_alias::ReferenceAlias, sample::Sample};
 
     use super::translate_gff;
     use crate::test_helpers::{get_connection, setup_test_data, test_workspace};

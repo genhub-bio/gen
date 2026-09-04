@@ -7,7 +7,9 @@ use std::{
 use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use gen_core::{HashId, PATH_START_NODE_ID, Workspace};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query};
+use gen_models_doltlite::{
+    block_group::BlockGroup, db::GraphConnection, node::Node, traits::Query,
+};
 use gen_tui::{
     LineStyle, graph_controller::GraphController, layout::VisualDetail, plotter::PathStyle,
     theme::current_theme,
@@ -70,7 +72,7 @@ fn get_block_group_path_nodes(
     block_group_id: &gen_core::HashId,
     graph: &GenGraph,
 ) -> Result<Vec<gen_graph::GraphNode>, String> {
-    use gen_models::path::Path;
+    use gen_models_doltlite::path::Path;
 
     // Query the database for the most recent path for this block group
     let path = Path::get(
@@ -211,7 +213,7 @@ fn load_annotation_groups_for_viewport(
 )]
 pub fn view_block_group(
     conn: &GraphConnection,
-    config_conn: &gen_models::db::ConfigConnection,
+    config_conn: &gen_models_doltlite::db::ConfigConnection,
     workspace: &gen_core::config::Workspace,
     name: Option<String>,
     sample_name: Option<String>,
@@ -269,7 +271,7 @@ pub fn view_block_group(
         let block_group = block_group.unwrap();
         block_group_id = Some(block_group.id);
         block_graph =
-            gen_graph::models::load_block_group_graph(conn, &block_group.id, history_ref)?;
+            gen_models::models::load_block_group_graph(conn, &block_group.id, history_ref)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -1252,7 +1254,7 @@ pub fn view_block_group(
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
             block_graph =
-                gen_graph::models::load_block_group_graph(conn, new_block_group_id, history_ref)?;
+                gen_models::models::load_block_group_graph(conn, new_block_group_id, history_ref)?;
             // Update the graph controller
             graph_controller = create_gen_graph_controller(block_graph.clone());
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {

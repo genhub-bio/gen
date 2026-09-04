@@ -7,7 +7,7 @@ mod tests {
     // TODO: This should be available in this crate once gen_graph_widget is ported
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use gen_graph::GenGraph;
-    use gen_models::sample::Sample;
+    use gen_models_doltlite::sample::Sample;
     use gen_tui::{
         geometry::WorldPos,
         graph_controller::{GraphConfig, GraphController},
@@ -46,7 +46,7 @@ mod tests {
             .expect("GFA import failed");
 
         let gen_graph =
-            gen_graph::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
+            gen_models::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
                 .unwrap();
 
         let config = GraphConfig {
@@ -319,7 +319,7 @@ mod tests {
             .expect("GFA import failed");
 
         let gen_graph =
-            gen_graph::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
+            gen_models::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
                 .unwrap();
 
         // Configure with large partition for stability
@@ -391,7 +391,7 @@ mod tests {
             .expect("GFA import failed");
 
         let gen_graph =
-            gen_graph::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
+            gen_models::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
                 .unwrap();
 
         // Configure with large partition for stability

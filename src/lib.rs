@@ -39,7 +39,7 @@ pub use gen_diff as diff;
 pub use gen_graph as graph;
 #[cfg(feature = "models")]
 pub use gen_models as models;
-use gen_models::{
+use gen_models_doltlite::{
     db::{ConfigConnection, GraphConnection},
     history::dolt::{active_branch, checkout},
     migrations::{run_config_migrations, run_migrations},
@@ -175,7 +175,7 @@ pub fn normalize_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{
+    use gen_models_doltlite::{
         collection::Collection,
         history::{HistoryStore, dolt::DoltHistoryStore},
     };
@@ -328,8 +328,11 @@ mod tests {
             get_connection(graph_db_path_str).expect("should create graph database");
         Collection::get_or_create(&graph_connection, "test-collection")
             .expect("should insert collection row");
-        gen_models::history::dolt::commit_all(&graph_connection, "initial collection commit")
-            .expect("should commit collection row");
+        gen_models_doltlite::history::dolt::commit_all(
+            &graph_connection,
+            "initial collection commit",
+        )
+        .expect("should commit collection row");
         drop(graph_connection);
 
         let history_connection =

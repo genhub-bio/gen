@@ -1,7 +1,7 @@
 use std::path::Path as FsPath;
 
 use gen_core::{HashId, Sha256Hash};
-use gen_models::{
+use gen_models_doltlite::{
     assets::{AssetRef, AssetUri, Assets},
     db::GraphConnection,
     file_types::FileTypes,
@@ -89,7 +89,7 @@ pub fn load_annotation_file_entries(
 mod tests {
     use std::path::PathBuf;
 
-    use gen_models::{
+    use gen_models_doltlite::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         assets::Assets,
     };
@@ -119,7 +119,7 @@ mod tests {
         assert_eq!(entries[0].display_name, "fixture-track");
         assert_eq!(
             entries[0].file_addition.file_type,
-            gen_models::file_types::FileTypes::Gff3
+            gen_models_doltlite::file_types::FileTypes::Gff3
         );
         assert!(entries[0].index_file_addition.is_none());
     }

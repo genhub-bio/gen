@@ -16,7 +16,7 @@
 //! the additive model in the database we must convert back to the Node format.
 
 pub use gen_core::GraphNodeSlice;
-use gen_core::{HashId, Strand};
+use gen_core::{HashId, Strand, Workspace};
 
 use crate::{db::GraphConnection, node::Node, sequence::reverse_complement};
 

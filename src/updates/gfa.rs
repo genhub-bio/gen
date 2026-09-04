@@ -4,7 +4,7 @@ use std::{
 };
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_terminal};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup,
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
@@ -490,7 +490,7 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::path::PathBuf;
 
-    use gen_models::traits::Query;
+    use gen_models_doltlite::traits::Query;
     use rusqlite::types::Value as SQLValue;
 
     use super::*;
@@ -547,7 +547,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
@@ -599,7 +599,7 @@ mod tests {
         );
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_groups[0].id, false)
                 .unwrap(),
             HashSet::from_iter(expected_sequences),
         );

@@ -21,8 +21,8 @@ name = "gen"
 path = "src/main.rs"
 
 [workspace]
-members = [".", "gen-core", "gen-models", "gen-models/graph-tests", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
-default-members = [".", "gen-core", "gen-models", "gen-models/graph-tests", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
+members = [".", "gen-core", "gen-models", "gen-models-doltlite", "gen-models/graph-tests", "gen-graph", "gen-diff", "gen-tui", "gen-sugiyama", "gen-annotations", "gen-capnp-schemas"]
+default-members = [".", "gen-core", "gen-models", "gen-models-doltlite", "gen-models/graph-tests", "gen-graph", "gen-diff", "gen-capnp-schemas", "gen-annotations"]
 exclude = ["gen-python", "gen-r/src/rust"]
 
 [features]
@@ -32,12 +32,13 @@ diff = []
 models = []
 cli = []
 remote = ["rusqlite/remote"]
-profiling = ["gen-models/profiling", "dep:tracing", "dep:tracing-subscriber", "dep:pprof"]
+profiling = ["gen-models-doltlite/profiling", "dep:tracing", "dep:tracing-subscriber", "dep:pprof"]
 
 [dependencies]
 gen-core = { path = "gen-core", version = "0.2.1" }
 gen-diff = { path = "gen-diff", version = "0.2.1" }
 gen-models = { path = "gen-models", version = "0.2.1" }
+gen-models-doltlite = { path = "gen-models-doltlite", version = "0.2.1" }
 gen-graph = { path = "gen-graph", version = "0.2.1" }
 gen-tui = { path = "gen-tui", version = "0.2.1" }
 gen-annotations = { path = "gen-annotations", version = "0.2.1" }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, NewBlockGroup},
     collection::Collection,
     db::DbContext,
@@ -64,7 +64,7 @@ pub fn import_library(
 
     match Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: sample,
             ..Default::default()
         },
@@ -120,7 +120,7 @@ pub fn import_library(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{
+    use gen_models_doltlite::{
         annotations::Annotation,
         assets::{OperationKind, OperationLog},
         block_group::BlockGroup,
@@ -185,7 +185,7 @@ mod tests {
         }
 
         let actual_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(actual_sequences, expected_sequences);
 
@@ -229,7 +229,7 @@ mod tests {
         let block_group = &block_groups[0];
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -278,7 +278,7 @@ mod tests {
             }
         }
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,

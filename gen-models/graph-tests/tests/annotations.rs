@@ -1,4 +1,4 @@
-use gen_models::{
+use gen_models_doltlite::{
     annotations::Annotation,
     assets::{OperationKind, OperationLog},
     errors::OperationError,
@@ -15,7 +15,7 @@ fn test_add_annotation_creates_annotation() {
     let history_store = DoltHistoryStore::new(conn);
     setup_block_group(conn);
 
-    let summary = gen_graph::models::add_annotation(
+    let summary = gen_models::models::add_annotation(
         &context,
         "test",
         "gene-a",
@@ -49,7 +49,7 @@ fn test_add_annotation_detects_no_changes() {
     setup_block_group(conn);
 
     let add = || {
-        gen_graph::models::add_annotation(
+        gen_models::models::add_annotation(
             &context,
             "test",
             "gene-a",

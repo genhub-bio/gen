@@ -1,6 +1,6 @@
 use std::io::Error as IOError;
 
-use gen_models::{
+use gen_models_doltlite::{
     errors::{
         BlockGroupError, NodeError, OperationError, PathError, QueryError, SampleError,
         SequenceError,

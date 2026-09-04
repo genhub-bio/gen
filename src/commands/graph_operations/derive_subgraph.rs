@@ -2,7 +2,7 @@ use core::ops::Range;
 
 use anyhow::{Error, Result};
 use gen_core::region::Region;
-use gen_models::{
+use gen_models_doltlite::{
     db::DbContext,
     errors::OperationError,
     operations::{OperationInfo, OperationSummary},

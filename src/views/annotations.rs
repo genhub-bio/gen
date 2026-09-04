@@ -22,7 +22,7 @@ use gen_annotations::{
 };
 use gen_core::{HashId, Strand, Workspace, is_terminal};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{
+use gen_models_doltlite::{
     accession::Accession,
     annotations::{Annotation, AnnotationError},
     assets::{AssetUri, ChecksummedReader, LocalAssetUri},
@@ -159,7 +159,7 @@ fn spans_whole_block_group(segments: &[AnnotationSegment], graph: &GenGraph) -> 
 
 fn load_group_annotations(
     conn: &GraphConnection,
-    workspace: &Workspace,
+    _workspace: &Workspace,
     current_block_group: &BlockGroup,
     entry: &AnnotationGroupEntry,
     node_ids: &HashSet<HashId>,
@@ -181,7 +181,7 @@ fn load_group_annotations(
     // annotation still covers every surviving fragment of its original range, on every
     // branch, with a gap wherever an edit spliced in unrelated sequence.
     let graph =
-        gen_graph::models::load_block_group_graph(conn, &current_block_group.id, history_ref)
+        gen_models::models::load_block_group_graph(conn, &current_block_group.id, history_ref)
             .unwrap_or_else(|_| GenGraph::new());
     Ok(annotations
         .into_iter()
@@ -877,7 +877,14 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use gen_core::{HashId, Sha256Hash, Strand};
     use gen_graph::{GenGraph, GraphNode};
-    use gen_models::{file_types::FileTypes, sample::Sample};
+    use gen_models_doltlite::{
+        annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
+        file_types::FileTypes,
+        operations::commit_operation_summary,
+        sample::Sample,
+    };
+    use noodles::{bgzf, core::Position, csi, tabix};
+    use tempfile::{NamedTempFile, tempdir};
 
     use super::{
         AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
@@ -1034,7 +1041,7 @@ mod tests {
     fn load_annotations_for_group_hides_puc19_whole_plasmid_source_annotation() {
         use std::{fs::File, io::BufReader, path::PathBuf};
 
-        use gen_models::{
+        use gen_models_doltlite::{
             file_types::FileTypes,
             operations::{OperationFile, OperationInfo},
             sample::Sample,
@@ -1070,11 +1077,15 @@ mod tests {
 
         let block_groups = Sample::get_block_groups(conn, "fixtures", "puc19-sample", None);
         let block_group = &block_groups[0];
-        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
+        let graph =
+            gen_models::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
         let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
 
-        let groups =
-            gen_models::annotations::AnnotationGroup::query_by_sample(conn, "puc19-sample", None);
+        let groups = gen_models_doltlite::annotations::AnnotationGroup::query_by_sample(
+            conn,
+            "puc19-sample",
+            None,
+        );
         let entry = AnnotationGroupEntry {
             id: groups[0].name.clone(),
             name: groups[0].name.clone(),
@@ -1112,7 +1123,7 @@ mod tests {
     fn load_annotations_for_group_finds_every_combinatorial_branch() {
         use std::path::PathBuf;
 
-        use gen_models::sample::Sample;
+        use gen_models_doltlite::sample::Sample;
 
         use super::{AnnotationGroupTrackRequest, load_annotations_for_group};
         use crate::{
@@ -1148,7 +1159,8 @@ mod tests {
         let block_groups = Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let block_group = &block_groups[0];
 
-        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
+        let graph =
+            gen_models::models::load_block_group_graph(conn, &block_group.id, None).unwrap();
         let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
 
         let entry = AnnotationGroupEntry {
@@ -1201,7 +1213,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        gen_graph::models::add_annotation(
+        gen_models::models::add_annotation(
             &context,
             &collection,
             "SITE",
@@ -1245,7 +1257,7 @@ mod tests {
             "the entry source should differ from the currently selected block group"
         );
         let selected_graph =
-            gen_graph::models::load_block_group_graph(conn, &selected_block_group.id, None)
+            gen_models::models::load_block_group_graph(conn, &selected_block_group.id, None)
                 .unwrap();
         let node_ids = selected_graph
             .nodes()
@@ -1555,8 +1567,12 @@ mod tests {
         assert!(!cached_bytes.is_empty());
     }
 
-    fn setup_versioned_annotation_assets()
-    -> (gen_models::db::DbContext, tempfile::TempDir, String, String) {
+    fn setup_versioned_annotation_assets() -> (
+        gen_models_doltlite::db::DbContext,
+        tempfile::TempDir,
+        String,
+        String,
+    ) {
         let context = setup_gen_on_disk();
         let mut fasta_file = NamedTempFile::new().expect("should create temporary FASTA file");
         fasta_file
@@ -1654,7 +1670,7 @@ mod tests {
             .into_iter()
             .find(|block_group| block_group.name == "m123")
             .expect("should find imported block group");
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &block_group.id, None)
             .expect("should load block group graph");
         let node_filter = graph
             .nodes()
@@ -1703,7 +1719,7 @@ mod tests {
             .into_iter()
             .find(|block_group| block_group.name == "m123")
             .expect("should find imported block group");
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)
+        let graph = gen_models::models::load_block_group_graph(conn, &block_group.id, None)
             .expect("should load block group graph");
         let node_filter = graph
             .nodes()

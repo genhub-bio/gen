@@ -21,7 +21,7 @@ use std::io::{Read, Seek};
 
 use gen_core::{BranchName, CommitRef, HashId, errors::ConfigError};
 use gen_diff::operations::{DiffRange, OperationDiff, OperationDiffError, collect_operation_diff};
-use gen_models::{
+use gen_models_doltlite::{
     db::{DbContext, get_config_connection, get_connection},
     history::{HistoryStore, dolt::DoltHistoryStore},
 };
@@ -138,7 +138,7 @@ mod tests {
         graph::{DiffGraphEdge, DiffGraphNode},
         operations::{BlockGroupDiff, DiffRange, OperationDiff, collect_operation_diff},
     };
-    use gen_models::{
+    use gen_models_doltlite::{
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         sample::Sample,
@@ -203,7 +203,7 @@ mod tests {
         }
     }
 
-    fn import_fixture(context: &gen_models::db::DbContext, sample: &str) {
+    fn import_fixture(context: &gen_models_doltlite::db::DbContext, sample: &str) {
         let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/simple.fa")
             .to_string_lossy()

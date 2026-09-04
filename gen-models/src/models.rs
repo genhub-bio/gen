@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use gen_core::{
     GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Workspace,
 };
-use gen_models::{
+use gen_models_doltlite::{
     accession::AccessionSpan,
     annotations::persist_annotation,
     block_group::{
@@ -24,7 +24,7 @@ use intervaltree::IntervalTree;
 use crate::{GraphError, all_intermediate_edges, flatten_to_interval_tree, graph_loader};
 
 pub fn add_annotation(
-    context: &gen_models::db::DbContext,
+    context: &gen_models_doltlite::db::DbContext,
     collection: &str,
     name: &str,
     group: Option<&str>,
@@ -33,7 +33,8 @@ pub fn add_annotation(
 ) -> Result<OperationSummary, Box<dyn std::error::Error>> {
     let conn = context.graph().conn();
     let parsed_region = gen_core::region::Region::parse(region)?;
-    let resolved_region = gen_models::region::resolve(&parsed_region, conn, collection, sample)?;
+    let resolved_region =
+        gen_models_doltlite::region::resolve(&parsed_region, conn, collection, sample)?;
     let tree = region_intervaltree(&resolved_region, conn)?;
     let range = resolved_region.start..resolved_region.end;
     let spans = AccessionSpan::from_intervaltree_ranges(&tree, core::slice::from_ref(&range))?;
@@ -108,11 +109,21 @@ pub fn get_all_sequences_with_pruning(
     block_group_id: &HashId,
     prune: bool,
 ) -> Result<HashSet<String>, BlockGroupError> {
+    let workspace = Workspace::from_current_dir();
+    get_all_sequences_in_workspace(conn, &workspace, block_group_id, prune)
+}
+
+pub fn get_all_sequences_in_workspace(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    block_group_id: &HashId,
+    prune: bool,
+) -> Result<HashSet<String>, BlockGroupError> {
     let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
         .into_iter()
         .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
         .collect::<Vec<_>>();
-    let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, None)?;
+    let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, &edges, None)?;
     let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
     let (mut graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
     if prune {
@@ -153,8 +164,9 @@ pub fn load_block_group_graph(
     block_group_id: &HashId,
     history_ref: Option<&str>,
 ) -> Result<GenGraph, BlockGroupError> {
+    let workspace = Workspace::from_current_dir();
     let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, history_ref);
-    let blocks = Edge::blocks_from_edges(conn, block_group_id, &edges, history_ref)?;
+    let blocks = Edge::blocks_from_edges(conn, &workspace, block_group_id, &edges, history_ref)?;
     let (load_edges, load_blocks) = Edge::graph_load_data(&edges, &blocks);
     let (graph, _) = graph_loader::build_graph(&load_edges, &load_blocks);
     Ok(graph)
@@ -199,6 +211,7 @@ fn region_intervaltree(
     region: &ResolvedGenRegion,
     conn: &GraphConnection,
 ) -> Result<IntervalTree<i64, NodeIntervalBlock>, BlockGroupError> {
+    let workspace = Workspace::from_current_dir();
     if region.kind == ResolvedRegionKind::BlockGroup {
         load_block_group_intervaltree(
             conn,
@@ -206,7 +219,7 @@ fn region_intervaltree(
             region.remove_ambiguous_positions,
         )
     } else {
-        IntervalTreeSource::intervaltree(region, conn)
+        IntervalTreeSource::intervaltree(region, conn, &workspace)
     }
 }
 
@@ -424,10 +437,12 @@ pub fn expand(
     if unloaded_edges.is_empty() {
         return false;
     }
-    let blocks = match Edge::blocks_from_edges(conn, block_group_id, &unloaded_edges, None) {
-        Ok(blocks) => blocks,
-        Err(_) => return false,
-    };
+    let workspace = Workspace::from_current_dir();
+    let blocks =
+        match Edge::blocks_from_edges(conn, &workspace, block_group_id, &unloaded_edges, None) {
+            Ok(blocks) => blocks,
+            Err(_) => return false,
+        };
     let (load_edges, load_blocks) = Edge::graph_load_data(&unloaded_edges, &blocks);
     let (fragment, _) = graph_loader::build_graph(&load_edges, &load_blocks);
     graph_loader::merge_fragment(graph, &fragment);

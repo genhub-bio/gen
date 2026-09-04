@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use gen_core::{GraphNodePosition, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     accession::Accession,
     block_group::{BlockGroup, NewBlockGroup, PathCache},
     block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
@@ -32,7 +32,7 @@ impl FindGraphPositions for ResolvedGenRegion {
         start_offset: i64,
         end_offset: i64,
     ) -> Result<ResolvedGenRegion, gen_graph::GraphError> {
-        gen_graph::models::find_region_graph_positions(self, conn, start_offset, end_offset)
+        gen_models::models::find_region_graph_positions(self, conn, start_offset, end_offset)
     }
 }
 

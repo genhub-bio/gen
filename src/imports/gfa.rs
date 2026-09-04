@@ -5,7 +5,7 @@ use gen_core::{
     is_start_node,
 };
 use gen_graph::{GraphEdge, GraphNode};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -69,7 +69,7 @@ pub fn import_gfa(
     }
     match Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: sample_name,
             ..Default::default()
         },
@@ -341,7 +341,7 @@ pub fn import_gfa(
     let bar = progress_bar.add(get_progress_bar(None));
     bar.set_message("Breaking cycles");
     let message_bar = progress_bar.add(get_message_bar());
-    let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, None)?;
+    let graph = gen_models::models::load_block_group_graph(conn, &block_group.id, None)?;
     let mut undirected_graph: UnGraphMap<GraphNode, GraphEdge> = UnGraphMap::new();
     for node in graph.nodes() {
         undirected_graph.add_node(node);
@@ -460,7 +460,7 @@ fn edge_data_from_fields(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_models::{
+    use gen_models_doltlite::{
         assets::{OperationKind, OperationLog},
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
@@ -531,7 +531,7 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -686,7 +686,7 @@ mod tests {
             }
         }
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(all_sequences.len(), 1024);
         assert_eq!(all_sequences, expected_sequences);
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(result.unwrap(), "AA");
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(all_sequences, HashSet::from_iter(vec!["AA".to_string()]));
 
@@ -736,7 +736,7 @@ mod tests {
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -758,7 +758,7 @@ mod tests {
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,

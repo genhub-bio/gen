@@ -1,5 +1,5 @@
 use anyhow::{Error, Result};
-use gen_models::{
+use gen_models_doltlite::{
     db::DbContext,
     errors::OperationError,
     operations::{OperationInfo, OperationSummary},
@@ -103,7 +103,7 @@ pub fn make_stitch_operation(
 mod tests {
     use std::path::PathBuf;
 
-    use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample};
+    use gen_models_doltlite::{block_group::BlockGroup, collection::Collection, sample::Sample};
 
     use super::*;
     use crate::{imports::fasta::import_fasta, test_helpers::setup_gen};

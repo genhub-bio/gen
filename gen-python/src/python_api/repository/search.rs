@@ -1,7 +1,7 @@
 use std::fs;
 
 use r#gen::graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind};
-use gen_models::{block_group::BlockGroup, traits::Query};
+use gen_models_doltlite::{block_group::BlockGroup, traits::Query};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::PyRepository;
@@ -45,7 +45,7 @@ impl PyRepository {
         };
 
         for bg in bgs {
-            let graph = gen_graph::models::load_block_group_graph(conn, &bg.id, None)
+            let graph = gen_models::models::load_block_group_graph(conn, &bg.id, None)
                 .map_err(block_group_err_to_pyerr)?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
             let index = SeedIndex::build(&matcher, k, normalized);
@@ -93,7 +93,7 @@ impl PyRepository {
         let query_bytes = query.as_bytes();
         let mut results = Vec::new();
         for bg in bgs {
-            let graph = gen_graph::models::load_block_group_graph(conn, &bg.id, None)
+            let graph = gen_models::models::load_block_group_graph(conn, &bg.id, None)
                 .map_err(block_group_err_to_pyerr)?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(conn, graph, kind);
 

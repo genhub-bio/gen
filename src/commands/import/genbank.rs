@@ -7,7 +7,7 @@ use std::{
 use anyhow::Result;
 use clap::Args;
 use flate2::read::MultiGzDecoder;
-use gen_models::{
+use gen_models_doltlite::{
     errors::OperationError,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},

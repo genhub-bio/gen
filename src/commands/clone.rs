@@ -1,7 +1,7 @@
 use std::fs;
 
 use gen_core::config::Workspace;
-use gen_models::operations::{Defaults, Remote, RemoteBranch};
+use gen_models_doltlite::operations::{Defaults, Remote, RemoteBranch};
 
 use crate::{
     commands::remote::operations::{

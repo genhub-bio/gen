@@ -13,7 +13,7 @@ use gb_io::{self, seq::Location};
 use gen_annotations::projection::{AnnotationSegment, project_annotation_segments};
 use gen_core::{Strand, Workspace, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
-use gen_models::{
+use gen_models_doltlite::{
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
@@ -85,7 +85,7 @@ fn annotation_location(
 
 fn export_annotations(
     conn: &GraphConnection,
-    path: &gen_models::path::Path,
+    path: &gen_models_doltlite::path::Path,
     path_blocks: &[PathBlock],
     seq: &mut gb_io::seq::Seq,
     sample_name: &str,
@@ -298,7 +298,7 @@ pub fn export_genbank(
         )?;
 
         // Identify the node traversal corresponding to our path.
-        let graph = gen_graph::models::load_block_group_graph(conn, &block_group.id, history_ref)?;
+        let graph = gen_models::models::load_block_group_graph(conn, &block_group.id, history_ref)?;
         let path_nodes = get_path_nodes(&graph, &path_blocks);
         let path_node_set: HashSet<&GraphNode> = HashSet::from_iter(&path_nodes);
         let mut node_it = path_nodes.iter().peekable();
@@ -453,7 +453,7 @@ mod tests {
 
     use gb_io::reader;
     use gen_core::{HashId, Strand, is_terminal, strand::Strand::Forward};
-    use gen_models::{
+    use gen_models_doltlite::{
         accession::{Accession, AccessionNode, AccessionNodeData},
         annotations::{Annotation, AnnotationExtra, GenBankExtra, GenBankLocationOperator},
         block_group::BlockGroup,
@@ -541,7 +541,7 @@ mod tests {
     }
 
     fn create_annotation_with_segments(
-        conn: &gen_models::db::GraphConnection,
+        conn: &gen_models_doltlite::db::GraphConnection,
         path: &Path,
         name: &str,
         segments: &[(usize, i64, i64, Strand)],
@@ -582,7 +582,7 @@ mod tests {
             Some(&AnnotationExtra {
                 genbank: Some(GenBankExtra {
                     kind: "misc_feature".to_string(),
-                    qualifiers: vec![gen_models::annotations::GenBankQualifier {
+                    qualifiers: vec![gen_models_doltlite::annotations::GenBankQualifier {
                         key: "label".to_string(),
                         value: Some(name.to_string()),
                     }],
@@ -976,11 +976,11 @@ mod tests {
             .unwrap();
         let mut extra = annotation.extra.unwrap();
         extra.genbank.as_mut().unwrap().qualifiers = vec![
-            gen_models::annotations::GenBankQualifier {
+            gen_models_doltlite::annotations::GenBankQualifier {
                 key: "label".to_string(),
                 value: Some("legacy-note".to_string()),
             },
-            gen_models::annotations::GenBankQualifier {
+            gen_models_doltlite::annotations::GenBankQualifier {
                 key: "note".to_string(),
                 value: Some(
                     "CAP binding activates transcription in the presence\n\nof cAMP.".to_string(),

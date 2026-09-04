@@ -8,7 +8,7 @@ use std::{
 
 use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     assets::{AssetRef, AssetRole, AssetUri, ChecksummedReader},
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -61,7 +61,7 @@ pub fn import_fasta(
             operation_files[0] = operation_files[0].clone().set_checksum_override(checksum);
         }
         AssetRef::create(conn, &sequence_asset_ref)
-            .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
+            .map_err(gen_models_doltlite::errors::FileAdditionError::DatabaseError)?;
         sequence_asset_ref_id = Some(sequence_asset_ref.id);
 
         let mut index_locations = indexes.to_vec();
@@ -83,7 +83,7 @@ pub fn import_fasta(
                 index_operation_file = index_operation_file.set_checksum_override(checksum);
             }
             AssetRef::create(conn, &index_asset_ref)
-                .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
+                .map_err(gen_models_doltlite::errors::FileAdditionError::DatabaseError)?;
             operation_files.push(index_operation_file);
         }
         Box::new(sequence_asset_ref.reader(context.workspace())?)
@@ -112,7 +112,7 @@ pub fn import_fasta(
 
     match Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: sample,
             ..Default::default()
         },
@@ -256,7 +256,7 @@ mod tests {
         time::Duration,
     };
 
-    use gen_models::{
+    use gen_models_doltlite::{
         assets::{AssetRef, AssetRole, OperationAsset, OperationKind, OperationLog},
         block_group::BlockGroup,
         errors::OperationError,
@@ -449,8 +449,13 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
-                .unwrap(),
+            gen_models::models::get_all_sequences_in_workspace(
+                conn,
+                context.workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 
@@ -480,8 +485,13 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
-                .unwrap(),
+            gen_models::models::get_all_sequences_in_workspace(
+                conn,
+                context.workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
     }
@@ -530,8 +540,13 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
-                .unwrap(),
+            gen_models::models::get_all_sequences_in_workspace(
+                conn,
+                context.workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
     }
@@ -555,8 +570,13 @@ mod tests {
         .unwrap();
         let block_group_id = BlockGroup::get_id("test", "new-sample", "m123", None);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
-                .unwrap(),
+            gen_models::models::get_all_sequences_in_workspace(
+                conn,
+                context.workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 
@@ -614,8 +634,13 @@ mod tests {
         fs::write(&gzip_index_path, "invalid logical-path gzip index\n").unwrap();
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
-                .unwrap(),
+            gen_models::models::get_all_sequences_in_workspace(
+                conn,
+                context.workspace(),
+                &block_group_id,
+                false,
+            )
+            .unwrap(),
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 

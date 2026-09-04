@@ -1,7 +1,7 @@
 use std::fs;
 
 use gen_core::errors::ConnectionError;
-use gen_models::{
+use gen_models_doltlite::{
     db::{ConfigConnection, GraphConnection},
     migrations::{run_config_migrations, run_migrations},
 };

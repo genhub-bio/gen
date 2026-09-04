@@ -5,7 +5,7 @@ use std::{
 
 use gb_io::seq::{Feature, Location, Seq};
 use gen_core::Strand;
-use gen_models::{
+use gen_models_doltlite::{
     annotations::{AnnotationExtra, GenBankExtra, GenBankLocationOperator, GenBankQualifier},
     errors::{
         AccessionError, AccessionNodeError, AnnotationError, BlockGroupError, CollectionError,

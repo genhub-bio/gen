@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args;
-use gen_models::errors::OperationError;
+use gen_models_doltlite::errors::OperationError;
 
 use crate::{
     commands::{cli_context::CliContext, commit_operation, get_default_collection},

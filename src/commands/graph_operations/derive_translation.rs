@@ -1,6 +1,6 @@
 use anyhow::{Error, Result};
 use gen_core::{Strand, region::Region};
-use gen_models::{
+use gen_models_doltlite::{
     db::DbContext,
     errors::OperationError,
     operations::{OperationInfo, OperationSummary},

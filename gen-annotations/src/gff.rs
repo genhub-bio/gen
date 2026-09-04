@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs::File, io, io::BufReader};
 
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupError},
     db::GraphConnection,
     errors::PathError,
@@ -139,7 +139,7 @@ mod tests {
     use gen_core::{
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand,
     };
-    use gen_models::{
+    use gen_models_doltlite::{
         block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
@@ -156,13 +156,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::propagate_gff;
-    use crate::test_helpers::{get_connection, test_workspace};
+    use crate::test_helpers::get_connection;
 
     fn create_block_group(conn: &GraphConnection) {
         let collection = Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: Sample::DEFAULT_NAME,
                 ..Default::default()
             },
@@ -245,7 +245,7 @@ mod tests {
     fn apply_child_sample_update_from_aa_fasta(conn: &GraphConnection) {
         Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "child sample",
                 ..Default::default()
             },
@@ -304,7 +304,7 @@ mod tests {
             preserve_edge: true,
         };
 
-        gen_graph::models::insert_change(conn, &change)
+        gen_models::models::insert_change(conn, &change)
             .expect("should apply AA update to child sample");
 
         let edge_to_insert = Edge::query(

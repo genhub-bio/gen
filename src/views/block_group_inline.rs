@@ -8,7 +8,7 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use gen_core::{HashId, Workspace};
 use gen_graph::GenGraph;
-use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
+use gen_models_doltlite::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_controller::GraphController,
     layout::VisualDetail,
@@ -224,7 +224,7 @@ pub fn show_inline_block_group_widget(
     height: u16,
     history_ref: Option<&str>,
 ) -> Result<bool> {
-    let graph = gen_graph::models::load_block_group_graph(conn, &block_group_id, history_ref)
+    let graph = gen_models::models::load_block_group_graph(conn, &block_group_id, history_ref)
         .map_err(Error::other)?;
     show_inline_widget(
         conn,

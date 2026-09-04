@@ -4,7 +4,7 @@ mod remote_workflow_integration_tests {
         commands::remote::{RemoteCommand, handle_remote_command},
         test_helpers::setup_gen,
     };
-    use gen_models::operations::{Defaults, Remote, RemoteBranch};
+    use gen_models_doltlite::operations::{Defaults, Remote, RemoteBranch};
 
     /// Test remote deletion with branch associations (should set to null)
     #[test]

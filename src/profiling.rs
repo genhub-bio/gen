@@ -335,7 +335,7 @@ fn is_owned_code(name: &str) -> bool {
         name,
         n if n.starts_with("gen::")
             || n.starts_with("r#gen::")
-            || n.starts_with("gen_models::")
+            || n.starts_with("gen_models_doltlite::")
             || n.starts_with("gen_core::")
             || n.starts_with("gen_graph::")
             || n.starts_with("gen_diff::")

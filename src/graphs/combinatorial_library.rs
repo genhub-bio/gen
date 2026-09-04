@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::Result;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, range::Range};
-use gen_models::{
+use gen_models_doltlite::{
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::{Annotation, AnnotationGroupSample, NewAnnotation},
     db::GraphConnection,
@@ -356,7 +356,7 @@ pub(crate) fn create_part_annotations(
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{
+    use gen_models_doltlite::{
         block_group::{BlockGroup, NewBlockGroup},
         sample::Sample,
     };
@@ -372,7 +372,7 @@ mod tests {
         let sample_name = "test-sample";
         let _sample = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: sample_name,
                 ..Default::default()
             },

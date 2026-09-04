@@ -5,7 +5,7 @@ use gen_core::{
     errors::ConnectionError,
 };
 use gen_graph::GenGraph;
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -26,7 +26,7 @@ pub fn create_bg(
 ) -> BlockGroup {
     Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: sample_name,
             ..Default::default()
         },
@@ -162,7 +162,7 @@ pub fn setup_block_group(conn: &GraphConnection) -> (HashId, Path) {
     let _collection = Collection::create(conn, "test");
     Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: "test",
             ..Default::default()
         },

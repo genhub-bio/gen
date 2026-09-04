@@ -19,12 +19,9 @@ use crate::{
     file_types::FileTypes,
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     history::{HistoryStore, dolt::DoltHistoryStore},
-    operations::{
-        FileAddition, OperationAssetRecord, OperationFile, OperationInfo, OperationSummary,
-        track_operation_assets,
-    },
-    region::ResolvedGenRegion,
-    traits::Query,
+    operations::{FileAddition, OperationFile, OperationInfo, OperationSummary, track_asset_refs},
+    region::{GenRegionError, ResolvedGenRegion},
+    traits::{Query, max_rows_per_batch},
 };
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct AnnotationGroup {

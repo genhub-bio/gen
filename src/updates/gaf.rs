@@ -9,7 +9,7 @@ use std::{
 
 use csv::Error as CsvError;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
@@ -416,7 +416,7 @@ mod tests {
     use std::path::PathBuf;
 
     use gen_graph::{GraphEdge, GraphNode};
-    use gen_models::traits::Query;
+    use gen_models_doltlite::traits::Query;
     use petgraph::Direction;
 
     use super::*;
@@ -500,7 +500,7 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection, "");
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
         update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
-        let graph = gen_graph::models::load_sample_graph(conn, "test", "child", None).unwrap();
+        let graph = gen_models::models::load_sample_graph(conn, "test", "child", None).unwrap();
 
         let query = Node::query(
             conn,
@@ -565,7 +565,7 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection, "");
         let gaf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/chr22_het.gaf");
         update_with_gaf(&context, gaf_path, csv_path, "test", "child", None).unwrap();
-        let graph = gen_graph::models::load_sample_graph(conn, "test", "child", None).unwrap();
+        let graph = gen_models::models::load_sample_graph(conn, "test", "child", None).unwrap();
 
         // we should end up with a new edge putting our insert to the beginning of the graph, which is node 3.
         let query = Node::query(

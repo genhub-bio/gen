@@ -4,8 +4,9 @@ use gen_core::{
     GenGraph, GraphNode, GraphNodePosition, HashId, NodeIntervalBlock, PATH_END_NODE_ID,
     PATH_START_NODE_ID, Strand,
 };
-use gen_graph::{GraphEdge, graph_from_interval_tree, graph_loader, models::expand};
-use gen_models::{
+use gen_graph::{GraphEdge, graph_from_interval_tree};
+use gen_models::{graph_loader, models::expand};
+use gen_models_doltlite::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,

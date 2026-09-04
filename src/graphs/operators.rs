@@ -1,8 +1,10 @@
 use core::ops::Range;
 use std::collections::HashMap;
 
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, is_end_node, is_start_node};
-use gen_models::{
+use gen_core::{
+    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace, is_end_node, is_start_node,
+};
+use gen_models_doltlite::{
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
@@ -94,7 +96,7 @@ pub fn derive_chunks(
     let conn = context.graph().conn();
     let _new_sample = Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: new_sample_name,
             ..Default::default()
         },
@@ -166,18 +168,13 @@ pub fn derive_chunks(
         let end_block = blocks[blocks.len() - 1];
         let end_node_coordinate = end_coordinate - end_block.start + end_block.sequence_start;
 
-        gen_graph::models::derive_subgraph(
+        gen_models::models::derive_subgraph(
             conn,
-            context.workspace(),
             &parent_block_group_id,
-            SubgraphBoundary {
-                block: &start_block,
-                sequence_coordinate: start_node_coordinate,
-            },
-            SubgraphBoundary {
-                block: &end_block,
-                sequence_coordinate: end_node_coordinate,
-            },
+            &start_block,
+            &end_block,
+            start_node_coordinate,
+            end_node_coordinate,
             &child_block_group_id,
             create_block_group,
         )?;
@@ -427,7 +424,7 @@ fn create_stitched_block_group(
 
     let _new_sample = Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: new_sample_name,
             ..Default::default()
         },
@@ -471,10 +468,10 @@ fn create_stitched_block_group(
 
 fn validate_stitched_block_group_is_acyclic(
     conn: &GraphConnection,
-    workspace: &Workspace,
+    _workspace: &Workspace,
     block_group_id: &HashId,
 ) -> Result<(), GraphOperationError> {
-    let graph = gen_graph::models::load_block_group_graph(conn, block_group_id, None)?;
+    let graph = gen_models::models::load_block_group_graph(conn, block_group_id, None)?;
     if is_cyclic_directed(&graph) {
         return Err(GraphOperationError::StitchedGraphCycle(format!(
             "block group {block_group_id} is cyclic"
@@ -553,7 +550,7 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-    use gen_models::{
+    use gen_models_doltlite::{
         block_group::NewBlockGroup, block_group_edge::BlockGroupEdgeData, collection::Collection,
         edge::Edge, node::Node, path::Path, sample::Sample, sequence::Sequence,
     };
@@ -664,7 +661,7 @@ mod tests {
         );
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group1_id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group1_id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -691,7 +688,7 @@ mod tests {
         let block_group2 = block_groups.iter().find(|x| x.name == "chr1").unwrap();
 
         let all_sequences2 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences2,
@@ -752,9 +749,12 @@ mod tests {
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let original_block_group_id = &original_block_groups[0].id;
-        let all_original_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, original_block_group_id, false)
-                .unwrap();
+        let all_original_sequences = gen_models::models::get_all_sequences_with_pruning(
+            conn,
+            original_block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_original_sequences,
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
@@ -762,7 +762,7 @@ mod tests {
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2", None);
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
-        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let all_grandchild_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
             grandchild_block_group_id,
             false,
@@ -800,7 +800,7 @@ mod tests {
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
         let all_sequences2 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences2,
@@ -815,7 +815,7 @@ mod tests {
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
         let all_sequences3 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group3.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group3.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences3,
@@ -879,9 +879,12 @@ mod tests {
         let original_block_groups =
             Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None);
         let original_block_group_id = &original_block_groups[0].id;
-        let all_original_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, original_block_group_id, false)
-                .unwrap();
+        let all_original_sequences = gen_models::models::get_all_sequences_with_pruning(
+            conn,
+            original_block_group_id,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             all_original_sequences,
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),])
@@ -889,7 +892,7 @@ mod tests {
 
         let grandchild_block_groups = Sample::get_block_groups(conn, collection, "test2", None);
         let grandchild_block_group_id = &grandchild_block_groups[0].id;
-        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let all_grandchild_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
             grandchild_block_group_id,
             false,
@@ -927,7 +930,7 @@ mod tests {
         let block_group2 = block_groups.iter().find(|x| x.name == "m123.2").unwrap();
 
         let all_sequences2 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group2.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences2,
@@ -942,7 +945,7 @@ mod tests {
 
         let block_group3 = block_groups.iter().find(|x| x.name == "m123.3").unwrap();
         let all_sequences3 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group3.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group3.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences3,
@@ -976,7 +979,7 @@ mod tests {
             .unwrap();
 
         let all_sequences4 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group4.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group4.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences4,
@@ -1013,7 +1016,7 @@ mod tests {
             .unwrap();
 
         let all_sequences5 =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group5.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group5.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences5,
@@ -1063,7 +1066,7 @@ mod tests {
         Collection::create(conn, "test").unwrap();
         Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "parent",
                 ..Default::default()
             },

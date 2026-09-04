@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use r#gen::{get_config_connection, get_connection};
 use gen_core::config::Workspace;
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup,
     collection::Collection,
     db::DbContext,

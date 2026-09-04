@@ -1,7 +1,7 @@
 use std::{collections::HashMap, error::Error};
 
 use gen_core::{BranchName, CommitRef, DoltHashId, HashId, config::Workspace};
-use gen_models::{
+use gen_models_doltlite::{
     assets::{AssetRef, materialization_destination_path},
     db::{ConfigConnection, GraphConnection},
     history::{

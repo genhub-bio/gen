@@ -1,6 +1,6 @@
 use std::{path::Path, str};
 
-use gen_models::block_group::BlockGroupError;
+use gen_models_doltlite::block_group::BlockGroupError;
 use pyo3::{
     exceptions::PyValueError,
     prelude::*,

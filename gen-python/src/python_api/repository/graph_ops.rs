@@ -3,7 +3,7 @@ use r#gen::commands::graph_operations::{
     make_stitch::make_stitch_operation,
 };
 use gen_core::region::Region;
-use gen_models::block_group::BlockGroup;
+use gen_models_doltlite::block_group::BlockGroup;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::PyRepository;

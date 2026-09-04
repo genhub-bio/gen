@@ -10,7 +10,7 @@ use r#gen::{
         library::{LibraryImportError, import_library},
     },
 };
-use gen_models::{
+use gen_models_doltlite::{
     errors::OperationError,
     sample::{NewSample, Sample},
 };
@@ -180,11 +180,11 @@ impl PyRepository {
                     &mut reader,
                     collection.as_ref(),
                     &sample,
-                    gen_models::operations::OperationInfo {
+                    gen_models_doltlite::operations::OperationInfo {
                         files: vec![{
                             let mut f =
-                                gen_models::operations::OperationFile::new(filename.clone());
-                            f.file_type = gen_models::file_types::FileTypes::GenBank;
+                                gen_models_doltlite::operations::OperationFile::new(filename.clone());
+                            f.file_type = gen_models_doltlite::file_types::FileTypes::GenBank;
                             f
                         }],
                         description: "GenBank Import".to_string(),

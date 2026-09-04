@@ -5,7 +5,7 @@ use std::{
 };
 
 use gen_core::{
-    GraphLoadBlock, GraphLoadEdge, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand,
+    GraphLoadBlock, GraphLoadEdge, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace,
     calculate_hash, is_terminal, traits::Capnp,
 };
 use indexmap::IndexSet;
@@ -711,7 +711,7 @@ impl Edge {
 
     /// Converts persisted edges and computed blocks into graph construction records.
     ///
-    /// `gen_graph::models::load_block_group_graph`, sequence enumeration, and graph export call this after
+    /// `gen_models::models::load_block_group_graph`, sequence enumeration, and graph export call this after
     /// `blocks_from_edges`, then pass the records to the graph layer for construction.
     ///
     /// Junctions and `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` have independent jobs:
@@ -782,7 +782,7 @@ mod tests {
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         sequence::Sequence,
-        test_helpers::get_connection,
+        test_helpers::{get_connection, test_workspace},
     };
 
     fn get_block_boundaries(

@@ -96,7 +96,7 @@ use gen_core::{
     PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::BlockGroup,
     block_group_edge::{AugmentedEdge, BlockGroupEdge},
     db::GraphConnection,

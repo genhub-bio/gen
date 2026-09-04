@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gen_core::{HashId, Strand};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
-use gen_models::locus::GraphLocus;
+use gen_models_doltlite::locus::GraphLocus;
 use petgraph::visit::IntoNodeIdentifiers;
 
 #[derive(Clone, Debug)]

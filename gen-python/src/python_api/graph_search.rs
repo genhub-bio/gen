@@ -1,6 +1,6 @@
 use r#gen::graphs::graph_search::GraphPos;
 use gen_core::Strand;
-use gen_models::locus::GraphLocus;
+use gen_models_doltlite::locus::GraphLocus;
 use pyo3::prelude::*;
 
 use super::graph_node::{PyGraphNode, PyGraphNodeSlice};

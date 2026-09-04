@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand, Workspace};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -38,7 +38,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
     let collection = Collection::create(conn, "test").unwrap();
     Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: Sample::DEFAULT_NAME,
             ..Default::default()
         },
@@ -149,7 +149,7 @@ pub fn setup_test_data(conn: &GraphConnection) {
 
     Sample::get_or_create(
         conn,
-        gen_models::sample::NewSample {
+        gen_models_doltlite::sample::NewSample {
             name: "foo",
             ..Default::default()
         },
@@ -203,5 +203,5 @@ pub fn setup_test_data(conn: &GraphConnection) {
         preserve_edge: false,
     };
 
-    gen_graph::models::insert_change(conn, &change).expect("should apply variant change");
+    gen_models::models::insert_change(conn, &change).expect("should apply variant change");
 }

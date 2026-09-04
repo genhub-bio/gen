@@ -1,30 +1,4 @@
-pub mod accession;
-pub mod annotations;
-pub mod assets;
-pub mod block_group;
-pub mod block_group_edge;
-pub mod block_group_lineage;
-pub mod collection;
-pub mod db;
-pub mod edge;
-pub mod errors;
-pub mod file_types;
-#[allow(clippy::all)]
-pub mod generated;
-pub mod history;
-pub use generated::gen_models_capnp;
-pub mod lineage;
-pub mod locus;
-pub mod migrations;
-pub mod node;
-pub mod operations;
-pub mod patch;
-pub mod path;
-pub mod reference_alias;
-pub mod region;
-pub mod sample;
-pub mod sample_lineage;
-pub mod sequence;
-#[cfg(test)]
-pub mod test_helpers;
-pub mod traits;
+pub mod graph_loader;
+pub mod models;
+
+pub use gen_graph::*;

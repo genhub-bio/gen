@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use gen_core::{HashId, PathBlock, Strand};
-use gen_graph::models::get_all_sequences;
-use gen_models::{
+use gen_models::models::get_all_sequences;
+use gen_models_doltlite::{
     block_group::BlockGroupChange, node::Node, region::ResolvedGenRegion, sequence::Sequence,
 };
 use gen_models_graph_tests::{get_connection, setup_block_group};
@@ -31,7 +31,7 @@ fn test_insert_and_deletion_sequences() {
     };
     let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15)
         .expect("should resolve the insertion region");
-    gen_graph::models::insert_change(
+    gen_models::models::insert_change(
         &conn,
         &BlockGroupChange {
             region,
@@ -73,7 +73,7 @@ fn test_insert_and_deletion_sequences() {
     };
     let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 19, 31)
         .expect("should resolve the deletion region");
-    gen_graph::models::insert_change(
+    gen_models::models::insert_change(
         &conn,
         &BlockGroupChange {
             region,

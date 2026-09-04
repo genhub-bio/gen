@@ -4,7 +4,7 @@
 mod tests {
     use std::path::PathBuf;
 
-    use gen_models::sample::Sample;
+    use gen_models_doltlite::sample::Sample;
     use gen_tui::{
         graph_controller::{GraphConfig, GraphController},
         layout::{NodeRole, VisualDetail},
@@ -41,7 +41,7 @@ mod tests {
             .expect("GFA import failed");
 
         let gen_graph =
-            gen_graph::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
+            gen_models::models::load_sample_graph(conn, collection_name, Sample::DEFAULT_NAME, None)
                 .unwrap();
 
         // Test with small partitions to force inter-partition edges

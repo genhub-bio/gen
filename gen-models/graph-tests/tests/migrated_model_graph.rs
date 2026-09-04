@@ -1,5 +1,5 @@
 use gen_core::{GraphNode, HashId, NodeIntervalBlock, PathBlock, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupChange, BlockGroupError, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -9,7 +9,7 @@ use gen_models::{
     sample::{NewSample, Sample},
     sequence::Sequence,
 };
-use gen_models_graph_tests::{get_connection, setup_block_group};
+use gen_models_graph_tests::{get_connection, setup_block_group, test_workspace};
 
 #[test]
 fn test_get_graph_branched_graph() {
@@ -82,7 +82,7 @@ fn test_get_graph_branched_graph() {
             .collect::<Vec<_>>(),
     );
 
-    let graph = gen_graph::models::load_block_group_graph(&conn, &block_group.id, None)
+    let graph = gen_models::models::load_block_group_graph(&conn, &block_group.id, None)
         .expect("should load the branched graph");
     assert_eq!(graph.nodes().len(), 7);
     assert_eq!(graph.all_edges().count(), 4);
@@ -138,7 +138,7 @@ fn test_error_on_out_of_bounds_change() {
     for (start, end) in [(350, 400), (-300, 400)] {
         let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, start, end)
             .expect("should resolve the requested path region");
-        let result = gen_graph::models::insert_change(
+        let result = gen_models::models::insert_change(
             &conn,
             &BlockGroupChange {
                 region,
@@ -195,7 +195,7 @@ fn test_blockgroup_interval_tree() {
         .expect("should create the inserted node");
     let child =
         BlockGroup::get_by_id(&conn, &child_id, None).expect("should load the child block group");
-    gen_graph::models::insert_change(
+    gen_models::models::insert_change(
         &conn,
         &BlockGroupChange {
             region: ResolvedGenRegion {
@@ -232,10 +232,10 @@ fn test_blockgroup_interval_tree() {
     )
     .expect("should insert the block-group change");
 
-    let original = gen_graph::models::load_block_group_intervaltree(&conn, &block_group_id, false)
+    let original = gen_models::models::load_block_group_intervaltree(&conn, &block_group_id, false)
         .expect("should load the original interval tree");
     let original_unambiguous =
-        gen_graph::models::load_block_group_intervaltree(&conn, &block_group_id, true)
+        gen_models::models::load_block_group_intervaltree(&conn, &block_group_id, true)
             .expect("should load the original unambiguous interval tree");
     assert_eq!(values_at(&original, 3), values_at(&original_unambiguous, 3));
     assert_eq!(
@@ -243,10 +243,10 @@ fn test_blockgroup_interval_tree() {
         values_at(&original_unambiguous, 35)
     );
 
-    let child_tree = gen_graph::models::load_block_group_intervaltree(&conn, &child_id, false)
+    let child_tree = gen_models::models::load_block_group_intervaltree(&conn, &child_id, false)
         .expect("should load the child interval tree");
     let child_unambiguous =
-        gen_graph::models::load_block_group_intervaltree(&conn, &child_id, true)
+        gen_models::models::load_block_group_intervaltree(&conn, &child_id, true)
             .expect("should load the child unambiguous interval tree");
     assert_eq!(values_at(&child_tree, 3), values_at(&child_unambiguous, 3));
     assert_eq!(values_at(&child_tree, 30).len(), 2);
@@ -260,7 +260,7 @@ fn test_blocks_from_edges_after_change() {
     let (block_group_id, path) = setup_block_group(&conn);
     let edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id, None);
     assert_eq!(
-        Edge::blocks_from_edges(&conn, &block_group_id, &edges, None)
+        Edge::blocks_from_edges(&conn, test_workspace(), &block_group_id, &edges, None)
             .expect("should derive the original blocks")
             .len(),
         6
@@ -274,7 +274,7 @@ fn test_blocks_from_edges_after_change() {
         .expect("should create the inserted node");
     let region = ResolvedGenRegion::from_path(&conn, block_group_id, &path, 7, 15)
         .expect("should resolve the changed region");
-    gen_graph::models::insert_change(
+    gen_models::models::insert_change(
         &conn,
         &BlockGroupChange {
             region,
@@ -298,14 +298,14 @@ fn test_blocks_from_edges_after_change() {
     .expect("should insert the change");
     let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id, None);
     assert_eq!(
-        Edge::blocks_from_edges(&conn, &block_group_id, &edges, None)
+        Edge::blocks_from_edges(&conn, test_workspace(), &block_group_id, &edges, None)
             .expect("should derive the changed blocks")
             .len(),
         9
     );
     edges.reverse();
     assert_eq!(
-        Edge::blocks_from_edges(&conn, &block_group_id, &edges, None)
+        Edge::blocks_from_edges(&conn, test_workspace(), &block_group_id, &edges, None)
             .expect("should derive the changed blocks independent of edge ordering")
             .len(),
         9

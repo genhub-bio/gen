@@ -2,7 +2,7 @@ use std::{io::Read, str};
 
 use gb_io::reader;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupChange, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -215,7 +215,7 @@ where
                             preserve_edge: true,
                         },
                     };
-                    gen_graph::models::insert_change(conn, &change).unwrap();
+                    gen_models::models::insert_change(conn, &change).unwrap();
                 }
             }
             Err(e) => return Err(GenBankError::ParseError(format!("Failed to parse {e}"))),
@@ -238,7 +238,7 @@ where
 mod tests {
     use std::{collections::HashSet, fs::File, io::BufReader, path::PathBuf};
 
-    use gen_models::{
+    use gen_models_doltlite::{
         assets::{OperationKind, OperationLog},
         file_types::FileTypes,
         history::{HistoryStore, dolt::DoltHistoryStore},
@@ -295,7 +295,7 @@ mod tests {
         let file = File::open(&path).unwrap();
         Sample::create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: Sample::DEFAULT_NAME,
                 is_reference: false,
             },
@@ -329,7 +329,7 @@ mod tests {
 
     #[cfg(test)]
     mod geneious_genbanks {
-        use gen_models::{operations::OperationFile, sample::Sample};
+        use gen_models_doltlite::{operations::OperationFile, sample::Sample};
 
         use super::*;
         use crate::{
@@ -381,7 +381,7 @@ mod tests {
             let mod_seq = str::from_utf8(&f[0].seq).unwrap().to_string();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let sequences: HashSet<String> =
-                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                     .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())
@@ -434,7 +434,7 @@ mod tests {
             let f = reader::parse_file(&path).unwrap();
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "insertion", None);
             let sequences: HashSet<String> =
-                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                     .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())
@@ -448,7 +448,7 @@ mod tests {
             // has a deletion in it.
             let block_group_id = BlockGroup::get_id("", Sample::DEFAULT_NAME, "deletion", None);
             let sequences: HashSet<String> =
-                gen_graph::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
+                gen_models::models::get_all_sequences_with_pruning(conn, &block_group_id, false)
                     .unwrap()
                     .iter()
                     .map(|s| s.to_lowercase())

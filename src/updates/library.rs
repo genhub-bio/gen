@@ -1,7 +1,7 @@
 use core::ops::Range;
 
 use gen_core::Strand;
-use gen_models::{
+use gen_models_doltlite::{
     accession::{Accession, AccessionSpan, NewAccession},
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -51,7 +51,7 @@ use crate::{
 /// itself (pre-existing, merged, shared by every region resolution in the
 /// system), which is out of scope here.
 fn create_location_accession(
-    conn: &gen_models::db::GraphConnection,
+    conn: &gen_models_doltlite::db::GraphConnection,
     block_group_id: gen_core::HashId,
     position: &gen_graph::GraphNodePosition,
 ) -> Result<Accession, BlockGroupError> {
@@ -221,7 +221,7 @@ fn update_graph_with_library(
 }
 
 fn target_library_block_groups(
-    conn: &gen_models::db::GraphConnection,
+    conn: &gen_models_doltlite::db::GraphConnection,
     collection_name: &str,
     parent_sample_name: &str,
     new_sample_name: &str,
@@ -312,7 +312,7 @@ fn update_path_library(
     )?;
 
     let resolved_with_positions =
-        gen_graph::models::find_region_graph_positions(resolved_region, conn, 0, 0)
+        gen_models::models::find_region_graph_positions(resolved_region, conn, 0, 0)
             .map_err(UpdateWithLibraryError::from)?;
     let splice_point = &resolved_with_positions.start_anchors.unwrap()[0];
     let location_accession = create_location_accession(conn, target_block_group.id, splice_point)?;
@@ -383,14 +383,14 @@ fn update_path_library(
 }
 
 fn update_graph_native_library(
-    conn: &gen_models::db::GraphConnection,
-    workspace: &gen_core::Workspace,
+    conn: &gen_models_doltlite::db::GraphConnection,
+    _workspace: &gen_core::Workspace,
     new_sample_name: &str,
     resolved_region: &ResolvedGenRegion,
     target_block_group: &BlockGroup,
     parts_list: Vec<Vec<SequencePart>>,
 ) -> Result<(), UpdateWithLibraryError> {
-    let resolved = gen_graph::models::find_region_graph_positions(resolved_region, conn, 0, 0)
+    let resolved = gen_models::models::find_region_graph_positions(resolved_region, conn, 0, 0)
         .map_err(UpdateWithLibraryError::from)?;
     let start_positions = resolved.start_anchors.as_ref().unwrap();
     let end_positions = resolved.end_anchors.as_ref().unwrap();
@@ -463,7 +463,7 @@ fn graph_node_positions_to_points(positions: &[gen_graph::GraphNodePosition]) ->
 
 /// Creates an edge at a given set of positions. Used for splitting the graph at start/end boundaries.
 fn preserve_library_boundary_points(
-    conn: &gen_models::db::GraphConnection,
+    conn: &gen_models_doltlite::db::GraphConnection,
     block_group_id: gen_core::HashId,
     positions: &[gen_graph::GraphNodePosition],
 ) -> Result<(), UpdateWithLibraryError> {
@@ -471,7 +471,7 @@ fn preserve_library_boundary_points(
         .iter()
         .map(|position| {
             let coordinate = position.coordinate();
-            gen_models::edge::EdgeData {
+            gen_models_doltlite::edge::EdgeData {
                 source_node_id: position.graph_node.node_id,
                 source_coordinate: coordinate,
                 source_strand: gen_core::Strand::Forward,
@@ -500,7 +500,7 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use anyhow::Result;
-    use gen_models::{
+    use gen_models_doltlite::{
         annotations::Annotation, block_group::BlockGroup, path::Path, sample_lineage::SampleLineage,
     };
 
@@ -552,7 +552,7 @@ mod tests {
         let block_group = &block_groups[0];
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -613,7 +613,7 @@ mod tests {
         let block_group = &block_groups[0];
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -655,7 +655,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        gen_graph::models::add_annotation(
+        gen_models::models::add_annotation(
             &context,
             &collection,
             "foobar",
@@ -690,7 +690,7 @@ mod tests {
 
         let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
@@ -720,7 +720,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        gen_graph::models::add_annotation(
+        gen_models::models::add_annotation(
             &context,
             &collection,
             "foobar",
@@ -750,7 +750,7 @@ mod tests {
 
         let block_group = crate::test_helpers::get_sample_bg(conn, &collection, "derived");
         assert_eq!(
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap(),
             HashSet::from_iter(vec![
                 "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
@@ -810,7 +810,7 @@ mod tests {
             }
         }
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -863,7 +863,7 @@ mod tests {
         let block_group = &block_groups[0];
 
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,
@@ -925,7 +925,7 @@ mod tests {
             }
         }
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &block_group.id, false)
                 .unwrap();
         assert_eq!(
             all_sequences,

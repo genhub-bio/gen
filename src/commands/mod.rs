@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use gen_core::DoltHashId;
 use gen_diff::operations::DiffRange;
-use gen_models::{
+use gen_models_doltlite::{
     db::{ConfigConnection, DbContext},
     errors::OperationError,
     history::dolt::reset_hard,
@@ -570,7 +570,7 @@ mod tests {
     }
 
     mod commit_tests {
-        use gen_models::{
+        use gen_models_doltlite::{
             collection::Collection,
             history::dolt::status_rows,
             operations::{OperationFile, OperationInfo, OperationSummary},

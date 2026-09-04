@@ -11,7 +11,7 @@ use r#gen::{
         vcf::{VcfError, update_with_vcf},
     },
 };
-use gen_models::{errors::OperationError, sample::Sample};
+use gen_models_doltlite::{errors::OperationError, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{PyRepository, run_operation_write};
@@ -212,11 +212,11 @@ impl PyRepository {
                     collection.as_ref(),
                     &sample,
                     create_missing,
-                    &gen_models::operations::OperationInfo {
+                    &gen_models_doltlite::operations::OperationInfo {
                         files: vec![{
                             let mut f =
-                                gen_models::operations::OperationFile::new(filename.clone());
-                            f.file_type = gen_models::file_types::FileTypes::GenBank;
+                                gen_models_doltlite::operations::OperationFile::new(filename.clone());
+                            f.file_type = gen_models_doltlite::file_types::FileTypes::GenBank;
                             f
                         }],
                         description: "Update from GenBank".to_string(),

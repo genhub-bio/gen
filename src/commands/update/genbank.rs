@@ -2,7 +2,7 @@ use std::fs::File;
 
 use anyhow::Result;
 use clap::Args;
-use gen_models::{
+use gen_models_doltlite::{
     errors::OperationError,
     file_types::FileTypes,
     operations::{OperationFile, OperationInfo},

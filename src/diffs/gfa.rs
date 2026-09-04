@@ -6,7 +6,7 @@ use std::{
 };
 
 use gen_core::{NodeIntervalBlock, Workspace, range::Range};
-use gen_models::{
+use gen_models_doltlite::{
     block_group::{BlockGroup, BlockGroupError},
     db::GraphConnection,
     errors::PathError,
@@ -259,7 +259,7 @@ fn path_from_segments(sample_name: &str, path: &Path, segments: &[Segment]) -> G
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use gen_core::{HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
-    use gen_models::{
+    use gen_models_doltlite::{
         block_group::BlockGroup,
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
@@ -421,7 +421,7 @@ mod tests {
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_child_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let all_child_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
             &new_child_block_group.id,
             false,
@@ -511,7 +511,7 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 3", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let all_grandchild_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
             &new_grandchild_block_group.id,
             false,
@@ -554,7 +554,7 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 4", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let all_grandchild_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
             &new_grandchild_block_group.id,
             false,
@@ -580,7 +580,7 @@ mod tests {
         Collection::create(conn, collection_name).unwrap();
         let _sample = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "test sample",
                 ..Default::default()
             },
@@ -667,7 +667,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
                 .unwrap();
 
         assert_eq!(
@@ -689,7 +689,7 @@ mod tests {
         Collection::create(conn, collection_name).unwrap();
         let _sample = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "test sample",
                 ..Default::default()
             },
@@ -776,7 +776,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
                 .unwrap();
 
         assert_eq!(
@@ -798,7 +798,7 @@ mod tests {
         Collection::create(conn, collection_name).unwrap();
         let _sample1 = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "sample1",
                 ..Default::default()
             },
@@ -864,7 +864,7 @@ mod tests {
 
         let _sample2 = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "sample2",
                 ..Default::default()
             },
@@ -951,7 +951,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
                 .unwrap();
 
         assert_eq!(
@@ -974,7 +974,7 @@ mod tests {
         Collection::create(conn, collection_name).unwrap();
         let _sample1 = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "sample1",
                 ..Default::default()
             },
@@ -1040,7 +1040,7 @@ mod tests {
 
         let _sample2 = Sample::get_or_create(
             conn,
-            gen_models::sample::NewSample {
+            gen_models_doltlite::sample::NewSample {
                 name: "sample2",
                 ..Default::default()
             },
@@ -1127,7 +1127,7 @@ mod tests {
             .pop()
             .unwrap();
         let all_sequences =
-            gen_graph::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
+            gen_models::models::get_all_sequences_with_pruning(conn, &new_block_group.id, false)
                 .unwrap();
 
         assert_eq!(
@@ -1271,7 +1271,7 @@ mod tests {
         let new_child_block_group = Collection::get_block_groups(conn, "test collection 2", None)
             .pop()
             .unwrap();
-        let all_child_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let all_child_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
             &new_child_block_group.id,
             false,
@@ -1362,7 +1362,7 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 3", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let all_grandchild_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
             &new_grandchild_block_group.id,
             false,
@@ -1402,7 +1402,7 @@ mod tests {
             Collection::get_block_groups(conn, "test collection 4", None)
                 .pop()
                 .unwrap();
-        let all_grandchild_sequences = gen_graph::models::get_all_sequences_with_pruning(
+        let all_grandchild_sequences = gen_models::models::get_all_sequences_with_pruning(
             conn,
             &new_grandchild_block_group.id,
             false,
