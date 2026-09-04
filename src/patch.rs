@@ -687,7 +687,6 @@ mod tests {
         collection::Collection,
         history::dolt::DoltHistoryStore,
         operations::{OperationFile, add_files_operation, commit_operation_summary},
-        traits::Query,
     };
     use tempfile::Builder;
 
@@ -1515,7 +1514,7 @@ mod tests {
             .expect("should apply remote-only patch");
 
         assert_eq!(
-            AssetRef::all(target_context.graph().conn()),
+            AssetRef::all(target_context.graph().conn()).expect("should load asset references"),
             vec![remote_asset]
         );
     }

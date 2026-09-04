@@ -69,30 +69,6 @@ pub trait Query {
         }
     }
 
-    fn get_by_id<'a, T>(
-        conn: &Connection,
-        id: &'a T,
-        history_ref: Option<&str>,
-    ) -> Option<Self::Model>
-    where
-        T: Clone + 'a,
-        Value: From<T>,
-    {
-        let query = format!(
-            "select * from {} where {} = :id",
-            Self::table_name_with_history_ref(history_ref),
-            Self::PRIMARY_KEY,
-        );
-        let mut stmt = conn.prepare(&query).unwrap();
-        let id_value = Value::from(id.clone());
-        let mut params: Vec<(&str, &dyn ToSql)> = vec![(":id", &id_value)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        let mut rows = stmt.query(&params[..]).unwrap();
-        rows.next().unwrap().map(|row| Self::process_row(row))
-    }
-
     fn query_by_ids<T>(conn: &Connection, ids: &[T], history_ref: Option<&str>) -> Vec<Self::Model>
     where
         T: Clone,
@@ -161,73 +137,5 @@ pub trait Query {
 
     fn table_name() -> &'static str {
         Self::TABLE_NAME
-    }
-
-    fn all(conn: &Connection) -> Vec<Self::Model> {
-        let query = format!("SELECT * FROM {}", Self::TABLE_NAME);
-        Self::query(conn, &query, [])
-    }
-
-    fn all_with_limit(conn: &Connection, limit: usize) -> Vec<Self::Model> {
-        let query = format!("SELECT * FROM {} LIMIT {}", Self::TABLE_NAME, limit);
-        Self::query(conn, &query, [])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{collection::Collection, test_helpers::get_connection};
-
-    #[test]
-    fn test_all_method() {
-        let conn = get_connection(None).expect("Failed to get connection");
-
-        // Test with empty table
-        let empty_results = Collection::all(&conn, None);
-        assert!(empty_results.is_empty());
-
-        // Create test collections
-        let collection_names = vec![
-            "test_collection_1",
-            "test_collection_2",
-            "test_collection_3",
-        ];
-        for name in &collection_names {
-            Collection::create(&conn, name).unwrap();
-        }
-
-        let all_results = Collection::all(&conn, None);
-        assert_eq!(all_results.len(), collection_names.len());
-
-        let returned_names: Vec<String> = all_results.iter().map(|c| c.name.clone()).collect();
-        for name in &collection_names {
-            assert!(returned_names.contains(&name.to_string()));
-        }
-    }
-
-    #[test]
-    fn test_all_with_limit_method() {
-        let conn = get_connection(None).expect("Failed to get connection");
-
-        for i in 0..10 {
-            Collection::create(&conn, &format!("test_collection_{}", i)).unwrap();
-        }
-
-        let limited_results = Collection::all_with_limit(&conn, 5);
-        assert_eq!(limited_results.len(), 5);
-
-        // Test limit larger than available records
-        let all_results = Collection::all(&conn, None);
-        let large_limit_results = Collection::all_with_limit(&conn, all_results.len() + 20);
-        assert_eq!(large_limit_results.len(), all_results.len());
-
-        // Test limit of 0
-        let zero_limit_results = Collection::all_with_limit(&conn, 0);
-        assert!(zero_limit_results.is_empty());
-
-        // Test limit of 1
-        let one_limit_results = Collection::all_with_limit(&conn, 1);
-        assert_eq!(one_limit_results.len(), 1);
     }
 }

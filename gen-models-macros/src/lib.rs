@@ -13,9 +13,10 @@ use syn::{
 /// typed ordering, projections, and explicit join conditions. Generated selectors can be composed
 /// with `.join_on(left_field, right_field)` or `.join_filtered_on(...)`. Joined queries can project
 /// fields with `.only(...)` or complete models with `.models::<(...)>()`.
-/// `#[model_select(column = "...")]` overrides a field's SQL column, `#[model_select(skip)]`
-/// excludes a field, and the struct-level `source`, `alias`, and `select` options support custom or
-/// aliased queries.
+/// `#[model_select(column = "...")]` overrides a field's SQL column,
+/// `#[model_select(primary_key)]` marks a non-`id` primary key, `#[model_select(skip)]` excludes a
+/// field, and the struct-level `source`, `alias`, and `select` options support custom or aliased
+/// queries.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
 pub fn derive_model_select(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -70,6 +71,8 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let mut model_columns = Vec::new();
     let mut model_initializers = Vec::new();
     let mut has_skipped_field = false;
+    let mut explicit_primary_key = None;
+    let mut inferred_primary_key = None;
 
     for field in fields {
         let Some(field_name) = field.ident else {
@@ -77,6 +80,12 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         };
         let field_options = FieldOptions::from_attributes(&field.attrs)?;
         if field_options.skip {
+            if field_options.primary_key {
+                return Err(Error::new_spanned(
+                    field_name,
+                    "a ModelSelect primary key cannot be skipped",
+                ));
+            }
             has_skipped_field = true;
             continue;
         }
@@ -89,6 +98,23 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         let field_type = &field.ty;
         let value_type = option_inner(field_type).unwrap_or(field_type);
         let field_index = model_initializers.len();
+
+        let primary_key = (
+            field_name.clone(),
+            value_type.clone(),
+            is_string(value_type),
+        );
+        if field_options.primary_key {
+            if explicit_primary_key.is_some() {
+                return Err(Error::new_spanned(
+                    field_name,
+                    "ModelSelect supports exactly one primary key field",
+                ));
+            }
+            explicit_primary_key = Some(primary_key);
+        } else if field_name_string(&field_name) == "id" {
+            inferred_primary_key = Some(primary_key);
+        }
 
         variants.push(variant.clone());
         model_columns.push(column_literal.clone());
@@ -122,6 +148,37 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             "ModelSelect requires at least one selectable field",
         ));
     }
+
+    let primary_key = explicit_primary_key.or(inferred_primary_key);
+    let get_by_id_method = primary_key
+        .map(|(field, field_type, string)| {
+            if string {
+                quote! {
+                    pub fn get_by_id(
+                        self,
+                        id: impl ::core::convert::Into<::std::string::String>,
+                    ) -> ::core::result::Result<
+                        ::core::option::Option<#model>,
+                        ::gen_models::ModelSelectError,
+                    > {
+                        self.#field(id).get()
+                    }
+                }
+            } else {
+                quote! {
+                    pub fn get_by_id(
+                        self,
+                        id: #field_type,
+                    ) -> ::core::result::Result<
+                        ::core::option::Option<#model>,
+                        ::gen_models::ModelSelectError,
+                    > {
+                        self.#field(id).get()
+                    }
+                }
+            }
+        })
+        .unwrap_or_default();
 
     let source_clause = if let Some(source) = options.source {
         quote! { #source(history_ref) }
@@ -359,6 +416,18 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 ::gen_models::select::load::<#model, _>(self.conn, &self)
             }
 
+            pub fn get(
+                mut self,
+            ) -> ::core::result::Result<
+                ::core::option::Option<#model>,
+                ::gen_models::ModelSelectError,
+            > {
+                self.limit = ::core::option::Option::Some(2);
+                ::gen_models::select::get::<#model, _>(self.conn, &self)
+            }
+
+            #get_by_id_method
+
             pub(crate) fn push_filter(
                 mut self,
                 filter: ::gen_models::select::SqlFilter,
@@ -427,6 +496,15 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             ) -> #selector<'_> {
                 #selector::new(conn)
             }
+
+            pub fn all(
+                conn: &::gen_models::select::Connection,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::gen_models::ModelSelectError,
+            > {
+                Self::select(conn).load()
+            }
         }
     })
 }
@@ -469,6 +547,7 @@ impl ContainerOptions {
 #[derive(Default)]
 struct FieldOptions {
     column: Option<String>,
+    primary_key: bool,
     skip: bool,
 }
 
@@ -487,6 +566,10 @@ impl FieldOptions {
                 }
                 if meta.path.is_ident("skip") {
                     options.skip = true;
+                    return Ok(());
+                }
+                if meta.path.is_ident("primary_key") {
+                    options.primary_key = true;
                     return Ok(());
                 }
                 Err(meta.error("unsupported model_select field option"))

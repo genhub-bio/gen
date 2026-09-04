@@ -547,6 +547,20 @@ where
     query_rows(conn, &query, params, |row| Ok(M::process_row(row)))
 }
 
+#[doc(hidden)]
+pub fn get<M, S>(conn: &Connection, select: &S) -> Result<Option<M>, ModelSelectError>
+where
+    M: Query<Model = M>,
+    S: SelectQuery,
+{
+    let mut rows = load::<M, S>(conn, select)?;
+    match rows.len() {
+        0 => Ok(None),
+        1 => Ok(rows.pop()),
+        _ => Err(ModelSelectError::MultipleResults),
+    }
+}
+
 fn render_query<S>(select: &S, select_clause: String) -> (String, Vec<Value>)
 where
     S: SelectQuery,

@@ -63,7 +63,11 @@ fn resolve_initial_collection(
         return Ok(collection);
     }
 
-    let collections = Collection::all(graph_conn, history_ref);
+    let mut select = Collection::select(graph_conn);
+    if let Some(history_ref) = history_ref {
+        select = select.with_ref(history_ref);
+    }
+    let collections = select.load().expect("should load collections");
     if let [collection] = collections.as_slice() {
         return Ok(collection.name.clone());
     }

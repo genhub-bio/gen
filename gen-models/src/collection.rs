@@ -21,6 +21,7 @@ pub enum CollectionError {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ModelSelect)]
 pub struct Collection {
+    #[model_select(primary_key)]
     pub name: String,
 }
 
@@ -53,15 +54,6 @@ impl Query for Collection {
 }
 
 impl Collection {
-    /// Returns collections visible at the requested history state, ordered by name.
-    pub fn all(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<Collection> {
-        let mut select = Collection::select(conn).order_by(CollectionSelect::Name, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
-        select.load().expect("should load collections")
-    }
-
     pub fn exists(conn: &GraphConnection, name: &str) -> bool {
         let mut stmt = conn
             .prepare("select name from collections where name = ?1")

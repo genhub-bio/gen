@@ -25,6 +25,7 @@ use crate::{
 
 #[derive(Clone, Debug, Deserialize, Serialize, ModelSelect)]
 pub struct Sequence {
+    #[model_select(primary_key)]
     pub hash: Sha256Hash,
     pub sequence_type: String,
     sequence: String,
@@ -837,7 +838,6 @@ mod tests {
         gen_models_capnp::sequence,
         operations::OperationFile,
         test_helpers::{get_connection, setup_gen_on_disk},
-        traits::Query,
     };
 
     fn prepare_asset(context: &crate::db::DbContext, path: &str, role: AssetRole) -> AssetRef {
@@ -910,7 +910,7 @@ mod tests {
     #[test]
     fn test_delete_sequence_by_hash() {
         let conn = &get_connection(None).unwrap();
-        let before_count = Sequence::all(conn).len();
+        let before_count = Sequence::all(conn).expect("should load sequences").len();
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("AACCTT")
@@ -922,12 +922,12 @@ mod tests {
             .save(conn)
             .unwrap();
 
-        let sequences = Sequence::all(conn);
+        let sequences = Sequence::all(conn).expect("should load sequences");
         assert_eq!(sequences.len(), before_count + 2);
 
         Sequence::delete_by_hash(conn, &sequence.hash);
 
-        let sequences = Sequence::all(conn);
+        let sequences = Sequence::all(conn).expect("should load sequences");
         assert_eq!(sequences.len(), before_count + 1);
         assert!(sequences.iter().any(|s| s.hash == sequence2.hash));
     }

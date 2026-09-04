@@ -140,7 +140,13 @@ pub fn gather_collection_explorer_data(
     let current_collection = collection_basename(full_collection_name).to_string();
     let _parent = parent_collection(full_collection_name);
     let current_collection_name = normalize_collection_name(full_collection_name);
-    let other_collections = Collection::all(conn, history_ref)
+    let mut collections = Collection::select(conn);
+    if let Some(history_ref) = history_ref {
+        collections = collections.with_ref(history_ref);
+    }
+    let other_collections = collections
+        .load()
+        .expect("should load collections")
         .into_iter()
         .map(|collection| collection.name)
         .filter(|name| normalize_collection_name(name) != current_collection_name)

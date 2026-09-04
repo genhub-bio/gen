@@ -1305,7 +1305,10 @@ mod tests {
         let edge_ids1 = Edge::bulk_create(conn, &edges);
         assert_eq!(edge_ids1.len(), 2);
         for (index, id) in edge_ids1.iter().enumerate() {
-            let edge = Edge::get_by_id(conn, id, None).unwrap();
+            let edge = Edge::select(conn)
+                .get_by_id(*id)
+                .expect("should query edge")
+                .expect("should find edge");
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
 
@@ -1315,7 +1318,10 @@ mod tests {
         assert_eq!(edge_ids2[2], edge_ids1[1]);
         assert_eq!(edge_ids2.len(), 3);
         for (index, id) in edge_ids2.iter().enumerate() {
-            let edge = Edge::get_by_id(conn, id, None).unwrap();
+            let edge = Edge::select(conn)
+                .get_by_id(*id)
+                .expect("should query edge")
+                .expect("should find edge");
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
     }
@@ -2088,7 +2094,7 @@ mod tests {
 
         assert_eq!(first.id, edge.id_hash());
         assert_eq!(duplicate.id, first.id);
-        assert_eq!(Edge::all(&conn).len(), 1);
+        assert_eq!(Edge::all(&conn).expect("should load edges").len(), 1);
     }
 
     #[test]

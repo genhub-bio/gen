@@ -18,6 +18,7 @@ use rusqlite::Row;
 
 #[derive(Debug, PartialEq, ModelSelect)]
 pub struct Sample {
+    #[model_select(primary_key)]
     pub name: String,
     pub is_reference: bool,
 }
@@ -61,6 +62,7 @@ For a model named `Sample`, the derive generates:
 - Typed field constants such as `SampleSelect::Name`. Each constant carries its model, SQL column,
   and Rust value type.
 - `Sample::select(conn)`, the preferred selector constructor.
+- `Sample::all(conn)`, a convenience wrapper around `Sample::select(conn).load()`.
 
 Every selectable field receives an exact-match method:
 
@@ -104,6 +106,40 @@ let roots = BlockGroup::select(conn)
     .load()
     .expect("should load root block groups");
 ```
+
+## Loading one model or all models
+
+Use `get` when a selector must match at most one model. It returns
+`Result<Option<Model>, ModelSelectError>`: `None` means no row matched, while multiple matches
+produce `ModelSelectError::MultipleResults`.
+
+```rust
+let sample = Sample::select(conn)
+    .name("sample-a")
+    .get()
+    .expect("should query sample");
+```
+
+The derive infers a field named `id` as the model primary key. Mark a differently named key with
+`#[model_select(primary_key)]`; this generates `get_by_id` on the selector:
+
+```rust
+let sample = Sample::select(conn)
+    .get_by_id("sample-a")
+    .expect("should query sample by primary key");
+```
+
+Only one field can be marked as the primary key, and skipped fields cannot be primary keys.
+Models without an `id` field or an explicit `primary_key` attribute do not receive `get_by_id`.
+
+To load every current model, use the generated convenience method:
+
+```rust
+let samples = Sample::all(conn).expect("should load all samples");
+```
+
+`Sample::all(conn)` is exactly `Sample::select(conn).load()`. For a historical read, construct the
+selector explicitly and call `.with_ref(history_ref).load()`.
 
 ## Selecting specific fields
 
@@ -277,9 +313,10 @@ panics with a descriptive message.
 
 ## Error handling
 
-`load()` returns `ModelSelectError` for database preparation, query execution, result-row iteration,
-and projections that refer to a model that was not selected or joined. Callers can propagate it
-directly:
+`load()` and `get()` return `ModelSelectError` for database preparation, query execution,
+result-row iteration, and projections that refer to a model that was not selected or joined.
+`get()` additionally returns `ModelSelectError::MultipleResults` when the selector matches more
+than one model. Callers can propagate these errors directly:
 
 ```rust,ignore
 use gen_models::ModelSelectError;
@@ -301,6 +338,7 @@ field with `model_select` attributes:
 ```rust
 #[derive(ModelSelect)]
 pub struct Example {
+    #[model_select(primary_key)]
     #[model_select(column = "display_name")]
     pub name: String,
 
@@ -346,7 +384,8 @@ At compile time, `ModelSelect`:
 2. Reads the model and field-level `model_select` attributes.
 3. Generates the selector struct, typed field constants, filter methods, and `SelectQuery`
    implementation.
-4. Generates `Model::select(conn)` as the public entry point.
+4. Generates `Model::select(conn)`, `Model::all(conn)`, selector `get()`, and selector
+   `get_by_id(...)` when a primary key is available.
 
 At runtime, [`gen-models::select`](../gen-models/src/select.rs):
 

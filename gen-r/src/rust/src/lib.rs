@@ -2723,7 +2723,9 @@ impl SequenceGraph {
                 })?
             }
         } else if let Some(id) = gen_annotation_record_id(&region)? {
-            let annotation = Annotation::get_by_id(conn, &id, None)
+            let annotation = Annotation::select(conn)
+                .get_by_id(id)
+                .map_err(|error| Error::Other(error.to_string()))?
                 .ok_or_else(|| Error::Other(format!("Annotation with id '{id}' not found")))?;
             let label = annotation.name.clone();
             run_translation_operation(&self.context, &label, || {

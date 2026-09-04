@@ -18,6 +18,7 @@ use crate::{
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, ModelSelect)]
 pub struct Sample {
+    #[model_select(primary_key)]
     pub name: String,
     pub is_reference: bool,
 }

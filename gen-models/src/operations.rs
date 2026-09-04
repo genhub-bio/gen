@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    Direction, ModelSelect,
+    Direction, ModelSelect, ModelSelectError,
     assets::{
         AssetRef, AssetRole, AssetUri, LocalAssetUri, OperationAsset, OperationKind, OperationLog,
     },
@@ -473,6 +473,7 @@ impl FileAddition {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, ModelSelect)]
 pub struct Remote {
+    #[model_select(primary_key)]
     pub name: String,
     pub url: String,
 }
@@ -804,7 +805,15 @@ impl RemoteOperationRecord {
                 assets_transfer_checkpoint
             ],
         )?;
-        Self::get_by_id(conn, &conn.last_insert_rowid(), None)
+        Self::select(conn)
+            .get_by_id(conn.last_insert_rowid())
+            .map_err(|error| match error {
+                ModelSelectError::DatabaseError(error) => error,
+                ModelSelectError::MultipleResults => rusqlite::Error::QueryReturnedMoreThanOneRow,
+                ModelSelectError::ProjectionSourceNotSelected { .. } => {
+                    rusqlite::Error::InvalidQuery
+                }
+            })?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
@@ -1032,7 +1041,6 @@ mod tests {
         assets::{AssetRef, AssetRole, OperationAsset, OperationLog},
         history::{HistoryStore, dolt::DoltHistoryStore},
         test_helpers::setup_gen,
-        traits::Query,
     };
 
     #[cfg(test)]
@@ -1164,7 +1172,6 @@ mod tests {
         use crate::{
             operations::{Remote, RemoteOperationKind, RemoteOperationRecord},
             test_helpers::setup_gen,
-            traits::Query,
         };
 
         #[test]
@@ -1226,7 +1233,9 @@ mod tests {
             resumed
                 .complete(config)
                 .expect("should complete pull operation");
-            let completed = RemoteOperationRecord::get_by_id(config, &resumed.id, None)
+            let completed = RemoteOperationRecord::select(config)
+                .get_by_id(resumed.id)
+                .expect("should query completed pull operation")
                 .expect("should refetch completed pull operation");
             assert!(
                 completed.completed_at.is_some(),
@@ -1298,7 +1307,9 @@ mod tests {
             operation
                 .complete(config)
                 .expect_err("should require assets to reach graph destination");
-            let failed = RemoteOperationRecord::get_by_id(config, &operation.id, None)
+            let failed = RemoteOperationRecord::select(config)
+                .get_by_id(operation.id)
+                .expect("should query failed clone operation")
                 .expect("should refetch failed clone operation");
             assert!(failed.failed_at.is_some(), "failed_at should be set");
         }
@@ -1842,7 +1853,8 @@ mod tests {
         )
         .expect("should track remote asset");
 
-        let asset_refs = AssetRef::all(context.graph().conn());
+        let asset_refs =
+            AssetRef::all(context.graph().conn()).expect("should load asset references");
         assert_eq!(asset_refs.len(), 1);
         assert_eq!(asset_refs[0].uri, asset_uri);
         assert_eq!(asset_refs[0].checksum, None);
@@ -1862,7 +1874,8 @@ mod tests {
         )
         .expect("should track remote asset without reading it");
 
-        let asset_refs = AssetRef::all(context.graph().conn());
+        let asset_refs =
+            AssetRef::all(context.graph().conn()).expect("should load asset references");
         assert_eq!(asset_refs.len(), 1);
         assert_eq!(asset_refs[0].uri, asset_uri);
         assert_eq!(asset_refs[0].checksum, Some(checksum));
@@ -1891,7 +1904,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut operation_logs = OperationLog::all(graph_conn);
+        let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
         let mut first_assets = OperationAsset::by_log_id(graph_conn, &operation_logs[0].id);
         first_assets.sort_by_key(|asset| asset.asset_ref_id);
@@ -1908,12 +1921,18 @@ mod tests {
                 .any(|asset| asset.asset_ref_id == first_assets[0].asset_ref_id)
         );
 
-        let shared_asset = AssetRef::get_by_id(graph_conn, &first_assets[0].asset_ref_id, None)
+        let shared_asset = AssetRef::select(graph_conn)
+            .get_by_id(first_assets[0].asset_ref_id)
+            .expect("should query shared asset ref")
             .expect("should load shared asset ref");
         let unique_asset = second_assets
             .iter()
             .find(|asset| asset.asset_ref_id != first_assets[0].asset_ref_id)
-            .and_then(|asset| AssetRef::get_by_id(graph_conn, &asset.asset_ref_id, None))
+            .and_then(|asset| {
+                AssetRef::select(graph_conn)
+                    .get_by_id(asset.asset_ref_id)
+                    .expect("should query unique asset ref")
+            })
             .expect("should load unique asset ref");
 
         let assets_dir = workspace.asset_dir().unwrap();
@@ -1952,7 +1971,7 @@ mod tests {
             Some("same asset, different filenames"),
         )?;
 
-        let mut asset_refs = AssetRef::all(graph_conn);
+        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
         asset_refs.sort_by(|left, right| left.name.cmp(&right.name));
 
         assert_eq!(
@@ -1986,9 +2005,9 @@ mod tests {
         )
         .unwrap();
 
-        let mut asset_refs = AssetRef::all(graph_conn);
+        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
         asset_refs.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-        let mut operation_logs = OperationLog::all(graph_conn);
+        let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
 
         assert_eq!(asset_refs.len(), 2);

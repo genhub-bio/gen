@@ -249,22 +249,6 @@ pub struct NewAccession {
 }
 
 impl Accession {
-    pub fn get_by_id(
-        conn: &GraphConnection,
-        id: &HashId,
-        history_ref: Option<&str>,
-    ) -> Option<Self> {
-        let mut select = Self::select(conn).id(*id);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
-        select
-            .load()
-            .expect("should load accession by id")
-            .into_iter()
-            .next()
-    }
-
     /// An accession is an ordered array of slices of nodes. The purpose
     /// of an accession is to provide additional layers of information to
     /// a graph. These extra pieces of information can be features such

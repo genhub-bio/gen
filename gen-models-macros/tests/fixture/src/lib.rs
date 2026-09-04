@@ -10,6 +10,7 @@ pub const IDENTIFIER_INJECTED_BRANCH: &str = "selector_identifier_injection";
 
 #[derive(Debug, ModelSelect, PartialEq)]
 pub struct FixtureSample {
+    #[model_select(primary_key)]
     pub name: String,
     pub is_reference: bool,
 }

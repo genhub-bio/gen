@@ -26,6 +26,7 @@ use crate::{
 };
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
 pub struct AnnotationGroup {
+    #[model_select(primary_key)]
     pub name: String,
 }
 
@@ -43,16 +44,6 @@ impl Query for AnnotationGroup {
 }
 
 impl AnnotationGroup {
-    /// Lists annotation groups visible at an optional historical reference.
-    pub fn all(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<AnnotationGroup> {
-        let mut select =
-            AnnotationGroup::select(conn).order_by(AnnotationGroupSelect::Name, Direction::Asc);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
-        select.load().expect("should load annotation groups")
-    }
-
     pub fn create(conn: &GraphConnection, name: &str) -> rusqlite::Result<AnnotationGroup> {
         let mut stmt = conn
             .prepare("INSERT INTO annotation_groups (name) VALUES (?1) returning (name);")
@@ -303,22 +294,6 @@ pub enum AddAnnotationError {
 }
 
 impl Annotation {
-    pub fn get_by_id(
-        conn: &GraphConnection,
-        id: &HashId,
-        history_ref: Option<&str>,
-    ) -> Option<Self> {
-        let mut select = Self::select(conn).id(*id);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
-        select
-            .load()
-            .expect("should load annotation by id")
-            .into_iter()
-            .next()
-    }
-
     pub fn generate_id(name: &str, group: &str, accession_id: &HashId) -> HashId {
         HashId(calculate_hash(&format!("{name}:{group}:{accession_id}",)))
     }
@@ -954,7 +929,6 @@ mod tests {
         sample::Sample,
         sample_lineage::SampleLineage,
         test_helpers::{create_bg, get_connection, setup_block_group, setup_gen},
-        traits::Query,
     };
 
     mod region_resolver {
@@ -1324,7 +1298,7 @@ mod tests {
         AnnotationGroup::create(&conn, "zebra").unwrap();
         AnnotationGroup::create(&conn, "ant").unwrap();
 
-        let groups = AnnotationGroup::all(&conn, None);
+        let groups = AnnotationGroup::all(&conn).expect("should load annotation groups");
 
         assert_eq!(
             groups,
@@ -1496,7 +1470,7 @@ mod tests {
         .unwrap();
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(graph_conn);
+        let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,
@@ -1562,9 +1536,9 @@ mod tests {
         .unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
 
-        let mut asset_refs = AssetRef::all(graph_conn);
+        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
         asset_refs.sort_by(|left, right| left.role.as_str().cmp(right.role.as_str()));
-        let mut operation_logs = OperationLog::all(graph_conn);
+        let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
         assert_eq!(asset_refs.len(), 1);
         assert_eq!(asset_refs[0].role, AssetRole::Annotation);
@@ -1643,7 +1617,7 @@ mod tests {
         )
         .expect("should create annotation file operation");
 
-        let mut asset_refs = AssetRef::all(graph_conn);
+        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
         asset_refs.sort_by(|left, right| {
             left.role
                 .as_str()
@@ -1693,7 +1667,8 @@ mod tests {
         )
         .expect("should track remote annotation assets");
 
-        let asset_refs = AssetRef::all(context.graph().conn());
+        let asset_refs =
+            AssetRef::all(context.graph().conn()).expect("should load asset references");
         assert_eq!(asset_refs.len(), 2);
         assert!(
             asset_refs
@@ -1734,7 +1709,8 @@ mod tests {
         )
         .expect("should track checksummed remote assets without reading them");
 
-        let asset_refs = AssetRef::all(context.graph().conn());
+        let asset_refs =
+            AssetRef::all(context.graph().conn()).expect("should load asset references");
         assert_eq!(asset_refs.len(), 2);
         let annotation = asset_refs
             .iter()
@@ -1782,6 +1758,7 @@ mod tests {
         .expect("should create annotation file operation");
 
         let index_asset = AssetRef::all(graph_conn)
+            .expect("should load asset references")
             .into_iter()
             .find(|asset| asset.role == AssetRole::AnnotationIndex)
             .expect("should store annotation index asset");

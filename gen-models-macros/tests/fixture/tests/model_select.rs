@@ -79,6 +79,61 @@ fn test_generated_filters_order_and_paginate() {
 }
 
 #[test]
+fn test_generated_get_returns_one_or_none_and_rejects_multiple_rows() {
+    let conn = connection();
+    insert_sample(&conn, "alpha", false);
+    insert_sample(&conn, "beta", false);
+
+    let alpha = FixtureSample::select(&conn)
+        .name("alpha")
+        .get()
+        .expect("should get one matching fixture sample");
+    let missing = FixtureSample::select(&conn)
+        .name("missing")
+        .get()
+        .expect("should return no missing fixture sample");
+    let multiple = FixtureSample::select(&conn)
+        .is_reference(false)
+        .get()
+        .expect_err("should reject a selector matching multiple rows");
+
+    assert_eq!(alpha.expect("should find alpha").name, "alpha");
+    assert_eq!(missing, None);
+    assert_eq!(multiple, ModelSelectError::MultipleResults);
+}
+
+#[test]
+fn test_generated_get_by_id_uses_the_model_primary_key() {
+    let conn = connection();
+    insert_sample(&conn, "alpha", false);
+    insert_group(&conn, 42, "alpha", "group", "collection");
+
+    let sample = FixtureSample::select(&conn)
+        .get_by_id("alpha")
+        .expect("should get a fixture sample by its name primary key");
+    let group = FixtureGroup::select(&conn)
+        .get_by_id(42)
+        .expect("should get a fixture group by its inferred id primary key");
+
+    assert_eq!(sample.expect("should find alpha").name, "alpha");
+    assert_eq!(group.expect("should find group 42").id, 42);
+}
+
+#[test]
+fn test_generated_all_loads_every_model() {
+    let conn = connection();
+    insert_sample(&conn, "alpha", false);
+    insert_sample(&conn, "beta", true);
+
+    let mut samples = FixtureSample::all(&conn).expect("should load every fixture sample");
+    samples.sort_by(|left, right| left.name.cmp(&right.name));
+
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].name, "alpha");
+    assert_eq!(samples[1].name, "beta");
+}
+
+#[test]
 fn test_generated_filters_accept_multiple_values() {
     let conn = connection();
     for name in ["alpha", "beta", "gamma"] {

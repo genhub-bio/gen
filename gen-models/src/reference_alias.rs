@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn test_prepopulated_aliases() {
         let conn = &mut get_connection(None).unwrap();
-        let reference_aliases = ReferenceAlias::all(conn);
+        let reference_aliases = ReferenceAlias::all(conn).expect("should load reference aliases");
         assert_eq!(reference_aliases.len(), 107);
         let first_e_coli_reference = reference_aliases
             .iter()

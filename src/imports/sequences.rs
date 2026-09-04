@@ -259,7 +259,6 @@ mod tests {
         errors::OperationError,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
-        traits::Query,
     };
 
     use super::*;
@@ -276,7 +275,7 @@ mod tests {
             import_sequences(&context, &entries, "test", Sample::DEFAULT_NAME).unwrap();
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(conn);
+        let mut operation_logs = OperationLog::all(conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,
@@ -319,7 +318,7 @@ mod tests {
         .unwrap();
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(conn);
+        let mut operation_logs = OperationLog::all(conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,

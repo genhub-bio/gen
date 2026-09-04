@@ -1522,7 +1522,7 @@ mod tests {
 
         BlockGroup::delete(conn, "test", &bg1.sample_name, &bg1.name).unwrap();
 
-        let bgs = BlockGroup::all(conn);
+        let bgs = BlockGroup::all(conn).expect("should load block groups");
         assert_eq!(bgs.len(), 1);
         assert_eq!(bgs[0], bg2);
     }
@@ -2366,8 +2366,10 @@ mod tests {
             path_end: 15,
             strand: Strand::Forward,
         };
-        let annotation_accession =
-            Accession::get_by_id(&conn, &annotation.accession_id, None).unwrap();
+        let annotation_accession = Accession::select(&conn)
+            .get_by_id(annotation.accession_id)
+            .expect("should query annotation accession")
+            .expect("should find annotation accession");
         let region =
             ResolvedGenRegion::from_annotation(&conn, &annotation, &annotation_accession, 5, 15)
                 .unwrap();

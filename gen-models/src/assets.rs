@@ -281,22 +281,6 @@ impl Query for OperationAsset {
 }
 
 impl AssetRef {
-    pub fn get_by_id(
-        conn: &GraphConnection,
-        id: &HashId,
-        history_ref: Option<&str>,
-    ) -> Option<Self> {
-        let mut select = Self::select(conn).id(*id);
-        if let Some(history_ref) = history_ref {
-            select = select.with_ref(history_ref);
-        }
-        select
-            .load()
-            .expect("should load asset reference by id")
-            .into_iter()
-            .next()
-    }
-
     /// Return the versioned store path for an asset.
     ///
     /// Logical paths describe the materialized workspace view and can point at a newer version.
@@ -1706,7 +1690,6 @@ mod tests {
         history::dolt::commit_all,
         operations::{calculate_file_checksum, calculate_reader_checksum},
         test_helpers::setup_gen,
-        traits::Query,
     };
 
     #[test]
@@ -1741,9 +1724,9 @@ mod tests {
         AssetRef::create(conn, &asset_ref).expect("should insert asset ref");
         OperationAsset::create(conn, &operation_asset).expect("should insert operation asset");
 
-        let asset_refs = AssetRef::all(conn);
-        let operation_logs = OperationLog::all(conn);
-        let operation_assets = OperationAsset::all(conn);
+        let asset_refs = AssetRef::all(conn).expect("should load asset references");
+        let operation_logs = OperationLog::all(conn).expect("should load operation logs");
+        let operation_assets = OperationAsset::all(conn).expect("should load operation assets");
 
         assert_eq!(asset_refs, vec![asset_ref]);
         assert_eq!(operation_logs, vec![operation_log]);

@@ -232,7 +232,6 @@ mod tests {
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::{OperationFile, commit_operation_summary},
         sample::Sample,
-        traits::Query,
     };
     use noodles::fasta;
 
@@ -307,7 +306,7 @@ mod tests {
         let history_store = DoltHistoryStore::new(conn);
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(conn);
+        let mut operation_logs = OperationLog::all(conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,
