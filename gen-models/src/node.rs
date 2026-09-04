@@ -130,7 +130,13 @@ impl Node {
         node_ids: &[HashId],
         history_ref: Option<&str>,
     ) -> HashMap<HashId, Sequence> {
-        let nodes = Node::query_by_ids(conn, node_ids, history_ref);
+        let mut node_select = Node::select(conn);
+        if let Some(history_ref) = history_ref {
+            node_select = node_select.with_ref(history_ref);
+        }
+        let nodes = node_select
+            .query_by_ids(node_ids.iter().copied())
+            .expect("should load nodes by id");
         let sequence_hashes_by_node_id = nodes
             .iter()
             .map(|node| (node.id, node.sequence_hash))

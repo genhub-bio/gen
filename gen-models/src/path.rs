@@ -230,7 +230,13 @@ impl Path {
         history_ref: Option<&str>,
     ) -> Vec<Edge> {
         let edge_ids = Self::edge_ids_for_path(conn, path_id, history_ref);
-        Edge::query_by_ids(conn, &edge_ids, history_ref)
+        let mut select = Edge::select(conn);
+        if let Some(history_ref) = history_ref {
+            select = select.with_ref(history_ref);
+        }
+        select
+            .query_by_ids(edge_ids)
+            .expect("should load path edges by id")
     }
 
     fn validate_ordered_edges(edge_data: &[EdgeData]) -> Result<(), PathError> {
@@ -1472,7 +1478,9 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, existing_path) = setup_block_group(conn);
         let edge_ids = Path::edge_ids_for_path(conn, &existing_path.id, None);
-        let edge_data = Edge::query_by_ids(conn, &edge_ids, None)
+        let edge_data = Edge::select(conn)
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load path edges by id")
             .iter()
             .map(EdgeData::from)
             .collect::<Vec<_>>();

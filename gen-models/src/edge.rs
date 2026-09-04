@@ -290,7 +290,9 @@ impl Edge {
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let batch_size = max_rows_per_batch(conn, 7);
 
-        let query = Edge::query_by_ids(conn, &edge_ids, None);
+        let query = Edge::select(conn)
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load existing edges by id");
         let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
 
         let mut edges_to_insert = IndexSet::new();
@@ -1238,7 +1240,9 @@ mod tests {
 
         let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
         assert_eq!(edge_ids.len(), 3);
-        let edges = Edge::query_by_ids(conn, &edge_ids, None);
+        let edges = Edge::select(conn)
+            .query_by_ids(edge_ids)
+            .expect("should load edges by id");
         assert_eq!(edges.len(), 3);
 
         let edges_by_source_node_id = edges
@@ -2001,7 +2005,9 @@ mod tests {
 
         let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
         assert_eq!(edge_ids.len(), 3);
-        let edges = Edge::query_by_ids(conn, &edge_ids, None);
+        let edges = Edge::select(conn)
+            .query_by_ids(edge_ids)
+            .expect("should load edges by id");
         assert_eq!(edges.len(), 3);
 
         let edges_by_source_node_id = edges

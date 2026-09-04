@@ -123,6 +123,7 @@ impl Query for CustomSourceModel {
 
 pub fn connection() -> Connection {
     let conn = Connection::open_in_memory().expect("should open fixture database");
+    rusqlite::vtab::array::load_module(&conn).expect("should load the fixture rarray module");
     conn.execute_batch(
         r#"
         CREATE TABLE fixture_samples (

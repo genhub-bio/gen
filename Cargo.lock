@@ -1973,6 +1973,7 @@ version = "0.2.1"
 dependencies = [
  "gen-models",
  "gen-models-macros",
+ "rusqdoltlite",
 ]
 
 [[package]]

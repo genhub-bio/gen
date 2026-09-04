@@ -1190,7 +1190,9 @@ impl BlockGroup {
             .iter()
             .map(|(_to, _from, edge_info)| edge_info[0].edge_id)
             .collect::<Vec<_>>();
-        let source_edges = Edge::query_by_ids(conn, &subgraph_edge_ids, None);
+        let source_edges = Edge::select(conn)
+            .query_by_ids(subgraph_edge_ids.iter().copied())
+            .expect("should load source edges by id");
 
         let source_block_group_edges = BlockGroupEdge::specific_edges_for_block_group(
             conn,

@@ -13,6 +13,8 @@ use syn::{
 /// typed ordering, projections, and explicit join conditions. Generated selectors can be composed
 /// with `.join_on(left_field, right_field)` or `.join_filtered_on(...)`. Joined queries can project
 /// fields with `.only(...)` or complete models with `.models::<(...)>()`.
+/// Primary-key selectors also provide `get_by_id(...)` and ordered, deduplicated
+/// `query_by_ids(...)` loads.
 /// `#[model_select(column = "...")]` overrides a field's SQL column,
 /// `#[model_select(primary_key)]` marks a non-`id` primary key, `#[model_select(skip)]` excludes a
 /// field, and the struct-level `source`, `alias`, and `select` options support custom or aliased
@@ -150,8 +152,9 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     }
 
     let primary_key = explicit_primary_key.or(inferred_primary_key);
-    let get_by_id_method = primary_key
+    let primary_key_methods = primary_key
         .map(|(field, field_type, string)| {
+            let in_method = format_ident!("{}_in", field);
             if string {
                 quote! {
                     pub fn get_by_id(
@@ -162,6 +165,20 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                         ::gen_models::ModelSelectError,
                     > {
                         self.#field(id).get()
+                    }
+
+                    pub fn query_by_ids<I, V>(
+                        self,
+                        ids: I,
+                    ) -> ::core::result::Result<
+                        ::std::vec::Vec<#model>,
+                        ::gen_models::ModelSelectError,
+                    >
+                    where
+                        I: ::core::iter::IntoIterator<Item = V>,
+                        V: ::core::convert::Into<::std::string::String>,
+                    {
+                        self.#in_method(ids).load()
                     }
                 }
             } else {
@@ -174,6 +191,19 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                         ::gen_models::ModelSelectError,
                     > {
                         self.#field(id).get()
+                    }
+
+                    pub fn query_by_ids<I>(
+                        self,
+                        ids: I,
+                    ) -> ::core::result::Result<
+                        ::std::vec::Vec<#model>,
+                        ::gen_models::ModelSelectError,
+                    >
+                    where
+                        I: ::core::iter::IntoIterator<Item = #field_type>,
+                    {
+                        self.#in_method(ids).load()
                     }
                 }
             }
@@ -426,7 +456,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 ::gen_models::select::get::<#model, _>(self.conn, &self)
             }
 
-            #get_by_id_method
+            #primary_key_methods
 
             pub(crate) fn push_filter(
                 mut self,

@@ -4,6 +4,7 @@ use gen_models_macros_fixture::{
     FixtureSampleSelect, IDENTIFIER_INJECTED_BRANCH, MissingTableModel, MissingTableModelSelect,
     QuotedIdentifierModel, QuotedIdentifierModelSelect, connection, insert_group, insert_sample,
 };
+use rusqlite::limits::Limit;
 
 fn branch_exists(conn: &Connection, branch_name: &str) -> bool {
     conn.query_row(
@@ -163,6 +164,41 @@ fn test_generated_filters_accept_multiple_values() {
     assert_eq!(names, vec!["alpha", "gamma"]);
     assert_eq!(group_names, vec!["first", "third"]);
     assert!(empty.is_empty());
+}
+
+#[test]
+fn test_generated_in_filters_preserve_input_order_and_deduplicate() {
+    let conn = connection();
+    for name in ["alpha", "beta", "gamma"] {
+        insert_sample(&conn, name, false);
+    }
+
+    let names = FixtureSample::select(&conn)
+        .name_in(["gamma", "alpha", "gamma", "beta"])
+        .only(FixtureSampleSelect::Name)
+        .load()
+        .expect("should load values in input order");
+
+    assert_eq!(names, vec!["gamma", "alpha", "beta"]);
+}
+
+#[test]
+fn test_generated_query_by_ids_batches_above_the_parameter_limit() {
+    let conn = connection();
+    insert_group(&conn, 1, "alpha", "first", "collection");
+    insert_group(&conn, 3, "gamma", "third", "collection");
+
+    conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 3)
+        .expect("should lower the fixture parameter limit");
+
+    let groups = FixtureGroup::select(&conn)
+        .query_by_ids([3, 100, 1, 101, 3])
+        .expect("should query groups across parameter-sized batches");
+
+    assert_eq!(
+        groups.into_iter().map(|group| group.id).collect::<Vec<_>>(),
+        vec![3, 1]
+    );
 }
 
 #[test]

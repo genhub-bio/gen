@@ -13,7 +13,6 @@ use gen_models::{
     path::Path,
     region::{Region, resolve},
     sample::Sample,
-    traits::Query,
 };
 use petgraph::algo::is_cyclic_directed;
 use thiserror::Error;
@@ -269,7 +268,9 @@ pub fn derive_chunks(
             )?;
         }
 
-        let path_edges = Edge::query_by_ids(conn, &new_path_edge_ids, None);
+        let path_edges = Edge::select(conn)
+            .query_by_ids(new_path_edge_ids)
+            .expect("should load path edges by id");
 
         block_group_chunks.push(BlockGroupChunk {
             entry_node_points: vec![start_node_point.clone()],

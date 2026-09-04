@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 gen-models = { path = "../../../gen-models", version = "0.2.1" }
 gen-models-macros = { path = "../..", version = "0.2.1" }
+rusqlite = { package = "rusqdoltlite", version = "0.40.16", features = ["array", "limits"] }

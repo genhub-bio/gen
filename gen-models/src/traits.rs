@@ -1,9 +1,7 @@
 use std::rc::Rc;
 
 use itertools::Itertools;
-use rusqlite::{
-    Connection, Params, Result as SQLResult, Row, ToSql, limits::Limit, params, types::Value,
-};
+use rusqlite::{Connection, Params, Result as SQLResult, Row, limits::Limit, params, types::Value};
 
 use crate::errors::QueryError;
 
@@ -69,45 +67,6 @@ pub trait Query {
         }
     }
 
-    fn query_by_ids<T>(conn: &Connection, ids: &[T], history_ref: Option<&str>) -> Vec<Self::Model>
-    where
-        T: Clone,
-        Value: From<T>,
-    {
-        let mut results = vec![];
-        let batch_size = max_rows_per_batch(conn, 1);
-        for chunk in &ids.iter().chunks(batch_size) {
-            let values: Vec<Value> = chunk.map(|value| Value::from(value.clone())).collect();
-            let query = format!(
-                "
-                    WITH arr AS (
-                    SELECT value, rowid AS pos
-                    FROM rarray(:ids)
-                    )
-                    SELECT t.*
-                    FROM {} t
-                    JOIN arr ON t.{} = arr.value
-                    ORDER BY arr.pos;
-                    ",
-                Self::table_name_with_history_ref(history_ref),
-                Self::PRIMARY_KEY
-            );
-            let mut stmt = conn.prepare(&query).unwrap();
-            let id_values = Rc::new(values);
-            let mut params: Vec<(&str, &dyn ToSql)> = vec![(":ids", &id_values)];
-            if let Some(history_ref) = history_ref.as_ref() {
-                params.push((":history_ref", history_ref));
-            }
-            let rows = stmt
-                .query_map(&params[..], |row| Ok(Self::process_row(row)))
-                .unwrap();
-            for row in rows {
-                results.push(row.unwrap());
-            }
-        }
-        results
-    }
-
     fn delete_by_ids<'a, I: ?Sized, T>(conn: &Connection, ids: &'a I) -> Vec<Self::Model>
     where
         &'a I: IntoIterator<Item = &'a T>,
@@ -134,8 +93,4 @@ pub trait Query {
     }
 
     fn process_row(row: &Row) -> Self::Model;
-
-    fn table_name() -> &'static str {
-        Self::TABLE_NAME
-    }
 }

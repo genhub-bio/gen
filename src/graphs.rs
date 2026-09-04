@@ -5,7 +5,6 @@ use gen_models::{
     db::GraphConnection,
     edge::{Edge, EdgeData},
     path::Path,
-    traits::Query,
 };
 use thiserror::Error;
 
@@ -159,7 +158,9 @@ pub fn stitch(
     {
         path_edges.extend(source_path_edges.clone());
 
-        let created_edges = Edge::query_by_ids(conn, &edge_ids, None);
+        let created_edges = Edge::select(conn)
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load created edges by id");
         let stitch_edge = created_edges.iter().find(|edge| {
             edge.source_node_id == edge_start_point.id
                 && edge.source_coordinate == edge_start_point.coordinate

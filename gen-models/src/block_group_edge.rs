@@ -207,7 +207,13 @@ impl BlockGroupEdge {
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids, history_ref);
+        let mut edge_select = Edge::select(conn);
+        if let Some(history_ref) = history_ref {
+            edge_select = edge_select.with_ref(history_ref);
+        }
+        let edges = edge_select
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load edges by id");
         let edge_map = edges
             .iter()
             .map(|edge| (&edge.id, edge))
@@ -254,7 +260,13 @@ impl BlockGroupEdge {
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids, history_ref);
+        let mut edge_select = Edge::select(conn);
+        if let Some(history_ref) = history_ref {
+            edge_select = edge_select.with_ref(history_ref);
+        }
+        let edges = edge_select
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load edges by id");
 
         let edge_map = edges
             .iter()

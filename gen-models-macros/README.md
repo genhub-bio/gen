@@ -71,11 +71,15 @@ Sample::select(conn).is_reference(true);
 ```
 
 Every selectable field also receives an `_in` method for matching any value from a typed
-iterator. Empty iterators match no rows:
+iterator. The result follows the values' first-occurrence order, repeated input values are
+deduplicated, and empty iterators match no rows:
 
 ```rust
 Sample::select(conn).name_in(["sample-a", "sample-b"]);
 ```
+
+List values are bound through SQLite's `rarray` virtual table. Large inputs are divided into
+parameter-limit-sized chunks and recombined while retaining their original order.
 
 `String` fields also receive a case-insensitive `_contains` method:
 
@@ -121,16 +125,23 @@ let sample = Sample::select(conn)
 ```
 
 The derive infers a field named `id` as the model primary key. Mark a differently named key with
-`#[model_select(primary_key)]`; this generates `get_by_id` on the selector:
+`#[model_select(primary_key)]`; this generates `get_by_id` and `query_by_ids` on the selector:
 
 ```rust
 let sample = Sample::select(conn)
     .get_by_id("sample-a")
     .expect("should query sample by primary key");
+
+let samples = Sample::select(conn)
+    .query_by_ids(["sample-b", "sample-a", "sample-b"])
+    .expect("should query samples by primary key");
 ```
 
+`query_by_ids` has the same ordered and deduplicated behavior as the generated `_in` filter.
+
 Only one field can be marked as the primary key, and skipped fields cannot be primary keys.
-Models without an `id` field or an explicit `primary_key` attribute do not receive `get_by_id`.
+Models without an `id` field or an explicit `primary_key` attribute receive neither primary-key
+convenience method.
 
 To load every current model, use the generated convenience method:
 
@@ -385,7 +396,7 @@ At compile time, `ModelSelect`:
 3. Generates the selector struct, typed field constants, filter methods, and `SelectQuery`
    implementation.
 4. Generates `Model::select(conn)`, `Model::all(conn)`, selector `get()`, and selector
-   `get_by_id(...)` when a primary key is available.
+   `get_by_id(...)` and `query_by_ids(...)` when a primary key is available.
 
 At runtime, [`gen-models::select`](../gen-models/src/select.rs):
 
@@ -393,7 +404,8 @@ At runtime, [`gen-models::select`](../gen-models/src/select.rs):
 2. Builds requested join conditions from typed field constants supplied by the caller.
 3. Quotes every structured table, alias, and column identifier, then renders one `SELECT` statement
    for the base model and its joined sources.
-4. Binds every runtime value through `rusqlite`.
+4. Binds every runtime value through `rusqlite`; list filters use `rarray` relations to retain
+   input order and avoid interpolating placeholder lists.
 5. Maps full base-model loads through `Query::process_row`, or typed field and model projections
    through fallible decoders generated for their selected types.
 
