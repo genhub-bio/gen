@@ -1,0 +1,10 @@
+[package]
+name = "gen-models-macros-fixture"
+description = "Integration fixture for the gen-models-macros crate."
+version = "0.2.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+gen-models = { path = "../../../gen-models", version = "0.2.1" }
+gen-models-macros = { path = "../..", version = "0.2.1" }

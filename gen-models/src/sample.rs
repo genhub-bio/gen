@@ -338,8 +338,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        ModelSelectError,
-        block_group::BlockGroupSelect,
         collection::Collection,
         errors::SampleError,
         history::dolt::commit_staged_all,
@@ -406,262 +404,12 @@ mod tests {
             .unwrap();
         }
 
-        let matches = Sample::select(conn)
-            .name_contains("FoO")
-            .order_by(SampleSelect::Name, Direction::CaseInsensitiveAsc)
-            .load()
-            .expect("should load matching samples")
+        let matches = Sample::search_name(conn, "FoO", None)
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
 
-        assert_eq!(matches, vec!["BarFooBaz", "foo", "QuxFood"]);
-
-        let exact_matches = Sample::select(conn)
-            .name("foo")
-            .load()
-            .expect("should load exact sample match");
-        assert_eq!(exact_matches.len(), 1);
-        assert_eq!(exact_matches[0].name, "foo");
-
-        let limited_matches = Sample::select(conn)
-            .name_contains("FoO")
-            .order_by(SampleSelect::Name, Direction::CaseInsensitiveDesc)
-            .limit(2)
-            .load()
-            .expect("should load limited sample matches")
-            .into_iter()
-            .map(|sample| sample.name)
-            .collect::<Vec<_>>();
-
-        assert_eq!(limited_matches, vec!["QuxFood", "foo"]);
-    }
-
-    #[test]
-    fn test_select_only_returns_typed_fields() {
-        let conn = &get_connection(None).expect("should create graph database");
-        Sample::create(
-            conn,
-            NewSample {
-                name: "alpha",
-                is_reference: false,
-            },
-        )
-        .expect("should create alpha sample");
-        Sample::create(
-            conn,
-            NewSample {
-                name: "beta",
-                is_reference: true,
-            },
-        )
-        .expect("should create beta sample");
-
-        let names: Vec<String> = Sample::select(conn)
-            .order_by(SampleSelect::Name, Direction::Asc)
-            .only(SampleSelect::Name)
-            .load()
-            .expect("should load selected sample names");
-        let rows: Vec<(String, bool)> = Sample::select(conn)
-            .order_by(SampleSelect::Name, Direction::Asc)
-            .only((SampleSelect::Name, SampleSelect::IsReference))
-            .load()
-            .expect("should load selected sample fields");
-        let sixteen_names = Sample::select(conn)
-            .name("alpha")
-            .only((
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-                SampleSelect::Name,
-            ))
-            .load()
-            .expect("should load a 16-field projection");
-
-        assert_eq!(names, vec!["alpha", "beta"]);
-        assert_eq!(
-            rows,
-            vec![("alpha".to_string(), false), ("beta".to_string(), true)]
-        );
-        assert_eq!(sixteen_names[0].0, "alpha");
-        assert_eq!(sixteen_names[0].15, "alpha");
-    }
-
-    #[test]
-    fn test_search_supports_sort_and_pagination() {
-        let conn = &get_connection(None).unwrap();
-
-        for (sample, is_reference) in [
-            ("alpha", false),
-            ("BarFooBaz", true),
-            ("foo", true),
-            ("QuxFood", true),
-            ("zzz", false),
-        ] {
-            Sample::create(
-                conn,
-                NewSample {
-                    name: sample,
-                    is_reference,
-                },
-            )
-            .unwrap();
-        }
-
-        let matches = Sample::select(conn)
-            .name_contains("o")
-            .is_reference(true)
-            .order_by(SampleSelect::Name, Direction::CaseInsensitiveDesc)
-            .limit(2)
-            .offset(1)
-            .load()
-            .expect("should load paginated sample matches")
-            .into_iter()
-            .map(|sample| sample.name)
-            .collect::<Vec<_>>();
-
-        assert_eq!(matches, vec!["foo", "BarFooBaz"]);
-    }
-
-    #[test]
-    fn test_name_contains_treats_like_wildcards_as_literals() {
-        let conn = &get_connection(None).expect("should create graph database");
-        for name in ["foo%", "foo_", "fooX"] {
-            Sample::create(
-                conn,
-                NewSample {
-                    name,
-                    is_reference: false,
-                },
-            )
-            .expect("should create wildcard sample");
-        }
-
-        let percent_matches = Sample::select(conn)
-            .name_contains("%")
-            .load()
-            .expect("should match a literal percent sign");
-        let underscore_matches = Sample::select(conn)
-            .name_contains("_")
-            .load()
-            .expect("should match a literal underscore");
-        let exact_percent = Sample::select(conn)
-            .name("foo%")
-            .load()
-            .expect("should exactly match a percent sign");
-        let exact_underscore = Sample::select(conn)
-            .name("foo_")
-            .load()
-            .expect("should exactly match an underscore");
-        let sql_looking_input = Sample::select(conn)
-            .name("' OR 1 = 1 --")
-            .load()
-            .expect("should treat SQL-looking input as a value");
-
-        assert_eq!(percent_matches[0].name, "foo%");
-        assert_eq!(underscore_matches[0].name, "foo_");
-        assert_eq!(exact_percent[0].name, "foo%");
-        assert_eq!(exact_underscore[0].name, "foo_");
-        assert!(sql_looking_input.is_empty());
-    }
-
-    #[test]
-    fn test_select_joins_related_model_selectors() {
-        let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "join-test").unwrap();
-        create_bg(conn, "join-test", "sample-alpha", "target-group");
-        create_bg(conn, "join-test", "sample-beta", "other-group");
-        Sample::set_reference(conn, "sample-alpha", true).unwrap();
-
-        let samples = Sample::select(conn)
-            .name_contains("sample")
-            .join_filtered_on(
-                SampleSelect::Name,
-                BlockGroupSelect::SampleName,
-                BlockGroup::select(conn).name("target-group"),
-            )
-            .join_filtered_on(
-                SampleSelect::Name,
-                BlockGroupSelect::SampleName,
-                BlockGroup::select(conn).collection_name("join-test"),
-            )
-            .load()
-            .expect("should load joined samples")
-            .into_iter()
-            .map(|sample| sample.name)
-            .collect::<Vec<_>>();
-        assert_eq!(samples, vec!["sample-alpha"]);
-
-        let block_groups = BlockGroup::select(conn)
-            .name_contains("group")
-            .join_filtered_on(
-                BlockGroupSelect::SampleName,
-                SampleSelect::Name,
-                Sample::select(conn).is_reference(true),
-            )
-            .load()
-            .expect("should load joined block groups")
-            .into_iter()
-            .map(|block_group| block_group.name)
-            .collect::<Vec<_>>();
-        assert_eq!(block_groups, vec!["target-group"]);
-
-        let projected_rows: Vec<(String, String)> = Sample::select(conn)
-            .name("sample-alpha")
-            .join_on(SampleSelect::Name, BlockGroupSelect::SampleName)
-            .only((SampleSelect::Name, BlockGroupSelect::Name))
-            .load()
-            .expect("should load fields from both joined models");
-        assert_eq!(
-            projected_rows,
-            vec![("sample-alpha".to_string(), "target-group".to_string())]
-        );
-
-        let model_rows: Vec<(Sample, BlockGroup)> = Sample::select(conn)
-            .join_filtered_on(
-                SampleSelect::Name,
-                BlockGroupSelect::SampleName,
-                BlockGroup::select(conn).name("target-group"),
-            )
-            .models::<(Sample, BlockGroup)>()
-            .load()
-            .expect("should load both joined models");
-        assert_eq!(model_rows.len(), 1);
-        assert_eq!(model_rows[0].0.name, "sample-alpha");
-        assert_eq!(model_rows[0].1.name, "target-group");
-    }
-
-    #[test]
-    fn test_projections_reject_unjoined_sources() {
-        let conn = &get_connection(None).expect("should create graph database");
-
-        let error = Sample::select(conn)
-            .only((SampleSelect::Name, BlockGroupSelect::Name))
-            .load()
-            .expect_err("should reject a field from a model that was not joined");
-        let model_error = Sample::select(conn)
-            .models::<(Sample, BlockGroup)>()
-            .load()
-            .expect_err("should reject a model that was not joined");
-
-        let expected_error = ModelSelectError::ProjectionSourceNotSelected {
-            table_name: "block_groups".to_string(),
-            alias: "block_groups".to_string(),
-        };
-        assert_eq!(error, expected_error);
-        assert_eq!(model_error, expected_error);
+        assert_eq!(matches, vec!["BarFooBaz", "QuxFood", "foo"]);
     }
 
     #[test]
@@ -687,42 +435,12 @@ mod tests {
         )
         .expect("should create current sample");
 
-        let matches = Sample::select(conn)
-            .with_ref(&historical_ref)
-            .name_contains("foo")
-            .order_by(SampleSelect::Name, Direction::Asc)
-            .load()
-            .expect("should load historical samples")
+        let matches = Sample::search_name(conn, "foo", Some(&historical_ref))
             .into_iter()
             .map(|sample| sample.name)
             .collect::<Vec<_>>();
 
         assert_eq!(matches, vec!["historical-foo"]);
-    }
-
-    #[test]
-    fn test_join_applies_history_ref_to_every_source() {
-        let conn = &get_connection(None).unwrap();
-        Collection::create(conn, "history-join").unwrap();
-        create_bg(conn, "history-join", "historical-sample", "matching-group");
-        let historical_commit =
-            commit_staged_all(conn, "add historical join rows").expect("should commit join rows");
-        create_bg(conn, "history-join", "current-sample", "matching-group");
-
-        let samples = Sample::select(conn)
-            .join_filtered_on(
-                SampleSelect::Name,
-                BlockGroupSelect::SampleName,
-                BlockGroup::select(conn).name("matching-group"),
-            )
-            .with_ref(historical_commit.to_string())
-            .load()
-            .expect("should load historical joined samples")
-            .into_iter()
-            .map(|sample| sample.name)
-            .collect::<Vec<_>>();
-
-        assert_eq!(samples, vec!["historical-sample"]);
     }
 
     #[test]

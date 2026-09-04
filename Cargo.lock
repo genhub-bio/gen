@@ -1968,6 +1968,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gen-models-macros-fixture"
+version = "0.2.1"
+dependencies = [
+ "gen-models",
+ "gen-models-macros",
+]
+
+[[package]]
 name = "gen-sugiyama"
 version = "0.2.1"
 dependencies = [
