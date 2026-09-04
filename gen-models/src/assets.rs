@@ -11,7 +11,7 @@ use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use indexmap::IndexMap;
 use opendal::{blocking, services};
 use rusqlite::{
-    Row, ToSql, named_params, params,
+    ToSql, named_params, params,
     types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use sha2::{Digest, Sha256};
@@ -179,6 +179,7 @@ impl FromSql for AssetRole {
 /// Use [`Self::get_cumulative_assets_at`] when that provenance is needed and
 /// [`Self::get_materialized_assets_at`] when constructing the one-file-per-path workspace view.
 #[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "gen_asset_refs")]
 pub struct AssetRef {
     pub id: HashId,
     pub uri: String,
@@ -213,6 +214,7 @@ pub struct AnnotationFileAssets {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "gen_operation_log")]
 pub struct OperationLog {
     pub id: HashId,
     pub operation_kind: OperationKind,
@@ -221,63 +223,12 @@ pub struct OperationLog {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "gen_operation_assets")]
 pub struct OperationAsset {
+    #[model_select(primary_key)]
     pub log_id: HashId,
     pub asset_ref_id: HashId,
     pub role: AssetRole,
-}
-
-impl Query for AssetRef {
-    type Model = AssetRef;
-
-    const PRIMARY_KEY: &'static str = "id";
-    const TABLE_NAME: &'static str = "gen_asset_refs";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            id: row.get("id").unwrap(),
-            uri: row.get("uri").unwrap(),
-            file_type: row.get("file_type").unwrap(),
-            checksum: row.get("checksum").unwrap(),
-            size: row.get("size").unwrap(),
-            role: row.get("role").unwrap(),
-            logical_path: row.get("logical_path").unwrap(),
-            name: row.get("name").unwrap(),
-            created_on: row.get("created_on").unwrap(),
-            upstream_asset_ref_id: row.get("upstream_asset_ref_id").unwrap(),
-        }
-    }
-}
-
-impl Query for OperationLog {
-    type Model = OperationLog;
-
-    const PRIMARY_KEY: &'static str = "id";
-    const TABLE_NAME: &'static str = "gen_operation_log";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            id: row.get("id").unwrap(),
-            operation_kind: row.get("operation_kind").unwrap(),
-            command: row.get("command").unwrap(),
-            created_on: row.get("created_on").unwrap(),
-        }
-    }
-}
-
-impl Query for OperationAsset {
-    type Model = OperationAsset;
-
-    const PRIMARY_KEY: &'static str = "log_id";
-    const TABLE_NAME: &'static str = "gen_operation_assets";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            log_id: row.get("log_id").unwrap(),
-            asset_ref_id: row.get("asset_ref_id").unwrap(),
-            role: row.get("role").unwrap(),
-        }
-    }
 }
 
 impl AssetRef {

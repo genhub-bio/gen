@@ -25,22 +25,10 @@ use crate::{
     traits::{Query, max_rows_per_batch},
 };
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "annotation_groups")]
 pub struct AnnotationGroup {
     #[model_select(primary_key)]
     pub name: String,
-}
-
-impl Query for AnnotationGroup {
-    type Model = AnnotationGroup;
-
-    const PRIMARY_KEY: &'static str = "name";
-    const TABLE_NAME: &'static str = "annotation_groups";
-
-    fn process_row(row: &Row) -> Self::Model {
-        AnnotationGroup {
-            name: row.get(0).unwrap(),
-        }
-    }
 }
 
 impl AnnotationGroup {
@@ -101,6 +89,7 @@ impl<'a> Capnp<'a> for AnnotationGroup {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "annotations", from_row = annotation_from_row)]
 pub struct Annotation {
     pub id: HashId,
     pub name: String,
@@ -109,6 +98,17 @@ pub struct Annotation {
     pub accession_id: HashId,
     #[model_select(skip)]
     pub extra: Option<AnnotationExtra>,
+}
+
+fn annotation_from_row(row: &Row) -> Annotation {
+    Annotation {
+        id: row.get(0).expect("should read annotation id"),
+        name: row.get(1).expect("should read annotation name"),
+        group: row.get(2).expect("should read annotation group"),
+        accession_id: row.get(3).expect("should read annotation accession id"),
+        extra: deserialize_annotation_extra(row.get(4).expect("should read annotation extra"))
+            .expect("should deserialize annotation extra from database"),
+    }
 }
 
 /// For use with create/bulk_create methods.
@@ -246,23 +246,6 @@ impl<'a> Capnp<'a> for Annotation {
             group,
             accession_id,
             extra,
-        }
-    }
-}
-
-impl Query for Annotation {
-    type Model = Annotation;
-
-    const TABLE_NAME: &'static str = "annotations";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Annotation {
-            id: row.get(0).unwrap(),
-            name: row.get(1).unwrap(),
-            group: row.get(2).unwrap(),
-            accession_id: row.get(3).unwrap(),
-            extra: deserialize_annotation_extra(row.get(4).unwrap())
-                .expect("should deserialize annotation extra from database"),
         }
     }
 }
@@ -600,23 +583,11 @@ impl RegionResolver for Annotation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "annotation_group_samples")]
 pub struct AnnotationGroupSample {
+    #[model_select(primary_key)]
     pub annotation_group: String,
     pub sample_name: String,
-}
-
-impl Query for AnnotationGroupSample {
-    type Model = AnnotationGroupSample;
-
-    const PRIMARY_KEY: &'static str = "annotation_group";
-    const TABLE_NAME: &'static str = "annotation_group_samples";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            annotation_group: row.get(0).unwrap(),
-            sample_name: row.get(1).unwrap(),
-        }
-    }
 }
 
 impl<'a> Capnp<'a> for AnnotationGroupSample {

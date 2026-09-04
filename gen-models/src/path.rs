@@ -10,7 +10,7 @@ use gen_core::{
 };
 use intervaltree::IntervalTree;
 use itertools::Itertools;
-use rusqlite::{Row, ToSql, params};
+use rusqlite::{ToSql, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -28,6 +28,7 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "paths")]
 pub struct Path {
     pub id: HashId,
     pub block_group_id: HashId,
@@ -1113,21 +1114,6 @@ impl RegionResolver for Path {
                     ))),
                 }
             }
-        }
-    }
-}
-
-impl Query for Path {
-    type Model = Path;
-
-    const TABLE_NAME: &'static str = "paths";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Path {
-            id: row.get(0).unwrap(),
-            block_group_id: row.get(1).unwrap(),
-            name: row.get(2).unwrap(),
-            created_on: row.get(3).unwrap(),
         }
     }
 }

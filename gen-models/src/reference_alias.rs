@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Result, Row};
+use rusqlite::Result;
 use thiserror::Error;
 
-use crate::{ModelSelect, db::GraphConnection, traits::*};
+use crate::{ModelSelect, db::GraphConnection};
 
 #[derive(Debug, Clone, ModelSelect)]
+#[model_select(table = "reference_aliases")]
 pub struct ReferenceAlias {
     pub reference_name: String,
     pub refseq_accession_id: Option<String>,
@@ -20,24 +21,6 @@ pub struct ReferenceAlias {
 pub enum ReferenceAliasError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
-}
-
-impl Query for ReferenceAlias {
-    type Model = ReferenceAlias;
-
-    const TABLE_NAME: &'static str = "reference_aliases";
-
-    fn process_row(row: &Row) -> Self::Model {
-        ReferenceAlias {
-            reference_name: row.get(0).unwrap(),
-            refseq_accession_id: row.get(1).unwrap(),
-            genbank_accession_id: row.get(2).unwrap(),
-            ucsc_id: row.get(3).unwrap(),
-            ensembl_id: row.get(4).unwrap(),
-            custom_id: row.get(5).unwrap(),
-            chromosome: row.get(6).unwrap(),
-        }
-    }
 }
 
 impl ReferenceAlias {

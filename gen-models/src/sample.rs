@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use gen_core::{Workspace, traits::Capnp};
 use gen_graph::GenGraph;
-use rusqlite::{Row, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -13,10 +13,10 @@ use crate::{
     errors::{BlockGroupError, QueryError},
     gen_models_capnp::sample,
     sample_lineage::SampleLineage,
-    traits::Query,
 };
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, ModelSelect)]
+#[model_select(table = "samples")]
 pub struct Sample {
     #[model_select(primary_key)]
     pub name: String,
@@ -60,20 +60,6 @@ impl<'a> Capnp<'a> for Sample {
         let name = reader.get_name().unwrap().to_string().unwrap();
         let is_reference = reader.get_is_reference();
         Sample { name, is_reference }
-    }
-}
-
-impl Query for Sample {
-    type Model = Sample;
-
-    const PRIMARY_KEY: &'static str = "name";
-    const TABLE_NAME: &'static str = "samples";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Sample {
-            name: row.get(0).unwrap(),
-            is_reference: row.get(1).unwrap(),
-        }
     }
 }
 

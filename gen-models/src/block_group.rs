@@ -17,7 +17,7 @@ use gen_graph::{
 };
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
-use rusqlite::{Row, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -36,10 +36,10 @@ use crate::{
     path::{Path, PathData, PathSelect},
     region::{ResolvedGenRegion, ResolvedRegionKind},
     sample::{Sample, SampleSelect},
-    traits::*,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq, ModelSelect)]
+#[model_select(table = "block_groups")]
 pub struct BlockGroup {
     pub id: HashId,
     pub collection_name: String,
@@ -1300,24 +1300,6 @@ impl RegionResolver for BlockGroup {
     }
 }
 
-impl Query for BlockGroup {
-    type Model = BlockGroup;
-
-    const TABLE_NAME: &'static str = "block_groups";
-
-    fn process_row(row: &Row) -> Self::Model {
-        BlockGroup {
-            id: row.get(0).unwrap(),
-            collection_name: row.get(1).unwrap(),
-            sample_name: row.get(2).unwrap(),
-            name: row.get(3).unwrap(),
-            created_on: row.get(4).unwrap(),
-            parent_block_group_id: row.get(5).unwrap(),
-            is_default: row.get(6).unwrap(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use core::ops::Range;
@@ -1339,6 +1321,7 @@ mod tests {
         test_helpers::{
             create_bg, get_connection, interval_tree_verify, setup_block_group, test_workspace,
         },
+        traits::Query,
     };
 
     mod region_resolver {

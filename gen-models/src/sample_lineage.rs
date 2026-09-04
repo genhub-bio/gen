@@ -1,14 +1,16 @@
 use gen_core::traits::Capnp;
-use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
+use rusqlite::{Result as SQLResult, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Direction, ModelSelect, db::GraphConnection, gen_models_capnp::sample_lineage,
-    lineage::SqlLineage, select::SqlFilter, traits::Query,
+    lineage::SqlLineage, select::SqlFilter,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "sample_lineage")]
 pub struct SampleLineage {
+    #[model_select(primary_key)]
     pub parent_sample_name: String,
     pub child_sample_name: String,
 }
@@ -48,20 +50,6 @@ impl<'a> Capnp<'a> for SampleLineage {
         SampleLineage {
             parent_sample_name,
             child_sample_name,
-        }
-    }
-}
-
-impl Query for SampleLineage {
-    type Model = SampleLineage;
-
-    const PRIMARY_KEY: &'static str = "parent_sample_name";
-    const TABLE_NAME: &'static str = "sample_lineage";
-
-    fn process_row(row: &Row) -> Self::Model {
-        SampleLineage {
-            parent_sample_name: row.get(0).unwrap(),
-            child_sample_name: row.get(1).unwrap(),
         }
     }
 }

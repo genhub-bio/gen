@@ -11,7 +11,7 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use rusqlite::{Row, ToSql, params, types::Value};
+use rusqlite::{ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -29,6 +29,7 @@ use crate::{
 #[derive(
     Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Ord, PartialOrd, ModelSelect,
 )]
+#[model_select(table = "edges")]
 pub struct Edge {
     pub id: HashId,
     pub source_node_id: HashId,
@@ -175,24 +176,6 @@ impl GroupBlock {
             sequence.get_sequence(self.start, self.end).unwrap()
         } else {
             panic!("Sequence or external sequence is not set.")
-        }
-    }
-}
-
-impl Query for Edge {
-    type Model = Edge;
-
-    const TABLE_NAME: &'static str = "edges";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Edge {
-            id: row.get(0).unwrap(),
-            source_node_id: row.get(1).unwrap(),
-            source_coordinate: row.get(2).unwrap(),
-            source_strand: row.get(3).unwrap(),
-            target_node_id: row.get(4).unwrap(),
-            target_coordinate: row.get(5).unwrap(),
-            target_strand: row.get(6).unwrap(),
         }
     }
 }

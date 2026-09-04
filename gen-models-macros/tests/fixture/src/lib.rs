@@ -1,34 +1,20 @@
 //! Fake persistence models used to exercise the generated selector API.
 
-use gen_models::{
-    select::{Connection, Row},
-    traits::Query,
-};
+use gen_models::select::{Connection, Row};
 use gen_models_macros::ModelSelect;
 
 pub const IDENTIFIER_INJECTED_BRANCH: &str = "selector_identifier_injection";
 
 #[derive(Debug, ModelSelect, PartialEq)]
+#[model_select(table = "fixture_samples")]
 pub struct FixtureSample {
     #[model_select(primary_key)]
     pub name: String,
     pub is_reference: bool,
 }
 
-impl Query for FixtureSample {
-    type Model = Self;
-
-    const TABLE_NAME: &'static str = "fixture_samples";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            name: row.get(0).expect("should read fixture sample name"),
-            is_reference: row.get(1).expect("should read fixture reference flag"),
-        }
-    }
-}
-
 #[derive(Debug, ModelSelect, PartialEq)]
+#[model_select(table = "fixture_groups")]
 pub struct FixtureGroup {
     pub id: i64,
     pub sample_name: String,
@@ -36,23 +22,8 @@ pub struct FixtureGroup {
     pub collection_name: String,
 }
 
-impl Query for FixtureGroup {
-    type Model = Self;
-
-    const TABLE_NAME: &'static str = "fixture_groups";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            id: row.get(0).expect("should read fixture group id"),
-            sample_name: row.get(1).expect("should read fixture group sample name"),
-            name: row.get(2).expect("should read fixture group name"),
-            collection_name: row.get(3).expect("should read fixture collection name"),
-        }
-    }
-}
-
 #[derive(Debug, ModelSelect, PartialEq)]
-#[model_select(alias = "selector alias\" --")]
+#[model_select(table = "selector table\" --", alias = "selector alias\" --")]
 pub struct QuotedIdentifierModel {
     #[model_select(column = "value\" || dolt_branch('selector_identifier_injection') || \"")]
     pub value: String,
@@ -60,39 +31,14 @@ pub struct QuotedIdentifierModel {
     pub optional_value: Option<String>,
 }
 
-impl Query for QuotedIdentifierModel {
-    type Model = Self;
-
-    const TABLE_NAME: &'static str = "selector table\" --";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            value: row.get(0).expect("should read quoted value"),
-            optional_value: row.get(1).expect("should read optional quoted value"),
-        }
-    }
-}
-
 fn missing_table_source(_history_ref: Option<&str>) -> String {
     "missing_fixture_models AS missing_fixture_models".to_string()
 }
 
 #[derive(Debug, ModelSelect)]
-#[model_select(source = missing_table_source)]
+#[model_select(table = "missing_fixture_models", source = missing_table_source)]
 pub struct MissingTableModel {
     pub value: i64,
-}
-
-impl Query for MissingTableModel {
-    type Model = Self;
-
-    const TABLE_NAME: &'static str = "missing_fixture_models";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            value: row.get(0).expect("should read missing model value"),
-        }
-    }
 }
 
 fn custom_source(_history_ref: Option<&str>) -> String {
@@ -101,6 +47,7 @@ fn custom_source(_history_ref: Option<&str>) -> String {
 
 #[derive(Debug, ModelSelect, PartialEq)]
 #[model_select(
+    table = "custom_source_models",
     alias = "custom_rows",
     source = custom_source,
     select = "\"custom_rows\".\"value\""
@@ -109,16 +56,20 @@ pub struct CustomSourceModel {
     pub value: String,
 }
 
-impl Query for CustomSourceModel {
-    type Model = Self;
-
-    const TABLE_NAME: &'static str = "custom_source_models";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            value: row.get(0).expect("should read custom source value"),
-        }
+fn derived_model_from_row(row: &Row) -> DerivedModel {
+    let value: String = row.get("value").expect("should read derived model value");
+    DerivedModel {
+        uppercase: value.to_uppercase(),
+        value,
     }
+}
+
+#[derive(Debug, ModelSelect, PartialEq)]
+#[model_select(table = "derived_models", history = false, from_row = derived_model_from_row)]
+pub struct DerivedModel {
+    pub value: String,
+    #[model_select(skip)]
+    pub uppercase: String,
 }
 
 pub fn connection() -> Connection {
@@ -136,6 +87,10 @@ pub fn connection() -> Connection {
             name TEXT NOT NULL,
             collection_name TEXT NOT NULL
         );
+        CREATE TABLE derived_models (
+            value TEXT NOT NULL
+        );
+        INSERT INTO derived_models (value) VALUES ('derived');
         CREATE TABLE "selector table"" --" (
             "value"" || dolt_branch('selector_identifier_injection') || """ TEXT NOT NULL,
             "optional value" TEXT

@@ -1,8 +1,9 @@
-use gen_models::{Direction, ModelSelectError, select::Connection};
+use gen_models::{Direction, ModelSelectError, select::Connection, traits::Query};
 use gen_models_macros_fixture::{
-    CustomSourceModel, CustomSourceModelSelect, FixtureGroup, FixtureGroupSelect, FixtureSample,
-    FixtureSampleSelect, IDENTIFIER_INJECTED_BRANCH, MissingTableModel, MissingTableModelSelect,
-    QuotedIdentifierModel, QuotedIdentifierModelSelect, connection, insert_group, insert_sample,
+    CustomSourceModel, CustomSourceModelSelect, DerivedModel, FixtureGroup, FixtureGroupSelect,
+    FixtureSample, FixtureSampleSelect, IDENTIFIER_INJECTED_BRANCH, MissingTableModel,
+    MissingTableModelSelect, QuotedIdentifierModel, QuotedIdentifierModelSelect, connection,
+    insert_group, insert_sample,
 };
 use rusqlite::limits::Limit;
 
@@ -132,6 +133,27 @@ fn test_generated_all_loads_every_model() {
     assert_eq!(samples.len(), 2);
     assert_eq!(samples[0].name, "alpha");
     assert_eq!(samples[1].name, "beta");
+}
+
+#[test]
+fn test_generated_query_implementation_supports_history_and_custom_rows() {
+    let conn = connection();
+
+    assert_eq!(FixtureSample::TABLE_NAME, "fixture_samples");
+    assert_eq!(FixtureSample::HISTORY_TABLE_NAME, Some("fixture_samples"));
+    assert_eq!(DerivedModel::HISTORY_TABLE_NAME, None);
+
+    let derived = DerivedModel::select(&conn)
+        .load()
+        .expect("should load a model through its custom row decoder");
+
+    assert_eq!(
+        derived,
+        vec![DerivedModel {
+            value: "derived".to_string(),
+            uppercase: "DERIVED".to_string(),
+        }]
+    );
 }
 
 #[test]

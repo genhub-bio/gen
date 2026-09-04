@@ -1,5 +1,5 @@
 use gen_core::traits::Capnp;
-use rusqlite::{Row, params_from_iter};
+use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -8,7 +8,6 @@ use crate::{
     block_group::{BlockGroup, BlockGroupSelect},
     db::GraphConnection,
     gen_models_capnp::collection,
-    traits::*,
 };
 
 #[derive(Debug, Error, PartialEq)]
@@ -20,6 +19,7 @@ pub enum CollectionError {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ModelSelect)]
+#[model_select(table = "collections")]
 pub struct Collection {
     #[model_select(primary_key)]
     pub name: String,
@@ -37,19 +37,6 @@ impl<'a> Capnp<'a> for Collection {
         let name = reader.get_name().unwrap().to_string().unwrap();
 
         Collection { name }
-    }
-}
-
-impl Query for Collection {
-    type Model = Collection;
-
-    const PRIMARY_KEY: &'static str = "name";
-    const TABLE_NAME: &'static str = "collections";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Collection {
-            name: row.get(0).unwrap(),
-        }
     }
 }
 

@@ -8,7 +8,7 @@ use gen_core::{
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{Row, params, types::Value as SQLValue};
+use rusqlite::{params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -24,6 +24,7 @@ use crate::{
 };
 
 #[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "accessions")]
 pub struct Accession {
     pub id: HashId,
     pub name: String,
@@ -109,6 +110,7 @@ impl<'a> Capnp<'a> for Accession {
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Hash, ModelSelect)]
+#[model_select(table = "accession_nodes")]
 pub struct AccessionNode {
     pub id: HashId,
     pub accession_id: HashId,
@@ -635,21 +637,6 @@ impl RegionResolver for Accession {
     }
 }
 
-impl Query for Accession {
-    type Model = Accession;
-
-    const TABLE_NAME: &'static str = "accessions";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Accession {
-            id: row.get(0).unwrap(),
-            name: row.get(1).unwrap(),
-            block_group_id: row.get(2).unwrap(),
-            parent_accession_id: row.get(3).unwrap(),
-        }
-    }
-}
-
 impl AccessionNode {
     pub fn query_accessions(
         conn: &GraphConnection,
@@ -742,24 +729,6 @@ impl AccessionNode {
             .map(AccessionNodeData::id_hash)
             .collect::<Vec<_>>();
         AccessionNode::delete_by_ids(conn, &ids);
-    }
-}
-
-impl Query for AccessionNode {
-    type Model = AccessionNode;
-
-    const TABLE_NAME: &'static str = "accession_nodes";
-
-    fn process_row(row: &Row) -> Self::Model {
-        AccessionNode {
-            id: row.get(0).unwrap(),
-            accession_id: row.get(1).unwrap(),
-            node_id: row.get(2).unwrap(),
-            sequence_start: row.get(3).unwrap(),
-            sequence_end: row.get(4).unwrap(),
-            strand: row.get(5).unwrap(),
-            index_in_path: row.get(6).unwrap(),
-        }
     }
 }
 

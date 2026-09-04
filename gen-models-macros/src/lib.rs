@@ -4,7 +4,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Error, ExprPath, Fields, Ident, LitStr, Type, parse_macro_input,
+    Attribute, Data, DeriveInput, Error, ExprPath, Fields, Ident, LitBool, LitStr, Type,
+    parse_macro_input,
 };
 
 /// Generates a `<Model>Select` query builder from a persisted model's named fields.
@@ -15,10 +16,11 @@ use syn::{
 /// fields with `.only(...)` or complete models with `.models::<(...)>()`.
 /// Primary-key selectors also provide `get_by_id(...)` and ordered, deduplicated
 /// `query_by_ids(...)` loads.
+/// `#[model_select(table = "...")]` generates the model's `Query` implementation.
 /// `#[model_select(column = "...")]` overrides a field's SQL column,
 /// `#[model_select(primary_key)]` marks a non-`id` primary key, `#[model_select(skip)]` excludes a
-/// field, and the struct-level `source`, `alias`, and `select` options support custom or aliased
-/// queries.
+/// field, and the struct-level `history`, `from_row`, `source`, `alias`, and `select` options
+/// support custom persistence behavior or aliased queries.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
 pub fn derive_model_select(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -72,6 +74,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let mut filter_methods = Vec::new();
     let mut model_columns = Vec::new();
     let mut model_initializers = Vec::new();
+    let mut query_initializers = Vec::new();
     let mut has_skipped_field = false;
     let mut explicit_primary_key = None;
     let mut inferred_primary_key = None;
@@ -105,6 +108,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             field_name.clone(),
             value_type.clone(),
             is_string(value_type),
+            column_literal.clone(),
         );
         if field_options.primary_key {
             if explicit_primary_key.is_some() {
@@ -122,6 +126,13 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         model_columns.push(column_literal.clone());
         model_initializers.push(quote! {
             #field_name: row.get(offset + #field_index)?
+        });
+        let query_error = LitStr::new(
+            &format!("should read {model}.{field_name} from database row"),
+            Span::call_site(),
+        );
+        query_initializers.push(quote! {
+            #field_name: row.get(#column_literal).expect(#query_error)
         });
         column_constants.push(quote! {
             #[expect(
@@ -153,9 +164,10 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 
     let primary_key = explicit_primary_key.or(inferred_primary_key);
     let primary_key_methods = primary_key
-        .map(|(field, field_type, string)| {
+        .as_ref()
+        .map(|(field, field_type, string, _)| {
             let in_method = format_ident!("{}_in", field);
-            if string {
+            if *string {
                 quote! {
                     pub fn get_by_id(
                         self,
@@ -210,7 +222,67 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         })
         .unwrap_or_default();
 
-    let source_clause = if let Some(source) = options.source {
+    let query_impl = if let Some(table) = options.table.as_ref() {
+        let primary_key = primary_key
+            .as_ref()
+            .map(|(_, _, _, column)| {
+                quote! {
+                    const PRIMARY_KEY: &'static str = #column;
+                }
+            })
+            .unwrap_or_default();
+        let history_table_name = if options.history.unwrap_or(true) {
+            quote! {
+                const HISTORY_TABLE_NAME: ::core::option::Option<&'static str> =
+                    ::core::option::Option::Some(Self::TABLE_NAME);
+            }
+        } else {
+            quote! {
+                const HISTORY_TABLE_NAME: ::core::option::Option<&'static str> =
+                    ::core::option::Option::None;
+            }
+        };
+        let process_row = if let Some(from_row) = options.from_row.as_ref() {
+            quote! { #from_row(row) }
+        } else {
+            if has_skipped_field {
+                return Err(Error::new_spanned(
+                    model,
+                    "ModelSelect requires `from_row = path` when a table-backed model skips fields",
+                ));
+            }
+            quote! {
+                Self {
+                    #(#query_initializers),*
+                }
+            }
+        };
+        quote! {
+            impl ::gen_models::traits::Query for #model {
+                type Model = Self;
+
+                #primary_key
+                const TABLE_NAME: &'static str = #table;
+                #history_table_name
+
+                fn process_row(
+                    row: &::gen_models::select::Row,
+                ) -> Self::Model {
+                    #process_row
+                }
+            }
+        }
+    } else {
+        if options.from_row.is_some() || options.history.is_some() {
+            return Err(Error::new_spanned(
+                model,
+                "ModelSelect `from_row` and `history` options require `table = \"...\"`",
+            ));
+        }
+        quote! {}
+    };
+
+    let source_clause = if let Some(source) = options.source.as_ref() {
         quote! { #source(history_ref) }
     } else {
         quote! {
@@ -224,6 +296,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     };
     let select_clause = options
         .select
+        .as_ref()
         .map(|select| quote! { ::std::string::String::from(#select) })
         .unwrap_or_else(|| {
             quote! {
@@ -262,6 +335,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     };
 
     Ok(quote! {
+        #query_impl
         #selectable_model_impl
 
         #[derive(Clone, Debug)]
@@ -542,6 +616,9 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 #[derive(Default)]
 struct ContainerOptions {
     alias: Option<String>,
+    table: Option<LitStr>,
+    history: Option<bool>,
+    from_row: Option<ExprPath>,
     source: Option<ExprPath>,
     select: Option<LitStr>,
 }
@@ -557,6 +634,19 @@ impl ContainerOptions {
                 if meta.path.is_ident("alias") {
                     let alias: LitStr = meta.value()?.parse()?;
                     options.alias = Some(alias.value());
+                    return Ok(());
+                }
+                if meta.path.is_ident("table") {
+                    options.table = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
+                if meta.path.is_ident("history") {
+                    let history: LitBool = meta.value()?.parse()?;
+                    options.history = Some(history.value());
+                    return Ok(());
+                }
+                if meta.path.is_ident("from_row") {
+                    options.from_row = Some(meta.value()?.parse()?);
                     return Ok(());
                 }
                 if meta.path.is_ident("source") {

@@ -2,7 +2,7 @@ use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
 use indexmap::IndexSet;
-use rusqlite::{self, Row, ToSql, types::Value};
+use rusqlite::{self, ToSql, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -16,6 +16,7 @@ use crate::{
 #[derive(
     Clone, Debug, Deserialize, Serialize, Eq, Hash, PartialEq, Ord, PartialOrd, ModelSelect,
 )]
+#[model_select(table = "block_group_edges")]
 pub struct BlockGroupEdge {
     pub id: HashId,
     pub block_group_id: HashId,
@@ -116,23 +117,6 @@ pub struct AugmentedEdgeData {
     pub edge_data: EdgeData,
     pub chromosome_index: i64,
     pub phased: i64,
-}
-
-impl Query for BlockGroupEdge {
-    type Model = BlockGroupEdge;
-
-    const TABLE_NAME: &'static str = "block_group_edges";
-
-    fn process_row(row: &Row) -> Self::Model {
-        BlockGroupEdge {
-            id: row.get(0).unwrap(),
-            block_group_id: row.get(1).unwrap(),
-            edge_id: row.get(2).unwrap(),
-            chromosome_index: row.get(3).unwrap(),
-            phased: row.get(4).unwrap(),
-            created_on: row.get(5).unwrap(),
-        }
-    }
 }
 
 impl BlockGroupEdge {

@@ -22,7 +22,7 @@ use std::{
 use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use itertools::Itertools;
 use rusqlite::{
-    OptionalExtension, Result as SQLResult, Row, ToSql, params,
+    OptionalExtension, Result as SQLResult, ToSql, params,
     types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use serde::{Deserialize, Serialize};
@@ -394,26 +394,12 @@ fn calculate_stream_hash<R: std::io::Read>(mut reader: R) -> Result<[u8; 32], st
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "file_additions")]
 pub struct FileAddition {
     pub id: HashId,
     pub asset_uri: String,
     pub file_type: FileTypes,
     pub checksum: Option<Sha256Hash>,
-}
-
-impl Query for FileAddition {
-    type Model = FileAddition;
-
-    const TABLE_NAME: &'static str = "file_additions";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self::Model {
-            id: row.get(0).unwrap(),
-            asset_uri: row.get(1).unwrap(),
-            file_type: row.get(2).unwrap(),
-            checksum: row.get(3).unwrap(),
-        }
-    }
 }
 
 impl FileAddition {
@@ -472,24 +458,11 @@ impl FileAddition {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, ModelSelect)]
+#[model_select(table = "remotes", history = false)]
 pub struct Remote {
     #[model_select(primary_key)]
     pub name: String,
     pub url: String,
-}
-
-impl Query for Remote {
-    type Model = Remote;
-
-    const HISTORY_TABLE_NAME: Option<&'static str> = None;
-    const TABLE_NAME: &'static str = "remotes";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Remote {
-            name: row.get(0).unwrap(),
-            url: row.get(1).unwrap(),
-        }
-    }
 }
 
 impl Remote {
@@ -601,24 +574,11 @@ impl Remote {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "remote_branch", history = false)]
 pub struct RemoteBranch {
     pub remote_name: Option<String>,
+    #[model_select(primary_key)]
     pub name: String,
-}
-
-impl Query for RemoteBranch {
-    type Model = RemoteBranch;
-
-    const HISTORY_TABLE_NAME: Option<&'static str> = None;
-    const PRIMARY_KEY: &'static str = "name";
-    const TABLE_NAME: &'static str = "remote_branch";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            remote_name: row.get(0).unwrap(),
-            name: row.get(1).unwrap(),
-        }
-    }
 }
 
 impl RemoteBranch {
@@ -706,6 +666,7 @@ impl ToSql for RemoteOperationKind {
 
 /// Tracks a remote operation until its graph and asset phases are complete.
 #[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "remote_operations", history = false)]
 pub struct RemoteOperationRecord {
     /// Config database row identifier.
     pub id: i64,
@@ -731,30 +692,6 @@ pub struct RemoteOperationRecord {
     pub completed_at: Option<String>,
     /// Time at which the operation became unrecoverable.
     pub failed_at: Option<String>,
-}
-
-impl Query for RemoteOperationRecord {
-    type Model = RemoteOperationRecord;
-
-    const HISTORY_TABLE_NAME: Option<&'static str> = None;
-    const TABLE_NAME: &'static str = "remote_operations";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            id: row.get("id").unwrap(),
-            remote_name: row.get("remote_name").unwrap(),
-            branch_name: row.get("branch_name").unwrap(),
-            operation: row.get("operation").unwrap(),
-            from_commit: row.get("from_commit").unwrap(),
-            assets_transfer_checkpoint: row.get("assets_transfer_checkpoint").unwrap(),
-            to_commit: row.get("to_commit").unwrap(),
-            transfer_id: row.get("transfer_id").unwrap(),
-            transfer_expires_at: row.get("transfer_expires_at").unwrap(),
-            started_at: row.get("started_at").unwrap(),
-            completed_at: row.get("completed_at").unwrap(),
-            failed_at: row.get("failed_at").unwrap(),
-        }
-    }
 }
 
 impl RemoteOperationRecord {
@@ -888,6 +825,7 @@ impl RemoteOperationRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ModelSelect)]
+#[model_select(table = "defaults", history = false)]
 pub struct Defaults {
     pub id: i64,
     pub collection_name: Option<String>,
@@ -895,24 +833,6 @@ pub struct Defaults {
     pub current_branch_name: Option<String>,
     pub default_committer_name: String,
     pub default_committer_email: String,
-}
-
-impl Query for Defaults {
-    type Model = Defaults;
-
-    const HISTORY_TABLE_NAME: Option<&'static str> = None;
-    const TABLE_NAME: &'static str = "defaults";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Defaults {
-            id: row.get(0).unwrap(),
-            collection_name: row.get(1).unwrap(),
-            remote_name: row.get(2).unwrap(),
-            current_branch_name: row.get(3).unwrap(),
-            default_committer_name: row.get(4).unwrap(),
-            default_committer_email: row.get(5).unwrap(),
-        }
-    }
 }
 
 impl Defaults {

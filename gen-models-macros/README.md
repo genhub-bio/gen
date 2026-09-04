@@ -9,36 +9,22 @@ the runtime selector implementation.
 
 ## Basic usage
 
-Derive `ModelSelect` on a named-field struct that also implements
-[`Query`](../gen-models/src/traits.rs):
+Derive `ModelSelect` on a named-field struct and provide its table name:
 
 ```rust
-use gen_models::{Direction, ModelSelect, traits::Query};
-use rusqlite::Row;
+use gen_models::{Direction, ModelSelect};
 
 #[derive(Debug, PartialEq, ModelSelect)]
+#[model_select(table = "samples")]
 pub struct Sample {
     #[model_select(primary_key)]
     pub name: String,
     pub is_reference: bool,
 }
-
-impl Query for Sample {
-    type Model = Sample;
-
-    const PRIMARY_KEY: &'static str = "name";
-    const TABLE_NAME: &'static str = "samples";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            name: row.get(0).expect("should read sample name"),
-            is_reference: row.get(1).expect("should read reference flag"),
-        }
-    }
-}
 ```
 
-The derive adds `Sample::select(conn)` and generates `SampleSelect`:
+The derive implements [`Query`](../gen-models/src/traits.rs), adds `Sample::select(conn)`, and
+generates `SampleSelect`:
 
 ```rust
 let samples = Sample::select(conn)
@@ -263,7 +249,8 @@ For the default source, a historical query reads `dolt_at_<table>(:history_ref)`
 are joined, the same history ref is applied to every source. If both selectors specify refs, they
 must be equal.
 
-Models that set `Query::HISTORY_TABLE_NAME` to `None` cannot use `with_ref`.
+Tables support historical reads by default. Set `#[model_select(history = false)]` on models for
+ordinary SQLite tables that do not have a Dolt history table; those models cannot use `with_ref`.
 
 ## Joins
 
@@ -348,6 +335,7 @@ field with `model_select` attributes:
 
 ```rust
 #[derive(ModelSelect)]
+#[model_select(table = "examples")]
 pub struct Example {
     #[model_select(primary_key)]
     #[model_select(column = "display_name")]
@@ -363,6 +351,7 @@ The derive also accepts advanced struct-level options:
 ```rust,ignore
 #[derive(ModelSelect)]
 #[model_select(
+    table = "samples",
     alias = "sample_rows",
     source = sample_source,
     select = "sample_rows.name, sample_rows.is_reference"
@@ -373,13 +362,46 @@ pub struct Sample {
 }
 ```
 
+- `table = "..."` generates the model's `Query` implementation and supplies `TABLE_NAME`.
+- `history = false` makes `Query::HISTORY_TABLE_NAME` return `None`. If omitted, historical reads
+  use the configured table name.
+- `from_row = path::to::function` supplies a `fn(&Row) -> Model` for models that need custom row
+  decoding. This is required when any field uses `skip`; otherwise the derive reads every field by
+  its configured SQL column name.
 - `alias = "..."` sets the SQL alias used to qualify generated columns. Aliases and field-level
   `column` values are single SQL identifiers; generated SQL always double-quotes them and treats
   punctuation such as `.` as part of the identifier.
 - `source = path::to::function` supplies a `fn(Option<&str>) -> String` that renders the `FROM`
   source. Its SQL must expose the configured alias and honor the optional history ref when needed.
-- `select = "..."` replaces the default `<alias>.*` select list. Its column order must still match
-  `Query::process_row`.
+- `select = "..."` replaces the default `<alias>.*` select list. Its result must still match the
+  generated or custom row decoder.
+
+For example, a model with a non-persisted field can supply its construction explicitly:
+
+```rust,ignore
+fn example_from_row(row: &gen_models::select::Row) -> Example {
+    let name: String = row.get("name").expect("should read example name");
+    Example {
+        uppercase_name: name.to_uppercase(),
+        name,
+    }
+}
+
+#[derive(ModelSelect)]
+#[model_select(
+    table = "examples",
+    history = false,
+    from_row = example_from_row
+)]
+pub struct Example {
+    pub name: String,
+    #[model_select(skip)]
+    pub uppercase_name: String,
+}
+```
+
+Omitting `table` remains supported for specialized types that provide a handwritten `Query`
+implementation, such as a view over another model's table.
 
 `source` and `select` are trusted, compile-time raw SQL escape hatches rather than identifiers, as
 are clauses passed directly to `SqlFilter::new`. Their authors are responsible for quoting every
@@ -393,9 +415,10 @@ At compile time, `ModelSelect`:
 
 1. Accepts a non-generic struct with named fields.
 2. Reads the model and field-level `model_select` attributes.
-3. Generates the selector struct, typed field constants, filter methods, and `SelectQuery`
+3. Generates `Query` from `table`, primary-key, history, and row-decoding metadata.
+4. Generates the selector struct, typed field constants, filter methods, and `SelectQuery`
    implementation.
-4. Generates `Model::select(conn)`, `Model::all(conn)`, selector `get()`, and selector
+5. Generates `Model::select(conn)`, `Model::all(conn)`, selector `get()`, and selector
    `get_by_id(...)` and `query_by_ids(...)` when a primary key is available.
 
 At runtime, [`gen-models::select`](../gen-models/src/select.rs):
@@ -406,8 +429,8 @@ At runtime, [`gen-models::select`](../gen-models/src/select.rs):
    for the base model and its joined sources.
 4. Binds every runtime value through `rusqlite`; list filters use `rarray` relations to retain
    input order and avoid interpolating placeholder lists.
-5. Maps full base-model loads through `Query::process_row`, or typed field and model projections
-   through fallible decoders generated for their selected types.
+5. Maps full base-model loads through the generated or custom `Query::process_row`, or typed field
+   and model projections through fallible decoders generated for their selected types.
 
 The runtime support cannot live in this proc-macro crate. A proc-macro executes inside the compiler
 and can export procedural macros, but it cannot export the normal reusable runtime types needed by

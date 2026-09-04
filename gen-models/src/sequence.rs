@@ -24,6 +24,7 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "sequences", from_row = sequence_from_row)]
 pub struct Sequence {
     #[model_select(primary_key)]
     pub hash: Sha256Hash,
@@ -49,6 +50,25 @@ pub struct Sequence {
     #[serde(skip)]
     #[model_select(skip)]
     asset_resolution_error: Option<String>,
+}
+
+fn sequence_from_row(row: &Row) -> Sequence {
+    let asset_ref_id: Option<HashId> = row.get(4).expect("should read sequence asset reference id");
+    let hash: Sha256Hash = row.get(0).expect("should read sequence hash");
+    let sequence = row.get(2).expect("should read inline sequence");
+    Sequence {
+        hash,
+        sequence_type: row.get(1).expect("should read sequence type"),
+        sequence,
+        name: row.get(3).expect("should read sequence name"),
+        asset_ref_id,
+        length: row.get(5).expect("should read sequence length"),
+        external_sequence: asset_ref_id.is_some(),
+        asset_ref: None,
+        index_asset_refs: Vec::new(),
+        workspace: None,
+        asset_resolution_error: None,
+    }
 }
 
 impl PartialEq for Sequence {
@@ -770,32 +790,6 @@ impl Sequence {
             }
         }
         sequences.into_values().collect()
-    }
-}
-
-impl Query for Sequence {
-    type Model = Sequence;
-
-    const PRIMARY_KEY: &'static str = "hash";
-    const TABLE_NAME: &'static str = "sequences";
-
-    fn process_row(row: &Row) -> Self::Model {
-        let asset_ref_id: Option<HashId> = row.get(4).unwrap();
-        let hash: Sha256Hash = row.get(0).unwrap();
-        let sequence = row.get(2).unwrap();
-        Sequence {
-            hash,
-            sequence_type: row.get(1).unwrap(),
-            sequence,
-            name: row.get(3).unwrap(),
-            asset_ref_id,
-            length: row.get(5).unwrap(),
-            external_sequence: asset_ref_id.is_some(),
-            asset_ref: None,
-            index_asset_refs: Vec::new(),
-            workspace: None,
-            asset_resolution_error: None,
-        }
     }
 }
 
