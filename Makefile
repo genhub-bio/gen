@@ -33,8 +33,8 @@ r-test:
 		test -f gen-r/inst/widget/genplot.esm.js || \
 			(echo "Error: gen-r/inst/widget/genplot.esm.js missing. Install npm and run 'make r'." && exit 1); \
 	fi
-	DOCKER_BUILDKIT=1 docker build --quiet -t gen-r -f ./gen-r/Dockerfile \
-		$${GITHUB_PAT:+--secret id=github_pat,env=GITHUB_PAT} .
+	bash -o pipefail -c 'DOCKER_BUILDKIT=1 docker build -t gen-r -f ./gen-r/Dockerfile \
+		$${GITHUB_PAT:+--secret id=github_pat,env=GITHUB_PAT} . 2>&1 | tail -n 25'
 	docker run --rm gen-r
 r:
 	# Builds JS widget and installs natively on the host machine
