@@ -1,0 +1,20 @@
+---
+source: src/views/gen_graph_widget.rs
+expression: terminal.backend().to_string()
+---
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                     promoter›                                                      "
+"  ╟──ACGTACGTACGTACGTACGTACGTACGTAC──ACGTACGTACGT──ACGTACGTACGTACGTACGTACGTACGTAC──╢                "
+"         ════════AmpR═══════▶ ◀ori═⢀⠔════lacZ════⠒⠒════▶     ══════════ tag ◀═                      "
+"                         ══════════⠃   ═══▶               terminator_region                         "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
