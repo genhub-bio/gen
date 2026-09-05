@@ -22,6 +22,7 @@ use crate::python_api::{
     repository::{
         PyRepository, clone_repository,
         history::{PyBranch, PyOperation},
+        remote::PyRemote,
     },
     sample::{PySample, PySampleIter},
     sequence_part::PySequencePart,
@@ -35,6 +36,7 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRepository>()?;
     m.add_class::<PyBranch>()?;
     m.add_class::<PyOperation>()?;
+    m.add_class::<PyRemote>()?;
     m.add_class::<PySequenceGraph>()?;
     m.add_class::<PyAnnotation>()?;
     m.add_class::<PyHashId>()?;

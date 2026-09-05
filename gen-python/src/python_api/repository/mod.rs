@@ -26,6 +26,7 @@ pub mod exports;
 pub mod graph_ops;
 pub mod history;
 pub mod imports;
+pub mod remote;
 pub mod search;
 pub mod updates;
 
@@ -173,6 +174,36 @@ impl PyRepository {
             in_transaction: false,
             pending_operation_summaries: RefCell::new(Vec::new()),
         })
+    }
+
+    pub(crate) fn ensure_no_transaction(&self, action: &str) -> PyResult<()> {
+        if self.in_transaction {
+            return Err(PyRuntimeError::new_err(format!(
+                "cannot {action} while a repository transaction is active"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Reopens the graph connection after orchestration performed work through another connection.
+    pub(crate) fn refresh_graph_connection(&mut self) -> PyResult<()> {
+        let graph_path = self
+            .context
+            .workspace()
+            .graph_db_path()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let intended_branch = Defaults::get_current_branch(self.context.config().conn());
+        let graph_connection =
+            get_connection_for_branch(graph_path.clone(), intended_branch.as_deref()).map_err(
+                |error| {
+                    PyRuntimeError::new_err(format!(
+                        "Failed to reopen database '{}': {error}",
+                        graph_path.display()
+                    ))
+                },
+            )?;
+        self.context.set_graph(graph_connection);
+        Ok(())
     }
 
     pub(crate) fn get_default_collection(&self) -> String {

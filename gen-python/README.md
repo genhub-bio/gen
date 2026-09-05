@@ -41,6 +41,35 @@ operations = repo.get_operations()
 repo.reset(operations[1])
 ```
 
+Push, pull, and fetch use the same remote selection, authentication, retries,
+asset transfer, and conflict behavior as the command-line client:
+
+```python
+# Arguments may be names or the corresponding Remote/Branch objects.
+origin = repo.get_remotes()[0]
+main = repo.current_branch
+
+repo.push(remote=origin, branch=main)
+repo.pull()                    # tracked remote and current branch
+repo.fetch(branch="feature")  # updates origin/feature without checkout
+```
+
+Repositories opened with `gen.Repository(...)` can configure remotes directly:
+
+```python
+origin = repo.add_remote("origin", "file:///path/to/another/repository")
+repo.set_default_remote(origin)  # available as repo.default_remote
+repo.set_branch_remote(origin)  # omit the argument to clear branch tracking
+remotes = repo.get_remotes()
+repo.remove_remote(origin)
+```
+
+`push(remote=None, branch=None, force=False)`,
+`pull(remote=None, branch=None)`, and `fetch(remote=None, branch=None)` select an
+explicit remote first, then the branch's tracked remote, the repository default,
+or the only configured remote. `push` and `pull` associate a successful transfer
+with that branch. Remote transfers cannot run inside `Repository.transaction()`.
+
 ## Architecture
 
 The package is built from three layers:
@@ -59,9 +88,12 @@ use CPython's stable ABI with Python 3.11 as the minimum supported version. This
 layer owns:
 
 - **`Repository`** — opens a Gen workspace, drives all import/export operations
-  (FASTA, GenBank, GFA, VCF, GAF, …), and exposes node/sample/sequence-graph
-  queries. These methods return live `Sample` (`PySample`) and `SequenceGraph`
-  (`PySequenceGraph`) objects.
+  (FASTA, GenBank, GFA, VCF, GAF, …), exposes version-control and remote
+  workflows, and provides node/sample/sequence-graph queries. These methods
+  return live `Sample` (`PySample`) and `SequenceGraph` (`PySequenceGraph`)
+  objects.
+- **`Branch`, `Operation`, `Remote`** — typed version-control values accepted
+  directly by the corresponding `Repository` methods.
 - **`Node`, `NodeSlice`, `HashId`, `Annotation`, `SequencePart`** — typed
   wrappers around internal objects so Python code can work with them safely.
 - **`PyGraphController`** — wraps the GraphController and owns the ratatui render loop for the Jupyter widget. On each

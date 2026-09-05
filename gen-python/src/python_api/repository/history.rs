@@ -105,7 +105,7 @@ impl PyOperation {
     }
 }
 
-fn branch_name(value: &Bound<'_, PyAny>) -> PyResult<String> {
+pub(super) fn branch_name(value: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(branch) = value.extract::<PyRef<'_, PyBranch>>() {
         Ok(branch.name.clone())
     } else {
@@ -122,15 +122,6 @@ fn operation_ref(value: &Bound<'_, PyAny>) -> PyResult<String> {
 }
 
 impl PyRepository {
-    fn ensure_no_history_transaction(&self, action: &str) -> PyResult<()> {
-        if self.in_transaction {
-            return Err(PyRuntimeError::new_err(format!(
-                "cannot {action} while a repository transaction is active"
-            )));
-        }
-        Ok(())
-    }
-
     fn branch_from_row(&self, row: DoltBranchRow, current_branch: Option<&BranchName>) -> PyBranch {
         let remote = if row.remote.is_empty() {
             RemoteBranch::get_remote(self.context.config().conn(), &row.name)
@@ -186,7 +177,7 @@ impl PyRepository {
     /// Creates a branch at HEAD, or at `start` when supplied.
     #[pyo3(signature = (name, start=None))]
     fn create_branch(&self, name: &str, start: Option<&str>) -> PyResult<PyBranch> {
-        self.ensure_no_history_transaction("create a branch")?;
+        self.ensure_no_transaction("create a branch")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let start_ref = start.map(|reference| CommitRef(reference.to_string()));
         history_store
@@ -197,7 +188,7 @@ impl PyRepository {
 
     /// Deletes a branch.
     fn delete_branch(&self, branch: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.ensure_no_history_transaction("delete a branch")?;
+        self.ensure_no_transaction("delete a branch")?;
         let name = branch_name(branch)?;
         DoltHistoryStore::new(self.context.graph().conn())
             .delete_branch(&BranchName(name))
@@ -206,7 +197,7 @@ impl PyRepository {
 
     /// Checks out an existing branch and returns its updated metadata.
     fn checkout(&self, branch: &Bound<'_, PyAny>) -> PyResult<PyBranch> {
-        self.ensure_no_history_transaction("checkout a branch")?;
+        self.ensure_no_transaction("checkout a branch")?;
         let name = branch_name(branch)?;
         r#gen::commands::checkout::execute(
             self.context.graph().conn(),
@@ -238,7 +229,7 @@ impl PyRepository {
 
     /// Merges a branch into the current branch and returns the new HEAD operation.
     fn merge(&self, branch: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
-        self.ensure_no_history_transaction("merge")?;
+        self.ensure_no_transaction("merge")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "merge")
             .map_err(history_err_to_pyerr)?;
@@ -252,7 +243,7 @@ impl PyRepository {
 
     /// Applies one operation to the current branch and returns the new HEAD operation.
     fn apply(&self, operation: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
-        self.ensure_no_history_transaction("apply an operation")?;
+        self.ensure_no_transaction("apply an operation")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "apply")
             .map_err(history_err_to_pyerr)?;
@@ -269,7 +260,7 @@ impl PyRepository {
 
     /// Hard-resets the current branch to an operation and returns the resulting HEAD.
     fn reset(&self, operation: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
-        self.ensure_no_history_transaction("reset")?;
+        self.ensure_no_transaction("reset")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "reset")
             .map_err(history_err_to_pyerr)?;
