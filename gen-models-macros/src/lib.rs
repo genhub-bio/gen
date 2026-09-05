@@ -18,9 +18,10 @@ use syn::{
 /// `query_by_ids(...)` loads, and batched `delete_by_ids(...)` mutations.
 /// `#[model_select(table = "...")]` generates the model's `Query` implementation.
 /// `#[model_select(column = "...")]` overrides a field's SQL column,
-/// `#[model_select(primary_key)]` marks a non-`id` primary key, `#[model_select(skip)]` excludes a
-/// field, and the struct-level `history`, `from_row`, `source`, `alias`, and `select` options
-/// support custom persistence behavior or aliased queries.
+/// `#[model_select(primary_key)]` marks each field in an explicit primary key,
+/// `#[model_select(default_sort = "asc")]` configures default ordering,
+/// `#[model_select(skip)]` excludes a field, and the struct-level `history`, `from_row`, `source`,
+/// `alias`, and `select` options support custom persistence behavior or aliased queries.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
 pub fn derive_model_select(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -76,8 +77,9 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let mut model_initializers = Vec::new();
     let mut query_initializers = Vec::new();
     let mut has_skipped_field = false;
-    let mut explicit_primary_key = None;
+    let mut explicit_primary_keys = Vec::new();
     let mut inferred_primary_key = None;
+    let mut default_order_initializers = Vec::new();
 
     for field in fields {
         let Some(field_name) = field.ident else {
@@ -89,6 +91,12 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 return Err(Error::new_spanned(
                     field_name,
                     "a ModelSelect primary key cannot be skipped",
+                ));
+            }
+            if field_options.default_sort.is_some() {
+                return Err(Error::new_spanned(
+                    field_name,
+                    "a skipped ModelSelect field cannot define a default sort",
                 ));
             }
             has_skipped_field = true;
@@ -104,22 +112,25 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         let value_type = option_inner(field_type).unwrap_or(field_type);
         let field_index = model_initializers.len();
 
-        let primary_key = (
-            field_name.clone(),
-            value_type.clone(),
-            is_string(value_type),
-            column_literal.clone(),
-        );
+        let primary_key = PrimaryKeyField {
+            field: field_name.clone(),
+            value_type: value_type.clone(),
+            string: is_string(value_type),
+            column: column_literal.clone(),
+        };
         if field_options.primary_key {
-            if explicit_primary_key.is_some() {
-                return Err(Error::new_spanned(
-                    field_name,
-                    "ModelSelect supports exactly one primary key field",
-                ));
-            }
-            explicit_primary_key = Some(primary_key);
+            explicit_primary_keys.push(primary_key);
         } else if field_name_string(&field_name) == "id" {
             inferred_primary_key = Some(primary_key);
+        }
+        if let Some(direction) = field_options.default_sort {
+            let direction = direction.tokens();
+            default_order_initializers.push(quote! {
+                ::gen_models::select::SqlOrder::new(
+                    ::gen_models::select::qualify_sql_column(#source_alias, #column_literal),
+                    #direction,
+                )
+            });
         }
 
         variants.push(variant.clone());
@@ -158,109 +169,12 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         ));
     }
 
-    let primary_key = explicit_primary_key.or(inferred_primary_key);
-    let primary_key_methods = primary_key
-        .as_ref()
-        .map(|(field, field_type, string, column)| {
-            let in_method = format_ident!("{}_in", field);
-            if *string {
-                quote! {
-                    pub fn get_by_id(
-                        self,
-                        id: impl ::core::convert::Into<::std::string::String>,
-                    ) -> ::core::result::Result<
-                        ::core::option::Option<#model>,
-                        ::gen_models::ModelSelectError,
-                    > {
-                        self.#field(id).get()
-                    }
-
-                    pub fn query_by_ids<I, V>(
-                        self,
-                        ids: I,
-                    ) -> ::core::result::Result<
-                        ::std::vec::Vec<#model>,
-                        ::gen_models::ModelSelectError,
-                    >
-                    where
-                        I: ::core::iter::IntoIterator<Item = V>,
-                        V: ::core::convert::Into<::std::string::String>,
-                    {
-                        self.#in_method(ids).load()
-                    }
-
-                    pub fn delete_by_ids<I, V>(
-                        self,
-                        ids: I,
-                    ) -> ::core::result::Result<usize, ::gen_models::ModelSelectError>
-                    where
-                        I: ::core::iter::IntoIterator<Item = V>,
-                        V: ::core::convert::Into<::std::string::String>,
-                    {
-                        self.validate_delete_by_ids()?;
-                        let values = ids
-                            .into_iter()
-                            .map(|id| {
-                                let id = id.into();
-                                ::gen_models::select::sql_value(&id)
-                            })
-                            .collect::<::core::result::Result<::std::vec::Vec<_>, _>>()?;
-                        ::gen_models::select::delete_by_ids(
-                            self.conn,
-                            <#model as ::gen_models::traits::Query>::TABLE_NAME,
-                            #column,
-                            values,
-                        )
-                    }
-                }
-            } else {
-                quote! {
-                    pub fn get_by_id(
-                        self,
-                        id: #field_type,
-                    ) -> ::core::result::Result<
-                        ::core::option::Option<#model>,
-                        ::gen_models::ModelSelectError,
-                    > {
-                        self.#field(id).get()
-                    }
-
-                    pub fn query_by_ids<I>(
-                        self,
-                        ids: I,
-                    ) -> ::core::result::Result<
-                        ::std::vec::Vec<#model>,
-                        ::gen_models::ModelSelectError,
-                    >
-                    where
-                        I: ::core::iter::IntoIterator<Item = #field_type>,
-                    {
-                        self.#in_method(ids).load()
-                    }
-
-                    pub fn delete_by_ids<I>(
-                        self,
-                        ids: I,
-                    ) -> ::core::result::Result<usize, ::gen_models::ModelSelectError>
-                    where
-                        I: ::core::iter::IntoIterator<Item = #field_type>,
-                    {
-                        self.validate_delete_by_ids()?;
-                        let values = ids
-                            .into_iter()
-                            .map(|id| ::gen_models::select::sql_value(&id))
-                            .collect::<::core::result::Result<::std::vec::Vec<_>, _>>()?;
-                        ::gen_models::select::delete_by_ids(
-                            self.conn,
-                            <#model as ::gen_models::traits::Query>::TABLE_NAME,
-                            #column,
-                            values,
-                        )
-                    }
-                }
-            }
-        })
-        .unwrap_or_default();
+    let primary_keys = if explicit_primary_keys.is_empty() {
+        inferred_primary_key.into_iter().collect::<Vec<_>>()
+    } else {
+        explicit_primary_keys
+    };
+    let primary_key_methods = primary_key_methods(&model, &primary_keys);
 
     let query_impl = if let Some(table) = options.table.as_ref() {
         let history_table_name = if options.history.unwrap_or(true) {
@@ -375,6 +289,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             error: ::core::option::Option<::gen_models::select::SelectorBuildError>,
             history_ref: ::core::option::Option<::std::string::String>,
             filters: ::std::vec::Vec<::gen_models::select::SqlFilter>,
+            default_order_by: ::std::vec::Vec<::gen_models::select::SqlOrder>,
             order_by: ::std::vec::Vec<::gen_models::select::SqlOrder>,
             joins: ::gen_models::select::SqlJoins,
             limit: ::core::option::Option<u32>,
@@ -392,6 +307,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                     error: ::core::option::Option::None,
                     history_ref: ::core::option::Option::None,
                     filters: ::std::vec::Vec::new(),
+                    default_order_by: ::std::vec![#(#default_order_initializers),*],
                     order_by: ::std::vec::Vec::new(),
                     joins: ::gen_models::select::SqlJoins::default(),
                     limit: ::core::option::Option::None,
@@ -697,6 +613,10 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 &self.order_by
             }
 
+            fn default_order_by(&self) -> &[::gen_models::select::SqlOrder] {
+                &self.default_order_by
+            }
+
             fn limit(&self) -> ::core::option::Option<u32> {
                 self.limit
             }
@@ -786,9 +706,54 @@ impl ContainerOptions {
     }
 }
 
+#[derive(Clone)]
+struct PrimaryKeyField {
+    field: Ident,
+    value_type: Type,
+    string: bool,
+    column: LitStr,
+}
+
+#[derive(Clone, Copy)]
+enum DefaultSort {
+    Asc,
+    Desc,
+    CaseInsensitiveAsc,
+    CaseInsensitiveDesc,
+}
+
+impl DefaultSort {
+    fn from_literal(literal: &LitStr) -> syn::Result<Self> {
+        match literal.value().as_str() {
+            "asc" => Ok(Self::Asc),
+            "desc" => Ok(Self::Desc),
+            "case_insensitive_asc" => Ok(Self::CaseInsensitiveAsc),
+            "case_insensitive_desc" => Ok(Self::CaseInsensitiveDesc),
+            _ => Err(Error::new_spanned(
+                literal,
+                "default_sort must be `asc`, `desc`, `case_insensitive_asc`, or `case_insensitive_desc`",
+            )),
+        }
+    }
+
+    fn tokens(self) -> proc_macro2::TokenStream {
+        match self {
+            Self::Asc => quote! { ::gen_models::Direction::Asc },
+            Self::Desc => quote! { ::gen_models::Direction::Desc },
+            Self::CaseInsensitiveAsc => {
+                quote! { ::gen_models::Direction::CaseInsensitiveAsc }
+            }
+            Self::CaseInsensitiveDesc => {
+                quote! { ::gen_models::Direction::CaseInsensitiveDesc }
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct FieldOptions {
     column: Option<String>,
+    default_sort: Option<DefaultSort>,
     primary_key: bool,
     skip: bool,
 }
@@ -814,10 +779,284 @@ impl FieldOptions {
                     options.primary_key = true;
                     return Ok(());
                 }
+                if meta.path.is_ident("default_sort") {
+                    if options.default_sort.is_some() {
+                        return Err(meta.error("default_sort can only be specified once per field"));
+                    }
+                    options.default_sort = if meta.input.peek(syn::Token![=]) {
+                        let literal: LitStr = meta.value()?.parse()?;
+                        Some(DefaultSort::from_literal(&literal)?)
+                    } else {
+                        Some(DefaultSort::Asc)
+                    };
+                    return Ok(());
+                }
                 Err(meta.error("unsupported model_select field option"))
             })?;
         }
         Ok(options)
+    }
+}
+
+fn primary_key_methods(
+    model: &Ident,
+    primary_keys: &[PrimaryKeyField],
+) -> proc_macro2::TokenStream {
+    match primary_keys {
+        [] => quote! {},
+        [primary_key] => single_primary_key_methods(model, primary_key),
+        primary_keys => composite_primary_key_methods(model, primary_keys),
+    }
+}
+
+fn single_primary_key_methods(
+    model: &Ident,
+    primary_key: &PrimaryKeyField,
+) -> proc_macro2::TokenStream {
+    let PrimaryKeyField {
+        field,
+        value_type,
+        string,
+        column,
+    } = primary_key;
+    let in_method = format_ident!("{}_in", field);
+    if *string {
+        quote! {
+            pub fn get_by_id(
+                self,
+                id: impl ::core::convert::Into<::std::string::String>,
+            ) -> ::core::result::Result<
+                ::core::option::Option<#model>,
+                ::gen_models::ModelSelectError,
+            > {
+                self.#field(id).get()
+            }
+
+            pub fn query_by_ids<I, V>(
+                self,
+                ids: I,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<#model>,
+                ::gen_models::ModelSelectError,
+            >
+            where
+                I: ::core::iter::IntoIterator<Item = V>,
+                V: ::core::convert::Into<::std::string::String>,
+            {
+                self.#in_method(ids).load()
+            }
+
+            pub fn delete_by_ids<I, V>(
+                self,
+                ids: I,
+            ) -> ::core::result::Result<usize, ::gen_models::ModelSelectError>
+            where
+                I: ::core::iter::IntoIterator<Item = V>,
+                V: ::core::convert::Into<::std::string::String>,
+            {
+                self.validate_delete_by_ids()?;
+                let rows = ids
+                    .into_iter()
+                    .map(|id| {
+                        let id = id.into();
+                        ::gen_models::select::sql_value(&id).map(|value| ::std::vec![value])
+                    })
+                    .collect::<::core::result::Result<::std::vec::Vec<_>, _>>()?;
+                ::gen_models::select::delete_by_ids(
+                    self.conn,
+                    <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                    &[#column],
+                    rows,
+                )
+            }
+        }
+    } else {
+        quote! {
+            pub fn get_by_id(
+                self,
+                id: #value_type,
+            ) -> ::core::result::Result<
+                ::core::option::Option<#model>,
+                ::gen_models::ModelSelectError,
+            > {
+                self.#field(id).get()
+            }
+
+            pub fn query_by_ids<I>(
+                self,
+                ids: I,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<#model>,
+                ::gen_models::ModelSelectError,
+            >
+            where
+                I: ::core::iter::IntoIterator<Item = #value_type>,
+            {
+                self.#in_method(ids).load()
+            }
+
+            pub fn delete_by_ids<I>(
+                self,
+                ids: I,
+            ) -> ::core::result::Result<usize, ::gen_models::ModelSelectError>
+            where
+                I: ::core::iter::IntoIterator<Item = #value_type>,
+            {
+                self.validate_delete_by_ids()?;
+                let rows = ids
+                    .into_iter()
+                    .map(|id| {
+                        ::gen_models::select::sql_value(&id).map(|value| ::std::vec![value])
+                    })
+                    .collect::<::core::result::Result<::std::vec::Vec<_>, _>>()?;
+                ::gen_models::select::delete_by_ids(
+                    self.conn,
+                    <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                    &[#column],
+                    rows,
+                )
+            }
+        }
+    }
+}
+
+fn composite_primary_key_methods(
+    model: &Ident,
+    primary_keys: &[PrimaryKeyField],
+) -> proc_macro2::TokenStream {
+    let parameter_names = (0..primary_keys.len())
+        .map(|index| format_ident!("primary_key_{index}"))
+        .collect::<Vec<_>>();
+    let string_generics = primary_keys
+        .iter()
+        .enumerate()
+        .filter(|(_, primary_key)| primary_key.string)
+        .map(|(index, _)| format_ident!("PrimaryKeyValue{index}"))
+        .collect::<Vec<_>>();
+    let mut string_generic_index = 0;
+    let input_types = primary_keys
+        .iter()
+        .map(|primary_key| {
+            if primary_key.string {
+                let generic = &string_generics[string_generic_index];
+                string_generic_index += 1;
+                quote! { #generic }
+            } else {
+                let value_type = &primary_key.value_type;
+                quote! { #value_type }
+            }
+        })
+        .collect::<Vec<_>>();
+    let string_bounds = string_generics
+        .iter()
+        .map(|generic| {
+            quote! { #generic: ::core::convert::Into<::std::string::String> }
+        })
+        .collect::<Vec<_>>();
+    let get_generics = if string_generics.is_empty() {
+        quote! {}
+    } else {
+        quote! { <#(#string_generics),*> }
+    };
+    let get_where = if string_bounds.is_empty() {
+        quote! {}
+    } else {
+        quote! { where #(#string_bounds),* }
+    };
+    let fields = primary_keys
+        .iter()
+        .map(|primary_key| &primary_key.field)
+        .collect::<Vec<_>>();
+    let columns = primary_keys
+        .iter()
+        .map(|primary_key| &primary_key.column)
+        .collect::<Vec<_>>();
+    let filter_chain =
+        fields
+            .iter()
+            .zip(&parameter_names)
+            .fold(quote! { self }, |chain, (field, parameter)| {
+                quote! { #chain.#field(#parameter) }
+            });
+    let sql_values = primary_keys
+        .iter()
+        .zip(&parameter_names)
+        .map(|(primary_key, parameter)| {
+            if primary_key.string {
+                quote! {{
+                    let value = ::core::convert::Into::<::std::string::String>::into(#parameter);
+                    ::gen_models::select::sql_value(&value)?
+                }}
+            } else {
+                quote! { ::gen_models::select::sql_value(&#parameter)? }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    quote! {
+        pub fn get_by_id #get_generics(
+            self,
+            id: (#(#input_types,)*),
+        ) -> ::core::result::Result<
+            ::core::option::Option<#model>,
+            ::gen_models::ModelSelectError,
+        >
+        #get_where
+        {
+            let (#(#parameter_names,)*) = id;
+            #filter_chain.get()
+        }
+
+        pub fn query_by_ids<I #(, #string_generics)*>(
+            self,
+            ids: I,
+        ) -> ::core::result::Result<
+            ::std::vec::Vec<#model>,
+            ::gen_models::ModelSelectError,
+        >
+        where
+            I: ::core::iter::IntoIterator<Item = (#(#input_types,)*)>,
+            #(#string_bounds,)*
+        {
+            let columns = ::std::vec![#(self.column(#columns)),*];
+            let rows = ids
+                .into_iter()
+                .map(|(#(#parameter_names,)*)| {
+                    ::core::result::Result::Ok(::std::vec![#(#sql_values),*])
+                })
+                .collect::<::core::result::Result<
+                    ::std::vec::Vec<_>,
+                    ::gen_models::select::SelectorBuildError,
+                >>()?;
+            let filter = ::gen_models::select::sql_composite_in_filter(columns, rows);
+            self.push_filter_result(filter).load()
+        }
+
+        pub fn delete_by_ids<I #(, #string_generics)*>(
+            self,
+            ids: I,
+        ) -> ::core::result::Result<usize, ::gen_models::ModelSelectError>
+        where
+            I: ::core::iter::IntoIterator<Item = (#(#input_types,)*)>,
+            #(#string_bounds,)*
+        {
+            self.validate_delete_by_ids()?;
+            let rows = ids
+                .into_iter()
+                .map(|(#(#parameter_names,)*)| {
+                    ::core::result::Result::Ok(::std::vec![#(#sql_values),*])
+                })
+                .collect::<::core::result::Result<
+                    ::std::vec::Vec<_>,
+                    ::gen_models::select::SelectorBuildError,
+                >>()?;
+            ::gen_models::select::delete_by_ids(
+                self.conn,
+                <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                &[#(#columns),*],
+                rows,
+            )
+        }
     }
 }
 

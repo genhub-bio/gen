@@ -110,9 +110,9 @@ let sample = Sample::select(conn)
     .expect("should query sample");
 ```
 
-The derive infers a field named `id` as the model primary key. Mark a differently named key with
-`#[model_select(primary_key)]`; this generates `get_by_id`, `query_by_ids`, and `delete_by_ids` on
-the selector:
+The derive infers a field named `id` as a single-column primary key. Mark every field in an
+explicit primary key with `#[model_select(primary_key)]`; this generates `get_by_id`,
+`query_by_ids`, and `delete_by_ids` on the selector:
 
 ```rust
 let sample = Sample::select(conn)
@@ -133,9 +133,30 @@ let deleted = Sample::select(conn)
 identifiers, and chunks large inputs. It must be called on a fresh selector because filters,
 joins, ordering, pagination, and historical refs do not define writable row sets.
 
-Only one field can be marked as the primary key, and skipped fields cannot be primary keys.
-Models without an `id` field or an explicit `primary_key` attribute receive none of these
-primary-key convenience methods.
+For a composite primary key, the methods accept tuples in field declaration order and match each
+tuple as one key rather than combining independent `IN` filters:
+
+```rust
+#[derive(ModelSelect)]
+#[model_select(table = "memberships")]
+struct Membership {
+    #[model_select(primary_key)]
+    organization: String,
+    #[model_select(primary_key)]
+    username: String,
+}
+
+let membership = Membership::select(conn)
+    .get_by_id(("genhub", "alice"))
+    .expect("should query a composite primary key");
+
+let memberships = Membership::select(conn)
+    .query_by_ids([("genhub", "alice"), ("genhub", "bob")])
+    .expect("should query composite primary keys");
+```
+
+Skipped fields cannot be primary keys. Models without an `id` field or an explicit `primary_key`
+attribute receive none of these primary-key convenience methods.
 
 To load every current model, use the generated convenience method:
 
@@ -237,6 +258,23 @@ Available directions are:
 - `Direction::Desc`
 - `Direction::CaseInsensitiveAsc`
 - `Direction::CaseInsensitiveDesc`
+
+Configure deterministic ordering directly on one or more model fields with `default_sort`. Fields
+are applied in declaration order, and an explicit `.order_by(...)` replaces the complete default:
+
+```rust
+#[derive(ModelSelect)]
+#[model_select(table = "memberships")]
+struct Membership {
+    #[model_select(primary_key, default_sort = "desc")]
+    organization: String,
+    #[model_select(primary_key, default_sort = "asc")]
+    username: String,
+}
+```
+
+The accepted values are `"asc"`, `"desc"`, `"case_insensitive_asc"`, and
+`"case_insensitive_desc"`. A bare `#[model_select(default_sort)]` is shorthand for ascending.
 
 An offset without an explicit limit is supported; the runtime renderer emits SQLite's unlimited
 `LIMIT -1` form before the offset.
@@ -438,7 +476,7 @@ At compile time, `ModelSelect`:
 
 1. Accepts a non-generic struct with named fields.
 2. Reads the model and field-level `model_select` attributes.
-3. Generates `Query` from `table`, primary-key, history, and row-decoding metadata.
+3. Generates `Query` from `table`, primary-key, default-sort, history, and row-decoding metadata.
 4. Generates the selector struct, typed field constants, filter methods, and `SelectQuery`
    implementation.
 5. Generates `Model::select(conn)`, `Model::all(conn)`, selector `get()`, and selector

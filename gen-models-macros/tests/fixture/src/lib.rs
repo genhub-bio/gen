@@ -29,6 +29,16 @@ pub struct FixtureGroup {
 }
 
 #[derive(Debug, ModelSelect, PartialEq)]
+#[model_select(table = "fixture_composite_keys")]
+pub struct FixtureCompositeKey {
+    #[model_select(primary_key, default_sort = "desc")]
+    pub namespace: String,
+    #[model_select(primary_key, default_sort = "asc")]
+    pub name: String,
+    pub position: i64,
+}
+
+#[derive(Debug, ModelSelect, PartialEq)]
 #[model_select(table = "selector table\" --", alias = "selector alias\" --")]
 pub struct QuotedIdentifierModel {
     #[model_select(
@@ -148,6 +158,12 @@ pub fn connection() -> Connection {
             name TEXT NOT NULL,
             collection_name TEXT NOT NULL
         );
+        CREATE TABLE fixture_composite_keys (
+            namespace TEXT NOT NULL,
+            name TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            PRIMARY KEY (namespace, name)
+        );
         CREATE TABLE derived_models (
             value TEXT NOT NULL
         );
@@ -197,4 +213,12 @@ pub fn insert_group(
         (id, sample_name, name, collection_name),
     )
     .expect("should insert fixture group");
+}
+
+pub fn insert_composite_key(conn: &Connection, namespace: &str, name: &str, position: i64) {
+    conn.execute(
+        "INSERT INTO fixture_composite_keys (namespace, name, position) VALUES (?1, ?2, ?3)",
+        (namespace, name, position),
+    )
+    .expect("should insert fixture composite key");
 }

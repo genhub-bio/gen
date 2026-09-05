@@ -1,9 +1,10 @@
 use gen_models::{Direction, ModelSelectError, select::Connection, traits::Query};
 use gen_models_macros_fixture::{
     CountedModel, CustomSourceModel, CustomSourceModelSelect, DerivedModel, DerivedModelSelect,
-    FailingSqlValue, FailingSqlValueModel, FixtureGroup, FixtureGroupSelect, FixtureSample,
-    FixtureSampleSelect, IDENTIFIER_INJECTED_BRANCH, InvalidRow, MissingTableModel,
-    MissingTableModelSelect, QuotedIdentifierModel, QuotedIdentifierModelSelect, connection,
+    FailingSqlValue, FailingSqlValueModel, FixtureCompositeKey, FixtureCompositeKeySelect,
+    FixtureGroup, FixtureGroupSelect, FixtureSample, FixtureSampleSelect,
+    IDENTIFIER_INJECTED_BRANCH, InvalidRow, MissingTableModel, MissingTableModelSelect,
+    QuotedIdentifierModel, QuotedIdentifierModelSelect, connection, insert_composite_key,
     insert_group, insert_sample, processed_row_count, reset_processed_row_count,
 };
 use rusqlite::limits::Limit;
@@ -139,6 +140,97 @@ fn test_generated_get_by_id_uses_the_model_primary_key() {
 
     assert_eq!(sample.expect("should find alpha").name, "alpha");
     assert_eq!(group.expect("should find group 42").id, 42);
+}
+
+#[test]
+fn test_generated_composite_primary_key_methods_match_complete_keys() {
+    let conn = connection();
+    for (namespace, name, position) in [
+        ("alpha", "one", 4),
+        ("alpha", "two", 2),
+        ("beta", "one", 3),
+        ("beta", "two", 1),
+    ] {
+        insert_composite_key(&conn, namespace, name, position);
+    }
+
+    let item = FixtureCompositeKey::select(&conn)
+        .get_by_id(("alpha", "two"))
+        .expect("should query one complete composite primary key")
+        .expect("should find the composite primary key");
+
+    conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 3)
+        .expect("should lower the fixture parameter limit");
+
+    let queried = FixtureCompositeKey::select(&conn)
+        .query_by_ids([("beta", "two"), ("alpha", "one"), ("beta", "two")])
+        .expect("should query ordered composite primary keys");
+    let deleted = FixtureCompositeKey::select(&conn)
+        .delete_by_ids([("alpha", "two"), ("beta", "one")])
+        .expect("should delete complete composite primary keys");
+
+    assert_eq!(item.position, 2);
+    assert_eq!(
+        queried
+            .iter()
+            .map(|item| (item.namespace.as_str(), item.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("beta", "two"), ("alpha", "one")],
+    );
+    assert_eq!(deleted, 2);
+    assert_eq!(
+        FixtureCompositeKey::select(&conn)
+            .load()
+            .expect("should load undeleted composite keys")
+            .into_iter()
+            .map(|item| (item.namespace, item.name))
+            .collect::<Vec<_>>(),
+        vec![
+            ("beta".to_string(), "two".to_string()),
+            ("alpha".to_string(), "one".to_string()),
+        ],
+    );
+}
+
+#[test]
+fn test_generated_default_sort_is_configurable_and_explicit_order_replaces_it() {
+    let conn = connection();
+    for (namespace, name, position) in [
+        ("alpha", "one", 4),
+        ("beta", "two", 1),
+        ("alpha", "two", 2),
+        ("beta", "one", 3),
+    ] {
+        insert_composite_key(&conn, namespace, name, position);
+    }
+
+    let default_order = FixtureCompositeKey::select(&conn)
+        .load()
+        .expect("should load using the configured default sort");
+    let explicit_order = FixtureCompositeKey::select(&conn)
+        .order_by(FixtureCompositeKeySelect::Position, Direction::Asc)
+        .load()
+        .expect("should replace the default sort with explicit ordering");
+
+    assert_eq!(
+        default_order
+            .iter()
+            .map(|item| (item.namespace.as_str(), item.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("beta", "one"),
+            ("beta", "two"),
+            ("alpha", "one"),
+            ("alpha", "two"),
+        ],
+    );
+    assert_eq!(
+        explicit_order
+            .into_iter()
+            .map(|item| item.position)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+    );
 }
 
 #[test]

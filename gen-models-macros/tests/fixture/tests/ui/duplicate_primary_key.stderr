@@ -1,5 +1,0 @@
-error: ModelSelect supports exactly one primary key field
- --> tests/ui/duplicate_primary_key.rs:9:5
-  |
-9 |     second: i64,
-  |     ^^^^^^

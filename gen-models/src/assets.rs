@@ -225,9 +225,11 @@ pub struct OperationLog {
 #[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
 #[model_select(table = "gen_operation_assets")]
 pub struct OperationAsset {
-    #[model_select(primary_key)]
+    #[model_select(primary_key, default_sort = "asc")]
     pub log_id: HashId,
+    #[model_select(primary_key, default_sort = "asc")]
     pub asset_ref_id: HashId,
+    #[model_select(primary_key, default_sort = "asc")]
     pub role: AssetRole,
 }
 
