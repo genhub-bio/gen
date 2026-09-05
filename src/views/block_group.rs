@@ -35,7 +35,9 @@ use crate::{
         },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
-            self, create_gen_graph_engine, draw_annotation_labels, reapply_overlays,
+            self, NodeAnnotationLayer, create_annotated_gen_graph_engine,
+            draw_annotation_connectors, draw_annotation_labels, reapply_overlays,
+            update_node_annotations,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlaySource, file_track_key, group_track_key,
@@ -456,8 +458,10 @@ pub fn view_block_group(
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Pre-computing layout in chunks");
 
+    // Annotation flags drawn under nodes at full detail; refilled from `overlays` each frame.
+    let node_annotations = NodeAnnotationLayer::new();
     let (mut graph_engine, mut graph_zoom_levels, mut graph_view_state) =
-        create_gen_graph_engine(block_graph.clone(), conn);
+        create_annotated_gen_graph_engine(block_graph.clone(), conn, node_annotations.clone());
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if position.is_some() {
@@ -1048,20 +1052,36 @@ pub fn view_block_group(
                     &mut overlays,
                     &mut annotation_colors,
                 );
+                // Names with no room under their node fall back to floating labels.
+                let floating_overlays =
+                    update_node_annotations(&node_annotations, &graph_engine, &overlays);
 
                 let active_renderer = &graph_zoom_levels[graph_view_state.zoom_index].1;
                 let view = GraphView::new(&mut graph_engine, active_renderer).style(canvas_style);
                 frame.render_stateful_widget(view, main_canvas_area, &mut graph_view_state);
 
                 // Draw floating labels after the graph, then a single hint if any were hidden.
+                // At full detail the renderer draws annotations as flags under their nodes,
+                // so only the names that found no room there still float.
                 let detail_level = graph_zoom_levels[graph_view_state.zoom_index].0;
+                let labelled_overlays = if detail_level == VisualDetail::Full {
+                    draw_annotation_connectors(
+                        frame.buffer_mut(),
+                        main_canvas_area,
+                        &graph_view_state.frame,
+                        &node_annotations,
+                    );
+                    &floating_overlays
+                } else {
+                    &overlays
+                };
                 let any_hidden = draw_annotation_labels(
                     frame.buffer_mut(),
                     main_canvas_area,
                     &graph_engine,
                     &graph_view_state,
                     &graph_zoom_levels,
-                    &overlays,
+                    labelled_overlays,
                 );
                 if any_hidden {
                     let note = if detail_level == VisualDetail::Full {
@@ -1206,8 +1226,11 @@ pub fn view_block_group(
             // Create a new graph for the selected block group
             block_graph = BlockGroup::get_graph(conn, new_block_group_id, history_ref)?;
             // Update the graph engine
-            (graph_engine, graph_zoom_levels, graph_view_state) =
-                create_gen_graph_engine(block_graph.clone(), conn);
+            (graph_engine, graph_zoom_levels, graph_view_state) = create_annotated_gen_graph_engine(
+                block_graph.clone(),
+                conn,
+                node_annotations.clone(),
+            );
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {
                 Ok(bg) => bg,
                 Err(err) => {
