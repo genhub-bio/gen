@@ -737,13 +737,7 @@ where
         .filter_map(|filter| filter.ordered_in.as_ref())
         .enumerate()
     {
-        append_ordered_in_join(
-            &mut query,
-            &mut params,
-            ordered_in,
-            index,
-            select.connection(),
-        )?;
+        append_ordered_in_join(&mut query, &mut params, ordered_in, index);
     }
 
     if filters.iter().any(|filter| !filter.clause.is_empty()) {
@@ -809,6 +803,15 @@ where
         params.push(SqlParameter::Scalar(Value::from(i64::from(offset))));
     }
 
+    let parameter_limit = sqlite_parameter_limit(select.connection());
+    if params.len() > parameter_limit {
+        return Err(SelectorBuildError::InvalidSelector(format!(
+            "selector requires {} SQL parameters, but the connection limit is {parameter_limit}",
+            params.len(),
+        ))
+        .into());
+    }
+
     Ok((query, params))
 }
 
@@ -839,7 +842,27 @@ pub fn delete_by_ids(
     let aliases = (0..primary_keys.len())
         .map(|index| format!("__model_select_delete_key_{index}"))
         .collect::<Vec<_>>();
-    let mut query = format!("DELETE FROM {quoted_table} WHERE EXISTS (SELECT 1 FROM ");
+    let mut query = format!("DELETE FROM {quoted_table} WHERE ");
+    if primary_keys.len() > 1 {
+        query.push('(');
+    }
+    for (index, primary_key) in primary_keys.iter().enumerate() {
+        if index > 0 {
+            query.push_str(", ");
+        }
+        query.push_str(&qualify_sql_column(table_name, primary_key));
+    }
+    if primary_keys.len() > 1 {
+        query.push(')');
+    }
+    query.push_str(" IN (SELECT ");
+    for (index, alias) in aliases.iter().enumerate() {
+        if index > 0 {
+            query.push_str(", ");
+        }
+        query.push_str(&qualify_sql_column(alias, "value"));
+    }
+    query.push_str(" FROM ");
     for (index, alias) in aliases.iter().enumerate() {
         if index == 0 {
             query.push_str(&format!(
@@ -856,17 +879,6 @@ pub fn delete_by_ids(
                 qualify_sql_column(&aliases[0], "rowid"),
             ));
         }
-    }
-    query.push_str(" WHERE ");
-    for (index, (primary_key, alias)) in primary_keys.iter().zip(&aliases).enumerate() {
-        if index > 0 {
-            query.push_str(" AND ");
-        }
-        query.push_str(&format!(
-            "{} = {}",
-            qualify_sql_column(table_name, primary_key),
-            qualify_sql_column(alias, "value"),
-        ));
     }
     query.push(')');
 
@@ -889,19 +901,8 @@ fn append_ordered_in_join(
     params: &mut Vec<SqlParameter>,
     ordered_in: &OrderedSqlIn,
     index: usize,
-    conn: &Connection,
-) -> Result<(), ModelSelectError> {
+) {
     let column_count = ordered_in.columns.len();
-    let parameter_limit = sqlite_parameter_limit(conn);
-    let maximum_chunks = parameter_limit / column_count;
-    if maximum_chunks == 0 {
-        return Err(SelectorBuildError::InvalidSelector(format!(
-            "composite selector requires {column_count} SQL parameters, but the connection limit is {parameter_limit}",
-        ))
-        .into());
-    }
-    let minimum_batch_size = ordered_in.rows.len().div_ceil(maximum_chunks);
-    let batch_size = max_rows_per_batch(conn, column_count).max(minimum_batch_size);
     let values_alias = quote_sql_identifier(&format!("__model_select_in_values_{index}"));
     let order_alias = format!("__model_select_in_{index}");
     let value_columns = (0..column_count)
@@ -915,46 +916,42 @@ fn append_ordered_in_join(
         query.push_str(&quote_sql_identifier(value_column));
     }
     query.push_str(", MIN(\"position\") AS \"position\" FROM (");
-    for (chunk_index, chunk) in ordered_in.rows.chunks(batch_size).enumerate() {
-        if chunk_index > 0 {
-            query.push_str(" UNION ALL ");
+    let array_aliases = (0..column_count)
+        .map(|column_index| format!("__model_select_in_array_{index}_{column_index}"))
+        .collect::<Vec<_>>();
+    query.push_str("SELECT ");
+    for (column_index, (array_alias, value_column)) in
+        array_aliases.iter().zip(&value_columns).enumerate()
+    {
+        if column_index > 0 {
+            query.push_str(", ");
         }
-        let position_offset = chunk_index * batch_size;
-        let array_aliases = (0..column_count)
-            .map(|column_index| {
-                format!("__model_select_in_array_{index}_{chunk_index}_{column_index}")
-            })
-            .collect::<Vec<_>>();
-        query.push_str("SELECT ");
-        for (column_index, (array_alias, value_column)) in
-            array_aliases.iter().zip(&value_columns).enumerate()
-        {
-            if column_index > 0 {
-                query.push_str(", ");
-            }
-            query.push_str(&qualify_sql_column(array_alias, "value"));
-            query.push_str(" AS ");
-            query.push_str(&quote_sql_identifier(value_column));
+        query.push_str(&qualify_sql_column(array_alias, "value"));
+        query.push_str(" AS ");
+        query.push_str(&quote_sql_identifier(value_column));
+    }
+    query.push_str(", ");
+    query.push_str(&qualify_sql_column(&array_aliases[0], "rowid"));
+    query.push_str(" AS \"position\" FROM ");
+    for (column_index, array_alias) in array_aliases.iter().enumerate() {
+        if column_index == 0 {
+            query.push_str("rarray(?) AS ");
+            query.push_str(&quote_sql_identifier(array_alias));
+        } else {
+            query.push_str(" JOIN rarray(?) AS ");
+            query.push_str(&quote_sql_identifier(array_alias));
+            query.push_str(" ON ");
+            query.push_str(&qualify_sql_column(array_alias, "rowid"));
+            query.push_str(" = ");
+            query.push_str(&qualify_sql_column(&array_aliases[0], "rowid"));
         }
-        query.push_str(", ");
-        query.push_str(&qualify_sql_column(&array_aliases[0], "rowid"));
-        query.push_str(&format!(" + {position_offset} AS \"position\" FROM "));
-        for (column_index, array_alias) in array_aliases.iter().enumerate() {
-            if column_index == 0 {
-                query.push_str("rarray(?) AS ");
-                query.push_str(&quote_sql_identifier(array_alias));
-            } else {
-                query.push_str(" JOIN rarray(?) AS ");
-                query.push_str(&quote_sql_identifier(array_alias));
-                query.push_str(" ON ");
-                query.push_str(&qualify_sql_column(array_alias, "rowid"));
-                query.push_str(" = ");
-                query.push_str(&qualify_sql_column(&array_aliases[0], "rowid"));
-            }
-            params.push(SqlParameter::Array(Rc::new(
-                chunk.iter().map(|row| row[column_index].clone()).collect(),
-            )));
-        }
+        params.push(SqlParameter::Array(Rc::new(
+            ordered_in
+                .rows
+                .iter()
+                .map(|row| row[column_index].clone())
+                .collect(),
+        )));
     }
     query.push_str(") AS ");
     query.push_str(&values_alias);
@@ -978,7 +975,6 @@ fn append_ordered_in_join(
         query.push_str(" = ");
         query.push_str(&qualify_sql_column(&order_alias, value_column));
     }
-    Ok(())
 }
 
 fn query_rows<T>(

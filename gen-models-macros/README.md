@@ -64,8 +64,11 @@ deduplicated, and empty iterators match no rows:
 Sample::select(conn).name_in(["sample-a", "sample-b"]);
 ```
 
-List values are bound through SQLite's `rarray` virtual table. Large inputs are divided into
-parameter-limit-sized chunks and recombined while retaining their original order.
+List values are bound through SQLite's `rarray` virtual table. Each list uses one array parameter
+per selected column, so long lists do not consume one SQLite parameter per value. The renderer
+counts those array parameters together with scalar filters, history refs, and pagination; a query
+that exceeds the connection's variable limit returns `ModelSelectError::InvalidSelector` before
+SQLite executes it.
 
 `String` fields also receive a case-insensitive `_contains` method:
 

@@ -232,9 +232,22 @@ impl Path {
     ) -> Vec<Edge> {
         let edge_ids = Self::edge_ids_for_path(conn, path_id, history_ref);
         let select = Edge::select(conn).with_ref(history_ref);
-        select
-            .query_by_ids(edge_ids)
+        let edges_by_id = select
+            .query_by_ids(edge_ids.iter().copied())
             .expect("should load path edges by id")
+            .into_iter()
+            .map(|edge| (edge.id, edge))
+            .collect::<HashMap<_, _>>();
+
+        edge_ids
+            .into_iter()
+            .map(|edge_id| {
+                edges_by_id
+                    .get(&edge_id)
+                    .cloned()
+                    .expect("should load every path edge by id")
+            })
+            .collect()
     }
 
     fn validate_ordered_edges(edge_data: &[EdgeData]) -> Result<(), PathError> {
@@ -1440,6 +1453,80 @@ mod tests {
 
         assert_eq!(encoded.len(), edge_ids.len() * HASH_ID_SIZE);
         assert_eq!(Path::decode_edge_ids(&encoded), edge_ids);
+    }
+
+    #[test]
+    fn test_edges_for_path_preserves_repeated_edges_in_walk_order() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, existing_path) = setup_block_group(conn);
+        let existing_edge_ids = Path::edge_ids_for_path(conn, &existing_path.id, None);
+        let existing_edges = Edge::select(conn)
+            .query_by_ids(existing_edge_ids.iter().copied())
+            .expect("should load fixture edges");
+        let forward_edge = &existing_edges[1];
+        let reverse_edge = Edge::create(
+            conn,
+            forward_edge.target_node_id,
+            10,
+            Strand::Forward,
+            forward_edge.source_node_id,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create cycle edge");
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: reverse_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let edge_ids = vec![
+            existing_edge_ids[0],
+            forward_edge.id,
+            reverse_edge.id,
+            forward_edge.id,
+            existing_edge_ids[2],
+            existing_edge_ids[3],
+            existing_edge_ids[4],
+        ];
+        let path = Path::create(conn, "cycle", &block_group_id, &edge_ids)
+            .expect("should create path with repeated edge");
+
+        let resolved_edge_ids = Path::edges_for_path(conn, &path.id, None)
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(resolved_edge_ids, edge_ids);
+        assert_eq!(
+            path.length(conn, None).expect("should measure cyclic path"),
+            60
+        );
+        let coordinates = path
+            .coordinate_blocks(conn, None)
+            .into_iter()
+            .filter(|block| block.path_start >= 0 && block.path_end <= 60)
+            .map(|block| (block.path_start, block.path_end))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            coordinates,
+            vec![(0, 10), (10, 20), (20, 30), (30, 40), (40, 50), (50, 60)]
+        );
+
+        let history_ref = commit_all(conn, "cyclic path")
+            .expect("should commit cyclic path")
+            .to_string();
+        assert_eq!(
+            Path::edges_for_path(conn, &path.id, Some(&history_ref))
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>(),
+            edge_ids,
+        );
     }
 
     #[test]
