@@ -111,7 +111,8 @@ let sample = Sample::select(conn)
 ```
 
 The derive infers a field named `id` as the model primary key. Mark a differently named key with
-`#[model_select(primary_key)]`; this generates `get_by_id` and `query_by_ids` on the selector:
+`#[model_select(primary_key)]`; this generates `get_by_id`, `query_by_ids`, and `delete_by_ids` on
+the selector:
 
 ```rust
 let sample = Sample::select(conn)
@@ -121,13 +122,20 @@ let sample = Sample::select(conn)
 let samples = Sample::select(conn)
     .query_by_ids(["sample-b", "sample-a", "sample-b"])
     .expect("should query samples by primary key");
+
+let deleted = Sample::select(conn)
+    .delete_by_ids(["retired-a", "retired-b"])
+    .expect("should delete samples by primary key");
 ```
 
 `query_by_ids` has the same ordered and deduplicated behavior as the generated `_in` filter.
+`delete_by_ids` returns the number of affected rows, quotes the generated table and primary-key
+identifiers, and chunks large inputs. It must be called on a fresh selector because filters,
+joins, ordering, pagination, and historical refs do not define writable row sets.
 
 Only one field can be marked as the primary key, and skipped fields cannot be primary keys.
-Models without an `id` field or an explicit `primary_key` attribute receive neither primary-key
-convenience method.
+Models without an `id` field or an explicit `primary_key` attribute receive none of these
+primary-key convenience methods.
 
 To load every current model, use the generated convenience method:
 
@@ -294,10 +302,12 @@ Calling `load` directly on either joined selector returns instances of the selec
 so these queries return `Vec<Sample>`. Use `only` for typed fields from either side of the join, or
 `models` for complete joined models.
 
-The join fields are rendered as one quoted equality, such as
-`"samples"."name" = "block_groups"."sample_name"`. Repeating an identical join reuses its
-insertion-ordered entry and combines the filters. Reusing one alias with a different source or
-condition is rejected.
+The join fields must have the same generated join type. Nullable columns normalize `Option<T>` to
+`T` for this check, so an optional foreign key can join its non-null primary key; incompatible
+types such as `String` and `i64` fail to compile. Compatible fields are rendered as one quoted
+equality, such as `"samples"."name" = "block_groups"."sample_name"`. Repeating an identical join
+reuses its insertion-ordered entry and combines the filters. Reusing one alias with a different
+source or condition is rejected.
 
 A helper can hide a common relationship while retaining model-specific filter syntax:
 
@@ -316,13 +326,14 @@ Joined selectors must:
 - Use a consistent source and condition when reusing a source alias.
 - Leave `limit` and `offset` unset; apply pagination to the outer selector after the join.
 
-Violating these requirements, or joining from a field whose source has not been selected, currently
-panics with a descriptive message.
+Violating these requirements, or joining from a field whose source has not been selected, records
+a selector-construction error. The next `load()`, `get()`, or projection load returns that error.
 
 ## Error handling
 
-`load()` and `get()` return `ModelSelectError` for database preparation, query execution,
-result-row iteration, and projections that refer to a model that was not selected or joined.
+`load()` and `get()` return `ModelSelectError` for selector construction, unsupported historical
+queries, database preparation, query execution, row decoding, result-row iteration, and
+projections that refer to a model that was not selected or joined.
 `get()` additionally returns `ModelSelectError::MultipleResults` when the selector matches more
 than one model. Callers can propagate these errors directly:
 
@@ -334,9 +345,11 @@ fn matching_samples(conn: &Connection) -> Result<Vec<Sample>, ModelSelectError> 
 }
 ```
 
-Selector construction errors, such as joining from an unselected model or reusing an alias with a
-different condition, are currently programming errors enforced with assertions before `load()`
-runs.
+Selector construction errors, such as joining from an unselected model, combining different
+connections, or reusing an alias with a different condition, are deferred so fluent builder
+methods remain concise and are returned as `ModelSelectError::InvalidSelector` at execution.
+Using `with_ref` when any selected source has `history = false` returns
+`ModelSelectError::HistoryNotSupported`.
 
 ## Configuration attributes
 
@@ -375,9 +388,9 @@ pub struct Sample {
 - `table = "..."` generates the model's `Query` implementation and supplies `TABLE_NAME`.
 - `history = false` makes `Query::HISTORY_TABLE_NAME` return `None`. If omitted, historical reads
   use the configured table name.
-- `from_row = path::to::function` supplies a `fn(&Row) -> Model` for models that need custom row
-  decoding. This is required when any field uses `skip`; otherwise the derive reads every field by
-  its configured SQL column name.
+- `from_row = path::to::function` supplies a `fn(&Row) -> rusqlite::Result<Model>` for models that
+  need custom row decoding. This is required when any field uses `skip`; otherwise the derive reads
+  every field by its configured SQL column name.
 - `alias = "..."` sets the SQL alias used to qualify generated columns. Aliases and field-level
   `column` values are single SQL identifiers; generated SQL always double-quotes them and treats
   punctuation such as `.` as part of the identifier.
@@ -389,12 +402,12 @@ pub struct Sample {
 For example, a model with a non-persisted field can supply its construction explicitly:
 
 ```rust,ignore
-fn example_from_row(row: &gen_models::select::Row) -> Example {
-    let name: String = row.get("name").expect("should read example name");
-    Example {
+fn example_from_row(row: &gen_models::select::Row) -> gen_models::select::SqlResult<Example> {
+    let name: String = row.get("name")?;
+    Ok(Example {
         uppercase_name: name.to_uppercase(),
         name,
-    }
+    })
 }
 
 #[derive(ModelSelect)]
@@ -429,7 +442,7 @@ At compile time, `ModelSelect`:
 4. Generates the selector struct, typed field constants, filter methods, and `SelectQuery`
    implementation.
 5. Generates `Model::select(conn)`, `Model::all(conn)`, selector `get()`, and selector
-   `get_by_id(...)` and `query_by_ids(...)` when a primary key is available.
+   `get_by_id(...)`, `query_by_ids(...)`, and `delete_by_ids(...)` when a primary key is available.
 
 At runtime, [`gen-models::select`](../gen-models/src/select.rs):
 
@@ -437,10 +450,10 @@ At runtime, [`gen-models::select`](../gen-models/src/select.rs):
 2. Builds requested join conditions from typed field constants supplied by the caller.
 3. Quotes every structured table, alias, and column identifier, then renders one `SELECT` statement
    for the base model and its joined sources.
-4. Binds every runtime value through `rusqlite`; list filters use `rarray` relations to retain
-   input order and avoid interpolating placeholder lists.
-5. Maps full base-model loads through the generated or custom `Query::process_row`, or typed field
-   and model projections through fallible decoders generated for their selected types.
+4. Fallibly converts and binds every runtime value through `rusqlite`; list filters use `rarray`
+   relations to retain input order and avoid interpolating placeholder lists.
+5. Maps full base-model loads through the generated or custom fallible `Query::process_row`, or
+   typed field and model projections through fallible decoders generated for their selected types.
 
 The runtime support cannot live in this proc-macro crate. A proc-macro executes inside the compiler
 and can export procedural macros, but it cannot export the normal reusable runtime types needed by
@@ -457,7 +470,5 @@ without expanding every derive.
 - A source alias can only refer to one source and join condition in a query.
 - `only` supports projections of one through 16 fields from selected and joined models.
 - `models` supports tuples of one through 16 selected and joined models without skipped fields.
-- `Query::process_row` returns a model directly, so a model implementation that panics while
-  decoding a row cannot be converted into `ModelSelectError` without changing the `Query` trait.
 - Generated code references `gen_models`, so downstream consumers should use the macro through the
   `gen-models` crate under its standard crate name.

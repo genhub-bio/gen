@@ -168,7 +168,9 @@ impl BlockGroupEdge {
             .iter()
             .map(|bge| bge.id_hash())
             .collect::<Vec<_>>();
-        BlockGroupEdge::delete_by_ids(conn, &hashes);
+        BlockGroupEdge::select(conn)
+            .delete_by_ids(hashes)
+            .expect("should delete block group edges by id");
     }
 
     #[cfg_attr(
@@ -346,7 +348,9 @@ mod tests {
         let historical_commit =
             commit_all(conn, "create block group edges").expect("should commit block group edges");
         BlockGroupEdge::bulk_delete(conn, &[block_group_edge]);
-        Edge::delete_by_ids(conn, &[historical_edge.edge.id]);
+        Edge::select(conn)
+            .delete_by_ids([historical_edge.edge.id])
+            .expect("should delete historical edge by id");
 
         assert!(
             BlockGroupEdge::specific_edges_for_block_group(

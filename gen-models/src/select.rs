@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 pub use rusqlite::{Connection, Result as SqlResult, Row};
 use rusqlite::{
-    ToSql, params_from_iter,
+    ToSql, params, params_from_iter,
     types::{FromSql, ToSqlOutput, Value},
 };
 
@@ -73,16 +73,40 @@ where
 }
 
 #[doc(hidden)]
-pub fn sql_value(value: &impl ToSql) -> Value {
-    match value
-        .to_sql()
-        .expect("should convert selector value to SQL")
-    {
-        ToSqlOutput::Borrowed(value) => {
-            Value::try_from(value).expect("should copy borrowed selector value")
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SelectorBuildError {
+    InvalidSelector(String),
+    HistoryNotSupported { table_name: &'static str },
+}
+
+impl From<SelectorBuildError> for ModelSelectError {
+    fn from(error: SelectorBuildError) -> Self {
+        match error {
+            SelectorBuildError::InvalidSelector(message) => Self::InvalidSelector(message),
+            SelectorBuildError::HistoryNotSupported { table_name } => Self::HistoryNotSupported {
+                table_name: table_name.to_string(),
+            },
         }
-        ToSqlOutput::Owned(value) => value,
-        _ => panic!("selector values must map to SQLite scalar values"),
+    }
+}
+
+#[doc(hidden)]
+pub fn sql_value(value: &impl ToSql) -> Result<Value, SelectorBuildError> {
+    let value = value.to_sql().map_err(|error| {
+        SelectorBuildError::InvalidSelector(format!(
+            "failed to convert selector value to SQL: {error}"
+        ))
+    })?;
+    match value {
+        ToSqlOutput::Borrowed(value) => Value::try_from(value).map_err(|error| {
+            SelectorBuildError::InvalidSelector(format!(
+                "failed to copy selector SQL value: {error}"
+            ))
+        }),
+        ToSqlOutput::Owned(value) => Ok(value),
+        _ => Err(SelectorBuildError::InvalidSelector(
+            "selector values must map to SQLite scalar values".to_string(),
+        )),
     }
 }
 
@@ -163,6 +187,7 @@ pub struct SqlSource {
     table_name: &'static str,
     alias: &'static str,
     source_id: &'static str,
+    supports_history: bool,
     source_clause: fn(Option<&str>) -> String,
 }
 
@@ -171,12 +196,14 @@ impl SqlSource {
         table_name: &'static str,
         alias: &'static str,
         source_id: &'static str,
+        supports_history: bool,
         source_clause: fn(Option<&str>) -> String,
     ) -> Self {
         Self {
             table_name,
             alias,
             source_id,
+            supports_history,
             source_clause,
         }
     }
@@ -193,10 +220,15 @@ impl SqlSource {
         self.alias
     }
 
+    fn supports_history(self) -> bool {
+        self.supports_history
+    }
+
     fn has_same_definition(self, other: Self) -> bool {
         self.table_name == other.table_name
             && self.alias == other.alias
             && self.source_id == other.source_id
+            && self.supports_history == other.supports_history
     }
 }
 
@@ -243,23 +275,27 @@ impl SqlJoins {
         self.joins.values()
     }
 
-    pub fn insert(&mut self, join: SqlJoin) {
+    pub fn insert(&mut self, join: SqlJoin) -> Result<(), SelectorBuildError> {
         let alias = join.source.alias();
         if let Some(existing) = self.joins.get(alias) {
-            assert!(
-                existing.source.has_same_definition(join.source)
-                    && existing.condition == join.condition,
-                "cannot use SQL source alias `{alias}` for different joins",
-            );
+            if !existing.source.has_same_definition(join.source)
+                || existing.condition != join.condition
+            {
+                return Err(SelectorBuildError::InvalidSelector(format!(
+                    "cannot use SQL source alias `{alias}` for different joins"
+                )));
+            }
         } else {
             self.joins.insert(alias, join);
         }
+        Ok(())
     }
 
-    pub fn extend_from(&mut self, joins: &Self) {
+    pub fn extend_from(&mut self, joins: &Self) -> Result<(), SelectorBuildError> {
         for join in joins.iter() {
-            self.insert(join.clone());
+            self.insert(join.clone())?;
         }
+        Ok(())
     }
 }
 
@@ -268,6 +304,8 @@ pub trait SelectQuery {
     fn connection(&self) -> &Connection;
 
     fn source(&self) -> SqlSource;
+
+    fn error(&self) -> Option<&SelectorBuildError>;
 
     fn history_ref(&self) -> Option<&str>;
 
@@ -288,20 +326,22 @@ pub trait SelectQuery {
 
 #[doc(hidden)]
 #[derive(Debug, Eq, PartialEq)]
-pub struct SelectField<M, T> {
+pub struct SelectField<M, T, JoinType = T> {
     table_name: &'static str,
     alias: &'static str,
     column: &'static str,
     field: PhantomData<fn() -> (M, T)>,
+    join_type: PhantomData<fn() -> JoinType>,
 }
 
-impl<M, T> SelectField<M, T> {
+impl<M, T, JoinType> SelectField<M, T, JoinType> {
     pub const fn new(table_name: &'static str, alias: &'static str, column: &'static str) -> Self {
         Self {
             table_name,
             alias,
             column,
             field: PhantomData,
+            join_type: PhantomData,
         }
     }
 
@@ -318,13 +358,13 @@ impl<M, T> SelectField<M, T> {
     }
 }
 
-impl<M, T> Clone for SelectField<M, T> {
+impl<M, T, JoinType> Clone for SelectField<M, T, JoinType> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<M, T> Copy for SelectField<M, T> {}
+impl<M, T, JoinType> Copy for SelectField<M, T, JoinType> {}
 
 #[doc(hidden)]
 pub trait ProjectionField {
@@ -339,7 +379,7 @@ pub trait ProjectionField {
     fn process_row(&self, row: &Row, index: usize) -> rusqlite::Result<Self::Output>;
 }
 
-impl<M, T> ProjectionField for SelectField<M, T>
+impl<M, T, JoinType> ProjectionField for SelectField<M, T, JoinType>
 where
     T: FromSql,
 {
@@ -389,7 +429,7 @@ pub trait SelectProjection {
     fn process_row(&self, row: &Row) -> rusqlite::Result<Self::Output>;
 }
 
-impl<M, T> SelectProjection for SelectField<M, T>
+impl<M, T, JoinType> SelectProjection for SelectField<M, T, JoinType>
 where
     T: FromSql,
 {
@@ -566,12 +606,15 @@ fn load_projection<S, T>(
 where
     S: SelectQuery,
 {
+    if let Some(error) = select.error() {
+        return Err(error.clone().into());
+    }
     validate_projection_sources(&select, &fields)?;
     let select_clause = fields
         .iter()
         .map(|(_, alias, column)| qualify_sql_column(alias, column))
         .join(", ");
-    let (query, params) = render_query(&select, select_clause);
+    let (query, params) = render_query(&select, select_clause, None)?;
     query_rows(select.connection(), &query, params, process_row)
 }
 
@@ -605,8 +648,8 @@ where
     M: Query<Model = M>,
     S: SelectQuery,
 {
-    let (query, params) = render_query(select, select.select_clause());
-    query_rows(conn, &query, params, |row| Ok(M::process_row(row)))
+    let (query, params) = render_query(select, select.select_clause(), None)?;
+    query_rows(conn, &query, params, M::process_row)
 }
 
 #[doc(hidden)]
@@ -615,7 +658,8 @@ where
     M: Query<Model = M>,
     S: SelectQuery,
 {
-    let mut rows = load::<M, S>(conn, select)?;
+    let (query, params) = render_query(select, select.select_clause(), Some(2))?;
+    let mut rows = query_rows(conn, &query, params, M::process_row)?;
     match rows.len() {
         0 => Ok(None),
         1 => Ok(rows.pop()),
@@ -623,10 +667,30 @@ where
     }
 }
 
-fn render_query<S>(select: &S, select_clause: String) -> (String, Vec<SqlParameter>)
+fn render_query<S>(
+    select: &S,
+    select_clause: String,
+    maximum_rows: Option<u32>,
+) -> Result<(String, Vec<SqlParameter>), ModelSelectError>
 where
     S: SelectQuery,
 {
+    if let Some(error) = select.error() {
+        return Err(error.clone().into());
+    }
+    if select.history_ref().is_some() {
+        for source in
+            core::iter::once(select.source()).chain(select.joins().iter().map(|join| join.source()))
+        {
+            if !source.supports_history() {
+                return Err(SelectorBuildError::HistoryNotSupported {
+                    table_name: source.table_name(),
+                }
+                .into());
+            }
+        }
+    }
+
     let mut query = format!(
         "SELECT {select_clause} FROM {}",
         select.source().clause(select.history_ref()),
@@ -694,20 +758,46 @@ where
         }
     }
 
-    if let Some(limit) = select.limit() {
+    let effective_limit = maximum_rows.or(select.limit());
+    if let Some(limit) = effective_limit {
         query.push_str(" LIMIT ?");
         params.push(SqlParameter::Scalar(Value::from(i64::from(limit))));
     }
     let offset = select.offset();
     if offset > 0 {
-        if select.limit().is_none() {
+        if effective_limit.is_none() {
             query.push_str(" LIMIT -1");
         }
         query.push_str(" OFFSET ?");
         params.push(SqlParameter::Scalar(Value::from(i64::from(offset))));
     }
 
-    (query, params)
+    Ok((query, params))
+}
+
+#[doc(hidden)]
+pub fn delete_by_ids(
+    conn: &Connection,
+    table_name: &str,
+    primary_key: &str,
+    values: Vec<Value>,
+) -> Result<usize, ModelSelectError> {
+    if values.is_empty() {
+        return Ok(0);
+    }
+
+    let query = format!(
+        "DELETE FROM {} WHERE {} IN rarray(?1)",
+        quote_sql_identifier(table_name),
+        quote_sql_identifier(primary_key),
+    );
+    let batch_size = max_rows_per_batch(conn, 1);
+    let mut deleted = 0;
+    let mut statement = conn.prepare(&query)?;
+    for chunk in values.chunks(batch_size) {
+        deleted += statement.execute(params![Rc::new(chunk.to_vec())])?;
+    }
+    Ok(deleted)
 }
 
 fn append_ordered_in_join(
@@ -782,44 +872,48 @@ pub fn default_sql_source(
 }
 
 #[doc(hidden)]
-pub fn sql_join_on<SourceModel, SourceType, JoinedModel, JoinedType>(
+pub fn sql_join_on<SourceModel, SourceType, JoinedModel, JoinedType, JoinType>(
     existing_sources: &[SqlSource],
     joined_source: SqlSource,
-    source_field: SelectField<SourceModel, SourceType>,
-    joined_field: SelectField<JoinedModel, JoinedType>,
-) -> SqlJoin {
-    assert!(
-        existing_sources
-            .first()
-            .is_none_or(|source| { source.alias() != joined_source.alias() }),
-        "cannot join the base SQL source alias `{}`",
-        joined_source.alias(),
-    );
-    assert!(
-        existing_sources.iter().any(|source| {
-            source.table_name() == source_field.table_name()
-                && source.alias() == source_field.alias()
-        }),
-        "cannot join from unselected SQL source `{} AS {}`",
-        source_field.table_name(),
-        source_field.alias(),
-    );
-    assert!(
-        joined_source.table_name() == joined_field.table_name()
-            && joined_source.alias() == joined_field.alias(),
-        "joined field source `{} AS {}` does not match selector source `{} AS {}`",
-        joined_field.table_name(),
-        joined_field.alias(),
-        joined_source.table_name(),
-        joined_source.alias(),
-    );
+    source_field: SelectField<SourceModel, SourceType, JoinType>,
+    joined_field: SelectField<JoinedModel, JoinedType, JoinType>,
+) -> Result<SqlJoin, SelectorBuildError> {
+    if existing_sources
+        .first()
+        .is_some_and(|source| source.alias() == joined_source.alias())
+    {
+        return Err(SelectorBuildError::InvalidSelector(format!(
+            "cannot join the base SQL source alias `{}`",
+            joined_source.alias(),
+        )));
+    }
+    if !existing_sources.iter().any(|source| {
+        source.table_name() == source_field.table_name() && source.alias() == source_field.alias()
+    }) {
+        return Err(SelectorBuildError::InvalidSelector(format!(
+            "cannot join from unselected SQL source `{} AS {}`",
+            source_field.table_name(),
+            source_field.alias(),
+        )));
+    }
+    if joined_source.table_name() != joined_field.table_name()
+        || joined_source.alias() != joined_field.alias()
+    {
+        return Err(SelectorBuildError::InvalidSelector(format!(
+            "joined field source `{} AS {}` does not match selector source `{} AS {}`",
+            joined_field.table_name(),
+            joined_field.alias(),
+            joined_source.table_name(),
+            joined_source.alias(),
+        )));
+    }
 
     let condition = format!(
         "{} = {}",
         qualify_sql_column(source_field.alias(), source_field.column()),
         qualify_sql_column(joined_field.alias(), joined_field.column()),
     );
-    SqlJoin::new(joined_source, condition)
+    Ok(SqlJoin::new(joined_source, condition))
 }
 
 fn quote_sql_identifier(identifier: &str) -> String {
@@ -829,8 +923,8 @@ fn quote_sql_identifier(identifier: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        SelectField, SqlJoins, SqlSource, default_sql_source, qualify_sql_column, select_all_sql,
-        sql_join_on,
+        SelectField, SelectorBuildError, SqlJoins, SqlSource, default_sql_source,
+        qualify_sql_column, select_all_sql, sql_join_on,
     };
 
     fn child_source_clause(_history_ref: Option<&str>) -> String {
@@ -847,12 +941,14 @@ mod tests {
             "selector_children",
             "children.alias",
             "tests::children",
+            true,
             child_source_clause,
         );
         let parent_source = SqlSource::new(
             "selector_parents",
             "parents\" --",
             "tests::parents",
+            true,
             parent_source_clause,
         );
         let source_field = SelectField::<(), i64>::new(
@@ -863,7 +959,8 @@ mod tests {
         let joined_field =
             SelectField::<(), i64>::new("selector_parents", "parents\" --", "target.column");
 
-        let join = sql_join_on(&[child_source], parent_source, source_field, joined_field);
+        let join = sql_join_on(&[child_source], parent_source, source_field, joined_field)
+            .expect("should create an explicit join");
         assert_eq!(
             join.condition,
             "\"children.alias\".\"source\"\" OR attacker_effect()\" = \"parents\"\" --\".\"target.column\"",
@@ -876,32 +973,43 @@ mod tests {
             "selector_children",
             "selector_children",
             "tests::children",
+            true,
             child_source_clause,
         );
         let later_source = SqlSource::new(
             "later_parents",
             "z_parents",
             "tests::later_parents",
+            true,
             parent_source_clause,
         );
         let earlier_source = SqlSource::new(
             "earlier_parents",
             "a_parents",
             "tests::earlier_parents",
+            true,
             parent_source_clause,
         );
         let source_field =
             SelectField::<(), i64>::new("selector_children", "selector_children", "parent_id");
         let later_field = SelectField::<(), i64>::new("later_parents", "z_parents", "id");
         let earlier_field = SelectField::<(), i64>::new("earlier_parents", "a_parents", "id");
-        let later_join = sql_join_on(&[child_source], later_source, source_field, later_field);
+        let later_join = sql_join_on(&[child_source], later_source, source_field, later_field)
+            .expect("should create the later join");
         let earlier_join =
-            sql_join_on(&[child_source], earlier_source, source_field, earlier_field);
+            sql_join_on(&[child_source], earlier_source, source_field, earlier_field)
+                .expect("should create the earlier join");
         let mut joins = SqlJoins::default();
 
-        joins.insert(later_join.clone());
-        joins.insert(earlier_join);
-        joins.insert(later_join);
+        joins
+            .insert(later_join.clone())
+            .expect("should insert the later join");
+        joins
+            .insert(earlier_join)
+            .expect("should insert the earlier join");
+        joins
+            .insert(later_join)
+            .expect("should deduplicate the later join");
 
         assert_eq!(joins.len(), 2);
         assert_eq!(
@@ -914,18 +1022,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cannot use SQL source alias `selector_parents` for different joins")]
     fn test_duplicate_alias_with_different_join_is_rejected() {
         let child_source = SqlSource::new(
             "selector_children",
             "selector_children",
             "tests::children",
+            true,
             child_source_clause,
         );
         let parent_source = SqlSource::new(
             "selector_parents",
             "selector_parents",
             "tests::parents",
+            true,
             parent_source_clause,
         );
         let joined_field =
@@ -935,7 +1044,8 @@ mod tests {
             parent_source,
             SelectField::<(), i64>::new("selector_children", "selector_children", "parent_id"),
             joined_field,
-        );
+        )
+        .expect("should create the first join");
         let second_join = sql_join_on(
             &[child_source],
             parent_source,
@@ -945,32 +1055,46 @@ mod tests {
                 "other_parent_id",
             ),
             joined_field,
-        );
+        )
+        .expect("should create the second join");
         let mut joins = SqlJoins::default();
 
-        joins.insert(first_join);
-        joins.insert(second_join);
+        joins
+            .insert(first_join)
+            .expect("should insert the first join");
+        let error = joins
+            .insert(second_join)
+            .expect_err("should reject a conflicting join");
+
+        assert_eq!(
+            error,
+            SelectorBuildError::InvalidSelector(
+                "cannot use SQL source alias `selector_parents` for different joins".to_string(),
+            )
+        );
     }
 
     #[test]
-    #[should_panic(expected = "cannot use SQL source alias `shared_parents` for different joins")]
     fn test_duplicate_alias_with_different_source_is_rejected() {
         let child_source = SqlSource::new(
             "selector_children",
             "selector_children",
             "tests::children",
+            true,
             child_source_clause,
         );
         let first_source = SqlSource::new(
             "selector_parents",
             "shared_parents",
             "tests::parents",
+            true,
             parent_source_clause,
         );
         let second_source = SqlSource::new(
             "alternate_parents",
             "shared_parents",
             "tests::alternate_parents",
+            true,
             parent_source_clause,
         );
         let source_field =
@@ -980,17 +1104,30 @@ mod tests {
             first_source,
             source_field,
             SelectField::<(), i64>::new("selector_parents", "shared_parents", "id"),
-        );
+        )
+        .expect("should create the first join");
         let second_join = sql_join_on(
             &[child_source],
             second_source,
             source_field,
             SelectField::<(), i64>::new("alternate_parents", "shared_parents", "id"),
-        );
+        )
+        .expect("should create the second join");
         let mut joins = SqlJoins::default();
 
-        joins.insert(first_join);
-        joins.insert(second_join);
+        joins
+            .insert(first_join)
+            .expect("should insert the first join");
+        let error = joins
+            .insert(second_join)
+            .expect_err("should reject a conflicting source");
+
+        assert_eq!(
+            error,
+            SelectorBuildError::InvalidSelector(
+                "cannot use SQL source alias `shared_parents` for different joins".to_string(),
+            )
+        );
     }
 
     #[test]

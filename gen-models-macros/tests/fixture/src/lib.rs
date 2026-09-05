@@ -1,7 +1,13 @@
 //! Fake persistence models used to exercise the generated selector API.
 
+use std::cell::Cell;
+
 use gen_models::select::{Connection, Row};
 use gen_models_macros::ModelSelect;
+use rusqlite::{
+    ToSql,
+    types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
+};
 
 pub const IDENTIFIER_INJECTED_BRANCH: &str = "selector_identifier_injection";
 
@@ -25,7 +31,10 @@ pub struct FixtureGroup {
 #[derive(Debug, ModelSelect, PartialEq)]
 #[model_select(table = "selector table\" --", alias = "selector alias\" --")]
 pub struct QuotedIdentifierModel {
-    #[model_select(column = "value\" || dolt_branch('selector_identifier_injection') || \"")]
+    #[model_select(
+        primary_key,
+        column = "value\" || dolt_branch('selector_identifier_injection') || \""
+    )]
     pub value: String,
     #[model_select(column = "optional value")]
     pub optional_value: Option<String>,
@@ -56,12 +65,12 @@ pub struct CustomSourceModel {
     pub value: String,
 }
 
-fn derived_model_from_row(row: &Row) -> DerivedModel {
-    let value: String = row.get("value").expect("should read derived model value");
-    DerivedModel {
+fn derived_model_from_row(row: &Row) -> rusqlite::Result<DerivedModel> {
+    let value: String = row.get("value")?;
+    Ok(DerivedModel {
         uppercase: value.to_uppercase(),
         value,
-    }
+    })
 }
 
 #[derive(Debug, ModelSelect, PartialEq)]
@@ -70,6 +79,58 @@ pub struct DerivedModel {
     pub value: String,
     #[model_select(skip)]
     pub uppercase: String,
+}
+
+#[derive(Debug, ModelSelect)]
+#[model_select(table = "invalid_rows")]
+pub struct InvalidRow {
+    pub value: String,
+}
+
+#[derive(Debug)]
+pub struct FailingSqlValue(pub i64);
+
+impl FromSql for FailingSqlValue {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value.as_i64().map(Self)
+    }
+}
+
+impl ToSql for FailingSqlValue {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::other("fixture selector conversion failure"),
+        )))
+    }
+}
+
+#[derive(Debug, ModelSelect)]
+#[model_select(table = "failing_sql_values")]
+pub struct FailingSqlValueModel {
+    pub value: FailingSqlValue,
+}
+
+thread_local! {
+    static PROCESSED_ROW_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+fn counted_model_from_row(row: &Row) -> rusqlite::Result<CountedModel> {
+    PROCESSED_ROW_COUNT.set(PROCESSED_ROW_COUNT.get() + 1);
+    Ok(CountedModel { id: row.get("id")? })
+}
+
+#[derive(Debug, ModelSelect)]
+#[model_select(table = "counted_models", from_row = counted_model_from_row)]
+pub struct CountedModel {
+    pub id: i64,
+}
+
+pub fn reset_processed_row_count() {
+    PROCESSED_ROW_COUNT.set(0);
+}
+
+pub fn processed_row_count() -> usize {
+    PROCESSED_ROW_COUNT.get()
 }
 
 pub fn connection() -> Connection {
@@ -91,6 +152,17 @@ pub fn connection() -> Connection {
             value TEXT NOT NULL
         );
         INSERT INTO derived_models (value) VALUES ('derived');
+        CREATE TABLE invalid_rows (
+            value INTEGER NOT NULL
+        );
+        INSERT INTO invalid_rows (value) VALUES (42);
+        CREATE TABLE failing_sql_values (
+            value INTEGER NOT NULL
+        );
+        CREATE TABLE counted_models (
+            id INTEGER PRIMARY KEY
+        );
+        INSERT INTO counted_models (id) VALUES (1), (2), (3), (4);
         CREATE TABLE "selector table"" --" (
             "value"" || dolt_branch('selector_identifier_injection') || """ TEXT NOT NULL,
             "optional value" TEXT

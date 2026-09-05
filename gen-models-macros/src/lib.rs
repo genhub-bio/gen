@@ -14,8 +14,8 @@ use syn::{
 /// typed ordering, projections, and explicit join conditions. Generated selectors can be composed
 /// with `.join_on(left_field, right_field)` or `.join_filtered_on(...)`. Joined queries can project
 /// fields with `.only(...)` or complete models with `.models::<(...)>()`.
-/// Primary-key selectors also provide `get_by_id(...)` and ordered, deduplicated
-/// `query_by_ids(...)` loads.
+/// Primary-key selectors also provide `get_by_id(...)`, ordered and deduplicated
+/// `query_by_ids(...)` loads, and batched `delete_by_ids(...)` mutations.
 /// `#[model_select(table = "...")]` generates the model's `Query` implementation.
 /// `#[model_select(column = "...")]` overrides a field's SQL column,
 /// `#[model_select(primary_key)]` marks a non-`id` primary key, `#[model_select(skip)]` excludes a
@@ -127,19 +127,15 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         model_initializers.push(quote! {
             #field_name: row.get(offset + #field_index)?
         });
-        let query_error = LitStr::new(
-            &format!("should read {model}.{field_name} from database row"),
-            Span::call_site(),
-        );
         query_initializers.push(quote! {
-            #field_name: row.get(#column_literal).expect(#query_error)
+            #field_name: row.get(#column_literal)?
         });
         column_constants.push(quote! {
             #[expect(
                 non_upper_case_globals,
                 reason = "selector field constants mirror generated Rust field variants"
             )]
-            pub const #variant: ::gen_models::select::SelectField<#model, #field_type> =
+            pub const #variant: ::gen_models::select::SelectField<#model, #field_type, #value_type> =
                 ::gen_models::select::SelectField::new(
                     <#model as ::gen_models::traits::Query>::TABLE_NAME,
                     #source_alias,
@@ -165,7 +161,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let primary_key = explicit_primary_key.or(inferred_primary_key);
     let primary_key_methods = primary_key
         .as_ref()
-        .map(|(field, field_type, string, _)| {
+        .map(|(field, field_type, string, column)| {
             let in_method = format_ident!("{}_in", field);
             if *string {
                 quote! {
@@ -192,6 +188,30 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                     {
                         self.#in_method(ids).load()
                     }
+
+                    pub fn delete_by_ids<I, V>(
+                        self,
+                        ids: I,
+                    ) -> ::core::result::Result<usize, ::gen_models::ModelSelectError>
+                    where
+                        I: ::core::iter::IntoIterator<Item = V>,
+                        V: ::core::convert::Into<::std::string::String>,
+                    {
+                        self.validate_delete_by_ids()?;
+                        let values = ids
+                            .into_iter()
+                            .map(|id| {
+                                let id = id.into();
+                                ::gen_models::select::sql_value(&id)
+                            })
+                            .collect::<::core::result::Result<::std::vec::Vec<_>, _>>()?;
+                        ::gen_models::select::delete_by_ids(
+                            self.conn,
+                            <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                            #column,
+                            values,
+                        )
+                    }
                 }
             } else {
                 quote! {
@@ -217,20 +237,32 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                     {
                         self.#in_method(ids).load()
                     }
+
+                    pub fn delete_by_ids<I>(
+                        self,
+                        ids: I,
+                    ) -> ::core::result::Result<usize, ::gen_models::ModelSelectError>
+                    where
+                        I: ::core::iter::IntoIterator<Item = #field_type>,
+                    {
+                        self.validate_delete_by_ids()?;
+                        let values = ids
+                            .into_iter()
+                            .map(|id| ::gen_models::select::sql_value(&id))
+                            .collect::<::core::result::Result<::std::vec::Vec<_>, _>>()?;
+                        ::gen_models::select::delete_by_ids(
+                            self.conn,
+                            <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                            #column,
+                            values,
+                        )
+                    }
                 }
             }
         })
         .unwrap_or_default();
 
     let query_impl = if let Some(table) = options.table.as_ref() {
-        let primary_key = primary_key
-            .as_ref()
-            .map(|(_, _, _, column)| {
-                quote! {
-                    const PRIMARY_KEY: &'static str = #column;
-                }
-            })
-            .unwrap_or_default();
         let history_table_name = if options.history.unwrap_or(true) {
             quote! {
                 const HISTORY_TABLE_NAME: ::core::option::Option<&'static str> =
@@ -252,22 +284,21 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 ));
             }
             quote! {
-                Self {
+                ::core::result::Result::Ok(Self {
                     #(#query_initializers),*
-                }
+                })
             }
         };
         quote! {
             impl ::gen_models::traits::Query for #model {
                 type Model = Self;
 
-                #primary_key
                 const TABLE_NAME: &'static str = #table;
                 #history_table_name
 
                 fn process_row(
                     row: &::gen_models::select::Row,
-                ) -> Self::Model {
+                ) -> ::gen_models::select::SqlResult<Self::Model> {
                     #process_row
                 }
             }
@@ -341,6 +372,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         #[derive(Clone, Debug)]
         pub struct #selector<'conn> {
             conn: &'conn ::gen_models::select::Connection,
+            error: ::core::option::Option<::gen_models::select::SelectorBuildError>,
             history_ref: ::core::option::Option<::std::string::String>,
             filters: ::std::vec::Vec<::gen_models::select::SqlFilter>,
             order_by: ::std::vec::Vec<::gen_models::select::SqlOrder>,
@@ -357,6 +389,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             ) -> Self {
                 Self {
                     conn,
+                    error: ::core::option::Option::None,
                     history_ref: ::core::option::Option::None,
                     filters: ::std::vec::Vec::new(),
                     order_by: ::std::vec::Vec::new(),
@@ -377,6 +410,56 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 )
             }
 
+            fn invalid_selector(mut self, message: impl ::core::convert::Into<::std::string::String>) -> Self {
+                if self.error.is_none() {
+                    self.error = ::core::option::Option::Some(
+                        ::gen_models::select::SelectorBuildError::InvalidSelector(message.into()),
+                    );
+                }
+                self
+            }
+
+            fn validate_delete_by_ids(
+                &self,
+            ) -> ::core::result::Result<(), ::gen_models::ModelSelectError> {
+                if let ::core::option::Option::Some(error) = &self.error {
+                    return ::core::result::Result::Err(error.clone().into());
+                }
+                if self.history_ref.is_some()
+                    || !self.filters.is_empty()
+                    || !self.order_by.is_empty()
+                    || !self.joins.is_empty()
+                    || self.limit.is_some()
+                    || self.offset != 0
+                {
+                    return ::core::result::Result::Err(
+                        ::gen_models::ModelSelectError::InvalidSelector(
+                            ::std::string::String::from(
+                                "delete_by_ids must be called before configuring the selector",
+                            ),
+                        ),
+                    );
+                }
+                ::core::result::Result::Ok(())
+            }
+
+            fn push_filter_result(
+                mut self,
+                filter: ::core::result::Result<
+                    ::gen_models::select::SqlFilter,
+                    ::gen_models::select::SelectorBuildError,
+                >,
+            ) -> Self {
+                match filter {
+                    ::core::result::Result::Ok(filter) => self.filters.push(filter),
+                    ::core::result::Result::Err(error) if self.error.is_none() => {
+                        self.error = ::core::option::Option::Some(error);
+                    }
+                    ::core::result::Result::Err(_) => {}
+                }
+                self
+            }
+
             pub fn with_ref<R, K>(
                 mut self,
                 history_ref: R,
@@ -391,9 +474,9 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 
             #(#filter_methods)*
 
-            pub fn order_by<T>(
+            pub fn order_by<T, JoinType>(
                 mut self,
-                field: ::gen_models::select::SelectField<#model, T>,
+                field: ::gen_models::select::SelectField<#model, T, JoinType>,
                 direction: ::gen_models::select::Direction,
             ) -> Self {
                 let column = self.column(field.column());
@@ -404,10 +487,10 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 self
             }
 
-            pub fn join_on<SourceType, JoinedModel, JoinedType>(
+            pub fn join_on<SourceType, JoinedModel, JoinedType, JoinType>(
                 self,
-                source_field: ::gen_models::select::SelectField<#model, SourceType>,
-                joined_field: ::gen_models::select::SelectField<JoinedModel, JoinedType>,
+                source_field: ::gen_models::select::SelectField<#model, SourceType, JoinType>,
+                joined_field: ::gen_models::select::SelectField<JoinedModel, JoinedType, JoinType>,
             ) -> Self
             where
                 JoinedModel: ::gen_models::select::ModelSelectSource,
@@ -417,36 +500,49 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 self.join_filtered_on(source_field, joined_field, joined)
             }
 
-            pub fn join_filtered_on<SourceType, JoinedModel, JoinedType>(
+            pub fn join_filtered_on<SourceType, JoinedModel, JoinedType, JoinType>(
                 mut self,
-                source_field: ::gen_models::select::SelectField<#model, SourceType>,
-                joined_field: ::gen_models::select::SelectField<JoinedModel, JoinedType>,
+                source_field: ::gen_models::select::SelectField<#model, SourceType, JoinType>,
+                joined_field: ::gen_models::select::SelectField<JoinedModel, JoinedType, JoinType>,
                 joined: <JoinedModel as ::gen_models::select::ModelSelectSource>::Selector<'conn>,
             ) -> Self
             where
                 JoinedModel: ::gen_models::select::ModelSelectSource,
             {
-                assert!(
-                    ::core::ptr::eq(
-                        self.conn,
-                        ::gen_models::select::SelectQuery::connection(&joined),
-                    ),
-                    "joined selectors must use the same database connection",
-                );
-                assert!(
-                    ::gen_models::select::SelectQuery::limit(&joined).is_none()
-                        && ::gen_models::select::SelectQuery::offset(&joined) == 0,
-                    "apply limit and offset after join, not to the joined selector",
-                );
+                if self.error.is_some() {
+                    return self;
+                }
+                if let ::core::option::Option::Some(error) =
+                    ::gen_models::select::SelectQuery::error(&joined)
+                {
+                    self.error = ::core::option::Option::Some(error.clone());
+                    return self;
+                }
+                if !::core::ptr::eq(
+                    self.conn,
+                    ::gen_models::select::SelectQuery::connection(&joined),
+                ) {
+                    return self.invalid_selector(
+                        "joined selectors must use the same database connection",
+                    );
+                }
+                if ::gen_models::select::SelectQuery::limit(&joined).is_some()
+                    || ::gen_models::select::SelectQuery::offset(&joined) != 0
+                {
+                    return self.invalid_selector(
+                        "apply limit and offset after join, not to the joined selector",
+                    );
+                }
 
                 if let ::core::option::Option::Some(joined_ref) =
                     ::gen_models::select::SelectQuery::history_ref(&joined)
                 {
                     if let ::core::option::Option::Some(history_ref) = &self.history_ref {
-                        assert!(
-                            history_ref == joined_ref,
-                            "joined selectors must use the same historical ref",
-                        );
+                        if history_ref != joined_ref {
+                            return self.invalid_selector(
+                                "joined selectors must use the same historical ref",
+                            );
+                        }
                     } else {
                         self.history_ref = ::core::option::Option::Some(joined_ref.to_string());
                     }
@@ -459,27 +555,40 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 existing_sources.extend(self.joins.iter().map(|join| join.source()));
 
                 let joined_source = ::gen_models::select::SelectQuery::source(&joined);
-                let explicit_join = ::gen_models::select::sql_join_on(
+                let explicit_join = match ::gen_models::select::sql_join_on(
                     &existing_sources,
                     joined_source,
                     source_field,
                     joined_field,
-                );
+                ) {
+                    ::core::result::Result::Ok(join) => join,
+                    ::core::result::Result::Err(error) => {
+                        self.error = ::core::option::Option::Some(error);
+                        return self;
+                    }
+                };
 
                 let base_alias =
                     <Self as ::gen_models::select::SelectQuery>::source(&self).alias();
                 for nested_join in
                     ::gen_models::select::SelectQuery::joins(&joined).iter()
                 {
-                    assert!(
-                        nested_join.source().alias() != base_alias,
-                        "cannot join the base SQL source alias `{base_alias}`",
-                    );
+                    if nested_join.source().alias() == base_alias {
+                        return self.invalid_selector(::std::format!(
+                            "cannot join the base SQL source alias `{base_alias}`",
+                        ));
+                    }
                 }
-                self.joins.insert(explicit_join);
-                self.joins.extend_from(
+                if let ::core::result::Result::Err(error) = self.joins.insert(explicit_join) {
+                    self.error = ::core::option::Option::Some(error);
+                    return self;
+                }
+                if let ::core::result::Result::Err(error) = self.joins.extend_from(
                     ::gen_models::select::SelectQuery::joins(&joined),
-                );
+                ) {
+                    self.error = ::core::option::Option::Some(error);
+                    return self;
+                }
                 self.filters.extend_from_slice(
                     ::gen_models::select::SelectQuery::filters(&joined),
                 );
@@ -528,12 +637,11 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             }
 
             pub fn get(
-                mut self,
+                self,
             ) -> ::core::result::Result<
                 ::core::option::Option<#model>,
                 ::gen_models::ModelSelectError,
             > {
-                self.limit = ::core::option::Option::Some(2);
                 ::gen_models::select::get::<#model, _>(self.conn, &self)
             }
 
@@ -558,8 +666,15 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                     <#model as ::gen_models::traits::Query>::TABLE_NAME,
                     #source_alias,
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#model)),
+                    <#model as ::gen_models::traits::Query>::HISTORY_TABLE_NAME.is_some(),
                     Self::source_clause_for,
                 )
+            }
+
+            fn error(
+                &self,
+            ) -> ::core::option::Option<&::gen_models::select::SelectorBuildError> {
+                self.error.as_ref()
             }
 
             fn history_ref(&self) -> ::core::option::Option<&str> {
@@ -716,32 +831,36 @@ fn filter_method(
     let in_method = format_ident!("{}_in", field);
     let exact = if string {
         quote! {
-            pub fn #field(mut self, value: impl ::core::convert::Into<::std::string::String>) -> Self {
+            pub fn #field(self, value: impl ::core::convert::Into<::std::string::String>) -> Self {
                 let value = value.into();
                 let column = self.column(#column);
-                self.filters.push(::gen_models::select::SqlFilter::new(
-                    ::std::format!("{column} = ?"),
-                    ::std::vec![::gen_models::select::sql_value(&value)],
-                ));
-                self
+                let filter = ::gen_models::select::sql_value(&value).map(|value| {
+                    ::gen_models::select::SqlFilter::new(
+                        ::std::format!("{column} = ?"),
+                        ::std::vec![value],
+                    )
+                });
+                self.push_filter_result(filter)
             }
         }
     } else {
         quote! {
-            pub fn #field(mut self, value: #value_type) -> Self {
+            pub fn #field(self, value: #value_type) -> Self {
                 let column = self.column(#column);
-                self.filters.push(::gen_models::select::SqlFilter::new(
-                    ::std::format!("{column} = ?"),
-                    ::std::vec![::gen_models::select::sql_value(&value)],
-                ));
-                self
+                let filter = ::gen_models::select::sql_value(&value).map(|value| {
+                    ::gen_models::select::SqlFilter::new(
+                        ::std::format!("{column} = ?"),
+                        ::std::vec![value],
+                    )
+                });
+                self.push_filter_result(filter)
             }
         }
     };
 
     let any_of = if string {
         quote! {
-            pub fn #in_method<I, V>(mut self, values: I) -> Self
+            pub fn #in_method<I, V>(self, values: I) -> Self
             where
                 I: ::core::iter::IntoIterator<Item = V>,
                 V: ::core::convert::Into<::std::string::String>,
@@ -753,14 +872,15 @@ fn filter_method(
                         let value = value.into();
                         ::gen_models::select::sql_value(&value)
                     })
-                    .collect::<::std::vec::Vec<_>>();
-                self.filters.push(::gen_models::select::sql_in_filter(column, params));
-                self
+                    .collect::<::core::result::Result<::std::vec::Vec<_>, _>>();
+                self.push_filter_result(
+                    params.map(|params| ::gen_models::select::sql_in_filter(column, params)),
+                )
             }
         }
     } else {
         quote! {
-            pub fn #in_method<I>(mut self, values: I) -> Self
+            pub fn #in_method<I>(self, values: I) -> Self
             where
                 I: ::core::iter::IntoIterator<Item = #value_type>,
             {
@@ -768,9 +888,10 @@ fn filter_method(
                 let params = values
                     .into_iter()
                     .map(|value| ::gen_models::select::sql_value(&value))
-                    .collect::<::std::vec::Vec<_>>();
-                self.filters.push(::gen_models::select::sql_in_filter(column, params));
-                self
+                    .collect::<::core::result::Result<::std::vec::Vec<_>, _>>();
+                self.push_filter_result(
+                    params.map(|params| ::gen_models::select::sql_in_filter(column, params)),
+                )
             }
         }
     };
@@ -779,16 +900,18 @@ fn filter_method(
         let contains_method = format_ident!("{}_contains", field);
         quote! {
             pub fn #contains_method(
-                mut self,
+                self,
                 value: impl ::core::convert::Into<::std::string::String>,
             ) -> Self {
                 let value = value.into();
                 let column = self.column(#column);
-                self.filters.push(::gen_models::select::SqlFilter::new(
-                    ::std::format!("instr(lower({column}), lower(?)) > 0"),
-                    ::std::vec![::gen_models::select::sql_value(&value)],
-                ));
-                self
+                let filter = ::gen_models::select::sql_value(&value).map(|value| {
+                    ::gen_models::select::SqlFilter::new(
+                        ::std::format!("instr(lower({column}), lower(?)) > 0"),
+                        ::std::vec![value],
+                    )
+                });
+                self.push_filter_result(filter)
             }
         }
     } else {
@@ -799,16 +922,18 @@ fn filter_method(
         let case_insensitive_method = format_ident!("{}_case_insensitive", field);
         quote! {
             pub fn #case_insensitive_method(
-                mut self,
+                self,
                 value: impl ::core::convert::Into<::std::string::String>,
             ) -> Self {
                 let value = value.into();
                 let column = self.column(#column);
-                self.filters.push(::gen_models::select::SqlFilter::new(
-                    ::std::format!("lower({column}) = lower(?)"),
-                    ::std::vec![::gen_models::select::sql_value(&value)],
-                ));
-                self
+                let filter = ::gen_models::select::sql_value(&value).map(|value| {
+                    ::gen_models::select::SqlFilter::new(
+                        ::std::format!("lower({column}) = lower(?)"),
+                        ::std::vec![value],
+                    )
+                });
+                self.push_filter_result(filter)
             }
         }
     } else {

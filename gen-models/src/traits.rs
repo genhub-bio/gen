@@ -1,7 +1,4 @@
-use std::rc::Rc;
-
-use itertools::Itertools;
-use rusqlite::{Connection, Params, Result as SQLResult, Row, limits::Limit, params, types::Value};
+use rusqlite::{Connection, Params, Result as SQLResult, Row, limits::Limit};
 
 use crate::errors::QueryError;
 
@@ -22,15 +19,12 @@ pub fn max_rows_per_batch(conn: &Connection, params_per_row: usize) -> usize {
 
 pub trait Query {
     type Model;
-    const PRIMARY_KEY: &'static str = "id";
     const TABLE_NAME: &'static str;
     const HISTORY_TABLE_NAME: Option<&'static str> = Some(Self::TABLE_NAME);
 
     fn query(conn: &Connection, query: &str, params: impl Params) -> Vec<Self::Model> {
         let mut stmt = conn.prepare(query).unwrap();
-        let rows = stmt
-            .query_map(params, |row| Ok(Self::process_row(row)))
-            .unwrap();
+        let rows = stmt.query_map(params, Self::process_row).unwrap();
         let mut objs = vec![];
         for row in rows {
             objs.push(row.unwrap());
@@ -44,7 +38,7 @@ pub trait Query {
         params: impl Params,
     ) -> Result<Vec<Self::Model>, QueryError> {
         let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map(params, |row| Ok(Self::process_row(row)))?;
+        let rows = stmt.query_map(params, Self::process_row)?;
         let mut objs = vec![];
         for row in rows {
             objs.push(row?);
@@ -53,8 +47,8 @@ pub trait Query {
     }
 
     fn get(conn: &Connection, query: &str, params: impl Params) -> SQLResult<Self::Model> {
-        let mut stmt = conn.prepare(query).unwrap();
-        stmt.query_row(params, |row| Ok(Self::process_row(row)))
+        let mut stmt = conn.prepare(query)?;
+        stmt.query_row(params, Self::process_row)
     }
 
     fn table_name_with_history_ref(history_ref: Option<&str>) -> String {
@@ -67,30 +61,5 @@ pub trait Query {
         }
     }
 
-    fn delete_by_ids<'a, I: ?Sized, T>(conn: &Connection, ids: &'a I) -> Vec<Self::Model>
-    where
-        &'a I: IntoIterator<Item = &'a T>,
-        T: Clone + 'a,
-        Value: From<T>,
-    {
-        let mut results = vec![];
-        let batch_size = max_rows_per_batch(conn, 1);
-        for chunk in &ids.into_iter().chunks(batch_size) {
-            let values: Vec<Value> = chunk
-                .map(|value: &'a T| Value::from(value.clone()))
-                .collect();
-            results.append(&mut Self::query(
-                conn,
-                &format!(
-                    "delete from {} where {} in rarray(?1)",
-                    Self::TABLE_NAME,
-                    Self::PRIMARY_KEY
-                ),
-                params!(Rc::new(values)),
-            ))
-        }
-        results
-    }
-
-    fn process_row(row: &Row) -> Self::Model;
+    fn process_row(row: &Row) -> SQLResult<Self::Model>;
 }

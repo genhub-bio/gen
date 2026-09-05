@@ -1,0 +1,5 @@
+error: ModelSelect requires `from_row = path` when a table-backed model skips fields
+ --> tests/ui/skipped_without_from_row.rs:5:8
+  |
+5 | struct SkippedWithoutFromRow {
+  |        ^^^^^^^^^^^^^^^^^^^^^

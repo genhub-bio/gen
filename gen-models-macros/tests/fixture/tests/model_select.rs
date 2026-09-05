@@ -1,9 +1,10 @@
 use gen_models::{Direction, ModelSelectError, select::Connection, traits::Query};
 use gen_models_macros_fixture::{
-    CustomSourceModel, CustomSourceModelSelect, DerivedModel, FixtureGroup, FixtureGroupSelect,
-    FixtureSample, FixtureSampleSelect, IDENTIFIER_INJECTED_BRANCH, MissingTableModel,
+    CountedModel, CustomSourceModel, CustomSourceModelSelect, DerivedModel, DerivedModelSelect,
+    FailingSqlValue, FailingSqlValueModel, FixtureGroup, FixtureGroupSelect, FixtureSample,
+    FixtureSampleSelect, IDENTIFIER_INJECTED_BRANCH, InvalidRow, MissingTableModel,
     MissingTableModelSelect, QuotedIdentifierModel, QuotedIdentifierModelSelect, connection,
-    insert_group, insert_sample,
+    insert_group, insert_sample, processed_row_count, reset_processed_row_count,
 };
 use rusqlite::limits::Limit;
 
@@ -98,10 +99,29 @@ fn test_generated_get_returns_one_or_none_and_rejects_multiple_rows() {
         .is_reference(false)
         .get()
         .expect_err("should reject a selector matching multiple rows");
+    let multiple_with_limit = FixtureSample::select(&conn)
+        .is_reference(false)
+        .limit(1)
+        .get()
+        .expect_err("should reject multiple rows even when the selector has a smaller limit");
 
     assert_eq!(alpha.expect("should find alpha").name, "alpha");
     assert_eq!(missing, None);
     assert_eq!(multiple, ModelSelectError::MultipleResults);
+    assert_eq!(multiple_with_limit, ModelSelectError::MultipleResults);
+}
+
+#[test]
+fn test_generated_get_decodes_at_most_two_rows() {
+    let conn = connection();
+    reset_processed_row_count();
+
+    let error = CountedModel::select(&conn)
+        .get()
+        .expect_err("should reject multiple counted rows");
+
+    assert_eq!(error, ModelSelectError::MultipleResults);
+    assert_eq!(processed_row_count(), 2);
 }
 
 #[test]
@@ -220,6 +240,45 @@ fn test_generated_query_by_ids_batches_above_the_parameter_limit() {
     assert_eq!(
         groups.into_iter().map(|group| group.id).collect::<Vec<_>>(),
         vec![3, 1]
+    );
+}
+
+#[test]
+fn test_generated_delete_by_ids_batches_and_reports_affected_rows() {
+    let conn = connection();
+    for name in ["alpha", "beta", "gamma"] {
+        insert_sample(&conn, name, false);
+    }
+
+    conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 2)
+        .expect("should lower the fixture parameter limit");
+
+    let deleted = FixtureSample::select(&conn)
+        .delete_by_ids(["gamma", "missing", "alpha", "gamma"])
+        .expect("should delete fixture samples across parameter-sized batches");
+    let remaining = FixtureSample::select(&conn)
+        .load()
+        .expect("should load the remaining fixture samples");
+
+    assert_eq!(deleted, 2);
+    assert_eq!(remaining[0].name, "beta");
+}
+
+#[test]
+fn test_generated_delete_by_ids_rejects_a_configured_selector() {
+    let conn = connection();
+    insert_sample(&conn, "alpha", false);
+
+    let error = FixtureSample::select(&conn)
+        .name("alpha")
+        .delete_by_ids(["alpha"])
+        .expect_err("should reject deletion from a configured selector");
+
+    assert_eq!(
+        error,
+        ModelSelectError::InvalidSelector(
+            "delete_by_ids must be called before configuring the selector".to_string(),
+        )
     );
 }
 
@@ -411,6 +470,64 @@ fn test_generated_history_ref_applies_to_every_source() {
 }
 
 #[test]
+fn test_generated_history_ref_rejects_models_without_history() {
+    let conn = connection();
+
+    let error = DerivedModel::select(&conn)
+        .with_ref("main")
+        .load()
+        .expect_err("should reject history for a model without a history table");
+
+    assert_eq!(
+        error,
+        ModelSelectError::HistoryNotSupported {
+            table_name: "derived_models".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_generated_history_ref_rejects_joined_models_without_history() {
+    let conn = connection();
+    insert_sample(&conn, "derived", false);
+
+    let error = FixtureSample::select(&conn)
+        .join_on(FixtureSampleSelect::Name, DerivedModelSelect::Value)
+        .with_ref("main")
+        .load()
+        .expect_err("should reject history when a joined model has no history table");
+
+    assert_eq!(
+        error,
+        ModelSelectError::HistoryNotSupported {
+            table_name: "derived_models".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_generated_join_construction_errors_are_returned_by_load() {
+    let conn = connection();
+    let other_conn = connection();
+
+    let error = FixtureSample::select(&conn)
+        .join_filtered_on(
+            FixtureSampleSelect::Name,
+            FixtureGroupSelect::SampleName,
+            FixtureGroup::select(&other_conn),
+        )
+        .load()
+        .expect_err("should reject selectors from different connections");
+
+    assert_eq!(
+        error,
+        ModelSelectError::InvalidSelector(
+            "joined selectors must use the same database connection".to_string(),
+        )
+    );
+}
+
+#[test]
 fn test_generated_queries_quote_every_structured_identifier() {
     let conn = connection();
     assert!(!branch_exists(&conn, IDENTIFIER_INJECTED_BRANCH));
@@ -429,10 +546,14 @@ fn test_generated_queries_quote_every_structured_identifier() {
         .models::<(QuotedIdentifierModel,)>()
         .load()
         .expect("should project a model using quoted identifiers");
+    let deleted = QuotedIdentifierModel::select(&conn)
+        .delete_by_ids(["safe"])
+        .expect("should delete using quoted table and primary-key identifiers");
 
     assert_eq!(models[0].value, "safe");
     assert_eq!(values, vec!["safe"]);
     assert_eq!(model_tuples[0].0.value, "safe");
+    assert_eq!(deleted, 1);
     assert!(!branch_exists(&conn, IDENTIFIER_INJECTED_BRANCH));
 }
 
@@ -463,4 +584,30 @@ fn test_generated_loads_return_errors_and_custom_sql_remains_supported() {
     ));
     assert_eq!(custom_models[0].value, "custom");
     assert_eq!(custom_values, vec!["custom"]);
+}
+
+#[test]
+fn test_generated_row_decoding_errors_are_returned_by_load() {
+    let conn = connection();
+
+    let error = InvalidRow::select(&conn)
+        .load()
+        .expect_err("should return invalid database column types");
+
+    assert!(matches!(error, ModelSelectError::DatabaseError(_)));
+}
+
+#[test]
+fn test_generated_filter_value_conversion_errors_are_returned_by_load() {
+    let conn = connection();
+
+    let error = FailingSqlValueModel::select(&conn)
+        .value(FailingSqlValue(42))
+        .load()
+        .expect_err("should return selector value conversion failures");
+
+    let ModelSelectError::InvalidSelector(message) = error else {
+        panic!("expected an invalid selector error");
+    };
+    assert!(message.contains("fixture selector conversion failure"));
 }

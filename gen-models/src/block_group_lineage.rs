@@ -18,14 +18,13 @@ pub struct BlockGroupLineage {
 impl Query for BlockGroupLineage {
     type Model = BlockGroupLineage;
 
-    const PRIMARY_KEY: &'static str = "id";
     const TABLE_NAME: &'static str = "block_groups";
 
-    fn process_row(row: &Row) -> Self::Model {
-        BlockGroupLineage {
-            parent_block_group_id: row.get(0).unwrap(),
-            child_block_group_id: row.get(1).unwrap(),
-        }
+    fn process_row(row: &Row) -> rusqlite::Result<Self::Model> {
+        Ok(BlockGroupLineage {
+            parent_block_group_id: row.get(0)?,
+            child_block_group_id: row.get(1)?,
+        })
     }
 }
 

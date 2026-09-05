@@ -7,7 +7,7 @@ use gen_core::{
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{Row, params};
+use rusqlite::{Result as SqlResult, Row, params, types::Type};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -99,15 +99,16 @@ pub struct Annotation {
     pub extra: Option<AnnotationExtra>,
 }
 
-fn annotation_from_row(row: &Row) -> Annotation {
-    Annotation {
-        id: row.get(0).expect("should read annotation id"),
-        name: row.get(1).expect("should read annotation name"),
-        group: row.get(2).expect("should read annotation group"),
-        accession_id: row.get(3).expect("should read annotation accession id"),
-        extra: deserialize_annotation_extra(row.get(4).expect("should read annotation extra"))
-            .expect("should deserialize annotation extra from database"),
-    }
+fn annotation_from_row(row: &Row) -> SqlResult<Annotation> {
+    Ok(Annotation {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        group: row.get(2)?,
+        accession_id: row.get(3)?,
+        extra: deserialize_annotation_extra(row.get(4)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+        })?,
+    })
 }
 
 /// For use with create/bulk_create methods.

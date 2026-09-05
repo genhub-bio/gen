@@ -726,7 +726,9 @@ impl AccessionNode {
             .iter()
             .map(AccessionNodeData::id_hash)
             .collect::<Vec<_>>();
-        AccessionNode::delete_by_ids(conn, &ids);
+        AccessionNode::select(conn)
+            .delete_by_ids(ids)
+            .expect("should delete accession nodes by id");
     }
 }
 

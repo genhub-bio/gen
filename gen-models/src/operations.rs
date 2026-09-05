@@ -714,7 +714,7 @@ impl RemoteOperationRecord {
                    AND (operation = ?3 OR operation = 'clone' AND ?3 = 'pull') \
                  ORDER BY id LIMIT 1",
                 params![remote_name, branch_name, operation.as_str()],
-                |row| Ok(Self::process_row(row)),
+                Self::process_row,
             )
             .optional()?;
         if let Some(pending) = pending {
@@ -747,7 +747,9 @@ impl RemoteOperationRecord {
             .map_err(|error| match error {
                 ModelSelectError::DatabaseError(error) => error,
                 ModelSelectError::MultipleResults => rusqlite::Error::QueryReturnedMoreThanOneRow,
-                ModelSelectError::ProjectionSourceNotSelected { .. } => {
+                ModelSelectError::InvalidSelector(_)
+                | ModelSelectError::HistoryNotSupported { .. }
+                | ModelSelectError::ProjectionSourceNotSelected { .. } => {
                     rusqlite::Error::InvalidQuery
                 }
             })?
