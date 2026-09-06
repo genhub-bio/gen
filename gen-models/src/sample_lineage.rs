@@ -8,11 +8,14 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
-#[model_select(table = "sample_lineage")]
+#[model_select(
+    table = "sample_lineage",
+    default_sort(parent_sample_name = "asc", child_sample_name = "asc")
+)]
 pub struct SampleLineage {
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     pub parent_sample_name: String,
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     pub child_sample_name: String,
 }
 

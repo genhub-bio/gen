@@ -186,14 +186,14 @@ fn test_generated_composite_primary_key_methods_match_complete_keys() {
             .map(|item| (item.namespace, item.name))
             .collect::<Vec<_>>(),
         vec![
-            ("beta".to_string(), "two".to_string()),
             ("alpha".to_string(), "one".to_string()),
+            ("beta".to_string(), "two".to_string()),
         ],
     );
 }
 
 #[test]
-fn test_generated_default_sort_is_configurable_and_explicit_order_replaces_it() {
+fn test_generated_default_sort_priority_is_configurable_and_explicit_order_replaces_it() {
     let conn = connection();
     for (namespace, name, position) in [
         ("alpha", "one", 4),
@@ -219,8 +219,8 @@ fn test_generated_default_sort_is_configurable_and_explicit_order_replaces_it() 
             .collect::<Vec<_>>(),
         vec![
             ("beta", "one"),
-            ("beta", "two"),
             ("alpha", "one"),
+            ("beta", "two"),
             ("alpha", "two"),
         ],
     );

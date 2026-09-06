@@ -223,13 +223,16 @@ pub struct OperationLog {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
-#[model_select(table = "gen_operation_assets")]
+#[model_select(
+    table = "gen_operation_assets",
+    default_sort(log_id = "asc", asset_ref_id = "asc", role = "asc")
+)]
 pub struct OperationAsset {
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     pub log_id: HashId,
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     pub asset_ref_id: HashId,
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     pub role: AssetRole,
 }
 

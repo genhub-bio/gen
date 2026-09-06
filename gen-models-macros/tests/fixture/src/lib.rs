@@ -29,11 +29,14 @@ pub struct FixtureGroup {
 }
 
 #[derive(Debug, ModelSelect, PartialEq)]
-#[model_select(table = "fixture_composite_keys")]
+#[model_select(
+    table = "fixture_composite_keys",
+    default_sort(name = "asc", namespace = "desc")
+)]
 pub struct FixtureCompositeKey {
-    #[model_select(primary_key, default_sort = "desc")]
+    #[model_select(primary_key)]
     pub namespace: String,
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     pub name: String,
     pub position: i64,
 }

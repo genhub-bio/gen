@@ -578,11 +578,14 @@ impl RegionResolver for Annotation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
-#[model_select(table = "annotation_group_samples")]
+#[model_select(
+    table = "annotation_group_samples",
+    default_sort(annotation_group = "asc", sample_name = "asc")
+)]
 pub struct AnnotationGroupSample {
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     pub annotation_group: String,
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     pub sample_name: String,
 }
 

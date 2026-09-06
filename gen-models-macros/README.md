@@ -262,22 +262,27 @@ Available directions are:
 - `Direction::CaseInsensitiveAsc`
 - `Direction::CaseInsensitiveDesc`
 
-Configure deterministic ordering directly on one or more model fields with `default_sort`. Fields
-are applied in declaration order, and an explicit `.order_by(...)` replaces the complete default:
+Configure deterministic ordering beside the table name with `default_sort`. Entries are applied in
+the order written, regardless of model field declaration order, and an explicit `.order_by(...)`
+replaces the complete default:
 
 ```rust
 #[derive(ModelSelect)]
-#[model_select(table = "memberships")]
+#[model_select(
+    table = "memberships",
+    default_sort(username = "asc", organization = "desc")
+)]
 struct Membership {
-    #[model_select(primary_key, default_sort = "desc")]
+    #[model_select(primary_key)]
     organization: String,
-    #[model_select(primary_key, default_sort = "asc")]
+    #[model_select(primary_key)]
     username: String,
 }
 ```
 
 The accepted values are `"asc"`, `"desc"`, `"case_insensitive_asc"`, and
-`"case_insensitive_desc"`. A bare `#[model_select(default_sort)]` is shorthand for ascending.
+`"case_insensitive_desc"`. The example sorts by `username` first and uses `organization` as its
+descending tie-breaker.
 
 An offset without an explicit limit is supported; the runtime renderer emits SQLite's unlimited
 `LIMIT -1` form before the offset.
@@ -427,6 +432,8 @@ pub struct Sample {
 ```
 
 - `table = "..."` generates the model's `Query` implementation and supplies `TABLE_NAME`.
+- `default_sort(field = "direction", ...)` configures the selector's default ordering. Entry order
+  defines sort precedence, and each entry names a selectable Rust model field.
 - `history = false` makes `Query::HISTORY_TABLE_NAME` return `None`. If omitted, historical reads
   use the configured table name.
 - `from_row = path::to::function` supplies a `fn(&Row) -> rusqlite::Result<Model>` for models that

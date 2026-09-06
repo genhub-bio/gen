@@ -1,9 +1,8 @@
 use gen_models::ModelSelect;
 
 #[derive(ModelSelect)]
-#[model_select(table = "invalid_default_sort")]
+#[model_select(table = "invalid_default_sort", default_sort(id = "sideways"))]
 struct InvalidDefaultSort {
-    #[model_select(default_sort = "sideways")]
     id: i64,
 }
 

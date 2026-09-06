@@ -21,7 +21,8 @@ use syn::{
 /// `#[model_select(table = "...")]` generates the model's `Query` implementation.
 /// `#[model_select(column = "...")]` overrides a field's SQL column,
 /// `#[model_select(primary_key)]` marks each field in an explicit primary key,
-/// `#[model_select(default_sort = "asc")]` configures default ordering,
+/// `#[model_select(default_sort(field = "asc", tie_breaker = "desc"))]` configures default
+/// ordering in precedence order,
 /// `#[model_select(skip)]` excludes a field, and the struct-level `history`, `from_row`, `source`,
 /// `alias`, and `select` options support custom persistence behavior or aliased queries.
 #[proc_macro_derive(ModelSelect, attributes(model_select))]
@@ -88,7 +89,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let mut has_skipped_field = false;
     let mut explicit_primary_keys = Vec::new();
     let mut inferred_primary_key = None;
-    let mut default_order_initializers = Vec::new();
+    let mut selectable_columns = Vec::new();
 
     for field in fields {
         let Some(field_name) = field.ident else {
@@ -100,12 +101,6 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 return Err(Error::new_spanned(
                     field_name,
                     "a ModelSelect primary key cannot be skipped",
-                ));
-            }
-            if field_options.default_sort.is_some() {
-                return Err(Error::new_spanned(
-                    field_name,
-                    "a skipped ModelSelect field cannot define a default sort",
                 ));
             }
             has_skipped_field = true;
@@ -132,17 +127,11 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         } else if field_name_string(&field_name) == "id" {
             inferred_primary_key = Some(primary_key);
         }
-        if let Some(direction) = field_options.default_sort {
-            let direction = direction.tokens();
-            default_order_initializers.push(quote! {
-                ::gen_models::select::SqlOrder::new(
-                    ::gen_models::select::qualify_sql_column(#source_alias, #column_literal),
-                    #direction,
-                )
-            });
-        }
-
         selectable_fields.push(selectable_field.clone());
+        selectable_columns.push(SelectableColumn {
+            field: field_name.clone(),
+            column: column_literal.clone(),
+        });
         model_columns.push(column_literal.clone());
         model_initializers.push(quote! {
             #field_name: row.get(offset + #field_index)?
@@ -177,6 +166,35 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             "ModelSelect requires at least one selectable field",
         ));
     }
+
+    let default_order_initializers = options
+        .default_sort
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|configured_sort| {
+            let Some(selectable_column) = selectable_columns
+                .iter()
+                .find(|column| column.field == configured_sort.field)
+            else {
+                return Err(Error::new_spanned(
+                    &configured_sort.field,
+                    format!(
+                        "default_sort field `{}` is not a selectable model field",
+                        configured_sort.field
+                    ),
+                ));
+            };
+            let column = &selectable_column.column;
+            let direction = configured_sort.direction.tokens();
+            Ok(quote! {
+                ::gen_models::select::SqlOrder::new(
+                    ::gen_models::select::qualify_sql_column(#source_alias, #column),
+                    #direction,
+                )
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
     let primary_keys = if explicit_primary_keys.is_empty() {
         inferred_primary_key.into_iter().collect::<Vec<_>>()
@@ -670,6 +688,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 struct ContainerOptions {
     alias: Option<String>,
     table: Option<LitStr>,
+    default_sort: Option<Vec<ConfiguredSort>>,
     history: Option<bool>,
     from_row: Option<ExprPath>,
     source: Option<ExprPath>,
@@ -691,6 +710,38 @@ impl ContainerOptions {
                 }
                 if meta.path.is_ident("table") {
                     options.table = Some(meta.value()?.parse()?);
+                    return Ok(());
+                }
+                if meta.path.is_ident("default_sort") {
+                    if options.default_sort.is_some() {
+                        return Err(meta.error("default_sort can only be specified once per model"));
+                    }
+                    let mut configured_sorts = Vec::new();
+                    meta.parse_nested_meta(|sort_meta| {
+                        let Some(field) = sort_meta.path.get_ident().cloned() else {
+                            return Err(
+                                sort_meta.error("default_sort entries must name a model field")
+                            );
+                        };
+                        if configured_sorts
+                            .iter()
+                            .any(|configured: &ConfiguredSort| configured.field == field)
+                        {
+                            return Err(
+                                sort_meta.error("a field can only appear once in default_sort")
+                            );
+                        }
+                        let direction: LitStr = sort_meta.value()?.parse()?;
+                        configured_sorts.push(ConfiguredSort {
+                            field,
+                            direction: DefaultSort::from_literal(&direction)?,
+                        });
+                        Ok(())
+                    })?;
+                    if configured_sorts.is_empty() {
+                        return Err(meta.error("default_sort requires at least one field"));
+                    }
+                    options.default_sort = Some(configured_sorts);
                     return Ok(());
                 }
                 if meta.path.is_ident("history") {
@@ -723,6 +774,16 @@ struct PrimaryKeyField {
     value_type: Type,
     string: bool,
     column: LitStr,
+}
+
+struct SelectableColumn {
+    field: Ident,
+    column: LitStr,
+}
+
+struct ConfiguredSort {
+    field: Ident,
+    direction: DefaultSort,
 }
 
 #[derive(Clone, Copy)]
@@ -764,7 +825,6 @@ impl DefaultSort {
 #[derive(Default)]
 struct FieldOptions {
     column: Option<String>,
-    default_sort: Option<DefaultSort>,
     primary_key: bool,
     skip: bool,
 }
@@ -788,18 +848,6 @@ impl FieldOptions {
                 }
                 if meta.path.is_ident("primary_key") {
                     options.primary_key = true;
-                    return Ok(());
-                }
-                if meta.path.is_ident("default_sort") {
-                    if options.default_sort.is_some() {
-                        return Err(meta.error("default_sort can only be specified once per field"));
-                    }
-                    options.default_sort = if meta.input.peek(syn::Token![=]) {
-                        let literal: LitStr = meta.value()?.parse()?;
-                        Some(DefaultSort::from_literal(&literal)?)
-                    } else {
-                        Some(DefaultSort::Asc)
-                    };
                     return Ok(());
                 }
                 Err(meta.error("unsupported model_select field option"))
