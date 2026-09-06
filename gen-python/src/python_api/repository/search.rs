@@ -1,7 +1,7 @@
 use std::fs;
 
 use r#gen::graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind};
-use gen_models::{block_group::BlockGroup, traits::Query};
+use gen_models::block_group::BlockGroup;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::PyRepository;
@@ -38,7 +38,9 @@ impl PyRepository {
 
         let bgs: Vec<_> = match bgs {
             Some(bgs) if !bgs.is_empty() => bgs,
-            _ => BlockGroup::all(conn)
+            _ => BlockGroup::select(conn)
+                .load()
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
                 .into_iter()
                 .map(|bg| self.to_py_block_group(bg))
                 .collect(),
@@ -89,7 +91,9 @@ impl PyRepository {
 
         let bgs: Vec<_> = match bgs {
             Some(bgs) if !bgs.is_empty() => bgs,
-            _ => BlockGroup::all(conn)
+            _ => BlockGroup::select(conn)
+                .load()
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
                 .into_iter()
                 .map(|bg| self.to_py_block_group(bg))
                 .collect(),

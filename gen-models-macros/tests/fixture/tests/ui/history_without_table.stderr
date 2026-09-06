@@ -1,0 +1,5 @@
+error: ModelSelect `from_row` and `history` options require `table = "..."`
+ --> tests/ui/history_without_table.rs:5:8
+  |
+5 | struct HistoryWithoutTable {
+  |        ^^^^^^^^^^^^^^^^^^^

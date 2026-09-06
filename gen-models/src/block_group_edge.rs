@@ -2,17 +2,21 @@ use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
 use indexmap::IndexSet;
-use rusqlite::{self, Row, ToSql, types::Value};
+use rusqlite::{self, ToSql, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Direction, ModelSelect,
     db::GraphConnection,
     edge::{Edge, EdgeData},
     gen_models_capnp::block_group_edge,
     traits::*,
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Debug, Deserialize, Serialize, Eq, Hash, PartialEq, Ord, PartialOrd, ModelSelect,
+)]
+#[model_select(table = "block_group_edges")]
 pub struct BlockGroupEdge {
     pub id: HashId,
     pub block_group_id: HashId,
@@ -115,23 +119,6 @@ pub struct AugmentedEdgeData {
     pub phased: i64,
 }
 
-impl Query for BlockGroupEdge {
-    type Model = BlockGroupEdge;
-
-    const TABLE_NAME: &'static str = "block_group_edges";
-
-    fn process_row(row: &Row) -> Self::Model {
-        BlockGroupEdge {
-            id: row.get(0).unwrap(),
-            block_group_id: row.get(1).unwrap(),
-            edge_id: row.get(2).unwrap(),
-            chromosome_index: row.get(3).unwrap(),
-            phased: row.get(4).unwrap(),
-            created_on: row.get(5).unwrap(),
-        }
-    }
-}
-
 impl BlockGroupEdge {
     #[cfg_attr(
         feature = "profiling",
@@ -181,7 +168,9 @@ impl BlockGroupEdge {
             .iter()
             .map(|bge| bge.id_hash())
             .collect::<Vec<_>>();
-        BlockGroupEdge::delete_by_ids(conn, &hashes);
+        BlockGroupEdge::select(conn)
+            .delete_by_ids(hashes)
+            .expect("should delete block group edges by id");
     }
 
     #[cfg_attr(
@@ -193,20 +182,19 @@ impl BlockGroupEdge {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<AugmentedEdge> {
-        let query = format!(
-            "select * from {} where block_group_id = :block_group_id ORDER BY created_on DESC;",
-            Self::table_name_with_history_ref(history_ref),
-        );
-        let mut params: Vec<(&str, &dyn ToSql)> = vec![(":block_group_id", block_group_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        let block_group_edges = BlockGroupEdge::query(conn, &query, &params[..]);
+        let select = BlockGroupEdge::select(conn)
+            .block_group_id(*block_group_id)
+            .order_by(BlockGroupEdgeSelect::CreatedOn, Direction::Desc)
+            .with_ref(history_ref);
+        let block_group_edges = select.load().expect("should load block group edges");
         let edge_ids = block_group_edges
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids, history_ref);
+        let edge_select = Edge::select(conn).with_ref(history_ref);
+        let edges = edge_select
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load edges by id");
         let edge_map = edges
             .iter()
             .map(|edge| (&edge.id, edge))
@@ -253,7 +241,10 @@ impl BlockGroupEdge {
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)
             .collect::<Vec<_>>();
-        let edges = Edge::query_by_ids(conn, &edge_ids, history_ref);
+        let edge_select = Edge::select(conn).with_ref(history_ref);
+        let edges = edge_select
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load edges by id");
 
         let edge_map = edges
             .iter()
@@ -357,7 +348,9 @@ mod tests {
         let historical_commit =
             commit_all(conn, "create block group edges").expect("should commit block group edges");
         BlockGroupEdge::bulk_delete(conn, &[block_group_edge]);
-        Edge::delete_by_ids(conn, &[historical_edge.edge.id]);
+        Edge::select(conn)
+            .delete_by_ids([historical_edge.edge.id])
+            .expect("should delete historical edge by id");
 
         assert!(
             BlockGroupEdge::specific_edges_for_block_group(

@@ -10,9 +10,7 @@ use gen_models::{
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
     sample::Sample,
     sequence::Sequence,
-    traits::*,
 };
-use rusqlite::{self, params};
 
 use crate::{
     errors::SequenceUpdateError,
@@ -132,18 +130,16 @@ pub fn update_with_sequence(
             if node_id == HashId::convert_str("") {
                 let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
             } else {
-                let edge_to_new_node = Edge::query(
-                    conn,
-                    "select * from edges where target_node_id = ?1",
-                    params![node_id],
-                )[0]
-                .clone();
-                let edge_from_new_node = Edge::query(
-                    conn,
-                    "select * from edges where source_node_id = ?1",
-                    params![node_id],
-                )[0]
-                .clone();
+                let edge_to_new_node = Edge::select(conn)
+                    .target_node_id(node_id)
+                    .load()
+                    .expect("should load edge to inserted node")[0]
+                    .clone();
+                let edge_from_new_node = Edge::select(conn)
+                    .source_node_id(node_id)
+                    .load()
+                    .expect("should load edge from inserted node")[0]
+                    .clone();
                 path.new_path_with(
                     conn,
                     start_coordinate,
@@ -199,8 +195,10 @@ mod tests {
         path::Path,
         region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
+        traits::Query,
     };
     use petgraph::Direction;
+    use rusqlite::params;
 
     use super::*;
     use crate::{
@@ -408,7 +406,7 @@ mod tests {
         .unwrap();
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(conn);
+        let mut operation_logs = OperationLog::all(conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,

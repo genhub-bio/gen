@@ -345,7 +345,6 @@ mod tests {
         node::Node,
         region::ResolvedGenRegion,
         sequence::Sequence,
-        traits::Query,
     };
     use petgraph::Direction;
     use tempfile::tempdir;
@@ -1032,7 +1031,9 @@ mod tests {
         assert_eq!(edge_ids.len(), 7);
 
         let node_ids_for_query = node_ids.iter().copied().collect::<Vec<_>>();
-        let nodes = Node::query_by_ids(conn, &node_ids_for_query, None);
+        let nodes = Node::select(conn)
+            .query_by_ids(node_ids_for_query)
+            .expect("should load nodes by id");
         let mut node_hashes = HashSet::new();
         for node in nodes {
             if !is_terminal(node.id) {
@@ -1093,7 +1094,9 @@ mod tests {
         assert_eq!(edge_ids2.len(), 7);
 
         let node_ids_for_query = node_ids2.iter().copied().collect::<Vec<_>>();
-        let nodes2 = Node::query_by_ids(conn, &node_ids_for_query, None);
+        let nodes2 = Node::select(conn)
+            .query_by_ids(node_ids_for_query)
+            .expect("should load nodes by id");
         let mut node_hashes2 = HashSet::new();
         for node in nodes2 {
             if !is_terminal(node.id) {

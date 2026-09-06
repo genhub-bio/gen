@@ -430,13 +430,13 @@ mod tests {
         .unwrap();
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(conn);
+        let mut operation_logs = OperationLog::all(conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,
             OperationKind::Other("fasta_addition".to_string())
         );
-        let asset_refs = AssetRef::all(conn);
+        let asset_refs = AssetRef::all(conn).expect("should load asset references");
         assert_eq!(asset_refs.len(), 1);
         assert_eq!(asset_refs[0].uri, "file://.gen/outside_root/simple.fa");
         assert!(
@@ -455,7 +455,7 @@ mod tests {
             "shallow FASTA should read through retained sequence and index assets"
         );
 
-        let path = Path::all(conn)[0].clone();
+        let path = Path::all(conn).expect("should load paths")[0].clone();
         assert_eq!(
             path.sequence(conn, context.workspace(), None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
@@ -561,7 +561,7 @@ mod tests {
             HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
 
-        let path = Path::all(conn)[0].clone();
+        let path = Path::all(conn).expect("should load paths")[0].clone();
         assert_eq!(
             path.sequence(conn, context.workspace(), None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()
@@ -624,14 +624,14 @@ mod tests {
             .into_iter()
             .find(|sequence| sequence.asset_ref_id.is_some())
             .expect("should persist the shallow sequence AssetRef pointer");
-        let asset_ref = AssetRef::get_by_id(
-            conn,
-            &sequence
-                .asset_ref_id
-                .expect("should have sequence AssetRef"),
-            None,
-        )
-        .expect("should persist sequence AssetRef");
+        let asset_ref = AssetRef::select(conn)
+            .get_by_id(
+                sequence
+                    .asset_ref_id
+                    .expect("should have sequence AssetRef"),
+            )
+            .expect("should query sequence AssetRef")
+            .expect("should persist sequence AssetRef");
         assert!(
             asset_ref
                 .versioned_store_path(context.workspace())
@@ -640,7 +640,7 @@ mod tests {
             "immutable sequence asset should remain after logical file removal"
         );
 
-        let path = Path::all(conn)[0].clone();
+        let path = Path::all(conn).expect("should load paths")[0].clone();
         assert_eq!(
             path.sequence(conn, context.workspace(), None).unwrap(),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
@@ -650,7 +650,7 @@ mod tests {
             .into_iter()
             .find(|sequence| sequence.asset_ref_id.is_some())
             .expect("should store the shallow sequence asset pointer");
-        let asset_refs = AssetRef::all(conn);
+        let asset_refs = AssetRef::all(conn).expect("should load asset references");
         assert!(
             asset_refs.iter().any(|asset_ref| {
                 Some(asset_ref.id) == sequence.asset_ref_id && asset_ref.role == AssetRole::Input
@@ -680,7 +680,7 @@ mod tests {
             Some("shallow.fa.bgz.gzi"),
             "second retained index should be the gzip index"
         );
-        let operation_assets = OperationAsset::all(conn);
+        let operation_assets = OperationAsset::all(conn).expect("should load operation assets");
         assert!(
             operation_assets.iter().any(|operation_asset| {
                 Some(operation_asset.asset_ref_id) == sequence.asset_ref_id
@@ -735,6 +735,7 @@ mod tests {
             .expect("should commit remote shallow FASTA assets");
 
         let sequence_asset = AssetRef::all(conn)
+            .expect("should load asset references")
             .into_iter()
             .find(|asset_ref| asset_ref.uri == fasta)
             .expect("should store the remote sequence AssetRef");

@@ -8,11 +8,13 @@ use gen_core::{
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{Row, params, types::Value as SQLValue};
+use rusqlite::{params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    Direction, ModelSelect, ModelSelectError,
+    block_group::{BlockGroup, BlockGroupSelect},
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
     errors::QueryError,
@@ -21,7 +23,8 @@ use crate::{
     traits::*,
 };
 
-#[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "accessions")]
 pub struct Accession {
     pub id: HashId,
     pub name: String,
@@ -33,6 +36,8 @@ pub struct Accession {
 pub enum AccessionError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Accession node creation error: {0}")]
     AccessionNodeError(#[from] AccessionNodeError),
     #[error("Duplicate entry with uuid: {0}")]
@@ -104,7 +109,8 @@ impl<'a> Capnp<'a> for Accession {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Hash, ModelSelect)]
+#[model_select(table = "accession_nodes")]
 pub struct AccessionNode {
     pub id: HashId,
     pub accession_id: HashId,
@@ -429,15 +435,11 @@ impl Accession {
         accession_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<AccessionNode> {
-        let query = format!(
-            "select * from {} where accession_id = :accession_id order by index_in_path;",
-            AccessionNode::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":accession_id", accession_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        AccessionNode::query(conn, &query, &params[..])
+        let select = AccessionNode::select(conn)
+            .accession_id(*accession_id)
+            .order_by(AccessionNodeSelect::IndexInPath, Direction::Asc)
+            .with_ref(history_ref);
+        select.load().expect("should load accession nodes")
     }
 
     pub fn blocks(&self, conn: &GraphConnection) -> Result<Vec<NodeIntervalBlock>, AccessionError> {
@@ -604,16 +606,17 @@ impl RegionResolver for Accession {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = Accession::query(
-            conn,
-            "SELECT a.* \
-             FROM accessions a \
-             JOIN block_groups bg ON a.block_group_id = bg.id \
-             WHERE bg.collection_name = ?1 \
-               AND bg.sample_name = ?2 \
-               AND lower(a.name) = lower(?3)",
-            params![collection_name, sample_name, region.name],
-        );
+        let matches = Accession::select(conn)
+            .name_case_insensitive(&region.name)
+            .join_filtered_on(
+                AccessionSelect::BlockGroupId,
+                BlockGroupSelect::Id,
+                BlockGroup::select(conn)
+                    .collection_name(collection_name)
+                    .sample_name(sample_name),
+            )
+            .load()
+            .map_err(AccessionError::from)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),
@@ -628,21 +631,6 @@ impl RegionResolver for Accession {
                 "multiple accessions named {}",
                 region.name
             ))),
-        }
-    }
-}
-
-impl Query for Accession {
-    type Model = Accession;
-
-    const TABLE_NAME: &'static str = "accessions";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Accession {
-            id: row.get(0).unwrap(),
-            name: row.get(1).unwrap(),
-            block_group_id: row.get(2).unwrap(),
-            parent_accession_id: row.get(3).unwrap(),
         }
     }
 }
@@ -738,25 +726,9 @@ impl AccessionNode {
             .iter()
             .map(AccessionNodeData::id_hash)
             .collect::<Vec<_>>();
-        AccessionNode::delete_by_ids(conn, &ids);
-    }
-}
-
-impl Query for AccessionNode {
-    type Model = AccessionNode;
-
-    const TABLE_NAME: &'static str = "accession_nodes";
-
-    fn process_row(row: &Row) -> Self::Model {
-        AccessionNode {
-            id: row.get(0).unwrap(),
-            accession_id: row.get(1).unwrap(),
-            node_id: row.get(2).unwrap(),
-            sequence_start: row.get(3).unwrap(),
-            sequence_end: row.get(4).unwrap(),
-            strand: row.get(5).unwrap(),
-            index_in_path: row.get(6).unwrap(),
-        }
+        AccessionNode::select(conn)
+            .delete_by_ids(ids)
+            .expect("should delete accession nodes by id");
     }
 }
 

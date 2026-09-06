@@ -16,7 +16,6 @@ use crate::{
     edge::EdgeData,
     errors::PathError,
     path::Path,
-    traits::Query,
 };
 
 #[derive(Clone, Debug)]
@@ -223,7 +222,9 @@ pub fn resolve_annotation(
         Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
         Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
     };
-    let accession = Accession::get_by_id(conn, &annotation.accession_id, None)
+    let accession = Accession::select(conn)
+        .get_by_id(annotation.accession_id)
+        .map_err(AccessionError::from)?
         .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
     let target = target_from_accession(
         region,

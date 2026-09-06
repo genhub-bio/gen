@@ -1,0 +1,5 @@
+error: default_sort must be `asc`, `desc`, `case_insensitive_asc`, or `case_insensitive_desc`
+ --> tests/ui/invalid_default_sort.rs:4:66
+  |
+4 | #[model_select(table = "invalid_default_sort", default_sort(id = "sideways"))]
+  |                                                                  ^^^^^^^^^^

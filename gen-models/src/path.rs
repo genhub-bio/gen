@@ -10,11 +10,13 @@ use gen_core::{
 };
 use intervaltree::IntervalTree;
 use itertools::Itertools;
-use rusqlite::{Row, ToSql, params, types::Value as SQLValue};
+use rusqlite::{ToSql, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    Direction, ModelSelect, ModelSelectError,
+    block_group::{BlockGroup, BlockGroupSelect},
     block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     edge::{Edge, EdgeData},
@@ -25,7 +27,8 @@ use crate::{
     traits::*,
 };
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "paths")]
 pub struct Path {
     pub id: HashId,
     pub block_group_id: HashId,
@@ -37,6 +40,8 @@ pub struct Path {
 pub enum PathError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Missing path data: {0}")]
     Missing(String),
     #[error("Duplicate entry with uuid: {0}")]
@@ -91,6 +96,26 @@ impl<'a> Capnp<'a> for Path {
 pub struct PathData {
     pub name: String,
     pub block_group_id: HashId,
+}
+
+impl PathSelect<'_> {
+    pub fn collection_name(self, collection_name: impl Into<String>) -> Self {
+        let conn = self.conn;
+        self.join_filtered_on(
+            PathSelect::BlockGroupId,
+            BlockGroupSelect::Id,
+            BlockGroup::select(conn).collection_name(collection_name),
+        )
+    }
+
+    pub fn sample_name(self, sample_name: impl Into<String>) -> Self {
+        let conn = self.conn;
+        self.join_filtered_on(
+            PathSelect::BlockGroupId,
+            BlockGroupSelect::Id,
+            BlockGroup::select(conn).sample_name(sample_name),
+        )
+    }
 }
 
 // interesting gist here: https://gist.github.com/mbhall88/cd900add6335c96127efea0e0f6a9f48, see if we
@@ -206,7 +231,23 @@ impl Path {
         history_ref: Option<&str>,
     ) -> Vec<Edge> {
         let edge_ids = Self::edge_ids_for_path(conn, path_id, history_ref);
-        Edge::query_by_ids(conn, &edge_ids, history_ref)
+        let select = Edge::select(conn).with_ref(history_ref);
+        let edges_by_id = select
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load path edges by id")
+            .into_iter()
+            .map(|edge| (edge.id, edge))
+            .collect::<HashMap<_, _>>();
+
+        edge_ids
+            .into_iter()
+            .map(|edge_id| {
+                edges_by_id
+                    .get(&edge_id)
+                    .cloned()
+                    .expect("should load every path edge by id")
+            })
+            .collect()
     }
 
     fn validate_ordered_edges(edge_data: &[EdgeData]) -> Result<(), PathError> {
@@ -396,17 +437,21 @@ impl Path {
     }
 
     pub fn get_by_id(conn: &GraphConnection, path_id: &HashId) -> Path {
-        Path::get(
-            conn,
-            "SELECT id, block_group_id, name, created_on FROM paths WHERE id = ?1;",
-            params![path_id],
-        )
-        .unwrap()
+        Path::select(conn)
+            .id(*path_id)
+            .load()
+            .expect("should load path by id")
+            .into_iter()
+            .next()
+            .expect("should find path by id")
     }
 
     pub fn query_for_collection(conn: &GraphConnection, collection_name: &str) -> Vec<Path> {
-        let query = "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1";
-        Path::query(conn, query, params![collection_name])
+        Path::select(conn)
+            .collection_name(collection_name)
+            .order_by(PathSelect::CreatedOn, Direction::Desc)
+            .load()
+            .expect("should load collection paths")
     }
 
     pub fn query_for_collection_and_sample(
@@ -414,8 +459,17 @@ impl Path {
         collection_name: &str,
         sample_name: &str,
     ) -> Vec<Path> {
-        let query = "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on FROM paths JOIN block_groups ON paths.block_group_id = block_groups.id WHERE block_groups.collection_name = ?1 AND block_groups.sample_name = ?2";
-        Path::query(conn, query, params![collection_name, sample_name])
+        Path::select(conn)
+            .join_filtered_on(
+                PathSelect::BlockGroupId,
+                BlockGroupSelect::Id,
+                BlockGroup::select(conn)
+                    .collection_name(collection_name)
+                    .sample_name(sample_name),
+            )
+            .order_by(PathSelect::CreatedOn, Direction::Desc)
+            .load()
+            .expect("should load collection and sample paths")
     }
 
     pub fn sequence(
@@ -882,16 +936,12 @@ impl Path {
 
         let node_deletion_start = deletion_start - block_with_start.start;
         let node_deletion_end = deletion_end - block_with_end.start;
-        let deletion_edge_result = Edge::query(
-            conn,
-            "SELECT * FROM edges WHERE source_node_id = ?1 AND source_coordinate = ?2 AND target_node_id = ?3 AND target_coordinate = ?4",
-            rusqlite::params!(
-                SQLValue::from(block_with_start.node_id),
-                SQLValue::from(node_deletion_start),
-                SQLValue::from(block_with_end.node_id),
-                SQLValue::from(node_deletion_end)
-            ),
-        );
+        let deletion_edge_result = Edge::select(conn)
+            .source_node_id(block_with_start.node_id)
+            .source_coordinate(node_deletion_start)
+            .target_node_id(block_with_end.node_id)
+            .target_coordinate(node_deletion_end)
+            .load()?;
 
         if deletion_edge_result.is_empty() {
             let error_string = format!(
@@ -1045,24 +1095,18 @@ impl RegionResolver for Path {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT paths.id, paths.block_group_id, paths.name, paths.created_on, \
-                    block_groups.is_default \
-             FROM paths \
-             JOIN block_groups ON paths.block_group_id = block_groups.id \
-             WHERE block_groups.collection_name = ?1 \
-               AND block_groups.sample_name = ?2 \
-               AND lower(paths.name) = lower(?3)",
+        let matches = Path::select(conn)
+            .name_case_insensitive(&region.name)
+            .join_filtered_on(
+                PathSelect::BlockGroupId,
+                BlockGroupSelect::Id,
+                BlockGroup::select(conn)
+                    .collection_name(collection_name)
+                    .sample_name(sample_name),
             )
-            .map_err(PathError::DatabaseError)?;
-        let matches = stmt
-            .query_map(params![collection_name, sample_name, region.name], |row| {
-                Ok((Self::process_row(row), row.get::<_, bool>(4)?))
-            })
-            .map_err(PathError::DatabaseError)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PathError::DatabaseError)?;
+            .models::<(Path, BlockGroup)>()
+            .load()
+            .map_err(PathError::from)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),
@@ -1070,7 +1114,7 @@ impl RegionResolver for Path {
             _ => {
                 let default_matches = matches
                     .into_iter()
-                    .filter(|(_, is_default)| *is_default)
+                    .filter(|(_, block_group)| block_group.is_default)
                     .collect::<Vec<_>>();
                 match default_matches.len() {
                     1 => Ok(default_matches.into_iter().next().unwrap().0),
@@ -1080,21 +1124,6 @@ impl RegionResolver for Path {
                     ))),
                 }
             }
-        }
-    }
-}
-
-impl Query for Path {
-    type Model = Path;
-
-    const TABLE_NAME: &'static str = "paths";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Path {
-            id: row.get(0).unwrap(),
-            block_group_id: row.get(1).unwrap(),
-            name: row.get(2).unwrap(),
-            created_on: row.get(3).unwrap(),
         }
     }
 }
@@ -1427,6 +1456,80 @@ mod tests {
     }
 
     #[test]
+    fn test_edges_for_path_preserves_repeated_edges_in_walk_order() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, existing_path) = setup_block_group(conn);
+        let existing_edge_ids = Path::edge_ids_for_path(conn, &existing_path.id, None);
+        let existing_edges = Edge::select(conn)
+            .query_by_ids(existing_edge_ids.iter().copied())
+            .expect("should load fixture edges");
+        let forward_edge = &existing_edges[1];
+        let reverse_edge = Edge::create(
+            conn,
+            forward_edge.target_node_id,
+            10,
+            Strand::Forward,
+            forward_edge.source_node_id,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create cycle edge");
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: reverse_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let edge_ids = vec![
+            existing_edge_ids[0],
+            forward_edge.id,
+            reverse_edge.id,
+            forward_edge.id,
+            existing_edge_ids[2],
+            existing_edge_ids[3],
+            existing_edge_ids[4],
+        ];
+        let path = Path::create(conn, "cycle", &block_group_id, &edge_ids)
+            .expect("should create path with repeated edge");
+
+        let resolved_edge_ids = Path::edges_for_path(conn, &path.id, None)
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(resolved_edge_ids, edge_ids);
+        assert_eq!(
+            path.length(conn, None).expect("should measure cyclic path"),
+            60
+        );
+        let coordinates = path
+            .coordinate_blocks(conn, None)
+            .into_iter()
+            .filter(|block| block.path_start >= 0 && block.path_end <= 60)
+            .map(|block| (block.path_start, block.path_end))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            coordinates,
+            vec![(0, 10), (10, 20), (20, 30), (30, 40), (40, 50), (50, 60)]
+        );
+
+        let history_ref = commit_all(conn, "cyclic path")
+            .expect("should commit cyclic path")
+            .to_string();
+        assert_eq!(
+            Path::edges_for_path(conn, &path.id, Some(&history_ref))
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>(),
+            edge_ids,
+        );
+    }
+
+    #[test]
     fn test_edge_id_blob_is_available_at_history_ref() {
         let conn = &get_connection(None).unwrap();
         let (_block_group_id, path) = setup_block_group(conn);
@@ -1445,7 +1548,9 @@ mod tests {
         let conn = &get_connection(None).unwrap();
         let (block_group_id, existing_path) = setup_block_group(conn);
         let edge_ids = Path::edge_ids_for_path(conn, &existing_path.id, None);
-        let edge_data = Edge::query_by_ids(conn, &edge_ids, None)
+        let edge_data = Edge::select(conn)
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load path edges by id")
             .iter()
             .map(EdgeData::from)
             .collect::<Vec<_>>();
@@ -1474,6 +1579,49 @@ mod tests {
             edge_ids.last().copied()
         );
         assert_eq!(Path::edge_id_at(conn, &path.id, edge_ids.len(), None), None);
+    }
+
+    #[test]
+    fn test_search_supports_sort_and_pagination() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, seed_path) = setup_block_group(conn);
+        let edge_ids = Path::edge_ids_for_path(conn, &seed_path.id, None);
+
+        let alpha = Path::create(conn, "alpha", &block_group_id, &edge_ids).unwrap();
+        let beta = Path::create(conn, "beta", &block_group_id, &edge_ids).unwrap();
+        let gamma = Path::create(conn, "gamma", &block_group_id, &edge_ids).unwrap();
+
+        let matches = Path::select(conn)
+            .collection_name("test")
+            .order_by(PathSelect::CreatedOn, Direction::Asc)
+            .limit(2)
+            .offset(1)
+            .load()
+            .expect("should load paginated paths");
+
+        assert_eq!(matches, vec![alpha, beta]);
+        assert_eq!(gamma.name, "gamma");
+    }
+
+    #[test]
+    fn test_select_with_ref_applies_to_joined_tables() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, historical_path) = setup_block_group(conn);
+        let edge_ids = Path::edge_ids_for_path(conn, &historical_path.id, None);
+        let historical_commit =
+            commit_all(conn, "historical path selector").expect("should commit path");
+        let current_path = Path::create(conn, "current", &block_group_id, &edge_ids)
+            .expect("should create current path");
+
+        let historical_matches = Path::select(conn)
+            .with_ref(historical_commit.to_string())
+            .collection_name("test")
+            .order_by(PathSelect::CreatedOn, Direction::Asc)
+            .load()
+            .expect("should load historical paths");
+
+        assert_eq!(historical_matches, vec![historical_path]);
+        assert!(!historical_matches.contains(&current_path));
     }
 
     #[test]

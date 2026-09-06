@@ -38,7 +38,7 @@ jobs:
       - name: Install capnp
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends capnproto clang mold
 
-      - name: Verify tag matches crate version
+      - name: Verify tag matches workspace versions
         run: |
           version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name=="gen") | .version' | head -n1)
           tag="${{ inputs.tag }}"
@@ -47,6 +47,12 @@ jobs:
           echo "Tag stripped: $tag_stripped"
           if [ "$version" != "$tag_stripped" ]; then
             echo "Tag version ($tag_stripped) does not match Cargo.toml version ($version)" >&2
+            exit 1
+          fi
+          mismatched=$(cargo metadata --format-version 1 --no-deps | jq -r --arg version "$version" '.packages[] | select(.version != $version) | "\(.name)=\(.version)"')
+          if [ -n "$mismatched" ]; then
+            echo "Workspace crate versions do not match $version:" >&2
+            echo "$mismatched" >&2
             exit 1
           fi
 

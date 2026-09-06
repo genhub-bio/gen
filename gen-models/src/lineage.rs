@@ -324,14 +324,13 @@ mod tests {
     impl Query for NumericLineage {
         type Model = NumericLineage;
 
-        const PRIMARY_KEY: &'static str = "parent_id";
         const TABLE_NAME: &'static str = "numeric_lineage";
 
-        fn process_row(row: &Row) -> Self::Model {
-            NumericLineage {
-                parent_id: row.get(0).unwrap(),
-                child_id: row.get(1).unwrap(),
-            }
+        fn process_row(row: &Row) -> rusqlite::Result<Self::Model> {
+            Ok(NumericLineage {
+                parent_id: row.get(0)?,
+                child_id: row.get(1)?,
+            })
         }
     }
 
@@ -363,14 +362,13 @@ mod tests {
     impl Query for HashLineage {
         type Model = HashLineage;
 
-        const PRIMARY_KEY: &'static str = "parent_id";
         const TABLE_NAME: &'static str = "hash_lineage";
 
-        fn process_row(row: &Row) -> Self::Model {
-            HashLineage {
-                parent_id: row.get(0).unwrap(),
-                child_id: row.get(1).unwrap(),
-            }
+        fn process_row(row: &Row) -> rusqlite::Result<Self::Model> {
+            Ok(HashLineage {
+                parent_id: row.get(0)?,
+                child_id: row.get(1)?,
+            })
         }
     }
 

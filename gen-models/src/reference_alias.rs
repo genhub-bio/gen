@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Result, Row};
+use rusqlite::Result;
 use thiserror::Error;
 
-use crate::{db::GraphConnection, traits::*};
+use crate::{ModelSelect, db::GraphConnection};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ModelSelect)]
+#[model_select(table = "reference_aliases")]
 pub struct ReferenceAlias {
     pub reference_name: String,
     pub refseq_accession_id: Option<String>,
@@ -20,24 +21,6 @@ pub struct ReferenceAlias {
 pub enum ReferenceAliasError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
-}
-
-impl Query for ReferenceAlias {
-    type Model = ReferenceAlias;
-
-    const TABLE_NAME: &'static str = "reference_aliases";
-
-    fn process_row(row: &Row) -> Self::Model {
-        ReferenceAlias {
-            reference_name: row.get(0).unwrap(),
-            refseq_accession_id: row.get(1).unwrap(),
-            genbank_accession_id: row.get(2).unwrap(),
-            ucsc_id: row.get(3).unwrap(),
-            ensembl_id: row.get(4).unwrap(),
-            custom_id: row.get(5).unwrap(),
-            chromosome: row.get(6).unwrap(),
-        }
-    }
 }
 
 impl ReferenceAlias {
@@ -121,13 +104,8 @@ impl ReferenceAlias {
         history_ref: Option<&str>,
     ) -> Result<HashMap<String, String>, ReferenceAliasError> {
         let mut references_by_alias = HashMap::new();
-        let table = ReferenceAlias::table_name_with_history_ref(history_ref);
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        let reference_aliases =
-            ReferenceAlias::query(conn, &format!("SELECT * FROM {table}"), &params[..]);
+        let select = ReferenceAlias::select(conn).with_ref(history_ref);
+        let reference_aliases = select.load().expect("should load reference aliases");
         for reference_alias in reference_aliases {
             let aliases = ReferenceAlias::compute_aliases(reference_alias);
             for reference in &references {
@@ -185,7 +163,7 @@ mod tests {
     #[test]
     fn test_prepopulated_aliases() {
         let conn = &mut get_connection(None).unwrap();
-        let reference_aliases = ReferenceAlias::all(conn);
+        let reference_aliases = ReferenceAlias::all(conn).expect("should load reference aliases");
         assert_eq!(reference_aliases.len(), 107);
         let first_e_coli_reference = reference_aliases
             .iter()

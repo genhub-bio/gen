@@ -1,3 +1,9 @@
+extern crate self as gen_models;
+
+pub use errors::ModelSelectError;
+pub use gen_models_macros::ModelSelect;
+pub use select::Direction;
+
 pub mod accession;
 pub mod annotations;
 pub mod assets;
@@ -25,6 +31,8 @@ pub mod reference_alias;
 pub mod region;
 pub mod sample;
 pub mod sample_lineage;
+#[doc(hidden)]
+pub mod select;
 pub mod sequence;
 #[cfg(test)]
 pub mod test_helpers;

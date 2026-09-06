@@ -11,7 +11,7 @@ use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use indexmap::IndexMap;
 use opendal::{blocking, services};
 use rusqlite::{
-    Row, ToSql, named_params, params,
+    ToSql, named_params, params,
     types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use sha2::{Digest, Sha256};
@@ -19,6 +19,7 @@ use tempfile::NamedTempFile;
 use url::{Position, Url};
 
 use crate::{
+    Direction, ModelSelect,
     db::GraphConnection,
     errors::{FileAdditionError, FileStoreError, QueryError},
     history::dolt::hash_of,
@@ -177,7 +178,8 @@ impl FromSql for AssetRole {
 ///
 /// Use [`Self::get_cumulative_assets_at`] when that provenance is needed and
 /// [`Self::get_materialized_assets_at`] when constructing the one-file-per-path workspace view.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "gen_asset_refs")]
 pub struct AssetRef {
     pub id: HashId,
     pub uri: String,
@@ -211,7 +213,8 @@ pub struct AnnotationFileAssets {
     pub index: Option<AssetRef>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "gen_operation_log")]
 pub struct OperationLog {
     pub id: HashId,
     pub operation_kind: OperationKind,
@@ -219,64 +222,18 @@ pub struct OperationLog {
     pub created_on: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(
+    table = "gen_operation_assets",
+    default_sort(log_id = "asc", asset_ref_id = "asc", role = "asc")
+)]
 pub struct OperationAsset {
+    #[model_select(primary_key)]
     pub log_id: HashId,
+    #[model_select(primary_key)]
     pub asset_ref_id: HashId,
+    #[model_select(primary_key)]
     pub role: AssetRole,
-}
-
-impl Query for AssetRef {
-    type Model = AssetRef;
-
-    const PRIMARY_KEY: &'static str = "id";
-    const TABLE_NAME: &'static str = "gen_asset_refs";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            id: row.get("id").unwrap(),
-            uri: row.get("uri").unwrap(),
-            file_type: row.get("file_type").unwrap(),
-            checksum: row.get("checksum").unwrap(),
-            size: row.get("size").unwrap(),
-            role: row.get("role").unwrap(),
-            logical_path: row.get("logical_path").unwrap(),
-            name: row.get("name").unwrap(),
-            created_on: row.get("created_on").unwrap(),
-            upstream_asset_ref_id: row.get("upstream_asset_ref_id").unwrap(),
-        }
-    }
-}
-
-impl Query for OperationLog {
-    type Model = OperationLog;
-
-    const PRIMARY_KEY: &'static str = "id";
-    const TABLE_NAME: &'static str = "gen_operation_log";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            id: row.get("id").unwrap(),
-            operation_kind: row.get("operation_kind").unwrap(),
-            command: row.get("command").unwrap(),
-            created_on: row.get("created_on").unwrap(),
-        }
-    }
-}
-
-impl Query for OperationAsset {
-    type Model = OperationAsset;
-
-    const PRIMARY_KEY: &'static str = "log_id";
-    const TABLE_NAME: &'static str = "gen_operation_assets";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            log_id: row.get("log_id").unwrap(),
-            asset_ref_id: row.get("asset_ref_id").unwrap(),
-            role: row.get("role").unwrap(),
-        }
-    }
 }
 
 impl AssetRef {
@@ -423,18 +380,13 @@ impl AssetRef {
         upstream_asset_ref_id: &HashId,
         history_ref: Option<&str>,
     ) -> Vec<Self> {
-        let table = Self::table_name_with_history_ref(history_ref);
-        let query = format!(
-            "SELECT * FROM {table} \
-             WHERE upstream_asset_ref_id = :upstream_asset_ref_id \
-             ORDER BY role, logical_path, id"
-        );
-        let mut query_params: Vec<(&str, &dyn ToSql)> =
-            vec![(":upstream_asset_ref_id", upstream_asset_ref_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            query_params.push((":history_ref", history_ref));
-        }
-        Self::query(conn, &query, &query_params[..])
+        let select = Self::select(conn)
+            .upstream_asset_ref_id(*upstream_asset_ref_id)
+            .order_by(AssetRefSelect::Role, Direction::Asc)
+            .order_by(AssetRefSelect::LogicalPath, Direction::Asc)
+            .order_by(AssetRefSelect::Id, Direction::Asc)
+            .with_ref(history_ref);
+        select.load().expect("should load derived assets")
     }
 
     /// Returns assets grouped by commit.
@@ -807,11 +759,10 @@ impl OperationAsset {
     }
 
     pub fn by_log_id(conn: &GraphConnection, log_id: &HashId) -> Vec<Self> {
-        Self::query(
-            conn,
-            "SELECT * FROM gen_operation_assets WHERE log_id = ?1",
-            params![log_id],
-        )
+        Self::select(conn)
+            .log_id(*log_id)
+            .load()
+            .expect("should load operation assets")
     }
 }
 
@@ -1693,7 +1644,6 @@ mod tests {
         history::dolt::commit_all,
         operations::{calculate_file_checksum, calculate_reader_checksum},
         test_helpers::setup_gen,
-        traits::Query,
     };
 
     #[test]
@@ -1728,9 +1678,9 @@ mod tests {
         AssetRef::create(conn, &asset_ref).expect("should insert asset ref");
         OperationAsset::create(conn, &operation_asset).expect("should insert operation asset");
 
-        let asset_refs = AssetRef::all(conn);
-        let operation_logs = OperationLog::all(conn);
-        let operation_assets = OperationAsset::all(conn);
+        let asset_refs = AssetRef::all(conn).expect("should load asset references");
+        let operation_logs = OperationLog::all(conn).expect("should load operation logs");
+        let operation_assets = OperationAsset::all(conn).expect("should load operation assets");
 
         assert_eq!(asset_refs, vec![asset_ref]);
         assert_eq!(operation_logs, vec![operation_log]);

@@ -92,7 +92,7 @@ fn trailing_commit_hash(output: &std::process::Output, context: &str) -> String 
 fn asset_refs(repo_root: &Path) -> Vec<AssetRef> {
     let graph_path = repo_root.join(".gen/default.db");
     let connection = get_connection(graph_path).expect("should reopen graph database");
-    let mut asset_refs = AssetRef::all(&connection);
+    let mut asset_refs = AssetRef::all(&connection).expect("should load asset references");
     asset_refs.sort_by(|left, right| {
         left.created_on
             .cmp(&right.created_on)

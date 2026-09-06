@@ -14,6 +14,7 @@ use gen_annotations::projection::{AnnotationSegment, project_annotation_segments
 use gen_core::{Strand, Workspace, is_terminal, path::PathBlock, range::Range};
 use gen_graph::{GenGraph, GraphEdge, GraphNode, all_simple_paths};
 use gen_models::{
+    ModelSelectError,
     accession::{Accession, AccessionSpan, NewAccession},
     annotations::{Annotation, GenBankLocationOperator},
     block_group::BlockGroup,
@@ -42,6 +43,8 @@ pub enum GenbankExportError {
     Path(#[from] PathError),
     #[error("Block group error while exporting GenBank: {0}")]
     BlockGroup(#[from] BlockGroupError),
+    #[error("Selector error while exporting GenBank: {0}")]
+    ModelSelect(#[from] ModelSelectError),
 }
 
 fn build_annotation_location(
@@ -93,8 +96,8 @@ fn export_annotations(
 ) -> Result<(), GenbankExportError> {
     let annotations = Annotation::query_by_sample(conn, sample_name, history_ref)?;
     for annotation in annotations {
-        let Some(accession) = Accession::get_by_id(conn, &annotation.accession_id, history_ref)
-        else {
+        let select = Accession::select(conn).with_ref(history_ref);
+        let Some(accession) = select.get_by_id(annotation.accession_id)? else {
             continue;
         };
         if accession.block_group_id != path.block_group_id {

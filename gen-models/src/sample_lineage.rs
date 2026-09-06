@@ -1,15 +1,37 @@
 use gen_core::traits::Capnp;
-use rusqlite::{Result as SQLResult, Row, params};
+use rusqlite::{Result as SQLResult, params, types::Value as SQLValue};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    db::GraphConnection, gen_models_capnp::sample_lineage, lineage::SqlLineage, traits::Query,
+    Direction, ModelSelect, db::GraphConnection, gen_models_capnp::sample_lineage,
+    lineage::SqlLineage, select::SqlFilter,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(
+    table = "sample_lineage",
+    default_sort(parent_sample_name = "asc", child_sample_name = "asc")
+)]
 pub struct SampleLineage {
+    #[model_select(primary_key)]
     pub parent_sample_name: String,
+    #[model_select(primary_key)]
     pub child_sample_name: String,
+}
+
+impl SampleLineageSelect<'_> {
+    pub fn name_contains(self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        let parent_column = self.column("parent_sample_name");
+        let child_column = self.column("child_sample_name");
+        self.push_filter(SqlFilter::new(
+            format!(
+                "(instr(lower({parent_column}), lower(?)) > 0 OR \
+                 instr(lower({child_column}), lower(?)) > 0)"
+            ),
+            vec![SQLValue::from(name.clone()), SQLValue::from(name)],
+        ))
+    }
 }
 
 impl<'a> Capnp<'a> for SampleLineage {
@@ -32,20 +54,6 @@ impl<'a> Capnp<'a> for SampleLineage {
         SampleLineage {
             parent_sample_name,
             child_sample_name,
-        }
-    }
-}
-
-impl Query for SampleLineage {
-    type Model = SampleLineage;
-
-    const PRIMARY_KEY: &'static str = "parent_sample_name";
-    const TABLE_NAME: &'static str = "sample_lineage";
-
-    fn process_row(row: &Row) -> Self::Model {
-        SampleLineage {
-            parent_sample_name: row.get(0).unwrap(),
-            child_sample_name: row.get(1).unwrap(),
         }
     }
 }
@@ -75,17 +83,13 @@ impl SampleLineage {
         child_sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<String> {
-        let query = format!(
-            "SELECT * FROM {} WHERE child_sample_name = :child_sample_name \
-             ORDER BY parent_sample_name;",
-            SampleLineage::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
-            vec![(":child_sample_name", &child_sample_name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        SampleLineage::query(conn, &query, &params[..])
+        let select = SampleLineage::select(conn)
+            .child_sample_name(child_sample_name)
+            .order_by(SampleLineageSelect::ParentSampleName, Direction::Asc)
+            .with_ref(history_ref);
+        select
+            .load()
+            .expect("should load parent sample lineage")
             .into_iter()
             .map(|lineage| lineage.parent_sample_name)
             .collect()
@@ -96,31 +100,16 @@ impl SampleLineage {
         parent_sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<String> {
-        let query = format!(
-            "SELECT * FROM {} WHERE parent_sample_name = :parent_sample_name \
-             ORDER BY child_sample_name;",
-            SampleLineage::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
-            vec![(":parent_sample_name", &parent_sample_name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        SampleLineage::query(conn, &query, &params[..])
+        let select = SampleLineage::select(conn)
+            .parent_sample_name(parent_sample_name)
+            .order_by(SampleLineageSelect::ChildSampleName, Direction::Asc)
+            .with_ref(history_ref);
+        select
+            .load()
+            .expect("should load child sample lineage")
             .into_iter()
             .map(|lineage| lineage.child_sample_name)
             .collect()
-    }
-
-    pub fn search_name(conn: &GraphConnection, name: &str) -> Vec<Self> {
-        SampleLineage::query(
-            conn,
-            "SELECT * FROM sample_lineage
-             WHERE instr(lower(parent_sample_name), lower(?1)) > 0
-                OR instr(lower(child_sample_name), lower(?1)) > 0
-             ORDER BY parent_sample_name, child_sample_name;",
-            params![name],
-        )
     }
 
     pub fn create(
@@ -357,6 +346,11 @@ mod tests {
             ),
             vec!["parent"]
         );
+        assert_eq!(
+            SampleLineage::get_parents(&conn, "parent", None),
+            vec!["grand"]
+        );
+        assert!(SampleLineage::get_parents(&conn, "parent", Some(&base.to_string())).is_empty());
     }
 
     #[test]
@@ -408,7 +402,12 @@ mod tests {
         SampleLineage::create(&conn, "plain-parent", "plain-child").unwrap();
         SampleLineage::create(&conn, "zzz", "QuxFood").unwrap();
 
-        let matches = SampleLineage::search_name(&conn, "FoO");
+        let matches = SampleLineage::select(&conn)
+            .name_contains("FoO")
+            .order_by(SampleLineageSelect::ParentSampleName, Direction::Asc)
+            .order_by(SampleLineageSelect::ChildSampleName, Direction::Asc)
+            .load()
+            .expect("should load matching sample lineage");
 
         assert_eq!(
             matches,
@@ -426,6 +425,65 @@ mod tests {
                     child_sample_name: "QuxFood".to_string(),
                 },
             ]
+        );
+
+        let limited_matches = SampleLineage::select(&conn)
+            .name_contains("FoO")
+            .order_by(SampleLineageSelect::ChildSampleName, Direction::Desc)
+            .order_by(SampleLineageSelect::ParentSampleName, Direction::Desc)
+            .limit(2)
+            .load()
+            .expect("should load limited sample lineage");
+
+        assert_eq!(
+            limited_matches,
+            vec![
+                SampleLineage {
+                    parent_sample_name: "foo".to_string(),
+                    child_sample_name: "child".to_string(),
+                },
+                SampleLineage {
+                    parent_sample_name: "zzz".to_string(),
+                    child_sample_name: "QuxFood".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_search_supports_sort_and_pagination() {
+        let conn = get_connection(None).unwrap();
+
+        for sample in ["alpha", "beta", "child-a", "child-b", "foo", "zzz"] {
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name: sample,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        SampleLineage::create(&conn, "alpha", "child-a").unwrap();
+        SampleLineage::create(&conn, "foo", "child-b").unwrap();
+        SampleLineage::create(&conn, "zzz", "beta").unwrap();
+
+        let matches = SampleLineage::select(&conn)
+            .name_contains("a")
+            .order_by(SampleLineageSelect::ChildSampleName, Direction::Desc)
+            .order_by(SampleLineageSelect::ParentSampleName, Direction::Desc)
+            .limit(2)
+            .offset(1)
+            .load()
+            .expect("should load paginated sample lineage");
+
+        assert_eq!(
+            matches,
+            vec![SampleLineage {
+                parent_sample_name: "zzz".to_string(),
+                child_sample_name: "beta".to_string(),
+            }]
         );
     }
 }

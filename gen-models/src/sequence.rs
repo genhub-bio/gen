@@ -10,20 +10,23 @@ use noodles::{
     core::Region,
     fasta::{self, fai, io::indexed_reader::Builder as IndexBuilder},
 };
-use rusqlite::{Row, ToSql, params, types::Value};
+use rusqlite::{Result as SqlResult, Row, ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    ModelSelect, ModelSelectError,
     assets::{AssetRef, AssetUri, LocalAssetUri},
     db::GraphConnection,
     gen_models_capnp::sequence,
     traits::{Query, max_rows_per_batch},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "sequences", from_row = sequence_from_row)]
 pub struct Sequence {
+    #[model_select(primary_key)]
     pub hash: Sha256Hash,
     pub sequence_type: String,
     sequence: String,
@@ -33,15 +36,39 @@ pub struct Sequence {
     pub length: i64,
     // Indicates whether the sequence is stored externally, a quick flag instead of checking the
     // sequence and asset reference in each caller.
+    #[model_select(skip)]
     pub external_sequence: bool,
     #[serde(skip)]
+    #[model_select(skip)]
     asset_ref: Option<AssetRef>,
     #[serde(skip)]
+    #[model_select(skip)]
     index_asset_refs: Vec<AssetRef>,
     #[serde(skip)]
+    #[model_select(skip)]
     workspace: Option<Workspace>,
     #[serde(skip)]
+    #[model_select(skip)]
     asset_resolution_error: Option<String>,
+}
+
+fn sequence_from_row(row: &Row) -> SqlResult<Sequence> {
+    let asset_ref_id: Option<HashId> = row.get(4)?;
+    let hash: Sha256Hash = row.get(0)?;
+    let sequence = row.get(2)?;
+    Ok(Sequence {
+        hash,
+        sequence_type: row.get(1)?,
+        sequence,
+        name: row.get(3)?,
+        asset_ref_id,
+        length: row.get(5)?,
+        external_sequence: asset_ref_id.is_some(),
+        asset_ref: None,
+        index_asset_refs: Vec::new(),
+        workspace: None,
+        asset_resolution_error: None,
+    })
 }
 
 impl PartialEq for Sequence {
@@ -74,6 +101,8 @@ impl Hash for Sequence {
 pub enum SequenceError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Sequence or asset_ref_id must be set.")]
     NoSequence(),
     #[error("An asset reference must have an accompanying sequence name.")]
@@ -274,32 +303,28 @@ impl<'a> NewSequence<'a> {
             }
         }
         let hash = self.hash();
-        match conn.query_row(
-            "SELECT hash from sequences where hash = ?1;",
-            [hash],
-            |row| row.get::<_, Sha256Hash>(0),
-        ) {
-            Ok(_) => {}
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                let mut stmt = conn.prepare("INSERT INTO sequences (hash, sequence_type, sequence, name, asset_ref_id, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6);")?;
-                match stmt.execute(params![
-                    hash,
-                    self.sequence_type.unwrap().to_string(),
-                    if self.shallow {
-                        ""
-                    } else {
-                        self.sequence.unwrap()
-                    },
-                    self.name.unwrap_or(""),
-                    self.asset_ref_id,
-                    self.length.unwrap_or(length)
-                ]) {
-                    Ok(_) => {}
-                    Err(err) => return Err(SequenceError::DatabaseError(err)),
-                }
+        let existing = Sequence::select(conn)
+            .hash(hash)
+            .only(SequenceSelect::Hash)
+            .load()?;
+        if existing.is_empty() {
+            let mut stmt = conn.prepare("INSERT INTO sequences (hash, sequence_type, sequence, name, asset_ref_id, length) VALUES (?1, ?2, ?3, ?4, ?5, ?6);")?;
+            match stmt.execute(params![
+                hash,
+                self.sequence_type.unwrap().to_string(),
+                if self.shallow {
+                    ""
+                } else {
+                    self.sequence.unwrap()
+                },
+                self.name.unwrap_or(""),
+                self.asset_ref_id,
+                self.length.unwrap_or(length)
+            ]) {
+                Ok(_) => {}
+                Err(err) => return Err(SequenceError::DatabaseError(err)),
             }
-            Err(err) => return Err(SequenceError::DatabaseError(err)),
-        };
+        }
 
         Ok(Sequence {
             hash,
@@ -615,7 +640,7 @@ impl Sequence {
         let mut sequences: IndexMap<Sha256Hash, Self> = IndexMap::new();
         for row in statement
             .query_map(&query_params[..], |row| {
-                Ok(Self::process_joined_row(row, workspace))
+                Self::process_joined_row(row, workspace)
             })
             .unwrap()
         {
@@ -630,48 +655,48 @@ impl Sequence {
         sequences.into_values().collect()
     }
 
-    fn process_joined_row(row: &Row, workspace: &Workspace) -> Self {
-        let mut sequence = <Self as Query>::process_row(row);
+    fn process_joined_row(row: &Row, workspace: &Workspace) -> SqlResult<Self> {
+        let mut sequence = <Self as Query>::process_row(row)?;
         if let Some(asset_ref_id) = sequence.asset_ref_id {
-            let Some(joined_asset_ref_id): Option<HashId> = row.get(6).unwrap() else {
+            let Some(joined_asset_ref_id): Option<HashId> = row.get(6)? else {
                 sequence.asset_resolution_error =
                     Some(format!("asset reference {asset_ref_id} does not exist"));
-                return sequence;
+                return Ok(sequence);
             };
             let asset_ref = AssetRef {
                 id: joined_asset_ref_id,
-                uri: row.get(7).unwrap(),
-                file_type: row.get(8).unwrap(),
-                checksum: row.get(9).unwrap(),
-                size: row.get(10).unwrap(),
-                role: row.get(11).unwrap(),
-                logical_path: row.get(12).unwrap(),
-                name: row.get(13).unwrap(),
-                created_on: row.get(14).unwrap(),
-                upstream_asset_ref_id: row.get(15).unwrap(),
+                uri: row.get(7)?,
+                file_type: row.get(8)?,
+                checksum: row.get(9)?,
+                size: row.get(10)?,
+                role: row.get(11)?,
+                logical_path: row.get(12)?,
+                name: row.get(13)?,
+                created_on: row.get(14)?,
+                upstream_asset_ref_id: row.get(15)?,
             };
             if LocalAssetUri::is_local_path_or_file_uri(&asset_ref.uri)
                 && let Err(error) = asset_ref.versioned_store_path(workspace)
             {
                 sequence.asset_resolution_error = Some(error.to_string());
-                return sequence;
+                return Ok(sequence);
             }
             sequence.asset_ref = Some(asset_ref);
             sequence.workspace = Some(workspace.clone());
 
-            let index_asset_ref_id: Option<HashId> = row.get(16).unwrap();
+            let index_asset_ref_id: Option<HashId> = row.get(16)?;
             if let Some(index_asset_ref_id) = index_asset_ref_id {
                 let index_asset = AssetRef {
                     id: index_asset_ref_id,
-                    uri: row.get(17).unwrap(),
-                    file_type: row.get(18).unwrap(),
-                    checksum: row.get(19).unwrap(),
-                    size: row.get(20).unwrap(),
-                    role: row.get(21).unwrap(),
-                    logical_path: row.get(22).unwrap(),
-                    name: row.get(23).unwrap(),
-                    created_on: row.get(24).unwrap(),
-                    upstream_asset_ref_id: row.get(25).unwrap(),
+                    uri: row.get(17)?,
+                    file_type: row.get(18)?,
+                    checksum: row.get(19)?,
+                    size: row.get(20)?,
+                    role: row.get(21)?,
+                    logical_path: row.get(22)?,
+                    name: row.get(23)?,
+                    created_on: row.get(24)?,
+                    upstream_asset_ref_id: row.get(25)?,
                 };
                 if !LocalAssetUri::is_local_path_or_file_uri(&index_asset.uri)
                     || index_asset.versioned_store_path(workspace).is_ok()
@@ -680,7 +705,7 @@ impl Sequence {
                 }
             }
         }
-        sequence
+        Ok(sequence)
     }
 
     pub fn get_sequence(
@@ -752,7 +777,7 @@ impl Sequence {
         let mut sequences: IndexMap<Sha256Hash, Self> = IndexMap::new();
         for row in statement
             .query_map(params![block_group_id], |row| {
-                Ok(Self::process_joined_row(row, workspace))
+                Self::process_joined_row(row, workspace)
             })
             .unwrap()
         {
@@ -765,32 +790,6 @@ impl Sequence {
             }
         }
         sequences.into_values().collect()
-    }
-}
-
-impl Query for Sequence {
-    type Model = Sequence;
-
-    const PRIMARY_KEY: &'static str = "hash";
-    const TABLE_NAME: &'static str = "sequences";
-
-    fn process_row(row: &Row) -> Self::Model {
-        let asset_ref_id: Option<HashId> = row.get(4).unwrap();
-        let hash: Sha256Hash = row.get(0).unwrap();
-        let sequence = row.get(2).unwrap();
-        Sequence {
-            hash,
-            sequence_type: row.get(1).unwrap(),
-            sequence,
-            name: row.get(3).unwrap(),
-            asset_ref_id,
-            length: row.get(5).unwrap(),
-            external_sequence: asset_ref_id.is_some(),
-            asset_ref: None,
-            index_asset_refs: Vec::new(),
-            workspace: None,
-            asset_resolution_error: None,
-        }
     }
 }
 
@@ -833,7 +832,6 @@ mod tests {
         gen_models_capnp::sequence,
         operations::OperationFile,
         test_helpers::{get_connection, setup_gen_on_disk},
-        traits::Query,
     };
 
     fn prepare_asset(context: &crate::db::DbContext, path: &str, role: AssetRole) -> AssetRef {
@@ -906,7 +904,7 @@ mod tests {
     #[test]
     fn test_delete_sequence_by_hash() {
         let conn = &get_connection(None).unwrap();
-        let before_count = Sequence::all(conn).len();
+        let before_count = Sequence::all(conn).expect("should load sequences").len();
         let sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("AACCTT")
@@ -918,12 +916,12 @@ mod tests {
             .save(conn)
             .unwrap();
 
-        let sequences = Sequence::all(conn);
+        let sequences = Sequence::all(conn).expect("should load sequences");
         assert_eq!(sequences.len(), before_count + 2);
 
         Sequence::delete_by_hash(conn, &sequence.hash);
 
-        let sequences = Sequence::all(conn);
+        let sequences = Sequence::all(conn).expect("should load sequences");
         assert_eq!(sequences.len(), before_count + 1);
         assert!(sequences.iter().any(|s| s.hash == sequence2.hash));
     }

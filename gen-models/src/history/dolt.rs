@@ -899,7 +899,6 @@ mod tests {
         operations::Defaults,
         sample::{NewSample, Sample},
         test_helpers::{get_connection, setup_gen_on_disk},
-        traits::Query,
     };
 
     #[test]
@@ -1695,7 +1694,11 @@ mod tests {
 
         let committed_assets = OperationAsset::by_log_id(conn, &log_id)
             .into_iter()
-            .filter_map(|asset| AssetRef::get_by_id(conn, &asset.asset_ref_id, None))
+            .filter_map(|asset| {
+                AssetRef::select(conn)
+                    .get_by_id(asset.asset_ref_id)
+                    .expect("should query asset reference")
+            })
             .map(|asset_ref| (asset_ref.file_type, asset_ref.role, asset_ref.name))
             .collect::<Vec<_>>();
         assert!(

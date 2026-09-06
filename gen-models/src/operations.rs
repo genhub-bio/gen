@@ -22,14 +22,15 @@ use std::{
 use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use itertools::Itertools;
 use rusqlite::{
-    OptionalExtension, Result as SQLResult, Row, params,
-    types::{FromSql, FromSqlResult, ValueRef},
+    OptionalExtension, Result as SQLResult, ToSql, params,
+    types::{FromSql, FromSqlResult, ToSqlOutput, ValueRef},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    Direction, ModelSelect, ModelSelectError,
     assets::{
         AssetRef, AssetRole, AssetUri, LocalAssetUri, OperationAsset, OperationKind, OperationLog,
     },
@@ -392,27 +393,13 @@ fn calculate_stream_hash<R: std::io::Read>(mut reader: R) -> Result<[u8; 32], st
     Ok(hash_array)
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "file_additions")]
 pub struct FileAddition {
     pub id: HashId,
     pub asset_uri: String,
     pub file_type: FileTypes,
     pub checksum: Option<Sha256Hash>,
-}
-
-impl Query for FileAddition {
-    type Model = FileAddition;
-
-    const TABLE_NAME: &'static str = "file_additions";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self::Model {
-            id: row.get(0).unwrap(),
-            asset_uri: row.get(1).unwrap(),
-            file_type: row.get(2).unwrap(),
-            checksum: row.get(3).unwrap(),
-        }
-    }
 }
 
 impl FileAddition {
@@ -470,23 +457,12 @@ impl FileAddition {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, ModelSelect)]
+#[model_select(table = "remotes", history = false)]
 pub struct Remote {
+    #[model_select(primary_key)]
     pub name: String,
     pub url: String,
-}
-
-impl Query for Remote {
-    type Model = Remote;
-
-    const TABLE_NAME: &'static str = "remotes";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Remote {
-            name: row.get(0).unwrap(),
-            url: row.get(1).unwrap(),
-        }
-    }
 }
 
 impl Remote {
@@ -558,14 +534,12 @@ impl Remote {
 
     /// Get a remote by name
     pub fn get_by_name(conn: &ConfigConnection, name: &str) -> Result<Remote, RemoteError> {
-        let query = "SELECT name, url FROM remotes WHERE name = ?1";
-        match Remote::get(conn, query, params![name]) {
-            Ok(remote) => Ok(remote),
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Err(RemoteError::RemoteNotFound(name.to_string()))
-            }
-            Err(e) => Err(RemoteError::DatabaseError(e)),
-        }
+        Remote::select(conn)
+            .name(name)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| RemoteError::RemoteNotFound(name.to_string()))
     }
 
     /// Get a remote by name, returning None if not found (for backward compatibility)
@@ -575,11 +549,10 @@ impl Remote {
 
     /// List all remotes
     pub fn list_all(conn: &ConfigConnection) -> Vec<Remote> {
-        Remote::query(
-            conn,
-            "SELECT name, url FROM remotes ORDER BY name",
-            params![],
-        )
+        Remote::select(conn)
+            .order_by(RemoteSelect::Name, Direction::Asc)
+            .load()
+            .expect("should load remotes")
     }
 
     /// Delete a remote by name
@@ -600,9 +573,11 @@ impl Remote {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "remote_branch", history = false)]
 pub struct RemoteBranch {
     pub remote_name: Option<String>,
+    #[model_select(primary_key)]
     pub name: String,
 }
 
@@ -632,14 +607,14 @@ impl RemoteBranch {
     }
 
     pub fn get_remote(conn: &ConfigConnection, branch_name: &str) -> Option<String> {
-        conn.query_row(
-            "SELECT remote_name FROM remote_branch WHERE name = ?1",
-            params![branch_name],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
+        RemoteBranch::select(conn)
+            .name(branch_name)
+            .only(RemoteBranchSelect::RemoteName)
+            .load()
+            .ok()?
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     pub fn clear_by_remote(conn: &ConfigConnection, remote_name: &str) -> Result<(), RemoteError> {
@@ -683,8 +658,15 @@ impl FromSql for RemoteOperationKind {
     }
 }
 
+impl ToSql for RemoteOperationKind {
+    fn to_sql(&self) -> SQLResult<ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
 /// Tracks a remote operation until its graph and asset phases are complete.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, ModelSelect)]
+#[model_select(table = "remote_operations", history = false)]
 pub struct RemoteOperationRecord {
     /// Config database row identifier.
     pub id: i64,
@@ -712,29 +694,6 @@ pub struct RemoteOperationRecord {
     pub failed_at: Option<String>,
 }
 
-impl Query for RemoteOperationRecord {
-    type Model = RemoteOperationRecord;
-
-    const TABLE_NAME: &'static str = "remote_operations";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Self {
-            id: row.get("id").unwrap(),
-            remote_name: row.get("remote_name").unwrap(),
-            branch_name: row.get("branch_name").unwrap(),
-            operation: row.get("operation").unwrap(),
-            from_commit: row.get("from_commit").unwrap(),
-            assets_transfer_checkpoint: row.get("assets_transfer_checkpoint").unwrap(),
-            to_commit: row.get("to_commit").unwrap(),
-            transfer_id: row.get("transfer_id").unwrap(),
-            transfer_expires_at: row.get("transfer_expires_at").unwrap(),
-            started_at: row.get("started_at").unwrap(),
-            completed_at: row.get("completed_at").unwrap(),
-            failed_at: row.get("failed_at").unwrap(),
-        }
-    }
-}
-
 impl RemoteOperationRecord {
     /// Resumes an incomplete operation or starts one from the supplied local commit.
     pub fn begin_or_resume(
@@ -755,7 +714,7 @@ impl RemoteOperationRecord {
                    AND (operation = ?3 OR operation = 'clone' AND ?3 = 'pull') \
                  ORDER BY id LIMIT 1",
                 params![remote_name, branch_name, operation.as_str()],
-                |row| Ok(Self::process_row(row)),
+                Self::process_row,
             )
             .optional()?;
         if let Some(pending) = pending {
@@ -783,7 +742,17 @@ impl RemoteOperationRecord {
                 assets_transfer_checkpoint
             ],
         )?;
-        Self::get_by_id(conn, &conn.last_insert_rowid(), None)
+        Self::select(conn)
+            .get_by_id(conn.last_insert_rowid())
+            .map_err(|error| match error {
+                ModelSelectError::DatabaseError(error) => error,
+                ModelSelectError::MultipleResults => rusqlite::Error::QueryReturnedMoreThanOneRow,
+                ModelSelectError::InvalidSelector(_)
+                | ModelSelectError::HistoryNotSupported { .. }
+                | ModelSelectError::ProjectionSourceNotSelected { .. } => {
+                    rusqlite::Error::InvalidQuery
+                }
+            })?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
@@ -857,7 +826,8 @@ impl RemoteOperationRecord {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ModelSelect)]
+#[model_select(table = "defaults", history = false)]
 pub struct Defaults {
     pub id: i64,
     pub collection_name: Option<String>,
@@ -865,23 +835,6 @@ pub struct Defaults {
     pub current_branch_name: Option<String>,
     pub default_committer_name: String,
     pub default_committer_email: String,
-}
-
-impl Query for Defaults {
-    type Model = Defaults;
-
-    const TABLE_NAME: &'static str = "defaults";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Defaults {
-            id: row.get(0).unwrap(),
-            collection_name: row.get(1).unwrap(),
-            remote_name: row.get(2).unwrap(),
-            current_branch_name: row.get(3).unwrap(),
-            default_committer_name: row.get(4).unwrap(),
-            default_committer_email: row.get(5).unwrap(),
-        }
-    }
 }
 
 impl Defaults {
@@ -913,17 +866,14 @@ impl Defaults {
 
     /// Get the default remote name
     pub fn get_default_remote(conn: &ConfigConnection) -> Option<String> {
-        let query = "SELECT remote_name FROM defaults WHERE id = 1";
-        let mut stmt = conn.prepare(query).ok()?;
-        let mut rows = stmt
-            .query_map(params![], |row| row.get::<_, Option<String>>(0))
-            .ok()?;
-
-        if let Some(Ok(remote_name)) = rows.next() {
-            remote_name
-        } else {
-            None
-        }
+        Defaults::select(conn)
+            .id(1)
+            .only(DefaultsSelect::RemoteName)
+            .load()
+            .ok()?
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     /// Helper method to get the default remote URL by resolving the remote name
@@ -947,17 +897,14 @@ impl Defaults {
     }
 
     pub fn get_current_branch(conn: &ConfigConnection) -> Option<String> {
-        let query = "SELECT current_branch_name FROM defaults WHERE id = 1";
-        let mut stmt = conn.prepare(query).ok()?;
-        let mut rows = stmt
-            .query_map(params![], |row| row.get::<_, Option<String>>(0))
-            .ok()?;
-
-        if let Some(Ok(branch_name)) = rows.next() {
-            branch_name
-        } else {
-            None
-        }
+        Defaults::select(conn)
+            .id(1)
+            .only(DefaultsSelect::CurrentBranchName)
+            .load()
+            .ok()?
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     pub fn set_default_committer_name(conn: &ConfigConnection, name: &str) -> SQLResult<()> {
@@ -968,12 +915,13 @@ impl Defaults {
     }
 
     pub fn get_default_committer_name(conn: &ConfigConnection) -> String {
-        conn.query_row(
-            "SELECT default_committer_name FROM defaults WHERE id = 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| GEN_DEFAULT_COMMITTER_NAME.to_string())
+        Defaults::select(conn)
+            .id(1)
+            .only(DefaultsSelect::DefaultCommitterName)
+            .load()
+            .ok()
+            .and_then(|names| names.into_iter().next())
+            .unwrap_or_else(|| GEN_DEFAULT_COMMITTER_NAME.to_string())
     }
 
     pub fn set_default_committer_email(conn: &ConfigConnection, email: &str) -> SQLResult<()> {
@@ -984,34 +932,18 @@ impl Defaults {
     }
 
     pub fn get_default_committer_email(conn: &ConfigConnection) -> String {
-        conn.query_row(
-            "SELECT default_committer_email FROM defaults WHERE id = 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| DEFAULT_COMMITTER_EMAIL.to_string())
+        Defaults::select(conn)
+            .id(1)
+            .only(DefaultsSelect::DefaultCommitterEmail)
+            .load()
+            .ok()
+            .and_then(|emails| emails.into_iter().next())
+            .unwrap_or_else(|| DEFAULT_COMMITTER_EMAIL.to_string())
     }
 
     /// Get the defaults record
     pub fn get(conn: &ConfigConnection) -> Option<Defaults> {
-        let query = "SELECT id, collection_name, remote_name, current_branch_name, default_committer_name, default_committer_email FROM defaults WHERE id = 1";
-        Self::get_single(conn, query, params![]).ok()
-    }
-
-    /// Helper method to get a single defaults record using the Query trait
-    fn get_single(
-        conn: &ConfigConnection,
-        query: &str,
-        params: &[&dyn rusqlite::ToSql],
-    ) -> SQLResult<Defaults> {
-        let mut stmt = conn.prepare(query)?;
-        let mut rows = stmt.query_map(params, |row| Ok(Self::process_row(row)))?;
-
-        if let Some(row) = rows.next() {
-            row
-        } else {
-            Err(rusqlite::Error::QueryReturnedNoRows)
-        }
+        Self::select(conn).id(1).load().ok()?.into_iter().next()
     }
 }
 
@@ -1031,7 +963,6 @@ mod tests {
         assets::{AssetRef, AssetRole, OperationAsset, OperationLog},
         history::{HistoryStore, dolt::DoltHistoryStore},
         test_helpers::setup_gen,
-        traits::Query,
     };
 
     #[cfg(test)]
@@ -1163,7 +1094,6 @@ mod tests {
         use crate::{
             operations::{Remote, RemoteOperationKind, RemoteOperationRecord},
             test_helpers::setup_gen,
-            traits::Query,
         };
 
         #[test]
@@ -1225,7 +1155,9 @@ mod tests {
             resumed
                 .complete(config)
                 .expect("should complete pull operation");
-            let completed = RemoteOperationRecord::get_by_id(config, &resumed.id, None)
+            let completed = RemoteOperationRecord::select(config)
+                .get_by_id(resumed.id)
+                .expect("should query completed pull operation")
                 .expect("should refetch completed pull operation");
             assert!(
                 completed.completed_at.is_some(),
@@ -1297,7 +1229,9 @@ mod tests {
             operation
                 .complete(config)
                 .expect_err("should require assets to reach graph destination");
-            let failed = RemoteOperationRecord::get_by_id(config, &operation.id, None)
+            let failed = RemoteOperationRecord::select(config)
+                .get_by_id(operation.id)
+                .expect("should query failed clone operation")
                 .expect("should refetch failed clone operation");
             assert!(failed.failed_at.is_some(), "failed_at should be set");
         }
@@ -1841,7 +1775,8 @@ mod tests {
         )
         .expect("should track remote asset");
 
-        let asset_refs = AssetRef::all(context.graph().conn());
+        let asset_refs =
+            AssetRef::all(context.graph().conn()).expect("should load asset references");
         assert_eq!(asset_refs.len(), 1);
         assert_eq!(asset_refs[0].uri, asset_uri);
         assert_eq!(asset_refs[0].checksum, None);
@@ -1861,7 +1796,8 @@ mod tests {
         )
         .expect("should track remote asset without reading it");
 
-        let asset_refs = AssetRef::all(context.graph().conn());
+        let asset_refs =
+            AssetRef::all(context.graph().conn()).expect("should load asset references");
         assert_eq!(asset_refs.len(), 1);
         assert_eq!(asset_refs[0].uri, asset_uri);
         assert_eq!(asset_refs[0].checksum, Some(checksum));
@@ -1890,7 +1826,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut operation_logs = OperationLog::all(graph_conn);
+        let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
         let mut first_assets = OperationAsset::by_log_id(graph_conn, &operation_logs[0].id);
         first_assets.sort_by_key(|asset| asset.asset_ref_id);
@@ -1907,12 +1843,18 @@ mod tests {
                 .any(|asset| asset.asset_ref_id == first_assets[0].asset_ref_id)
         );
 
-        let shared_asset = AssetRef::get_by_id(graph_conn, &first_assets[0].asset_ref_id, None)
+        let shared_asset = AssetRef::select(graph_conn)
+            .get_by_id(first_assets[0].asset_ref_id)
+            .expect("should query shared asset ref")
             .expect("should load shared asset ref");
         let unique_asset = second_assets
             .iter()
             .find(|asset| asset.asset_ref_id != first_assets[0].asset_ref_id)
-            .and_then(|asset| AssetRef::get_by_id(graph_conn, &asset.asset_ref_id, None))
+            .and_then(|asset| {
+                AssetRef::select(graph_conn)
+                    .get_by_id(asset.asset_ref_id)
+                    .expect("should query unique asset ref")
+            })
             .expect("should load unique asset ref");
 
         let assets_dir = workspace.asset_dir().unwrap();
@@ -1951,7 +1893,7 @@ mod tests {
             Some("same asset, different filenames"),
         )?;
 
-        let mut asset_refs = AssetRef::all(graph_conn);
+        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
         asset_refs.sort_by(|left, right| left.name.cmp(&right.name));
 
         assert_eq!(
@@ -1985,9 +1927,9 @@ mod tests {
         )
         .unwrap();
 
-        let mut asset_refs = AssetRef::all(graph_conn);
+        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
         asset_refs.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-        let mut operation_logs = OperationLog::all(graph_conn);
+        let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
 
         assert_eq!(asset_refs.len(), 2);

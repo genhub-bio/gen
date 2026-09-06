@@ -1,22 +1,24 @@
-use std::{collections::HashSet, rc::Rc};
+use std::collections::HashSet;
 
 use gen_core::{Workspace, traits::Capnp};
 use gen_graph::GenGraph;
-use rusqlite::{Result as SQLResult, Row, params, types::Value as SQLValue};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group::BlockGroup,
+    Direction, ModelSelect, ModelSelectError,
+    block_group::{BlockGroup, BlockGroupSelect},
     db::GraphConnection,
     errors::{BlockGroupError, QueryError},
     gen_models_capnp::sample,
     sample_lineage::SampleLineage,
-    traits::Query,
 };
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, ModelSelect)]
+#[model_select(table = "samples")]
 pub struct Sample {
+    #[model_select(primary_key)]
     pub name: String,
     pub is_reference: bool,
 }
@@ -33,6 +35,8 @@ pub enum SampleError {
     QueryError(#[from] QueryError),
     #[error("SQLite Error: {0}")]
     SqliteError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Sample already exists")]
     Duplicate(Sample),
     #[error("Sample not found: {0}")]
@@ -56,20 +60,6 @@ impl<'a> Capnp<'a> for Sample {
         let name = reader.get_name().unwrap().to_string().unwrap();
         let is_reference = reader.get_is_reference();
         Sample { name, is_reference }
-    }
-}
-
-impl Query for Sample {
-    type Model = Sample;
-
-    const PRIMARY_KEY: &'static str = "name";
-    const TABLE_NAME: &'static str = "samples";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Sample {
-            name: row.get(0).unwrap(),
-            is_reference: row.get(1).unwrap(),
-        }
     }
 }
 
@@ -143,15 +133,11 @@ impl Sample {
     }
 
     pub fn get_reference_samples(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<Sample> {
-        let query = format!(
-            "select * from {} where is_reference = 1 order by name;",
-            Sample::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        Sample::query(conn, &query, &params[..])
+        let select = Sample::select(conn)
+            .is_reference(true)
+            .order_by(SampleSelect::Name, Direction::Asc)
+            .with_ref(history_ref);
+        select.load().expect("should load reference samples")
     }
 
     pub fn get_sample_reference_block_groups(
@@ -241,22 +227,14 @@ impl Sample {
         ) {
             Ok(new_sample) => {
                 if !parent_samples.is_empty() {
-                    let parent_block_groups = BlockGroup::query(
-                        conn,
-                        "select * from block_groups
-                         where collection_name = ?1 AND sample_name IN rarray(?2)
-                         ORDER BY name, sample_name, created_on, id",
-                        params![
-                            collection_name,
-                            Rc::new(
-                                parent_samples
-                                    .iter()
-                                    .cloned()
-                                    .map(SQLValue::from)
-                                    .collect::<Vec<_>>()
-                            ),
-                        ],
-                    );
+                    let parent_block_groups = BlockGroup::select(conn)
+                        .collection_name(collection_name)
+                        .sample_name_in(parent_samples.iter())
+                        .order_by(BlockGroupSelect::Name, Direction::Asc)
+                        .order_by(BlockGroupSelect::SampleName, Direction::Asc)
+                        .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+                        .order_by(BlockGroupSelect::Id, Direction::Asc)
+                        .load()?;
                     let group_names = parent_block_groups
                         .into_iter()
                         .map(|parent_block_group| parent_block_group.name)
@@ -292,39 +270,26 @@ impl Sample {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<BlockGroup> {
-        let query = format!(
-            "select * from {} where collection_name = :collection_name AND sample_name = :sample_name;",
-            BlockGroup::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
-            (":collection_name", &collection_name),
-            (":sample_name", &sample_name),
-        ];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        BlockGroup::query(conn, &query, &params[..])
+        let select = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .with_ref(history_ref);
+        select.load().expect("should load block groups")
     }
 
     pub fn get_all_names(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<String> {
-        let query = format!(
-            "select * from {};",
-            Sample::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        let samples = Sample::query(conn, &query, &params[..]);
+        let select = Sample::select(conn).with_ref(history_ref);
+        let samples = select.load().expect("should load sample names");
         samples.iter().map(|s| s.name.clone()).collect()
     }
 
-    pub fn get_by_name(conn: &GraphConnection, name: &str) -> SQLResult<Sample> {
-        Sample::get(
-            conn,
-            "select * from samples where name = ?1;",
-            rusqlite::params!(name),
-        )
+    pub fn get_by_name(conn: &GraphConnection, name: &str) -> Result<Sample, SampleError> {
+        Sample::select(conn)
+            .name(name)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| SampleError::NotFound(name.to_string()))
     }
 
     pub fn search_name(
@@ -332,17 +297,11 @@ impl Sample {
         name: &str,
         history_ref: Option<&str>,
     ) -> Vec<Sample> {
-        let query = format!(
-            "select * from {}
-             where instr(lower(name), lower(:name)) > 0
-             order by name;",
-            Sample::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":name", &name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        Sample::query(conn, &query, &params[..])
+        let select = Sample::select(conn)
+            .name_contains(name)
+            .order_by(SampleSelect::Name, Direction::Asc)
+            .with_ref(history_ref);
+        select.load().expect("should load matching samples")
     }
 }
 

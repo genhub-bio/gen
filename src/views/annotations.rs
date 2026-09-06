@@ -30,7 +30,6 @@ use gen_models::{
     db::GraphConnection,
     file_types::FileTypes,
     reference_alias::ReferenceAlias,
-    traits::Query,
 };
 use noodles::{bed, core::Region, csi, gff, tabix};
 use petgraph::Direction;
@@ -185,7 +184,10 @@ fn load_group_annotations(
     Ok(annotations
         .into_iter()
         .filter_map(|annotation| {
-            let _ = Accession::get_by_id(conn, &annotation.accession_id, history_ref)?;
+            let select = Accession::select(conn).with_ref(history_ref);
+            let _ = select
+                .get_by_id(annotation.accession_id)
+                .expect("should load accession by id")?;
             let accession_segments =
                 annotation_projection::annotation_segments(conn, &annotation, history_ref);
             let clipped_segments = clip_segments_to_graph(&accession_segments, &graph);

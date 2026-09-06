@@ -11,11 +11,12 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use rusqlite::{Row, ToSql, params, types::Value};
+use rusqlite::{ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    ModelSelect,
     block_group_edge::{AugmentedEdge, BlockGroupEdge},
     db::GraphConnection,
     errors::NodeError,
@@ -25,7 +26,10 @@ use crate::{
     traits::*,
 };
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Ord, PartialOrd)]
+#[derive(
+    Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, Ord, PartialOrd, ModelSelect,
+)]
+#[model_select(table = "edges")]
 pub struct Edge {
     pub id: HashId,
     pub source_node_id: HashId,
@@ -176,24 +180,6 @@ impl GroupBlock {
     }
 }
 
-impl Query for Edge {
-    type Model = Edge;
-
-    const TABLE_NAME: &'static str = "edges";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Edge {
-            id: row.get(0).unwrap(),
-            source_node_id: row.get(1).unwrap(),
-            source_coordinate: row.get(2).unwrap(),
-            source_strand: row.get(3).unwrap(),
-            target_node_id: row.get(4).unwrap(),
-            target_coordinate: row.get(5).unwrap(),
-            target_strand: row.get(6).unwrap(),
-        }
-    }
-}
-
 #[derive(Debug, Error, PartialEq)]
 pub enum EdgeError {
     #[error("Database error: {0}")]
@@ -287,7 +273,9 @@ impl Edge {
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let batch_size = max_rows_per_batch(conn, 7);
 
-        let query = Edge::query_by_ids(conn, &edge_ids, None);
+        let query = Edge::select(conn)
+            .query_by_ids(edge_ids.iter().copied())
+            .expect("should load existing edges by id");
         let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
 
         let mut edges_to_insert = IndexSet::new();
@@ -1235,7 +1223,9 @@ mod tests {
 
         let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
         assert_eq!(edge_ids.len(), 3);
-        let edges = Edge::query_by_ids(conn, &edge_ids, None);
+        let edges = Edge::select(conn)
+            .query_by_ids(edge_ids)
+            .expect("should load edges by id");
         assert_eq!(edges.len(), 3);
 
         let edges_by_source_node_id = edges
@@ -1302,7 +1292,10 @@ mod tests {
         let edge_ids1 = Edge::bulk_create(conn, &edges);
         assert_eq!(edge_ids1.len(), 2);
         for (index, id) in edge_ids1.iter().enumerate() {
-            let edge = Edge::get_by_id(conn, id, None).unwrap();
+            let edge = Edge::select(conn)
+                .get_by_id(*id)
+                .expect("should query edge")
+                .expect("should find edge");
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
 
@@ -1312,7 +1305,10 @@ mod tests {
         assert_eq!(edge_ids2[2], edge_ids1[1]);
         assert_eq!(edge_ids2.len(), 3);
         for (index, id) in edge_ids2.iter().enumerate() {
-            let edge = Edge::get_by_id(conn, id, None).unwrap();
+            let edge = Edge::select(conn)
+                .get_by_id(*id)
+                .expect("should query edge")
+                .expect("should find edge");
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
     }
@@ -1992,7 +1988,9 @@ mod tests {
 
         let edge_ids = Edge::bulk_create(conn, &[edge1, edge2, edge3]);
         assert_eq!(edge_ids.len(), 3);
-        let edges = Edge::query_by_ids(conn, &edge_ids, None);
+        let edges = Edge::select(conn)
+            .query_by_ids(edge_ids)
+            .expect("should load edges by id");
         assert_eq!(edges.len(), 3);
 
         let edges_by_source_node_id = edges
@@ -2085,7 +2083,7 @@ mod tests {
 
         assert_eq!(first.id, edge.id_hash());
         assert_eq!(duplicate.id, first.id);
-        assert_eq!(Edge::all(&conn).len(), 1);
+        assert_eq!(Edge::all(&conn).expect("should load edges").len(), 1);
     }
 
     #[test]

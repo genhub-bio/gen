@@ -7,12 +7,13 @@ use gen_core::{
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{Row, params};
+use rusqlite::{Result as SqlResult, Row, params, types::Type};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    accession::{Accession, AccessionError, AccessionSpan, NewAccession},
+    Direction, ModelSelect, ModelSelectError,
+    accession::{Accession, AccessionError, AccessionSelect, AccessionSpan, NewAccession},
     assets::{AssetRef, AssetRole, OperationKind},
     db::{DbContext, GraphConnection},
     errors::{FileAdditionError, OperationError},
@@ -23,39 +24,14 @@ use crate::{
     region::GenRegionError,
     traits::{Query, max_rows_per_batch},
 };
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "annotation_groups")]
 pub struct AnnotationGroup {
+    #[model_select(primary_key)]
     pub name: String,
 }
 
-impl Query for AnnotationGroup {
-    type Model = AnnotationGroup;
-
-    const PRIMARY_KEY: &'static str = "name";
-    const TABLE_NAME: &'static str = "annotation_groups";
-
-    fn process_row(row: &Row) -> Self::Model {
-        AnnotationGroup {
-            name: row.get(0).unwrap(),
-        }
-    }
-}
-
 impl AnnotationGroup {
-    /// Lists annotation groups visible at an optional historical reference.
-    pub fn all(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<AnnotationGroup> {
-        let table = AnnotationGroup::table_name_with_history_ref(history_ref);
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        AnnotationGroup::query(
-            conn,
-            &format!("SELECT * FROM {table} ORDER BY name"),
-            &params[..],
-        )
-    }
-
     pub fn create(conn: &GraphConnection, name: &str) -> rusqlite::Result<AnnotationGroup> {
         let mut stmt = conn
             .prepare("INSERT INTO annotation_groups (name) VALUES (?1) returning (name);")
@@ -81,26 +57,18 @@ impl AnnotationGroup {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<AnnotationGroup> {
-        let groups_table = AnnotationGroup::table_name_with_history_ref(history_ref);
-        let samples_table = if history_ref.is_some() {
-            "dolt_at_annotation_group_samples(:history_ref)"
-        } else {
-            "annotation_group_samples"
-        };
-        let query = format!(
-            "\
-            select ag.* \
-            from {groups_table} ag \
-            join {samples_table} s \
-                on ag.name = s.annotation_group \
-            where s.sample_name = :sample_name \
-            order by ag.name;"
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":sample_name", &sample_name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        AnnotationGroup::query(conn, &query, &params[..])
+        let samples = AnnotationGroupSample::select(conn)
+            .sample_name(sample_name)
+            .with_ref(history_ref);
+        AnnotationGroup::select(conn)
+            .join_filtered_on(
+                AnnotationGroupSelect::Name,
+                AnnotationGroupSampleSelect::AnnotationGroup,
+                samples,
+            )
+            .order_by(AnnotationGroupSelect::Name, Direction::Asc)
+            .load()
+            .expect("should load annotation groups for sample")
     }
 }
 
@@ -119,13 +87,28 @@ impl<'a> Capnp<'a> for AnnotationGroup {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(table = "annotations", from_row = annotation_from_row)]
 pub struct Annotation {
     pub id: HashId,
     pub name: String,
+    #[model_select(column = "annotation_group")]
     pub group: String,
     pub accession_id: HashId,
+    #[model_select(skip)]
     pub extra: Option<AnnotationExtra>,
+}
+
+fn annotation_from_row(row: &Row) -> SqlResult<Annotation> {
+    Ok(Annotation {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        group: row.get(2)?,
+        accession_id: row.get(3)?,
+        extra: deserialize_annotation_extra(row.get(4)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+        })?,
+    })
 }
 
 /// For use with create/bulk_create methods.
@@ -267,27 +250,12 @@ impl<'a> Capnp<'a> for Annotation {
     }
 }
 
-impl Query for Annotation {
-    type Model = Annotation;
-
-    const TABLE_NAME: &'static str = "annotations";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Annotation {
-            id: row.get(0).unwrap(),
-            name: row.get(1).unwrap(),
-            group: row.get(2).unwrap(),
-            accession_id: row.get(3).unwrap(),
-            extra: deserialize_annotation_extra(row.get(4).unwrap())
-                .expect("should deserialize annotation extra from database"),
-        }
-    }
-}
-
 #[derive(Debug, Error, PartialEq)]
 pub enum AnnotationError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
     #[error("Annotation group error: {0}")]
     AnnotationGroupError(#[from] AnnotationGroupError),
     #[error("Accession error: {0}")]
@@ -432,14 +400,10 @@ impl Annotation {
         conn: &GraphConnection,
         annotation_group: &str,
     ) -> Result<Vec<String>, AnnotationError> {
-        let query = "SELECT sample_name FROM annotation_group_samples WHERE annotation_group = ?1;";
-        let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map(params![annotation_group], |row| row.get(0))?;
-        let mut samples = Vec::new();
-        for row in rows {
-            samples.push(row?);
-        }
-        Ok(samples)
+        Ok(AnnotationGroupSample::select(conn)
+            .annotation_group(annotation_group)
+            .only(AnnotationGroupSampleSelect::SampleName)
+            .load()?)
     }
 
     pub fn query_by_sample(
@@ -447,23 +411,16 @@ impl Annotation {
         sample_name: &str,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let annotations_table = Annotation::table_name_with_history_ref(history_ref);
-        let samples_table = if history_ref.is_some() {
-            "dolt_at_annotation_group_samples(:history_ref)"
-        } else {
-            "annotation_group_samples"
-        };
-        let query = format!(
-            "select annotations.* from {annotations_table} annotations \
-             join {samples_table} samples \
-               on annotations.annotation_group = samples.annotation_group \
-             where samples.sample_name = :sample_name"
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":sample_name", &sample_name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        Ok(Annotation::query(conn, &query, &params[..]))
+        let samples = AnnotationGroupSample::select(conn)
+            .sample_name(sample_name)
+            .with_ref(history_ref);
+        Ok(Annotation::select(conn)
+            .join_filtered_on(
+                AnnotationSelect::Group,
+                AnnotationGroupSampleSelect::AnnotationGroup,
+                samples,
+            )
+            .load()?)
     }
 
     pub fn query_by_group(
@@ -471,15 +428,8 @@ impl Annotation {
         group: &str,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let query = format!(
-            "select * from {} where annotation_group = :group",
-            Annotation::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":group", &group)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        Ok(Annotation::query(conn, &query, &params[..]))
+        let select = Annotation::select(conn).group(group).with_ref(history_ref);
+        Ok(select.load()?)
     }
 
     pub fn query_by_group_and_block_group(
@@ -488,20 +438,17 @@ impl Annotation {
         block_group_id: &HashId,
         history_ref: Option<&str>,
     ) -> Result<Vec<Annotation>, AnnotationError> {
-        let annotations_table = Annotation::table_name_with_history_ref(history_ref);
-        let accessions_table = Accession::table_name_with_history_ref(history_ref);
-        let query = format!(
-            "SELECT annotations.* FROM {annotations_table} annotations \
-             JOIN {accessions_table} accessions ON accessions.id = annotations.accession_id \
-             WHERE annotations.annotation_group = :group \
-               AND accessions.block_group_id = :block_group_id"
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
-            vec![(":group", &group), (":block_group_id", block_group_id)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        Ok(Annotation::query(conn, &query, &params[..]))
+        let accessions = Accession::select(conn)
+            .block_group_id(*block_group_id)
+            .with_ref(history_ref);
+        Ok(Annotation::select(conn)
+            .group(group)
+            .join_filtered_on(
+                AnnotationSelect::AccessionId,
+                AccessionSelect::Id,
+                accessions,
+            )
+            .load()?)
     }
 
     /// List every annotation on a block group, following the sample lineage.
@@ -566,11 +513,12 @@ impl Annotation {
         &self,
         conn: &GraphConnection,
     ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AnnotationError> {
-        let accession = Accession::get(
-            conn,
-            "select * from accessions where id = ?1",
-            params![self.accession_id],
-        )?;
+        let accession = Accession::select(conn)
+            .id(self.accession_id)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         accession.intervaltree(conn).map_err(Into::into)
     }
 }
@@ -629,9 +577,15 @@ impl RegionResolver for Annotation {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
+#[model_select(
+    table = "annotation_group_samples",
+    default_sort(annotation_group = "asc", sample_name = "asc")
+)]
 pub struct AnnotationGroupSample {
+    #[model_select(primary_key)]
     pub annotation_group: String,
+    #[model_select(primary_key)]
     pub sample_name: String,
 }
 
@@ -945,7 +899,6 @@ mod tests {
         sample::Sample,
         sample_lineage::SampleLineage,
         test_helpers::{create_bg, get_connection, setup_block_group, setup_gen},
-        traits::Query,
     };
 
     mod region_resolver {
@@ -1315,7 +1268,7 @@ mod tests {
         AnnotationGroup::create(&conn, "zebra").unwrap();
         AnnotationGroup::create(&conn, "ant").unwrap();
 
-        let groups = AnnotationGroup::all(&conn, None);
+        let groups = AnnotationGroup::all(&conn).expect("should load annotation groups");
 
         assert_eq!(
             groups,
@@ -1487,7 +1440,7 @@ mod tests {
         .unwrap();
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(graph_conn);
+        let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,
@@ -1553,9 +1506,9 @@ mod tests {
         .unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
 
-        let mut asset_refs = AssetRef::all(graph_conn);
+        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
         asset_refs.sort_by(|left, right| left.role.as_str().cmp(right.role.as_str()));
-        let mut operation_logs = OperationLog::all(graph_conn);
+        let mut operation_logs = OperationLog::all(graph_conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| operation_log.created_on);
         assert_eq!(asset_refs.len(), 1);
         assert_eq!(asset_refs[0].role, AssetRole::Annotation);
@@ -1634,7 +1587,7 @@ mod tests {
         )
         .expect("should create annotation file operation");
 
-        let mut asset_refs = AssetRef::all(graph_conn);
+        let mut asset_refs = AssetRef::all(graph_conn).expect("should load asset references");
         asset_refs.sort_by(|left, right| {
             left.role
                 .as_str()
@@ -1684,7 +1637,8 @@ mod tests {
         )
         .expect("should track remote annotation assets");
 
-        let asset_refs = AssetRef::all(context.graph().conn());
+        let asset_refs =
+            AssetRef::all(context.graph().conn()).expect("should load asset references");
         assert_eq!(asset_refs.len(), 2);
         assert!(
             asset_refs
@@ -1725,7 +1679,8 @@ mod tests {
         )
         .expect("should track checksummed remote assets without reading them");
 
-        let asset_refs = AssetRef::all(context.graph().conn());
+        let asset_refs =
+            AssetRef::all(context.graph().conn()).expect("should load asset references");
         assert_eq!(asset_refs.len(), 2);
         let annotation = asset_refs
             .iter()
@@ -1773,6 +1728,7 @@ mod tests {
         .expect("should create annotation file operation");
 
         let index_asset = AssetRef::all(graph_conn)
+            .expect("should load asset references")
             .into_iter()
             .find(|asset| asset.role == AssetRole::AnnotationIndex)
             .expect("should store annotation index asset");

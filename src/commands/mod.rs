@@ -5,7 +5,7 @@ use gen_models::{
     db::{ConfigConnection, DbContext},
     errors::OperationError,
     history::dolt::reset_hard,
-    operations::{OperationSummary, commit_operation_summary},
+    operations::{Defaults as ModelDefaults, OperationSummary, commit_operation_summary},
 };
 
 pub mod cache;
@@ -515,11 +515,9 @@ pub struct Cli {
 }
 
 pub fn get_default_collection(conn: &ConfigConnection) -> String {
-    let mut stmt = conn
-        .prepare("select collection_name from defaults where id = 1")
-        .unwrap();
-    stmt.query_row((), |row| row.get(0))
-        .unwrap_or("default".to_string())
+    ModelDefaults::get(conn)
+        .and_then(|defaults| defaults.collection_name)
+        .unwrap_or_else(|| "default".to_string())
 }
 
 #[cfg(test)]

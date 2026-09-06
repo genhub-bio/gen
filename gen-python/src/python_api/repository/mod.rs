@@ -10,7 +10,6 @@ use gen_models::{
     node::Node,
     operations::{Defaults, OperationInfo, OperationSummary, commit_operation_summary},
     sample::Sample,
-    traits::Query,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
@@ -319,7 +318,9 @@ impl PyRepository {
 
     fn get_sequence_graphs(&self) -> PyResult<Vec<PySequenceGraph>> {
         let conn = self.context.graph().conn();
-        Ok(BlockGroup::all(conn)
+        Ok(BlockGroup::select(conn)
+            .load()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
             .into_iter()
             .map(|bg| self.to_py_block_group(bg))
             .collect())
@@ -340,7 +341,10 @@ impl PyRepository {
     fn get_samples(&self) -> PyResult<Vec<PySample>> {
         let conn = self.context.graph().conn();
         let mut samples: Vec<PySample> = Vec::new();
-        for bg in BlockGroup::all(conn) {
+        for bg in BlockGroup::select(conn)
+            .load()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+        {
             let py_bg = self.to_py_block_group(bg);
             match samples.iter_mut().find(|sample| {
                 sample.collection_name == py_bg.collection_name

@@ -4,18 +4,14 @@ use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_END_SEQUENCE_HASH, PATH_START_NODE_ID, PATH_START_SEQUENCE_HASH,
     Sha256Hash, Workspace, traits::Capnp,
 };
-use rusqlite::{Row, params, types::Value};
+use rusqlite::{params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    db::GraphConnection,
-    gen_models_capnp::node,
-    sequence::Sequence,
-    traits::{self, *},
-};
+use crate::{ModelSelect, db::GraphConnection, gen_models_capnp::node, sequence::Sequence, traits};
 
-#[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq)]
+#[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq, ModelSelect)]
+#[model_select(table = "nodes")]
 pub struct Node {
     pub id: HashId,
     pub sequence_hash: Sha256Hash,
@@ -47,19 +43,6 @@ impl<'a> Capnp<'a> for Node {
             .unwrap();
 
         Node { id, sequence_hash }
-    }
-}
-
-impl Query for Node {
-    type Model = Node;
-
-    const TABLE_NAME: &'static str = "nodes";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Node {
-            id: row.get(0).unwrap(),
-            sequence_hash: row.get(1).unwrap(),
-        }
     }
 }
 
@@ -129,7 +112,10 @@ impl Node {
         node_ids: &[HashId],
         history_ref: Option<&str>,
     ) -> HashMap<HashId, Sequence> {
-        let nodes = Node::query_by_ids(conn, node_ids, history_ref);
+        let node_select = Node::select(conn).with_ref(history_ref);
+        let nodes = node_select
+            .query_by_ids(node_ids.iter().copied())
+            .expect("should load nodes by id");
         let sequence_hashes_by_node_id = nodes
             .iter()
             .map(|node| (node.id, node.sequence_hash))
