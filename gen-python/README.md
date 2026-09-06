@@ -214,6 +214,10 @@ sequence = child[0]
 inserted = sequence.replace(annotation, "ACGT")
 sequence.add_annotation(inserted, "mutation")
 ```
+At full detail, the widget uses the CLI's annotation display: packed directional
+bars beneath nodes, with Braille curves connecting fragments of the same annotation.
+Names that do not fit beside their bars fall back to floating labels. Use
+`widget.zoom_in()` to reach full detail and see this display.
 
 ## Annotation files
 

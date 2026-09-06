@@ -18,8 +18,9 @@ use r#gen::{
         },
         block_group::{current_view_coordinate_window, expand_query_window},
         gen_graph_widget::{
-            self, PathSequenceSource, SendSyncZoomLevels, create_send_sync_gen_graph_engine,
-            draw_annotation_labels, locus_midpoint, reapply_overlays,
+            self, NodeAnnotationLayer, PathSequenceSource, SendSyncZoomLevels,
+            create_send_sync_annotated_gen_graph_engine, draw_annotation_connectors,
+            draw_annotation_labels, locus_midpoint, reapply_overlays, update_node_annotations,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
@@ -270,6 +271,7 @@ struct GraphPage {
     /// zoom/detail changes the same way the annotation overlays do.
     overlays: Vec<GraphOverlay>,
     annotation_colors: AnnotationColorCache,
+    node_annotations: NodeAnnotationLayer,
     /// Set to `true` once annotation groups have been loaded (auto or with colors).
     /// Survives cloning so that cell-display clones do not double-load.
     annotation_groups_loaded: bool,
@@ -318,7 +320,9 @@ impl Page {
 impl GraphPage {
     fn new(name: String, db_path: PathBuf, graph: GenGraph) -> Self {
         let source = PathSequenceSource::new(db_path.clone());
-        let (engine, zoom_levels, view_state) = create_send_sync_gen_graph_engine(graph, source);
+        let node_annotations = NodeAnnotationLayer::new();
+        let (engine, zoom_levels, view_state) =
+            create_send_sync_annotated_gen_graph_engine(graph, source, node_annotations.clone());
         Self {
             name,
             db_path,
@@ -328,6 +332,7 @@ impl GraphPage {
             view_state,
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
+            node_annotations,
             annotation_groups_loaded: false,
             annotation_files: Vec::new(),
         }
@@ -532,24 +537,33 @@ impl GraphPage {
     fn render_into(&mut self, buf: &mut Buffer, graph_area: Rect) -> PyResult<()> {
         // Re-register overlays: detail level affects which spans register (see `reapply`).
         self.reapply();
-        self.draw_graph(buf, graph_area)?;
-        // The viewport is only known once drawn, so indexed annotation files that the camera has
-        // moved away from are reloaded here and the frame is drawn again with them.
-        if self.refresh_annotation_files_for_viewport() {
-            self.reapply();
-            self.draw_graph(buf, graph_area)?;
-        }
+        // Packing before layout reserves room beneath each node for its annotation bars.
+        let floating_overlays =
+            update_node_annotations(&self.node_annotations, &self.engine, &self.overlays);
+        let active_renderer = &self.zoom_levels[self.view_state.zoom_index].1;
+        let view = GraphView::new(&mut self.engine, active_renderer);
+        view.render(graph_area, buf, &mut self.view_state);
 
-        // Draw overlay labels after the graph, then a single hint if any were hidden.
-        // Midpoints are recomputed each render because the viewport may have changed.
+        // At full detail, only names that could not fit beside their bars still float.
         let detail_level = self.zoom_levels[self.view_state.zoom_index].0;
+        let labelled_overlays = if detail_level == VisualDetail::Full {
+            draw_annotation_connectors(
+                buf,
+                graph_area,
+                &self.view_state.frame,
+                &self.node_annotations,
+            );
+            &floating_overlays
+        } else {
+            &self.overlays
+        };
         let any_hidden = draw_annotation_labels(
             buf,
             graph_area,
             &self.engine,
             &self.view_state,
             &self.zoom_levels,
-            &self.overlays,
+            labelled_overlays,
         );
         if any_hidden {
             let note = if detail_level == VisualDetail::Full {
@@ -1539,16 +1553,21 @@ pub fn build_widget(
 mod tests {
     use r#gen::{
         test_helpers::{setup_block_group, setup_gen_on_disk},
-        views::graph_overlay::OverlayContent,
+        views::{
+            annotation_track::{AnnotationSegment, AnnotationSpan},
+            graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
+        },
     };
-    use gen_core::{BranchName, Strand};
+    use gen_core::{BranchName, HashId, Strand, is_end_node, is_start_node};
     use gen_graph::GraphNodeSlice;
     use gen_models::{
         block_group::BlockGroup,
         history::{HistoryStore as _, dolt::DoltHistoryStore},
         locus::GraphLocus,
     };
+    use gen_tui::plotter::PathStyle;
     use pyo3::{exceptions::PyValueError, prelude::*};
+    use ratatui::style::Color;
     use serde_json::Value;
 
     use super::{PyGraphController, active_branch, current_theme};
@@ -1725,5 +1744,87 @@ mod tests {
                 assert!(x < 80 && y < 24, "cell coordinates out of bounds");
             }
         });
+    }
+
+    #[test]
+    fn test_annotation_bars_follow_detail_and_removal() {
+        let mut controller = make_controller(Some("full")).expect("should create a controller");
+        let page = controller.active().expect("should have an active page");
+        let (source, target, _) = page
+            .engine
+            .graph()
+            .all_edges()
+            .find(|(source, target, _)| {
+                !is_start_node(source.node_id) && !is_end_node(target.node_id)
+            })
+            .expect("should have an edge between sequence nodes");
+        page.overlays.push(GraphOverlay {
+            content: OverlayContent::Span(AnnotationSpan {
+                id: HashId::convert_str("gene"),
+                name: "gene".to_string(),
+                segments: [source, target]
+                    .iter()
+                    .map(|node| AnnotationSegment {
+                        node_id: node.node_id,
+                        start: node.sequence_start,
+                        end: node.sequence_end,
+                        strand: Strand::Forward,
+                    })
+                    .collect(),
+            }),
+            source: OverlaySource::Annotation("gene".to_string()),
+            style: PathStyle::new(Color::Red),
+        });
+
+        for detail in ["full", "normal", "minimal", "full"] {
+            controller.set_detail(detail).expect("should change detail");
+            let text = rendered_text(&mut controller);
+            let full = detail == "full";
+            assert_eq!(
+                text.contains('═'),
+                full,
+                "annotation bars at {detail} detail"
+            );
+            assert_eq!(text.contains('▶'), full, "direction cap at {detail} detail");
+            assert_eq!(
+                text.chars()
+                    .any(|glyph| ('\u{2801}'..='\u{28ff}').contains(&glyph)),
+                full,
+                "annotation connector at {detail} detail"
+            );
+            if full {
+                assert_eq!(
+                    text.matches("gene").count(),
+                    1,
+                    "should label the span once"
+                );
+            }
+        }
+
+        controller
+            .remove_annotation("gene")
+            .expect("should remove annotation");
+        let text = rendered_text(&mut controller);
+        assert!(!text.contains('═'), "should remove annotation bars");
+        assert!(!text.contains("gene"), "should remove the annotation label");
+        assert!(
+            !text
+                .chars()
+                .any(|glyph| ('\u{2801}'..='\u{28ff}').contains(&glyph)),
+            "should remove annotation connectors"
+        );
+    }
+
+    fn rendered_text(controller: &mut PyGraphController) -> String {
+        let frame = controller
+            .render_frame(100, 30)
+            .expect("should render the graph");
+        let value: Value = serde_json::from_str(&frame).expect("should serialize a valid frame");
+        value["cells"]
+            .as_array()
+            .expect("should include rendered cells")
+            .iter()
+            .map(|cell| cell["text"].as_str().expect("should include cell text"))
+            .collect()
     }
 }

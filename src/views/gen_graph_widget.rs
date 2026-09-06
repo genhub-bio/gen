@@ -23,6 +23,7 @@ use gen_tui::{
     theme::current_theme,
     viewport_state::WorldBuffer,
 };
+use itertools::Itertools as _;
 use petgraph::{
     Direction,
     visit::{DfsEvent, depth_first_search},
@@ -199,6 +200,22 @@ where
         Arc::new(GenGraphTruncatedRenderer::new(source.clone()));
     let full: Arc<dyn NodeRenderer<GenGraph> + Send + Sync> =
         Arc::new(GenGraphFullRenderer::new(source));
+    zoom_entries!(minimal, truncated, full)
+}
+
+/// Build thread-safe zoom levels with annotation flags at full detail for Jupyter.
+pub fn build_send_sync_annotated_zoom_levels<S>(
+    source: S,
+    layer: NodeAnnotationLayer,
+) -> SendSyncZoomLevels
+where
+    S: SequenceSource + Clone + Send + Sync + 'static,
+{
+    let minimal: Arc<dyn NodeRenderer<GenGraph> + Send + Sync> = Arc::new(GenGraphMinimalRenderer);
+    let truncated: Arc<dyn NodeRenderer<GenGraph> + Send + Sync> =
+        Arc::new(GenGraphTruncatedRenderer::new(source.clone()));
+    let full: Arc<dyn NodeRenderer<GenGraph> + Send + Sync> =
+        Arc::new(GenGraphAnnotatedRenderer::new(source, layer));
     zoom_entries!(minimal, truncated, full)
 }
 
@@ -861,13 +878,17 @@ fn rasterize_braille_cubic(controls: &[(f64, f64); 4], visit: &mut impl FnMut((i
 }
 
 /// Adaptively flatten and rasterize a thin braille cubic between two terminal cells
-/// (inclusive, through their vertical middle), adding dots only to empty or braille cells,
+/// (inclusive, beside their vertical middle), adding dots only to empty or braille cells,
 /// so edge lines and nodes in the way are left intact.
 fn draw_braille_curve(buf: &mut Buffer, from: (u16, u16), to: (u16, u16), color: Color) {
     // Work in dot space: 2 columns × 4 rows of dots per cell.
-    let (x0, y0) = (2 * from.0 as i64, 4 * from.1 as i64 + 1);
-    let (x1, y1) = (2 * to.0 as i64 + 1, 4 * to.1 as i64 + 1);
-    // Mid-gap controls at each bar's height give symmetric, horizontal joins.
+    // Braille has no center dot. Choose the middle row facing the curve at each
+    // bar so the joins bend inward; terminal row coordinates increase downward.
+    let start_row = 1 + i64::from(to.1 > from.1);
+    let end_row = 1 + i64::from(to.1 < from.1);
+    let (x0, y0) = (2 * from.0 as i64, 4 * from.1 as i64 + start_row);
+    let (x1, y1) = (2 * to.0 as i64 + 1, 4 * to.1 as i64 + end_row);
+    // Mid-gap controls at each endpoint's height give symmetric, horizontal joins.
     let middle_x = (x0 + x1) as f64 / 2.0;
     let controls = [
         (x0 as f64, y0 as f64),
@@ -1285,6 +1306,59 @@ pub fn create_send_sync_gen_graph_engine<S: SequenceSource + Clone + Send + Sync
     GraphViewState<GraphNode>,
 ) {
     build_gen_graph_engine(graph, build_send_sync_zoom_levels(source))
+}
+
+/// Create a thread-safe graph engine with annotation flags at full detail for Jupyter.
+pub fn create_send_sync_annotated_gen_graph_engine<S>(
+    graph: GenGraph,
+    source: S,
+    layer: NodeAnnotationLayer,
+) -> (
+    LayoutEngine<GenGraph>,
+    SendSyncZoomLevels,
+    GraphViewState<GraphNode>,
+)
+where
+    S: SequenceSource + Clone + Send + Sync + 'static,
+{
+    build_gen_graph_engine(graph, build_send_sync_annotated_zoom_levels(source, layer))
+}
+
+/// Rebuild `graph` with its nodes and edges inserted in sorted order.
+///
+/// `GenGraph` is a `DiGraphMap`, which iterates in insertion order, and the layout resolves
+/// its remaining tie-breaks in that order. The order a block group's graph arrives in is not
+/// guaranteed: blocks come out of `blocks_from_edges` sorted by sequence hash, and sequences
+/// are content addressed, so two nodes carrying the same sequence tie and fall through to
+/// `HashMap` iteration - randomized per process. Nothing downstream of persistence is wrong
+/// about that; it just means rendering the same block group twice can place symmetric
+/// branches differently, which makes the view jump between sessions and snapshot tests
+/// irreproducible. Sorting here, where a graph becomes something to draw, keeps that concern
+/// out of the persistence layer.
+///
+/// Edges are sorted for the same reason. Their order happens to be stable today, so this
+/// changes nothing on its own, but it makes the guarantee unconditional rather than reliant
+/// on how `build_graph` came to walk them.
+fn normalize_graph_order(graph: &GenGraph) -> GenGraph {
+    let mut normalized = GenGraph::new();
+    // Start sentinels lead. `LayoutEngine::default_anchor` takes the graph's lowest-index
+    // node, deliberately without a rank pass, so whatever lands first decides where the view
+    // opens. Sorting alone would hand that role to an arbitrary node in the middle of the
+    // graph and open the viewer clipped; putting the sentinels first makes the cheap default
+    // the beginning of the graph, which is where a reader expects to start.
+    for node in graph
+        .nodes()
+        .sorted_by_key(|node| (!is_start_node(node.node_id), *node))
+    {
+        normalized.add_node(node);
+    }
+    for (source, target, weights) in graph
+        .all_edges()
+        .sorted_by_key(|(source, target, _)| (*source, *target))
+    {
+        normalized.add_edge(source, target, weights.clone());
+    }
+    normalized
 }
 
 /// Shared body of [`create_gen_graph_engine`]/[`create_send_sync_gen_graph_engine`]: dims
