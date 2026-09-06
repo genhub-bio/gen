@@ -792,35 +792,94 @@ const fn braille_bit(column: i64, row: i64) -> u32 {
     }
 }
 
-/// Rasterize a dotted braille cubic curve between two terminal cells (inclusive, through their
-/// vertical middle) into `buf`, adding dots only to cells that are empty or already braille,
+/// Visit a thin, eight-connected line, including both endpoints, without supercover dots.
+fn rasterize_braille_line(from: (i64, i64), to: (i64, i64), visit: &mut impl FnMut((i64, i64))) {
+    let (mut x, mut y) = from;
+    let delta_x = (to.0 - x).abs();
+    let delta_y = -(to.1 - y).abs();
+    let step_x = (to.0 - x).signum();
+    let step_y = (to.1 - y).signum();
+    let mut error = delta_x + delta_y;
+    loop {
+        visit((x, y));
+        if (x, y) == to {
+            break;
+        }
+        let twice_error = 2 * error;
+        if twice_error >= delta_y {
+            error += delta_y;
+            x += step_x;
+        }
+        if twice_error <= delta_x {
+            error += delta_x;
+            y += step_y;
+        }
+    }
+}
+
+/// Flatten in dot space before rounding, so dense curve samples cannot widen the line.
+fn rasterize_braille_cubic(controls: &[(f64, f64); 4], visit: &mut impl FnMut((i64, i64))) {
+    let [start, first, second, end] = *controls;
+    let chord = (end.0 - start.0, end.1 - start.1);
+    let chord_length = chord.0.hypot(chord.1);
+    let distance = |point: (f64, f64)| {
+        let offset = (point.0 - start.0, point.1 - start.1);
+        if chord_length == 0.0 {
+            offset.0.hypot(offset.1)
+        } else {
+            (chord.0 * offset.1 - chord.1 * offset.0).abs() / chord_length
+        }
+    };
+    // A quarter dot keeps the polyline close to the curve on the binary Braille grid.
+    if distance(first).max(distance(second)) <= 0.25 {
+        // Resolve half-dot ties evenly so reflecting a connector preserves its rounding.
+        rasterize_braille_line(
+            (
+                start.0.round_ties_even() as i64,
+                start.1.round_ties_even() as i64,
+            ),
+            (
+                end.0.round_ties_even() as i64,
+                end.1.round_ties_even() as i64,
+            ),
+            visit,
+        );
+        return;
+    }
+
+    let midpoint =
+        |left: (f64, f64), right: (f64, f64)| ((left.0 + right.0) / 2.0, (left.1 + right.1) / 2.0);
+    let start_first = midpoint(start, first);
+    let first_second = midpoint(first, second);
+    let second_end = midpoint(second, end);
+    let left_control = midpoint(start_first, first_second);
+    let right_control = midpoint(first_second, second_end);
+    let middle = midpoint(left_control, right_control);
+    // Both halves reuse the same endpoint so rounding cannot leave a gap at the join.
+    rasterize_braille_cubic(&[start, start_first, left_control, middle], visit);
+    rasterize_braille_cubic(&[middle, right_control, second_end, end], visit);
+}
+
+/// Adaptively flatten and rasterize a thin braille cubic between two terminal cells
+/// (inclusive, through their vertical middle), adding dots only to empty or braille cells,
 /// so edge lines and nodes in the way are left intact.
 fn draw_braille_curve(buf: &mut Buffer, from: (u16, u16), to: (u16, u16), color: Color) {
     // Work in dot space: 2 columns × 4 rows of dots per cell.
     let (x0, y0) = (2 * from.0 as i64, 4 * from.1 as i64 + 1);
     let (x1, y1) = (2 * to.0 as i64 + 1, 4 * to.1 as i64 + 1);
-    // Mid-gap controls at each bar's height give symmetric, horizontal joins. Sample
-    // twice per dot of displacement to cover the cubic's faster-moving middle.
+    // Mid-gap controls at each bar's height give symmetric, horizontal joins.
     let middle_x = (x0 + x1) as f64 / 2.0;
-    let steps = 2 * (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    let controls = [
+        (x0 as f64, y0 as f64),
+        (middle_x, y0 as f64),
+        (middle_x, y1 as f64),
+        (x1 as f64, y1 as f64),
+    ];
     let mut dots: HashMap<(u16, u16), u32> = HashMap::new();
-    for step in 0..=steps {
-        let progress = step as f64 / steps as f64;
-        let remaining = 1.0 - progress;
-        let start_weight = remaining.powi(3);
-        let first_control_weight = 3.0 * remaining.powi(2) * progress;
-        let second_control_weight = 3.0 * remaining * progress.powi(2);
-        let end_weight = progress.powi(3);
-        let x = (start_weight * x0 as f64
-            + (first_control_weight + second_control_weight) * middle_x
-            + end_weight * x1 as f64)
-            .round() as i64;
-        let y = ((start_weight + first_control_weight) * y0 as f64
-            + (second_control_weight + end_weight) * y1 as f64)
-            .round() as i64;
+    rasterize_braille_cubic(&controls, &mut |(x, y)| {
         let cell = ((x / 2) as u16, (y / 4) as u16);
         *dots.entry(cell).or_default() |= braille_bit(x % 2, y % 4);
-    }
+    });
     for (cell, bits) in dots {
         let Some(target) = buf.cell_mut(cell) else {
             continue;
