@@ -1,0 +1,11 @@
+---
+source: src/views/gen_graph_widget.rs
+expression: snapshot
+---
+"                                            "
+"                                            "
+"                                            "
+"  ╟──ACGTACGTACGTACGTACGTACGT──ACGT──╢      "
+"     ══════════gene═════════▶               "
+"                                            "
+"                                            "
