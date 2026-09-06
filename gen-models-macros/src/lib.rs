@@ -8,11 +8,13 @@ use syn::{
     parse_macro_input,
 };
 
-/// Generates a `<Model>Select` query builder from a persisted model's named fields.
+/// Adds a typed SQL query builder to a Gen model.
 ///
-/// String fields receive exact and `_contains` filters. Every generated field can be used for
-/// typed ordering, projections, and explicit join conditions. Generated selectors can be composed
-/// with `.join_on(left_field, right_field)` or `.join_filtered_on(...)`. Joined queries can project
+/// The derive parses the model's named fields and generates a `<Model>Select` type. Calling
+/// `<Model>::select(...)` creates that builder; its generated filter methods, typed field constants,
+/// ordering, joins, and projections are rendered into SQL when the query is loaded.
+/// String fields receive exact and `_contains` filters. Generated selectors can be composed with
+/// `.join_on(left_field, right_field)` or `.join_filtered_on(...)`. Joined queries can project
 /// fields with `.only(...)` or complete models with `.models::<(...)>()`.
 /// Primary-key selectors also provide `get_by_id(...)`, ordered and deduplicated
 /// `query_by_ids(...)` loads, and batched `delete_by_ids(...)` mutations.
@@ -31,6 +33,10 @@ pub fn derive_model_select(input: TokenStream) -> TokenStream {
 }
 
 fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    // `DeriveInput` describes the annotated Rust item. The struct name becomes the selector name,
+    // while each named field supplies the Rust type and, unless overridden, its SQL column name.
+    // Those two pieces let the generated API bind correctly typed values and decode query rows
+    // without requiring a separate schema declaration.
     let model = input.ident;
     let fields = match input.data {
         Data::Struct(data) => match data.fields {
@@ -59,6 +65,9 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 
     let options = ContainerOptions::from_attributes(&input.attrs)?;
     let selector = format_ident!("{}Select", model);
+    // A SQL alias identifies one occurrence of a table or custom source in a query. It normally
+    // matches the table name, but an explicit alias allows the same model to participate more than
+    // once in a join while keeping generated qualified columns unambiguous.
     let source_alias = options
         .alias
         .as_ref()
@@ -70,7 +79,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             quote! { <#model as ::gen_models::traits::Query>::TABLE_NAME }
         });
 
-    let mut variants = Vec::new();
+    let mut selectable_fields = Vec::new();
     let mut column_constants = Vec::new();
     let mut filter_methods = Vec::new();
     let mut model_columns = Vec::new();
@@ -103,7 +112,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             continue;
         }
 
-        let variant = snake_to_pascal(&field_name);
+        let selectable_field = snake_to_pascal(&field_name);
         let column = field_options
             .column
             .unwrap_or_else(|| field_name_string(&field_name));
@@ -133,7 +142,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             });
         }
 
-        variants.push(variant.clone());
+        selectable_fields.push(selectable_field.clone());
         model_columns.push(column_literal.clone());
         model_initializers.push(quote! {
             #field_name: row.get(offset + #field_index)?
@@ -144,9 +153,9 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         column_constants.push(quote! {
             #[expect(
                 non_upper_case_globals,
-                reason = "selector field constants mirror generated Rust field variants"
+                reason = "selector field constants use generated PascalCase field names"
             )]
-            pub const #variant: ::gen_models::select::SelectField<#model, #field_type, #value_type> =
+            pub const #selectable_field: ::gen_models::select::SelectField<#model, #field_type, #value_type> =
                 ::gen_models::select::SelectField::new(
                     <#model as ::gen_models::traits::Query>::TABLE_NAME,
                     #source_alias,
@@ -162,7 +171,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         ));
     }
 
-    if variants.is_empty() {
+    if selectable_fields.is_empty() {
         return Err(Error::new_spanned(
             model,
             "ModelSelect requires at least one selectable field",
@@ -230,6 +239,8 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     let source_clause = if let Some(source) = options.source.as_ref() {
         quote! { #source(history_ref) }
     } else {
+        // Dolt exposes historical table snapshots through `dolt_at_<table>(ref)`. The shared
+        // renderer selects that source when `history_ref` is present and the model has history.
         quote! {
             ::gen_models::select::default_sql_source(
                 <#model as ::gen_models::traits::Query>::TABLE_NAME,
