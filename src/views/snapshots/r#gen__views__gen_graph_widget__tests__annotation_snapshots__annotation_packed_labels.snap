@@ -1,0 +1,19 @@
+---
+source: src/views/gen_graph_widget.rs
+expression: snapshot
+---
+"                                                                "
+"                                                                "
+"                                                                "
+"                                                                "
+"                                                                "
+"                                                                "
+"         a_label_too_long_for_either_side                       "
+"  ╟──ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT──ACGT──╢          "
+"     ═▶ promoter       ════   site ◀  ══tag══                   "
+"          ════════gene════════▶                                 "
+"             ◀════antisense══════                               "
+"                                                                "
+"                                                                "
+"                                                                "
+"                                                                "
