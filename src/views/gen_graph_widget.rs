@@ -792,18 +792,32 @@ const fn braille_bit(column: i64, row: i64) -> u32 {
     }
 }
 
-/// Rasterize a dotted braille line between two terminal cells (inclusive, through their
+/// Rasterize a dotted braille cubic curve between two terminal cells (inclusive, through their
 /// vertical middle) into `buf`, adding dots only to cells that are empty or already braille,
 /// so edge lines and nodes in the way are left intact.
-fn draw_braille_line(buf: &mut Buffer, from: (u16, u16), to: (u16, u16), color: Color) {
+fn draw_braille_curve(buf: &mut Buffer, from: (u16, u16), to: (u16, u16), color: Color) {
     // Work in dot space: 2 columns × 4 rows of dots per cell.
     let (x0, y0) = (2 * from.0 as i64, 4 * from.1 as i64 + 1);
     let (x1, y1) = (2 * to.0 as i64 + 1, 4 * to.1 as i64 + 1);
-    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    // Mid-gap controls at each bar's height give symmetric, horizontal joins. Sample
+    // twice per dot of displacement to cover the cubic's faster-moving middle.
+    let middle_x = (x0 + x1) as f64 / 2.0;
+    let steps = 2 * (x1 - x0).abs().max((y1 - y0).abs()).max(1);
     let mut dots: HashMap<(u16, u16), u32> = HashMap::new();
     for step in 0..=steps {
-        let x = x0 + (x1 - x0) * step / steps;
-        let y = y0 + (y1 - y0) * step / steps;
+        let progress = step as f64 / steps as f64;
+        let remaining = 1.0 - progress;
+        let start_weight = remaining.powi(3);
+        let first_control_weight = 3.0 * remaining.powi(2) * progress;
+        let second_control_weight = 3.0 * remaining * progress.powi(2);
+        let end_weight = progress.powi(3);
+        let x = (start_weight * x0 as f64
+            + (first_control_weight + second_control_weight) * middle_x
+            + end_weight * x1 as f64)
+            .round() as i64;
+        let y = ((start_weight + first_control_weight) * y0 as f64
+            + (second_control_weight + end_weight) * y1 as f64)
+            .round() as i64;
         let cell = ((x / 2) as u16, (y / 4) as u16);
         *dots.entry(cell).or_default() |= braille_bit(x % 2, y % 4);
     }
@@ -826,9 +840,9 @@ fn draw_braille_line(buf: &mut Buffer, from: (u16, u16), to: (u16, u16), color: 
 }
 
 /// Connect the pieces of every annotation that spans several nodes with a dotted braille
-/// line from the end of one piece's bar to the start of the next, drawn after the graph so
+/// cubic curve from the end of one piece's bar to the start of the next, drawn after the graph so
 /// it can use the placed node rects in `frame`. Only pieces whose nodes were both placed by
-/// the last render are connected, and the line only ever fills empty cells, so it never
+/// the last render are connected, and the curve only ever fills empty cells, so it never
 /// breaks an edge or a node it crosses.
 pub fn draw_annotation_connectors(
     buf: &mut Buffer,
@@ -864,7 +878,7 @@ pub fn draw_annotation_connectors(
             ) else {
                 continue;
             };
-            draw_braille_line(buf, from, to, from_flag.color);
+            draw_braille_curve(buf, from, to, from_flag.color);
         }
     }
 }
@@ -2353,5 +2367,254 @@ mod tests {
         assert_eq!(lane.symbol(), "═");
 
         insta::assert_snapshot!("annotated_full_detail", terminal.backend().to_string());
+    }
+
+    mod annotation_snapshots {
+        use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+        use gen_graph::{GenGraph, GraphEdge, GraphNode};
+        use gen_tui::{graph_view::GraphView, testing::create_test_terminal};
+        use ratatui::{style::Color, widgets::StatefulWidget as _};
+
+        use super::{RepeatingSequenceSource, span_overlay};
+        use crate::views::{
+            gen_graph_widget::{
+                FULL_ZOOM_LEVEL, NodeAnnotationLayer, apply_zoom_level,
+                create_annotated_gen_graph_engine, draw_annotation_connectors,
+                draw_annotation_labels, draw_braille_curve, reapply_overlays,
+                update_node_annotations,
+            },
+            graph_overlay::{AnnotationColorCache, GraphOverlay},
+        };
+
+        fn node(name: &str, length: i64) -> GraphNode {
+            GraphNode {
+                node_id: HashId::convert_str(name),
+                sequence_start: 0,
+                sequence_end: length,
+            }
+        }
+
+        fn graph(edges: &[(GraphNode, GraphNode)]) -> GenGraph {
+            let mut graph = GenGraph::new();
+            let start = GraphNode {
+                node_id: PATH_START_NODE_ID,
+                sequence_start: 0,
+                sequence_end: 0,
+            };
+            let end = GraphNode {
+                node_id: PATH_END_NODE_ID,
+                sequence_start: 0,
+                sequence_end: 0,
+            };
+            let first = edges.first().expect("should have a first edge").0;
+            let last = edges.last().expect("should have a last edge").1;
+            for (index, (source, target)) in core::iter::once((start, first))
+                .chain(edges.iter().copied())
+                .chain(core::iter::once((last, end)))
+                .enumerate()
+            {
+                graph.add_edge(
+                    source,
+                    target,
+                    vec![GraphEdge {
+                        edge_id: HashId::convert_str(&format!("annotation edge {index}")),
+                        source_strand: Strand::Forward,
+                        target_strand: Strand::Forward,
+                        chromosome_index: 0,
+                        phased: 0,
+                        created_on: 0,
+                    }],
+                );
+            }
+            graph
+        }
+
+        // Exercise the viewer's complete overlay pass, including the second frame that
+        // uses the placed nodes for connectors and floating labels.
+        fn render(
+            graph: GenGraph,
+            mut overlays: Vec<GraphOverlay>,
+            zoom_level: usize,
+            size: (u16, u16),
+        ) -> String {
+            let layer = NodeAnnotationLayer::new();
+            let (mut engine, zoom_levels, mut view_state) =
+                create_annotated_gen_graph_engine(graph, RepeatingSequenceSource, layer.clone());
+            apply_zoom_level(&mut view_state, zoom_level, &zoom_levels);
+            let mut colors = AnnotationColorCache::new();
+            let mut terminal = create_test_terminal(size.0, size.1);
+            for _ in 0..2 {
+                reapply_overlays(
+                    &engine,
+                    &mut view_state,
+                    &zoom_levels,
+                    &mut overlays,
+                    &mut colors,
+                );
+                let floating = update_node_annotations(&layer, &engine, &overlays);
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        GraphView::new(&mut engine, &zoom_levels[view_state.zoom_index].1).render(
+                            area,
+                            frame.buffer_mut(),
+                            &mut view_state,
+                        );
+                        draw_annotation_connectors(
+                            frame.buffer_mut(),
+                            area,
+                            &view_state.frame,
+                            &layer,
+                        );
+                        draw_annotation_labels(
+                            frame.buffer_mut(),
+                            area,
+                            &engine,
+                            &view_state,
+                            &zoom_levels,
+                            &floating,
+                        );
+                    })
+                    .expect("should render annotations");
+            }
+            terminal.backend().to_string()
+        }
+
+        #[test]
+        fn test_annotation_simple_strands() {
+            let sequence = node("sequence", 24);
+            let neighbor = node("unannotated", 4);
+            for (name, strand) in [
+                ("forward", Strand::Forward),
+                ("reverse", Strand::Reverse),
+                ("unknown", Strand::Unknown),
+            ] {
+                let snapshot = render(
+                    graph(&[(sequence, neighbor)]),
+                    vec![span_overlay("gene", vec![(sequence, 0, 24, strand)])],
+                    FULL_ZOOM_LEVEL,
+                    (44, 7),
+                );
+                insta::assert_snapshot!(format!("annotation_simple_{name}"), snapshot);
+            }
+        }
+
+        #[test]
+        fn test_annotation_packed_labels() {
+            // A nonzero sequence origin also exercises translation into local columns.
+            let sequence = GraphNode {
+                sequence_start: 100,
+                sequence_end: 140,
+                ..node("packed", 40)
+            };
+            let neighbor = node("unannotated", 4);
+            let snapshot = render(
+                graph(&[(sequence, neighbor)]),
+                vec![
+                    span_overlay("promoter", vec![(sequence, 0, 2, Strand::Forward)]),
+                    span_overlay("gene", vec![(sequence, 5, 26, Strand::Forward)]),
+                    span_overlay("antisense", vec![(sequence, 8, 28, Strand::Reverse)]),
+                    span_overlay("site", vec![(sequence, 30, 31, Strand::Reverse)]),
+                    span_overlay("tag", vec![(sequence, 33, 40, Strand::Unknown)]),
+                    span_overlay(
+                        "a_label_too_long_for_either_side",
+                        vec![(sequence, 18, 22, Strand::Unknown)],
+                    ),
+                ],
+                FULL_ZOOM_LEVEL,
+                (64, 15),
+            );
+            assert!(snapshot.contains("a_label_too_long_for_either_side"));
+            insta::assert_snapshot!("annotation_packed_labels", snapshot);
+        }
+
+        #[test]
+        fn test_annotation_branching_spans() {
+            let first = node("first", 16);
+            let upper = node("upper", 22);
+            let lower = node("lower", 12);
+            let merge = node("merge", 16);
+            let last = node("last", 10);
+            let graph = graph(&[
+                (first, upper),
+                (first, lower),
+                (upper, merge),
+                (lower, merge),
+                (merge, last),
+            ]);
+            let overlays = vec![
+                span_overlay(
+                    "coding",
+                    vec![
+                        (first, 6, 16, Strand::Forward),
+                        (upper, 0, 22, Strand::Forward),
+                        (merge, 0, 9, Strand::Forward),
+                    ],
+                ),
+                span_overlay(
+                    "reverse",
+                    vec![
+                        (first, 10, 16, Strand::Reverse),
+                        (lower, 0, 12, Strand::Reverse),
+                        (merge, 0, 6, Strand::Reverse),
+                    ],
+                ),
+                span_overlay("nested", vec![(upper, 3, 18, Strand::Reverse)]),
+                span_overlay("site", vec![(lower, 5, 6, Strand::Forward)]),
+                span_overlay(
+                    "tail",
+                    vec![
+                        (merge, 11, 16, Strand::Unknown),
+                        (last, 0, 10, Strand::Unknown),
+                    ],
+                ),
+            ];
+            for zoom_level in [FULL_ZOOM_LEVEL, 5] {
+                let snapshot = render(graph.clone(), overlays.clone(), zoom_level, (110, 31));
+                for label in ["coding", "reverse", "nested", "site", "tail"] {
+                    assert_eq!(
+                        snapshot.matches(label).count(),
+                        1,
+                        "should label {label} once"
+                    );
+                }
+                insta::assert_snapshot!(
+                    format!("annotation_branching_zoom_{zoom_level}"),
+                    snapshot
+                );
+            }
+        }
+
+        #[test]
+        fn test_annotation_connector_curves() {
+            let mut terminal = create_test_terminal(66, 16);
+            terminal
+                .draw(|frame| {
+                    let buffer = frame.buffer_mut();
+                    // Paired slopes expose the symmetry; short gaps and level bars cover
+                    // the limiting shapes. The crossing must preserve existing graph ink.
+                    for (from, to) in [
+                        ((2, 1), (26, 6)),
+                        ((36, 6), (60, 1)),
+                        ((2, 9), (26, 9)),
+                        ((36, 9), (39, 14)),
+                        ((48, 9), (48, 14)),
+                    ] {
+                        buffer[(from.0 - 1, from.1)].set_char('═');
+                        buffer[(to.0 + 1, to.1)].set_char('═');
+                        draw_braille_curve(buffer, from, to, Color::Red);
+                    }
+                    buffer[(14, 12)].set_char('│');
+                    buffer[(19, 12)].set_char('A');
+                    draw_braille_curve(buffer, (2, 12), (26, 12), Color::Blue);
+                    assert_eq!(buffer[(14, 12)].symbol(), "│");
+                    assert_eq!(buffer[(19, 12)].symbol(), "A");
+                })
+                .expect("should render connector curves");
+            insta::assert_snapshot!(
+                "annotation_connector_curves",
+                terminal.backend().to_string()
+            );
+        }
     }
 }

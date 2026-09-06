@@ -2,11 +2,9 @@
 
 Python bindings to the Gen version control system for genetic sequences.
 
-The package installs the `gen` command-line client and exposes the full Gen data
-model — repositories, sequence graphs, import/export pipelines — from Python and
-Jupyter notebooks. An optional Jupyter widget provides interactive graph
-visualization. Plotting falls back to a readable textual rendering without the
-extra or outside a live Jupyter kernel, including terminal and AI REPL sessions.
+The bindings expose the full Gen data model — repositories, sequence graphs,
+import/export pipelines — from Python and Jupyter notebooks. An optional Jupyter
+widget provides interactive graph visualization.
 
 ## Quick start
 
@@ -90,6 +88,11 @@ key can be set through the environment variable `GENHUB_API_KEY`. If this variab
 is not set, the extension falls back to the same login process the CLI uses. See 
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
+For a self-contained graph with two branching regions and twelve overlapping
+annotations, open [complex_annotations.ipynb](examples/complex_annotations.ipynb)
+and run all cells using the project's Python environment.
+The notebook creates a temporary repository and displays the existing `GraphWidget`.
+The graph, annotations, and widget remain available for further exploration.
 
 ## Sequence editing
 
@@ -250,18 +253,10 @@ paths.
 
 The package is built from three layers:
 
-### Client (`src/main.rs`)
-
-The existing Rust command-line client is compiled separately and staged in
-maturin's wheel data `scripts` directory. Package installers place that executable
-on `PATH` as `gen` on macOS and Linux or `gen.exe` on Windows.
-
 ### Rust (`src/python_api/`)
 
 The core of the package. [PyO3](https://pyo3.rs) + [maturin](https://www.maturin.rs)
-compile the Gen engine into a native extension module (`gen.so`). Release wheels
-use CPython's stable ABI with Python 3.11 as the minimum supported version. This
-layer owns:
+compile the Gen engine into a native extension module (`gen.so`). This layer owns:
 
 - **`Repository`** — opens a Gen workspace, drives all import/export operations
   (FASTA, GenBank, GFA, VCF, GAF, …), exposes version-control and remote
@@ -310,37 +305,31 @@ Loaded by anywidget directly in the browser. Responsible for:
 
 ```sh
 make          # from the project root — builds the native extension via maturin
-make python-wheel  # builds a wheel containing the extension and client
 make jupyter  # also builds the JS widget bundle and installs the `jupyter` extras
 ```
 
 ## Testing
 
-`gen-python/Makefile` has four testing targets:
+`gen-python/Makefile` has three targets:
 
-- `bindings-test` — runs `cargo test` with the pyenv-managed Python interpreter set
+- `pyenv-test` — runs `cargo test` with the pyenv-managed Python interpreter set
   as the PyO3 Python — necessary because PyO3 must link against the same Python
   that will load the extension. Use it when working on the Rust layer.
-- `api-test` — rebuilds the extension into the project-root `.venv` and runs
-  `unittest discover` over `tests/`, exercising the installed extension's public
-  API (including remote clone/push/pull/fetch against mock HTTP and file remotes).
 - `notebook-test` — rebuilds the extension into the project-root `.venv` and runs
   `pytest --nbmake` over `examples/`, executing every example notebook end to end.
-- `test` — runs all of the above.
+- `test` — runs both of the above.
 
 ```sh
-cd gen-python && make bindings-test  # Rust-layer tests
-cd gen-python && make api-test       # installed public API tests
+cd gen-python && make pyenv-test     # Rust-layer tests
 cd gen-python && make notebook-test  # example notebooks
-cd gen-python && make test           # all three
+cd gen-python && make test           # both
 ```
 
 ## For AI agents
 
-`Sample.plot()` / `SequenceGraph.plot()` return a `TextGraphWidget` in plain
-Python, including AI REPLs, even when `gen[jupyter]` is installed. Drive and
-inspect it without a browser or JS; use `repr(widget)` to see the current state
-as ASCII.
+`Sample.plot()` / `SequenceGraph.plot()` return a `GraphWidget` you can drive and
+inspect from plain Python — no browser or JS required to verify behavior; use
+`repr(widget)` to see the current state as ASCII.
 
 - A widget from `sample.plot()` pages through every sequence graph in the
   sample; one from `sg.plot()` shows just that one graph (one page).
