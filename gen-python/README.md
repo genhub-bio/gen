@@ -31,6 +31,11 @@ and run all cells using the project's Python environment.
 The notebook creates a temporary repository and displays the existing `GraphWidget`.
 The graph, annotations, and widget remain available for further exploration.
 
+At full detail, the widget uses the CLI's annotation display: packed directional
+bars beneath nodes, with Braille curves connecting fragments of the same annotation.
+Names that do not fit beside their bars fall back to floating labels. Use
+`widget.zoom_in()` to reach full detail and see this display.
+
 ## Architecture
 
 The package is built from three layers:
