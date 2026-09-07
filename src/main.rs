@@ -9,7 +9,7 @@ use r#gen::profiling::{Profiler, SamplingProfiler};
 use r#gen::{
     annotations::gff::propagate_gff,
     commands::{
-        Cli, Commands, cache, cli_context::CliContext, commit_operation,
+        Cli, Commands, cli_context::CliContext, commit_operation,
         graph_operations::make_stitch::make_stitch_operation, parse_diff_revisions,
         remote::handle_remote_command,
     },
@@ -21,9 +21,9 @@ use r#gen::{
     theme::init_theme,
     updates::gaf::transform_csv_to_fasta,
     views::{
-        block_group::view_block_group,
-        block_group_inline::{show_inline_block_group_widget, show_inline_diff_graph_widget},
-        diff::{view_diff, view_diff_graph},
+        block_group::{BlockGroupViewOptions, view_block_group},
+        block_group_inline::{show_inline_block_group_widget, show_inline_gen_graph_widget},
+        diff::view_diff,
         operations::view_operations,
         patch::view_patch,
         tui_runtime::install_global_panic_hook,
@@ -31,9 +31,9 @@ use r#gen::{
 };
 use gen_annotations::translate;
 use gen_core::{BranchName, CommitRef, config::Workspace, range::Range, region::Region};
-use gen_diff::{operations::collect_operation_diff, sample::build_sample_diff};
+use gen_diff::operations::collect_operation_diff;
 use gen_models::{
-    annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
+    annotations::{add_annotation, add_annotation_file},
     block_group::BlockGroup,
     collection::Collection,
     db::{ConfigConnection, DbContext, GraphConnection},
@@ -42,17 +42,19 @@ use gen_models::{
         HistoryStore,
         dolt::{DoltHistoryStore, branch_rows},
     },
-    operations::{Defaults, OperationFile, RemoteBranch, add_files_operation},
+    operations::{Defaults, RemoteBranch, add_files_operation},
     reference_alias::ReferenceAlias,
     sample::Sample,
+    traits::Query,
 };
 use rusqlite::{params, types::Value};
 use sha2::digest::typenum::Gr;
 
 fn get_default_collection(conn: &ConfigConnection) -> Result<String, rusqlite::Error> {
-    Ok(Defaults::get(conn)
-        .and_then(|defaults| defaults.collection_name)
-        .unwrap_or_else(|| "default".to_string()))
+    let mut stmt = conn.prepare("select collection_name from defaults where id = 1")?;
+    Ok(stmt
+        .query_row((), |row| row.get(0))
+        .unwrap_or("default".to_string()))
 }
 
 fn resolve_initial_collection(
@@ -65,8 +67,7 @@ fn resolve_initial_collection(
         return Ok(collection);
     }
 
-    let select = Collection::select(graph_conn).with_ref(history_ref);
-    let collections = select.load().expect("should load collections");
+    let collections = Collection::all(graph_conn, history_ref);
     if let [collection] = collections.as_slice() {
         return Ok(collection.name.clone());
     }
@@ -99,14 +100,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(Commands::Clone { url }) = &cli.command {
         return r#gen::commands::clone::execute(url, &workspace);
-    }
-    if let Some(Commands::CacheClear {}) = &cli.command {
-        if cache::clear(&workspace)? {
-            println!("Cache cleared.");
-        } else {
-            println!("No cache found.");
-        }
-        return Ok(());
     }
     #[cfg(feature = "profiling")]
     if let Some(Commands::Profile(cmd)) = &cli.command {
@@ -157,7 +150,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         return r#gen::commands::checkout::execute(
             &graph_connection,
             &config_conn,
-            &workspace,
             branch.as_deref(),
             hash.as_deref(),
         );
@@ -171,23 +163,15 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         force,
     }) = &cli.command
     {
-        r#gen::commands::remote::operations::execute_push(
+        return r#gen::commands::remote::operations::execute_push(
             &workspace,
             remote.as_deref(),
             branch.as_deref(),
             *force,
-        )?;
-        return Ok(());
+        );
     }
     if let Some(Commands::Pull { remote, branch }) = &cli.command {
         return r#gen::commands::remote::operations::execute_pull(
-            &workspace,
-            remote.as_deref(),
-            branch.as_deref(),
-        );
-    }
-    if let Some(Commands::Fetch { remote, branch }) = &cli.command {
-        return r#gen::commands::remote::operations::execute_fetch(
             &workspace,
             remote.as_deref(),
             branch.as_deref(),
@@ -257,9 +241,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Clone { .. }) => {
             unreachable!("clone commands are handled before opening the workspace databases")
         }
-        Some(Commands::CacheClear {}) => {
-            unreachable!("cache-clear is handled before opening the workspace databases")
-        }
         #[cfg(feature = "profiling")]
         Some(Commands::Profile(cmd)) => r#gen::commands::profile::execute(cmd.clone()),
         Some(Commands::Import(cmd)) => Ok(r#gen::commands::import::execute(&cli_context, cmd)?),
@@ -304,19 +285,16 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     &base_name,
                     history_ref.as_deref(),
                 )?;
-                let title = format!("{graph_name}: query {query_name} against base {base_name}");
                 if full {
-                    view_diff_graph(graph_conn, db_context.workspace(), &diff.graph, title)?;
+                    view_diff(graph_conn, &diff)?;
                 } else {
-                    match show_inline_diff_graph_widget(
+                    match show_inline_gen_graph_widget(
                         graph_conn,
-                        db_context.workspace(),
                         &diff.graph,
+                        Vec::new(),
                         clamp_inline_view_height(height),
                     ) {
-                        Ok(true) => {
-                            view_diff_graph(graph_conn, db_context.workspace(), &diff.graph, title)?
-                        }
+                        Ok(true) => view_diff(graph_conn, &diff)?,
                         Ok(false) => {}
                         Err(error) => eprintln!("Error showing inline widget: {error}"),
                     }
@@ -343,7 +321,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         )?;
                         match show_inline_block_group_widget(
                             graph_conn,
-                            db_context.workspace(),
                             bg.id,
                             vec![current_path],
                             clamp_inline_view_height(height),
@@ -355,11 +332,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                     graph_conn,
                                     config_conn,
                                     &workspace,
-                                    graph,
-                                    sample,
-                                    collection_name,
-                                    position,
-                                    history_ref.as_deref(),
+                                    BlockGroupViewOptions {
+                                        name: graph,
+                                        sample_name: sample,
+                                        collection_name,
+                                        position,
+                                        history_ref: history_ref.as_deref(),
+                                    },
                                 )?;
                             }
                             Ok(false) => {}
@@ -381,11 +360,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                     graph_conn,
                     config_conn,
                     &workspace,
-                    graph,
-                    sample,
-                    collection_name,
-                    position,
-                    history_ref.as_deref(),
+                    BlockGroupViewOptions {
+                        name: graph,
+                        sample_name: sample,
+                        collection_name,
+                        position,
+                        history_ref: history_ref.as_deref(),
+                    },
                 )?;
             }
             Ok(())
@@ -402,7 +383,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             if diff.operations.is_empty() {
                 println!("No differences found between {source_ref} and {target_ref}.");
             } else {
-                view_diff(graph_conn, db_context.workspace(), &diff)?;
+                view_diff(graph_conn, &diff)?;
             }
             Ok(())
         }
@@ -423,7 +404,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let mut bed_file = File::open(bed)?;
                 Ok(translate::bed::translate_bed(
                     graph_conn,
-                    db_context.workspace(),
                     collection_name,
                     sample.as_str(),
                     None,
@@ -436,7 +416,6 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 let mut gff_file = BufReader::new(File::open(gff)?);
                 Ok(translate::gff::translate_gff(
                     graph_conn,
-                    db_context.workspace(),
                     collection_name,
                     sample.as_str(),
                     None,
@@ -490,18 +469,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             merge,
             set_remote,
             branch_name,
-            start_point,
         }) => {
             let history_store = DoltHistoryStore::new(graph_conn);
             if create {
                 let branch_name = branch_name
                     .clone()
                     .ok_or("Must provide a branch name to create.")?;
-                let start_ref = start_point.clone().map(CommitRef);
-                history_store
-                    .create_branch(&BranchName(branch_name.clone()), start_ref.as_ref())?;
-            } else if start_point.is_some() {
-                return Err("A start point is only valid together with --create.".into());
+                history_store.create_branch(&BranchName(branch_name.clone()), None)?;
             } else if delete {
                 history_store.delete_branch(&BranchName(
                     branch_name
@@ -546,7 +520,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else if merge {
                 let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
-                graph_conn.with_transaction(|| history_store.merge(&CommitRef(branch_name)))?;
+                history_store.merge(&CommitRef(branch_name))?;
                 println!("Merge successful");
             } else if let Some(remote_name) = set_remote {
                 let current_branch_name = history_store
@@ -578,7 +552,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
             let history_store = DoltHistoryStore::new(graph_conn);
             ensure_clean_working_set(&history_store, "merge")?;
-            match graph_conn.with_transaction(|| history_store.merge(&CommitRef(branch_name))) {
+            match history_store.merge(&CommitRef(branch_name)) {
                 Ok(_) => {
                     println!("Merge successful");
                     Ok(())
@@ -695,7 +669,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(operation_summary) => operation_summary,
                 Err(err) => {
                     graph_conn.execute("ROLLBACK TRANSACTION;", [])?;
-                    return Err(err.into());
+                    return Err(err);
                 }
             };
             graph_conn.execute("END TRANSACTION", [])?;
@@ -724,18 +698,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 index.as_deref(),
                 name.as_deref(),
                 message.as_deref(),
-                AnnotationFileChecksumOverrides::default(),
             )?;
             println!("Annotation file added in operation {commit_hash}");
             Ok(())
         }
         Some(Commands::AddFile { files, message }) => {
-            let operation_files = files
-                .into_iter()
-                .map(OperationFile::new)
-                .collect::<Vec<_>>();
-            let commit_hash =
-                add_files_operation(&db_context, &operation_files, message.as_deref())?;
+            let commit_hash = add_files_operation(&db_context, &files, message.as_deref())?;
             println!("Files added in operation {commit_hash}");
             Ok(())
         }
@@ -756,9 +724,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .ensure_search_index()
                 .map_err(|_| "No .gen directory found. Run 'gen init' first.")?;
             for bg in block_groups {
-                let graph =
-                    BlockGroup::get_graph(graph_conn, db_context.workspace(), &bg.id, None)?;
-                let matcher = GenGraphMatcher::new(graph_conn, db_context.workspace(), graph);
+                let graph = BlockGroup::get_graph(graph_conn, &bg.id, None)?;
+                let matcher = GenGraphMatcher::new(graph_conn, graph);
                 let index = SeedIndex::build(&matcher, kmer_size, true);
                 let path = index_dir.join(format!("{}.bin", bg.id));
                 index.save_to_path(&path).map_err(|e| anyhow!("{e}"))?;
@@ -799,28 +766,24 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let block_groups = match (collection, sample.as_deref()) {
                 (Some(c), Some(s)) => Sample::get_block_groups(graph_conn, &c, s, None),
                 (Some(c), None) => Collection::get_block_groups(graph_conn, &c, None),
-                (None, Some(s)) => BlockGroup::select(graph_conn)
-                    .sample_name(s)
-                    .load()
-                    .expect("should load sample block groups"),
-                (None, None) => BlockGroup::select(graph_conn)
-                    .load()
-                    .expect("should load block groups"),
+                (None, Some(s)) => BlockGroup::all(graph_conn)
+                    .into_iter()
+                    .filter(|bg| bg.sample_name == s)
+                    .collect(),
+                (None, None) => BlockGroup::all(graph_conn),
             };
             let index_dir = workspace.find_search_index();
             let query_bytes = query.as_bytes();
             println!("sample\tgraph\tblocks\toffset");
             for bg in block_groups {
-                let graph =
-                    BlockGroup::get_graph(graph_conn, db_context.workspace(), &bg.id, None)?;
-                let matcher = GenGraphMatcher::new(graph_conn, db_context.workspace(), graph);
+                let graph = BlockGroup::get_graph(graph_conn, &bg.id, None)?;
+                let matcher = GenGraphMatcher::new(graph_conn, graph);
                 let matches = index_dir
                     .as_ref()
                     .and_then(|dir| {
                         let p = dir.join(format!("{}.bin", bg.id));
                         SeedIndex::load_from_path(p).ok()
                     })
-                    .filter(|index| index.is_valid_for(&matcher))
                     .map(|idx| matcher.find_all_with_seed_index(&idx, query_bytes))
                     .unwrap_or_else(|| Ok(matcher.find_all(query_bytes)))?;
                 for m in matches {
@@ -926,8 +889,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 })?;
             let path =
                 BlockGroup::get_current_path(graph_conn, &block_group.id, history_ref.as_deref())?;
-            let sequence =
-                path.sequence(graph_conn, db_context.workspace(), history_ref.as_deref())?;
+            let sequence = path.sequence(graph_conn, history_ref.as_deref())?;
             if end_coordinate == -1 {
                 end_coordinate = sequence.len() as i64;
             }
@@ -939,8 +901,8 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Diff {
             name,
-            query,
-            base,
+            sample1,
+            sample2,
             gfa,
         }) => {
             let collection_name = &(match name {
@@ -949,11 +911,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             });
             gfa_sample_diff(
                 graph_conn,
-                db_context.workspace(),
                 collection_name,
                 &PathBuf::from(gfa),
-                base.as_str(),
-                query.as_str(),
+                sample1.as_str(),
+                sample2.as_str(),
             )?;
             Ok(())
         }
@@ -970,9 +931,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => Err(format!("Error making a stitch: {e}").into()),
             }
         }
-        Some(Commands::Push { .. })
-        | Some(Commands::Pull { .. })
-        | Some(Commands::Fetch { .. }) => unreachable!(),
+        Some(Commands::Push { .. }) | Some(Commands::Pull { .. }) => unreachable!(),
         Some(Commands::AddReferenceAliases {
             reference_name,
             refseq_accession_id,
