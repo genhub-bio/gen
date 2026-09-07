@@ -13,6 +13,7 @@ except PackageNotFoundError:
 # Directly from Rust
 from .gen import (
     Annotation,
+    Asset,
     Branch,
     HashId,
     Locus,
@@ -37,6 +38,7 @@ except ImportError:
 
 __all__ = [
     "Annotation",
+    "Asset",
     "Branch",
     "GraphWidget",
     "freeze_all_widgets",

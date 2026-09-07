@@ -135,6 +135,7 @@ impl PyRepository {
     #[pyo3(signature = (remote=None, branch=None, force=false))]
     fn push(
         &mut self,
+        python: Python<'_>,
         remote: Option<&Bound<'_, PyAny>>,
         branch: Option<&Bound<'_, PyAny>>,
         force: bool,
@@ -143,12 +144,15 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = r#gen::commands::remote::operations::execute_push(
-            &workspace,
-            remote.as_deref(),
-            branch.as_deref(),
-            force,
-        );
+        let result = python.allow_threads(|| {
+            r#gen::commands::remote::operations::execute_push(
+                &workspace,
+                remote.as_deref(),
+                branch.as_deref(),
+                force,
+            )
+            .map_err(|error| error.to_string())
+        });
         self.finish_remote_operation("push", result)
     }
 
@@ -156,6 +160,7 @@ impl PyRepository {
     #[pyo3(signature = (remote=None, branch=None))]
     fn pull(
         &mut self,
+        python: Python<'_>,
         remote: Option<&Bound<'_, PyAny>>,
         branch: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
@@ -163,11 +168,14 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = r#gen::commands::remote::operations::execute_pull(
-            &workspace,
-            remote.as_deref(),
-            branch.as_deref(),
-        );
+        let result = python.allow_threads(|| {
+            r#gen::commands::remote::operations::execute_pull(
+                &workspace,
+                remote.as_deref(),
+                branch.as_deref(),
+            )
+            .map_err(|error| error.to_string())
+        });
         self.finish_remote_operation("pull", result)
     }
 
@@ -175,6 +183,7 @@ impl PyRepository {
     #[pyo3(signature = (remote=None, branch=None))]
     fn fetch(
         &mut self,
+        python: Python<'_>,
         remote: Option<&Bound<'_, PyAny>>,
         branch: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
@@ -182,11 +191,14 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = r#gen::commands::remote::operations::execute_fetch(
-            &workspace,
-            remote.as_deref(),
-            branch.as_deref(),
-        );
+        let result = python.allow_threads(|| {
+            r#gen::commands::remote::operations::execute_fetch(
+                &workspace,
+                remote.as_deref(),
+                branch.as_deref(),
+            )
+            .map_err(|error| error.to_string())
+        });
         self.finish_remote_operation("fetch", result)
     }
 }
@@ -313,16 +325,8 @@ mod tests {
             let local_parent = tempdir().expect("should create local parent directory");
             let local_path = local_parent.path().join("local");
             let remote_url = format!("file://{}", remote_dir.path().display());
-            let mut local_repository = clone_repository(
-                &remote_url,
-                Some(
-                    local_path
-                        .to_str()
-                        .expect("should encode local path")
-                        .to_string(),
-                ),
-            )
-            .expect("should clone remote repository");
+            let mut local_repository = clone_repository(python, &remote_url, Some(local_path))
+                .expect("should clone remote repository");
 
             commit_collection(&local_repository, "pushed");
             let remote = local_repository
@@ -341,6 +345,7 @@ mod tests {
             let branch_object = Py::new(python, branch).expect("should create Python branch");
             local_repository
                 .push(
+                    python,
                     Some(remote_object.bind(python).as_any()),
                     Some(branch_object.bind(python).as_any()),
                     false,
@@ -356,7 +361,7 @@ mod tests {
 
             commit_collection(&remote_repository, "pulled");
             local_repository
-                .pull(None, None)
+                .pull(python, None, None)
                 .expect("should pull current tracked branch");
             assert!(
                 has_collection(&local_repository, "pulled"),
@@ -384,7 +389,7 @@ mod tests {
             };
             let feature_object = Py::new(python, feature).expect("should create Python branch");
             local_repository
-                .fetch(None, Some(feature_object.bind(python).as_any()))
+                .fetch(python, None, Some(feature_object.bind(python).as_any()))
                 .expect("should fetch Branch object");
             assert_eq!(
                 active_branch(local_repository.context.graph().conn())
@@ -404,20 +409,23 @@ mod tests {
 
     #[test]
     fn test_remote_transfers_reject_repository_transaction() {
-        let repository_dir = tempdir().expect("should create repository directory");
-        let mut repository = create_repository(repository_dir.path());
-        repository.in_transaction = true;
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|python| {
+            let repository_dir = tempdir().expect("should create repository directory");
+            let mut repository = create_repository(repository_dir.path());
+            repository.in_transaction = true;
 
-        for (action, result) in [
-            ("push", repository.push(None, None, false)),
-            ("pull", repository.pull(None, None)),
-            ("fetch", repository.fetch(None, None)),
-        ] {
-            let error = result.expect_err("should reject remote transfer during transaction");
-            assert!(
-                error.to_string().contains("transaction is active"),
-                "{action} error should explain the active transaction"
-            );
-        }
+            for (action, result) in [
+                ("push", repository.push(python, None, None, false)),
+                ("pull", repository.pull(python, None, None)),
+                ("fetch", repository.fetch(python, None, None)),
+            ] {
+                let error = result.expect_err("should reject remote transfer during transaction");
+                assert!(
+                    error.to_string().contains("transaction is active"),
+                    "{action} error should explain the active transaction"
+                );
+            }
+        });
     }
 }

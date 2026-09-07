@@ -105,6 +105,40 @@ impl PyOperation {
     }
 }
 
+/// A content-addressed file reachable from a branch, such as an imported FASTA or GenBank file.
+///
+/// Every file import is tracked as an asset for provenance, independent of whether its content is
+/// stored inline in the graph. A custom GenHub-compatible server needs this inventory to answer
+/// asset-transfer requests for clone, push, pull, and fetch.
+#[pyclass(name = "Asset")]
+#[derive(Clone)]
+pub struct PyAsset {
+    #[pyo3(get)]
+    pub id: String,
+    #[pyo3(get)]
+    pub name: Option<String>,
+}
+
+impl From<gen_models::assets::AssetRef> for PyAsset {
+    fn from(asset: gen_models::assets::AssetRef) -> Self {
+        Self {
+            id: asset.id.to_string(),
+            name: asset.name,
+        }
+    }
+}
+
+#[pymethods]
+impl PyAsset {
+    fn __str__(&self) -> &str {
+        &self.id
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Asset(id={:?}, name={:?})", self.id, self.name)
+    }
+}
+
 pub(super) fn branch_name(value: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(branch) = value.extract::<PyRef<'_, PyBranch>>() {
         Ok(branch.name.clone())
@@ -195,10 +229,20 @@ impl PyRepository {
             .map_err(history_err_to_pyerr)
     }
 
-    /// Checks out an existing branch and returns its updated metadata.
-    fn checkout(&self, branch: &Bound<'_, PyAny>) -> PyResult<PyBranch> {
+    /// Checks out a branch by name or Branch object and returns its updated metadata.
+    ///
+    /// Set `create=True` to create a new branch at HEAD before checking it out.
+    /// Creating an existing branch is an error.
+    #[pyo3(signature = (branch, *, create=false))]
+    fn checkout(&self, branch: &Bound<'_, PyAny>, create: bool) -> PyResult<PyBranch> {
         self.ensure_no_transaction("checkout a branch")?;
         let name = branch_name(branch)?;
+        if create {
+            let history_store = DoltHistoryStore::new(self.context.graph().conn());
+            r#gen::history::ensure_clean_working_set(&history_store, "checkout")
+                .map_err(history_err_to_pyerr)?;
+            self.create_branch(&name, None)?;
+        }
         r#gen::commands::checkout::execute(
             self.context.graph().conn(),
             self.context.config().conn(),
@@ -225,6 +269,25 @@ impl PyRepository {
             None => history_store.log(limit).map_err(history_err_to_pyerr)?,
         };
         Ok(entries.into_iter().map(PyOperation::from).collect())
+    }
+
+    /// Returns the assets reachable from the current branch or a named branch.
+    #[pyo3(signature = (branch=None))]
+    fn get_assets(&self, branch: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<PyAsset>> {
+        let history_store = DoltHistoryStore::new(self.context.graph().conn());
+        let name = match branch {
+            Some(branch) => branch_name(branch)?,
+            None => {
+                history_store
+                    .current_branch()
+                    .map_err(history_err_to_pyerr)?
+                    .ok_or_else(|| PyRuntimeError::new_err("repository has no current branch"))?
+                    .0
+            }
+        };
+        gen_models::assets::Assets::get_branch_assets(self.context.graph().conn(), &name)
+            .map_err(history_err_to_pyerr)
+            .map(|assets| assets.into_values().map(PyAsset::from).collect())
     }
 
     /// Merges a branch into the current branch and returns the new HEAD operation.
@@ -313,7 +376,7 @@ mod tests {
             assert!(!feature.is_current, "new branch should not be current");
             let feature_object = Py::new(python, feature).expect("should create Python branch");
             let checked_out = repository
-                .checkout(feature_object.bind(python).as_any())
+                .checkout(feature_object.bind(python).as_any(), false)
                 .expect("should checkout Branch object");
             assert!(
                 checked_out.is_current,
@@ -337,7 +400,7 @@ mod tests {
                 .into_pyobject(python)
                 .expect("should create Python branch name");
             repository
-                .checkout(main.as_any())
+                .checkout(main.as_any(), false)
                 .expect("should checkout branch name");
             assert!(
                 Collection::all(repository.context.graph().conn(), None)
@@ -394,7 +457,7 @@ mod tests {
             .expect("should create Python branch");
 
             let error = repository
-                .checkout(branch.bind(python).as_any())
+                .checkout(branch.bind(python).as_any(), false)
                 .expect_err("should reject checkout during transaction");
             assert!(
                 error.to_string().contains("transaction is active"),

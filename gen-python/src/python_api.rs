@@ -21,7 +21,7 @@ use crate::python_api::{
     jupyter_widget::PyGraphController,
     repository::{
         PyRepository, clone_repository,
-        history::{PyBranch, PyOperation},
+        history::{PyAsset, PyBranch, PyOperation},
         remote::PyRemote,
     },
     sample::{PySample, PySampleIter},
@@ -36,6 +36,7 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRepository>()?;
     m.add_class::<PyBranch>()?;
     m.add_class::<PyOperation>()?;
+    m.add_class::<PyAsset>()?;
     m.add_class::<PyRemote>()?;
     m.add_class::<PySequenceGraph>()?;
     m.add_class::<PyAnnotation>()?;

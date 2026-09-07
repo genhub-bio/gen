@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, path::PathBuf};
 
 use r#gen::{get_config_connection, get_connection_for_branch};
 use gen_core::config::Workspace;
@@ -33,10 +33,15 @@ pub mod updates;
 /// Clones a remote Gen repository and opens it.
 ///
 /// When `path` is omitted, the remote repository name is used beneath the
-/// current directory. When supplied, `path` is the exact destination.
+/// current directory. When supplied, `path` is the exact destination and accepts
+/// strings or Python path-like objects. The destination may be an empty directory.
 #[pyfunction(name = "clone")]
 #[pyo3(signature = (url, path=None))]
-pub fn clone_repository(url: &str, path: Option<String>) -> PyResult<PyRepository> {
+pub fn clone_repository(
+    python: Python<'_>,
+    url: &str,
+    path: Option<PathBuf>,
+) -> PyResult<PyRepository> {
     let workspace = match path {
         Some(path) => Workspace::new(path),
         None => {
@@ -47,8 +52,10 @@ pub fn clone_repository(url: &str, path: Option<String>) -> PyResult<PyRepositor
             Workspace::new(destination)
         }
     };
-    r#gen::commands::clone::clone_to_workspace(url, &workspace)
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    python.allow_threads(|| {
+        r#gen::commands::clone::clone_to_workspace(url, &workspace)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    })?;
     PyRepository::open_workspace(workspace)
 }
 
@@ -539,9 +546,8 @@ mod python_tests {
             let destination_parent = tempdir().unwrap();
             let destination = destination_parent.path().join("clone");
             let remote_url = format!("file://{}", source_root.display());
-            let cloned =
-                clone_repository(&remote_url, Some(destination.to_str().unwrap().to_string()))
-                    .expect("should clone and open repository");
+            let cloned = clone_repository(py, &remote_url, Some(destination))
+                .expect("should clone and open repository");
 
             let block_groups = cloned.get_sequence_graphs().unwrap();
             assert_eq!(

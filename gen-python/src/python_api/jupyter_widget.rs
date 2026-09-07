@@ -6,7 +6,7 @@ use std::{
 };
 
 use r#gen::{
-    get_connection,
+    get_connection_for_branch,
     views::{
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
         annotation_track::{
@@ -31,6 +31,7 @@ use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
     db::GraphConnection,
+    history::dolt::active_branch,
     locus::GraphLocus,
 };
 use gen_tui::{
@@ -268,6 +269,8 @@ fn sort_key_longest_first(span: &AnnotationSpan) -> i64 {
 struct GraphPage {
     name: String,
     db_path: PathBuf,
+    // Viewer callbacks reopen connections and must keep the plotted graph's branch.
+    branch: Option<String>,
     workspace: Workspace,
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
@@ -287,6 +290,7 @@ struct GraphPage {
 struct PageRef {
     name: String,
     db_path: PathBuf,
+    branch: String,
     workspace: Workspace,
     block_group_id: HashId,
 }
@@ -316,6 +320,7 @@ impl GraphPage {
         Self {
             name,
             db_path,
+            branch: None,
             workspace,
             block_group_id: None,
             controller,
@@ -326,7 +331,8 @@ impl GraphPage {
     }
 
     fn open_conn(&self) -> PyResult<GraphConnection> {
-        get_connection(&self.db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        get_connection_for_branch(&self.db_path, self.branch.as_deref())
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
     fn all_node_ids(&self) -> HashSet<HashId> {
@@ -1098,6 +1104,9 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
     let graph = BlockGroup::get_graph(graph_conn, context.workspace(), &sg.id, None)
         .map_err(block_group_err_to_pyerr)?;
     let mut page = GraphPage::new(sg.name.clone(), db_path, context.workspace().clone(), graph);
+    page.branch = Some(
+        active_branch(graph_conn).map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
+    );
     page.block_group_id = Some(sg.id);
     Ok(page)
 }
@@ -1119,6 +1128,8 @@ fn page_ref_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<PageRef> {
     Ok(PageRef {
         name: sg.name.clone(),
         db_path,
+        branch: active_branch(context.graph().conn())
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
         workspace: context.workspace().clone(),
         block_group_id: sg.id,
     })
@@ -1196,7 +1207,7 @@ impl PyGraphController {
     fn active(&mut self) -> PyResult<&mut GraphPage> {
         let page = &mut self.pages[self.current_index];
         if let Page::Pending(page_ref) = page {
-            let conn = get_connection(&page_ref.db_path)
+            let conn = get_connection_for_branch(&page_ref.db_path, Some(&page_ref.branch))
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let graph =
                 BlockGroup::get_graph(&conn, &page_ref.workspace, &page_ref.block_group_id, None)
@@ -1208,6 +1219,7 @@ impl PyGraphController {
                 graph,
             );
             loaded.block_group_id = Some(page_ref.block_group_id);
+            loaded.branch = Some(page_ref.branch.clone());
             *page = Page::Loaded(Box::new(loaded));
         }
         match page {
@@ -1513,11 +1525,62 @@ impl PyGraphController {
 #[cfg(test)]
 mod tests {
     use r#gen::test_helpers::{setup_block_group, setup_gen_on_disk};
-    use gen_models::block_group::BlockGroup;
+    use gen_core::BranchName;
+    use gen_models::{
+        block_group::BlockGroup,
+        history::{HistoryStore as _, dolt::DoltHistoryStore},
+    };
     use pyo3::{exceptions::PyValueError, prelude::*};
     use serde_json::Value;
 
-    use super::{PyGraphController, current_theme};
+    use super::{PyGraphController, active_branch, current_theme};
+    use crate::python_api::block_group::PySequenceGraph;
+
+    #[test]
+    fn test_widget_keeps_branch_for_annotations_and_lazy_pages() {
+        pyo3::prepare_freethreaded_python();
+        let context = setup_gen_on_disk();
+        let history_store = DoltHistoryStore::new(context.graph().conn());
+        let branch = BranchName("design".to_string());
+        history_store
+            .create_branch(&branch, None)
+            .expect("should create design branch");
+        history_store
+            .checkout_branch(&branch)
+            .expect("should checkout design branch");
+        let (block_group_id, _) = setup_block_group(context.graph().conn());
+        history_store
+            .commit_all("design graph")
+            .expect("should commit graph on design branch");
+        let block_group = BlockGroup::get_by_id(context.graph().conn(), &block_group_id, None)
+            .expect("should find design graph");
+        let sequence_graph = PySequenceGraph {
+            id: block_group_id,
+            collection_name: block_group.collection_name,
+            sample_name: block_group.sample_name,
+            name: block_group.name,
+            context: Some(context.clone()),
+        };
+        let mut graph_controller = PyGraphController::for_sequence_graph(&sequence_graph)
+            .expect("should create graph widget on design branch");
+        let mut sample_controller = PyGraphController::for_sample(&[sequence_graph])
+            .expect("should capture lazy sample page on design branch");
+        history_store
+            .checkout_branch(&BranchName("main".to_string()))
+            .expect("should return to main");
+
+        graph_controller
+            .list_annotations()
+            .expect("should find the plotted graph on its original branch");
+        sample_controller
+            .list_annotations()
+            .expect("should load a pending page from its original branch");
+        assert_eq!(
+            active_branch(context.graph().conn()).expect("should read repository branch"),
+            "main",
+            "viewing a design should preserve the repository checkout"
+        );
+    }
 
     fn make_controller(detail: Option<&str>) -> PyResult<PyGraphController> {
         let ctx = setup_gen_on_disk();

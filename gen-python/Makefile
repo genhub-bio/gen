@@ -7,21 +7,27 @@ VENV_JUPYTER := $(VENV)/bin/jupyter
 VENV_PIP := $(VENV)/bin/pip
 VENV_PLAYWRIGHT := $(VENV)/bin/playwright
 
-.PHONY: help pyenv-test notebook-clear-output notebook-test notebook-freeze test
+.PHONY: help pyenv-test installed-test notebook-clear-output notebook-test notebook-freeze test
 
 help:
 	@echo "Available targets:"
 	@echo "  pyenv-test            Run cargo tests using the pyenv Python and its library path"
+	@echo "  installed-test        Build via the root Makefile's 'python' target, then exercise the"
+	@echo "                        installed extension's public API (tests/*.py)"
 	@echo "  notebook-clear-output Clear outputs from example notebooks in place"
 	@echo "  notebook-test         Build via the root Makefile's 'python' target, then run notebook tests"
 	@echo "  notebook-freeze       Execute example notebooks in a real browser and freeze widgets to static PNGs"
-	@echo "  test                  Run all tests (pyenv-test + notebook-test)"
+	@echo "  test                  Run all tests (pyenv-test + installed-test + notebook-test)"
 
 pyenv-test:
 	PYO3_PYTHON="$(PYENV_PYTHON)" \
 	LD_LIBRARY_PATH="$(PYENV_PREFIX)/lib:$(LD_LIBRARY_PATH)" \
 	DYLD_LIBRARY_PATH="$(PYENV_PREFIX)/lib:$(DYLD_LIBRARY_PATH)" \
 	cargo t
+
+installed-test:
+	$(MAKE) -C .. python
+	$(VENV_PYTHON) -m unittest discover -s tests -v
 
 notebook-clear-output:
 	$(VENV_JUPYTER) nbconvert --clear-output --inplace examples/*.ipynb
@@ -40,4 +46,4 @@ notebook-freeze:
 	$(MAKE) -C .. jupyter
 	$(VENV_PYTHON) scripts/freeze_notebooks.py
 
-test: notebook-clear-output pyenv-test notebook-test
+test: notebook-clear-output pyenv-test installed-test notebook-test

@@ -30,8 +30,7 @@ Clone and version-control repositories with the same object-oriented workflow:
 
 ```python
 repo = gen.clone("https://www.genhub.bio/api/repos/owner/repository")
-feature = repo.create_branch("experiment")
-repo.checkout(feature)
+feature = repo.checkout("experiment", create=True)
 
 # Import or update sequences on the feature branch.
 repo.checkout("main")
@@ -40,6 +39,16 @@ repo.merge(feature)
 operations = repo.get_operations()
 repo.reset(operations[1])
 ```
+
+`gen.clone(url, path=None)` accepts a string or an `os.PathLike` destination,
+including `pathlib.Path`. The destination must be new or an empty directory.
+Omitting `path` creates a directory named after the remote beneath the current
+directory.
+
+`checkout(branch)` accepts a branch name or a `Branch` object. Use
+`checkout("experiment", create=True)` to create a branch at the current HEAD and
+switch to it in one call; it raises an error if that branch already exists.
+To create a branch without switching, use `create_branch(name, start=None)`.
 
 Push, pull, and fetch use the same remote selection, authentication, retries,
 asset transfer, and conflict behavior as the command-line client:
@@ -65,10 +74,13 @@ repo.remove_remote(origin)
 ```
 
 `push(remote=None, branch=None, force=False)`,
-`pull(remote=None, branch=None)`, and `fetch(remote=None, branch=None)` select an
-explicit remote first, then the branch's tracked remote, the repository default,
-or the only configured remote. `push` and `pull` associate a successful transfer
-with that branch. Remote transfers cannot run inside `Repository.transaction()`.
+`pull(remote=None, branch=None)`, and `fetch(remote=None, branch=None)` allow you
+to optionally override the remote or use a different branch than is currently
+checked out. For operations or repositories that require authentication, an API
+key can be set through the environment variable `GENHUB_API_KEY`. If this variable
+is not set, the extension falls back to the same login process the CLI uses. See 
+the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
+for a complete walkthrough.
 
 ## Architecture
 
@@ -134,19 +146,23 @@ make jupyter  # also builds the JS widget bundle and installs the `jupyter` extr
 
 ## Testing
 
-`gen-python/Makefile` has three targets:
+`gen-python/Makefile` has four targets:
 
 - `pyenv-test` — runs `cargo test` with the pyenv-managed Python interpreter set
   as the PyO3 Python — necessary because PyO3 must link against the same Python
   that will load the extension. Use it when working on the Rust layer.
+- `installed-test` — rebuilds the extension into the project-root `.venv` and runs
+  `unittest discover` over `tests/`, exercising the installed extension's public
+  API (including remote clone/push/pull/fetch against mock HTTP and file remotes).
 - `notebook-test` — rebuilds the extension into the project-root `.venv` and runs
   `pytest --nbmake` over `examples/`, executing every example notebook end to end.
-- `test` — runs both of the above.
+- `test` — runs all of the above.
 
 ```sh
-cd gen-python && make pyenv-test     # Rust-layer tests
-cd gen-python && make notebook-test  # example notebooks
-cd gen-python && make test           # both
+cd gen-python && make pyenv-test      # Rust-layer tests
+cd gen-python && make installed-test  # installed-extension tests
+cd gen-python && make notebook-test   # example notebooks
+cd gen-python && make test            # all three
 ```
 
 ## For AI agents
