@@ -85,13 +85,11 @@ pub enum OverlaySource {
 
 /// What a `GraphOverlay` paints.
 ///
-/// A path is just another overlay: at the controller level it and an annotation span
-/// are both entries in one highlight list (a `HighlightKind::Path` vs `Cells`/`Edge`),
-/// so both are repainted the same way every frame. They differ only in payload — a span
-/// is a labelled sub-node byte range, a path is a route through whole nodes.
+/// An annotation span supplies bars, connectors, and labels; a path highlights a route
+/// through whole nodes. Both are managed together and repainted every frame.
 #[derive(Clone)]
 pub enum OverlayContent {
-    /// A labelled annotation span, painted as a sub-node cell highlight.
+    /// An annotation span, painted as bars, connectors, and labels.
     Span(AnnotationSpan),
     /// A route through whole nodes, painted as a connected path highlight.
     Path(Vec<GraphNode>),

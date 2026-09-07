@@ -33,7 +33,8 @@ The graph, annotations, and widget remain available for further exploration.
 
 At full detail, the widget uses the CLI's annotation display: packed directional
 bars beneath nodes, with Braille curves connecting fragments of the same annotation.
-Names that do not fit beside their bars fall back to floating labels. Use
+Names that do not fit beside their bars fall back to floating labels. Annotation colors
+apply to bars, connectors, and labels; sequence characters keep their normal colors. Use
 `widget.zoom_in()` to reach full detail and see this display.
 
 ## Architecture

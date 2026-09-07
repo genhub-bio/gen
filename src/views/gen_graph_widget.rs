@@ -1586,11 +1586,9 @@ fn accent_colors() -> [Color; 8] {
     ]
 }
 
-/// Re-register every overlay highlight on `view_state`, replacing whatever highlights were
-/// previously set.
+/// Assign annotation colors and replace the path highlights on `view_state`.
 ///
-/// Span overlays are processed longest-first so shorter (inner) spans paint on top; any
-/// path overlay is applied last so the route paints over the span tints. Each span's color
+/// Span overlays are processed longest-first. Each span's color
 /// is chosen greedily: its color from a previous pass (`color_cache`) if it's still
 /// conflict-free, or else the next color in rotation, so spans that never conflict with
 /// anything still get spread across distinct colors instead of colors reshuffling across
@@ -1601,11 +1599,10 @@ fn accent_colors() -> [Color; 8] {
 /// mutually-overlapping annotations can still collide, but this makes collisions the
 /// exception rather than the default.
 ///
-/// `overlays` is written back with the colors actually used, so `draw_annotation_labels`
-/// (which reads `overlay.style` separately, after this runs) labels each span in the same
-/// color that got painted. Callers run this after any change that invalidates mapped
-/// highlight columns (zoom, detail change) or, in the live TUI viewers, every frame because
-/// the overlay set changes with scrolling.
+/// `overlays` is written back with the colors used by annotation bars, connectors, and
+/// labels. Annotation spans leave sequence cells and graph edges in their normal colors.
+/// Callers run this after zoom or detail changes, or every frame in the live TUI viewers
+/// because the overlay set changes with scrolling.
 pub fn reapply_overlays<R>(
     engine: &LayoutEngine<GenGraph>,
     view_state: &mut GraphViewState<GraphNode>,
@@ -1651,11 +1648,9 @@ pub fn reapply_overlays<R>(
             .sum::<i64>())
     });
 
-    // Decide every span's locus and color first (only needs `&engine`); painting
-    // (`&mut view_state`) happens in a second pass once every color is settled.
+    // Use mapped span extents to keep overlapping annotation colors distinct.
     let accents = accent_colors();
     let mut occupied: Vec<(CellRegion, Color)> = Vec::new();
-    let mut decisions: Vec<(usize, GraphLocus, Color)> = Vec::new();
     for idx in span_indices {
         let span = overlays[idx]
             .span()
@@ -1696,14 +1691,10 @@ pub fn reapply_overlays<R>(
         for region in regions {
             occupied.push((region, color));
         }
-        decisions.push((idx, locus, color));
+        overlays[idx].style.color = color;
     }
 
     view_state.clear_all_highlights();
-    for (idx, locus, color) in &decisions {
-        overlays[*idx].style.color = *color;
-        highlight_match_range(view_state, levels, locus, overlays[*idx].style);
-    }
     for overlay in overlays.iter() {
         if let Some(nodes) = overlay.path_nodes() {
             view_state.set_path_highlight(overlay.style, nodes.to_vec());
@@ -2478,8 +2469,7 @@ mod tests {
                 .unwrap();
         }
 
-        // The sequence row stays on the rect's center row (where the span highlight is
-        // painted) with the flags under it.
+        // The sequence row stays on the rect's center row with the flags under it.
         let rect = view_state
             .frame
             .rect_of(node_a)
@@ -2490,15 +2480,7 @@ mod tests {
             "AmpR and lacZ overlap: two lanes"
         );
         let sequence_y = area.height as i64 - 1 - sequence_row(rect);
-        let theme = current_theme();
         let buffer = terminal.backend().buffer();
-        let covered = &buffer[((rect.min.x + 10) as u16, sequence_y as u16)];
-        assert_ne!(
-            covered.bg, theme[0x05],
-            "AmpR's highlight lands on the sequence row"
-        );
-        let uncovered = &buffer[((rect.min.x + 1) as u16, sequence_y as u16)];
-        assert_eq!(uncovered.bg, theme[0x05]);
         let lane = &buffer[((rect.min.x + 4) as u16, sequence_y as u16 + 1)];
         assert_eq!(lane.symbol(), "═");
 
