@@ -1361,17 +1361,20 @@ fn normalize_graph_order(graph: &GenGraph) -> GenGraph {
     normalized
 }
 
+type GraphEngineSetup<R> = (
+    LayoutEngine<GenGraph>,
+    Vec<(VisualDetail, R, GapSizes)>,
+    GraphViewState<GraphNode>,
+);
+
 /// Shared body of [`create_gen_graph_engine`]/[`create_send_sync_gen_graph_engine`]: dims
 /// pruned edges and inaccessible nodes, starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
 /// free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
 fn build_gen_graph_engine<R>(
-    mut graph: GenGraph,
+    graph: GenGraph,
     levels: Vec<(VisualDetail, R, GapSizes)>,
-) -> (
-    LayoutEngine<GenGraph>,
-    Vec<(VisualDetail, R, GapSizes)>,
-    GraphViewState<GraphNode>,
-) {
+) -> GraphEngineSetup<R> {
+    let mut graph = normalize_graph_order(&graph);
     collapse_reverse_complement_edges(&mut graph);
     let backward_edges = extract_backward_edges(&mut graph);
     let pruned = compute_pruned_edges(&graph);

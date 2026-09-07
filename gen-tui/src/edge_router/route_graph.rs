@@ -138,11 +138,10 @@ pub(crate) fn make_rectilinear(
                     if let Some(edge_idx) = graph.find_edge(*node_index1, *node_index2) {
                         let edge = graph.edge_weight(edge_idx).unwrap();
                         (edge.bundle.clone(), edge.is_backward_span)
-                    } else if let Some(edge_idx) = graph.find_edge(*node_index2, *node_index1) {
-                        let edge = graph.edge_weight(edge_idx).unwrap();
-                        (edge.bundle.clone(), edge.is_backward_span)
                     } else {
-                        return None; // No edge exists
+                        let edge_index = graph.find_edge(*node_index2, *node_index1)?;
+                        let edge = graph.edge_weight(edge_index).unwrap();
+                        (edge.bundle.clone(), edge.is_backward_span)
                     };
 
                 // Convert from NodeIndex to array indices for layout_layer
