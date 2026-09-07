@@ -68,7 +68,7 @@ impl GraphBuilder<'_> {
     }
 
     fn transpose(&mut self) {
-        for (_node_id, position) in self.node_positions_by_id.iter_mut() {
+        for position in self.node_positions_by_id.values_mut() {
             let (x, y) = position;
             *position = (*y, *x);
         }
@@ -84,7 +84,7 @@ impl GraphBuilder<'_> {
             self.node_ids_by_position.insert(*position, *node_id);
         }
 
-        for (_node_id, port) in self.node_ports_by_id.iter_mut() {
+        for port in self.node_ports_by_id.values_mut() {
             let (n, e, s, w) = port;
             *port = (*e, *n, *w, *s);
         }
@@ -1055,24 +1055,21 @@ impl Router {
         // Find a position for the new track that is as close to the middle as possible,
         // and that is accessible from the pins without violating a vertical constraint.
         let current_vertical_wires = self.vertical_wiring(graph_builder);
-        let min_start;
-        let max_end;
-
-        if current_vertical_wires.is_empty() {
-            min_start = 1;
-            max_end = self.channel_width;
+        let (min_start, max_end) = if current_vertical_wires.is_empty() {
+            (1, self.channel_width)
         } else {
-            min_start = current_vertical_wires
+            let min_start = current_vertical_wires
                 .iter()
                 .min_by(|wire1, wire2| wire1.0.cmp(&wire2.0))
                 .unwrap()
                 .0;
-            max_end = current_vertical_wires
+            let max_end = current_vertical_wires
                 .iter()
                 .max_by(|wire1, wire2| wire1.1.cmp(&wire2.1))
                 .unwrap()
                 .1;
-        }
+            (min_start, max_end)
+        };
 
         let new_track_candidate_bottom = cmp::min(min_start, mid_track);
         let new_track_candidate_top = cmp::max(max_end + 1, mid_track);
@@ -1103,7 +1100,7 @@ impl Router {
 
         // Update the active assignments for all tracks above the new track,
         // starting from the top down so we don't overwrite any existing assignments
-        for (_net, old_tracks) in tracks_by_net.iter_mut() {
+        for old_tracks in tracks_by_net.values_mut() {
             let mut new_tracks = HashSet::new();
             for old_track in old_tracks.iter() {
                 if *old_track >= new_track {

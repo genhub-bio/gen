@@ -377,16 +377,33 @@ fn teleport_through_wormhole(
     graph_view_state.mark_wormhole_entry(target);
 }
 
+/// Initial graph selection and navigation for the full-screen viewer.
+pub struct BlockGroupViewOptions<'a> {
+    /// Graph to select when opening the viewer.
+    pub name: Option<String>,
+    /// Sample containing the selected graph.
+    pub sample_name: Option<String>,
+    /// Collection to browse.
+    pub collection_name: &'a str,
+    /// Requested node ID and offset.
+    pub position: Option<String>,
+    /// Historical revision to display, if requested.
+    pub history_ref: Option<&'a str>,
+}
+
 pub fn view_block_group(
     conn: &GraphConnection,
     config_conn: &gen_models::db::ConfigConnection,
     workspace: &Workspace,
-    name: Option<String>,
-    sample_name: Option<String>,
-    collection_name: &str,
-    position: Option<String>, // Node ID and offset
-    history_ref: Option<&str>,
+    options: BlockGroupViewOptions<'_>,
 ) -> Result<(), Box<dyn Error>> {
+    let BlockGroupViewOptions {
+        name,
+        sample_name,
+        collection_name,
+        position,
+        history_ref,
+    } = options;
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Loading block group");
@@ -649,10 +666,8 @@ pub fn view_block_group(
                                 focus_zone = FocusZone::Canvas;
                                 tui_layout_change = true;
                             }
-                            KeyCode::Char('c') => {
-                                if panel_mode == PanelMode::Messages {
-                                    messages.clear();
-                                }
+                            KeyCode::Char('c') if panel_mode == PanelMode::Messages => {
+                                messages.clear();
                             }
                             _ => {}
                         },
