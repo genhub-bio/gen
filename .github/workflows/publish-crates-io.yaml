@@ -49,9 +49,9 @@ jobs:
             echo "Tag version ($tag_stripped) does not match Cargo.toml version ($version)" >&2
             exit 1
           fi
-          mismatched=$(cargo metadata --format-version 1 --no-deps | jq -r --arg version "$version" '.packages[] | select(.version != $version) | "\(.name)=\(.version)"')
+          mismatched=$(cargo metadata --format-version 1 --no-deps | jq -r --arg version "$version" '.packages[] | select(.publish != []) | select(.version != $version) | "\(.name)=\(.version)"')
           if [ -n "$mismatched" ]; then
-            echo "Workspace crate versions do not match $version:" >&2
+            echo "Publishable workspace crate versions do not match $version:" >&2
             echo "$mismatched" >&2
             exit 1
           fi

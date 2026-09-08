@@ -43,7 +43,7 @@ use crate::{
         HistoryStore,
         dolt::{DoltHistoryStore, is_current_branch_dirty},
     },
-    traits::*,
+    select::ModelSelectRow,
 };
 
 pub const GEN_DEFAULT_COMMITTER_NAME: &str = "gen";

@@ -9,7 +9,6 @@ use crate::{
     db::GraphConnection,
     file_types::FileTypes,
     operations::OperationFileInfo,
-    traits::Query,
 };
 
 /// An executable statement returned by DoltLite's `dolt_patch` table function.

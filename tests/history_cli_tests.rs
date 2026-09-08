@@ -26,7 +26,6 @@ use gen_models::{
     },
     node::Node,
     sample_lineage::SampleLineage,
-    traits::Query,
 };
 use rusqlite::params;
 use tempfile::tempdir;
@@ -560,9 +559,8 @@ mod operation_history {
 
 mod patches {
     use super::{
-        BlockGroup, File, PathBuf, Query, SampleLineage, Workspace, assert_success, fs,
-        get_connection, load_patches, operations_stdout, operations_stdout_for_branch, params,
-        run_gen, tempdir,
+        BlockGroup, File, PathBuf, SampleLineage, Workspace, assert_success, fs, get_connection,
+        load_patches, operations_stdout, operations_stdout_for_branch, run_gen, tempdir,
     };
 
     #[test]
@@ -1013,24 +1011,20 @@ mod patches {
             vec!["default".to_string()],
             "patch apply should preserve the lineage row for the derived sample"
         );
-        let default_block_group = BlockGroup::query(
-            &graph_conn,
-            "SELECT * FROM block_groups
-         WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-            params!["default", "default", "m123"],
-        )
-        .into_iter()
-        .next()
-        .expect("should retain the source block group");
-        let imported_block_group = BlockGroup::query(
-            &graph_conn,
-            "SELECT * FROM block_groups
-         WHERE collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-            params!["default", "unknown", "m123"],
-        )
-        .into_iter()
-        .next()
-        .expect("should import the derived block group");
+        let default_block_group = BlockGroup::select(&graph_conn)
+            .collection_name("default")
+            .sample_name("default")
+            .name("m123")
+            .get()
+            .expect("should query the source block group")
+            .expect("should retain the source block group");
+        let imported_block_group = BlockGroup::select(&graph_conn)
+            .collection_name("default")
+            .sample_name("unknown")
+            .name("m123")
+            .get()
+            .expect("should query the derived block group")
+            .expect("should import the derived block group");
         assert_eq!(
             imported_block_group.parent_block_group_id,
             Some(default_block_group.id),

@@ -2,11 +2,11 @@ use std::str::FromStr;
 
 use gen_core::HashId;
 use rusqlite::{
-    Connection, params,
+    Connection, Row, params,
     types::{FromSql, ToSql},
 };
 
-use crate::traits::Query;
+use crate::select::sql_table_name_with_history_ref;
 
 // This looks a bit redundant with the HashId sql parsing, but is not because the id column can be any type. The macro below
 // and these traits provide a generic way to go from hex in sql -> rust type. The traversal code encodes everything as hex
@@ -59,9 +59,10 @@ macro_rules! impl_numeric_lineage_id {
 
 impl_numeric_lineage_id!(i32, i64, u32, u64, usize);
 
-pub trait SqlLineage: Query<Model = Self> + Sized {
+pub trait SqlLineage: Sized {
     type Id: LineageId;
 
+    const TABLE_NAME: &'static str;
     const PARENT_TABLE_NAME: &'static str;
     const PARENT_ID_COLUMN: &'static str;
     const CHILD_TABLE_NAME: &'static str;
@@ -71,6 +72,7 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
 
     fn parent_id(&self) -> &Self::Id;
     fn child_id(&self) -> &Self::Id;
+    fn process_row(row: &Row) -> rusqlite::Result<Self>;
 
     fn get_ancestors(
         conn: &Connection,
@@ -79,7 +81,8 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
         history_ref: Option<&str>,
     ) -> Vec<Self::Id> {
         let max_depth = max_depth.map(|depth| depth as i64);
-        let lineage_table_name = Self::table_name_with_history_ref(history_ref);
+        let lineage_table_name =
+            sql_table_name_with_history_ref(Self::TABLE_NAME, Some(Self::TABLE_NAME), history_ref);
         let parent_table_name = history_ref.map_or_else(
             || Self::PARENT_TABLE_NAME.to_string(),
             |_| format!("dolt_at_{}(:history_ref)", Self::PARENT_TABLE_NAME),
@@ -202,7 +205,12 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
             child_column = Self::CHILD_COLUMN,
         );
 
-        Self::query(conn, &query, [])
+        let mut statement = conn.prepare(&query).unwrap();
+        statement
+            .query_map([], Self::process_row)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 
     fn get_path_between(
@@ -301,7 +309,8 @@ pub trait SqlLineage: Query<Model = Self> + Sized {
                 child_column = Self::CHILD_COLUMN,
             );
 
-            if let Ok(edge) = Self::get(conn, &query, params![&pair[0], &pair[1]]) {
+            let edge = conn.query_row(&query, params![&pair[0], &pair[1]], Self::process_row);
+            if let Ok(edge) = edge {
                 edges.push(edge);
             }
         }
@@ -321,19 +330,6 @@ mod tests {
         child_id: i64,
     }
 
-    impl Query for NumericLineage {
-        type Model = NumericLineage;
-
-        const TABLE_NAME: &'static str = "numeric_lineage";
-
-        fn process_row(row: &Row) -> rusqlite::Result<Self::Model> {
-            Ok(NumericLineage {
-                parent_id: row.get(0)?,
-                child_id: row.get(1)?,
-            })
-        }
-    }
-
     impl SqlLineage for NumericLineage {
         type Id = i64;
 
@@ -343,6 +339,14 @@ mod tests {
         const PARENT_COLUMN: &'static str = "parent_id";
         const PARENT_ID_COLUMN: &'static str = "id";
         const PARENT_TABLE_NAME: &'static str = "numeric_nodes";
+        const TABLE_NAME: &'static str = "numeric_lineage";
+
+        fn process_row(row: &Row) -> rusqlite::Result<Self> {
+            Ok(NumericLineage {
+                parent_id: row.get(0)?,
+                child_id: row.get(1)?,
+            })
+        }
 
         fn parent_id(&self) -> &Self::Id {
             &self.parent_id
@@ -359,19 +363,6 @@ mod tests {
         child_id: HashId,
     }
 
-    impl Query for HashLineage {
-        type Model = HashLineage;
-
-        const TABLE_NAME: &'static str = "hash_lineage";
-
-        fn process_row(row: &Row) -> rusqlite::Result<Self::Model> {
-            Ok(HashLineage {
-                parent_id: row.get(0)?,
-                child_id: row.get(1)?,
-            })
-        }
-    }
-
     impl SqlLineage for HashLineage {
         type Id = HashId;
 
@@ -381,6 +372,14 @@ mod tests {
         const PARENT_COLUMN: &'static str = "parent_id";
         const PARENT_ID_COLUMN: &'static str = "id";
         const PARENT_TABLE_NAME: &'static str = "hash_nodes";
+        const TABLE_NAME: &'static str = "hash_lineage";
+
+        fn process_row(row: &Row) -> rusqlite::Result<Self> {
+            Ok(HashLineage {
+                parent_id: row.get(0)?,
+                child_id: row.get(1)?,
+            })
+        }
 
         fn parent_id(&self) -> &Self::Id {
             &self.parent_id

@@ -695,7 +695,6 @@ mod tests {
         file_types::FileTypes,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::{OperationFile, commit_operation_summary},
-        traits::Query,
     };
     use noodles::fasta;
 
@@ -1209,7 +1208,9 @@ mod tests {
         );
 
         assert!(AnnotationGroup::query_by_sample(conn, "no-annotation-sample", None).is_empty());
-        let annotations = Annotation::query(conn, "select * from annotations", rusqlite::params!());
+        let annotations = Annotation::select(conn)
+            .load()
+            .expect("should load imported annotations");
         assert!(annotations.is_empty());
     }
 

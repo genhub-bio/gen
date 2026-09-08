@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "gen-models-macros-fixture"
-version = "0.2.1"
+version = "0.0.0"
 dependencies = [
  "gen-models",
  "gen-models-macros",

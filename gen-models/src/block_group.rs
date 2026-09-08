@@ -1299,7 +1299,6 @@ mod tests {
     use capnp::message::TypedBuilder;
     use chrono::Utc;
     use gen_core::{NO_CHROMOSOME_INDEX, region::RegionResolutionError};
-    use rusqlite::types::Value as SQLValue;
 
     use super::*;
     use crate::{
@@ -1312,7 +1311,6 @@ mod tests {
         test_helpers::{
             create_bg, get_connection, interval_tree_verify, setup_block_group, test_workspace,
         },
-        traits::Query,
     };
 
     mod region_resolver {
@@ -1674,16 +1672,14 @@ mod tests {
         let child_a = child_by_parent.get(&parent_a_bg.id).unwrap();
         let child_b = child_by_parent.get(&parent_b_bg.id).unwrap();
 
-        let child_a_edges = BlockGroupEdge::query(
-            conn,
-            "select * from block_group_edges where block_group_id = ?1",
-            params![child_a.id],
-        );
-        let child_b_edges = BlockGroupEdge::query(
-            conn,
-            "select * from block_group_edges where block_group_id = ?1",
-            params![child_b.id],
-        );
+        let child_a_edges = BlockGroupEdge::select(conn)
+            .block_group_id(child_a.id)
+            .load()
+            .expect("should load the first child's edges");
+        let child_b_edges = BlockGroupEdge::select(conn)
+            .block_group_id(child_b.id)
+            .load()
+            .expect("should load the second child's edges");
         assert_eq!(
             child_a_edges
                 .iter()
@@ -2151,11 +2147,11 @@ mod tests {
         let child_a = child_by_parent.get(&parent_a_bg.id).unwrap();
         let child_b = child_by_parent.get(&parent_b_bg.id).unwrap();
 
-        let child_a_paths = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1 order by name",
-            params![child_a.id],
-        );
+        let child_a_paths = Path::select(conn)
+            .block_group_id(child_a.id)
+            .order_by(crate::path::PathSelect::Name, Direction::Asc)
+            .load()
+            .expect("should load the first child's paths");
         assert_eq!(
             child_a_paths
                 .iter()
@@ -2164,11 +2160,11 @@ mod tests {
             vec!["chr1"]
         );
 
-        let child_b_paths = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1 order by name",
-            params![child_b.id],
-        );
+        let child_b_paths = Path::select(conn)
+            .block_group_id(child_b.id)
+            .order_by(crate::path::PathSelect::Name, Direction::Asc)
+            .load()
+            .expect("should load the second child's paths");
         assert_eq!(
             child_b_paths
                 .iter()
@@ -2177,11 +2173,11 @@ mod tests {
             vec!["chr1", "chr1-alt"]
         );
 
-        let child_a_accessions = Accession::query(
-            conn,
-            "select * from accessions where block_group_id = ?1 order by name",
-            params![child_a.id],
-        );
+        let child_a_accessions = Accession::select(conn)
+            .block_group_id(child_a.id)
+            .order_by(crate::accession::AccessionSelect::Name, Direction::Asc)
+            .load()
+            .expect("should load the first child's accessions");
         assert_eq!(
             child_a_accessions
                 .iter()
@@ -2190,11 +2186,11 @@ mod tests {
             Vec::<&str>::new()
         );
 
-        let child_b_accessions = Accession::query(
-            conn,
-            "select * from accessions where block_group_id = ?1 order by name",
-            params![child_b.id],
-        );
+        let child_b_accessions = Accession::select(conn)
+            .block_group_id(child_b.id)
+            .order_by(crate::accession::AccessionSelect::Name, Direction::Asc)
+            .load()
+            .expect("should load the second child's accessions");
         assert_eq!(
             child_b_accessions
                 .iter()
@@ -2211,11 +2207,10 @@ mod tests {
         let mut path_cache = PathCache::new(conn);
         let acc_1 = BlockGroup::add_accession(conn, &path, "test", 3, 7, &mut path_cache).unwrap();
         assert_eq!(
-            Accession::query(
-                conn,
-                "select * from accessions where name = ?1",
-                rusqlite::params!(SQLValue::from("test".to_string())),
-            ),
+            Accession::select(conn)
+                .name("test")
+                .load()
+                .expect("should load the named accession"),
             vec![Accession {
                 id: acc_1.id,
                 name: "test".to_string(),
@@ -2234,12 +2229,11 @@ mod tests {
         .unwrap();
         let _bg2 = get_single_bg_id(conn, "test", "sample2", "chr1", vec!["test".to_string()]);
         assert_eq!(
-            Accession::query(
-                conn,
-                "select * from accessions where name = ?1",
-                rusqlite::params!(SQLValue::from("test".to_string())),
-            )
-            .len(),
+            Accession::select(conn)
+                .name("test")
+                .load()
+                .expect("should load the named accession")
+                .len(),
             1
         );
     }
@@ -3321,11 +3315,10 @@ mod tests {
         )
         .unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
-        let _new_path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1",
-            params![new_bg_id],
-        );
+        let _new_path = Path::select(conn)
+            .block_group_id(new_bg_id)
+            .load()
+            .expect("should load the child path");
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -3514,11 +3507,10 @@ mod tests {
         )
         .unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
-        let new_path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1",
-            rusqlite::params!(SQLValue::from(new_bg_id)),
-        );
+        let new_path = Path::select(conn)
+            .block_group_id(new_bg_id)
+            .load()
+            .expect("should load the child path");
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -3570,11 +3562,10 @@ mod tests {
             "chr1",
             vec!["child".to_string()],
         );
-        let _new_path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1",
-            rusqlite::params!(SQLValue::from(gc_bg_id)),
-        );
+        let _new_path = Path::select(conn)
+            .block_group_id(gc_bg_id)
+            .load()
+            .expect("should load the grandchild path");
 
         let insert = PathBlock {
             node_id: insert_node_id,
@@ -3633,11 +3624,10 @@ mod tests {
         )
         .unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
-        let _new_path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1",
-            params![new_bg_id],
-        );
+        let _new_path = Path::select(conn)
+            .block_group_id(new_bg_id)
+            .load()
+            .expect("should load the child path");
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
             .sequence("NNNN")
@@ -3705,11 +3695,10 @@ mod tests {
             "chr1",
             vec!["child".to_string()],
         );
-        let _new_path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1",
-            params![gc_bg_id],
-        );
+        let _new_path = Path::select(conn)
+            .block_group_id(gc_bg_id)
+            .load()
+            .expect("should load the grandchild path");
 
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -3785,11 +3774,10 @@ mod tests {
         )
         .unwrap();
         let new_bg_id = get_single_bg_id(conn, "test", "child", "chr1", vec!["test".to_string()]);
-        let _new_path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1",
-            rusqlite::params!(SQLValue::from(new_bg_id)),
-        );
+        let _new_path = Path::select(conn)
+            .block_group_id(new_bg_id)
+            .load()
+            .expect("should load the child path");
         // This is a heterozygous replacement of 5 bases with 4 bases, so positions
         // downstream of this are not addressable.
         let insert_sequence = Sequence::new()
@@ -3861,11 +3849,10 @@ mod tests {
             "chr1",
             vec!["child".to_string()],
         );
-        let _new_path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1",
-            rusqlite::params!(SQLValue::from(gc_bg_id)),
-        );
+        let _new_path = Path::select(conn)
+            .block_group_id(gc_bg_id)
+            .load()
+            .expect("should load the grandchild path");
 
         let insert_sequence = Sequence::new()
             .sequence_type("DNA")
@@ -4038,7 +4025,10 @@ mod tests {
             let end_node_coordinate = 25 - end_block.start + end_block.sequence_start;
 
             let block_group2 = create_bg(conn, "test", "test", "chr1.1");
-            let node_count_before = Node::query(conn, "SELECT * FROM nodes", params![]).len();
+            let node_count_before = Node::select(conn)
+                .load()
+                .expect("should load nodes before deriving the subgraph")
+                .len();
             BlockGroup::derive_subgraph(
                 conn,
                 test_workspace(),
@@ -4055,7 +4045,10 @@ mod tests {
                 true,
             )
             .unwrap();
-            let node_count_after = Node::query(conn, "SELECT * FROM nodes", params![]).len();
+            let node_count_after = Node::select(conn)
+                .load()
+                .expect("should load nodes after deriving the subgraph")
+                .len();
             assert_eq!(node_count_after, node_count_before);
             let all_sequences2 =
                 BlockGroup::get_all_sequences(conn, test_workspace(), &block_group2.id, false)

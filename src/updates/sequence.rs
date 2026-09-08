@@ -195,10 +195,8 @@ mod tests {
         path::Path,
         region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
-        traits::Query,
     };
     use petgraph::Direction;
-    use rusqlite::params;
 
     use super::*;
     use crate::{
@@ -207,6 +205,18 @@ mod tests {
         test_helpers::{get_sample_bg, setup_block_group, setup_gen},
         updates::library::update_with_library,
     };
+
+    fn block_groups_for_sample(
+        conn: &gen_models::db::GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Vec<BlockGroup> {
+        BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .load()
+            .expect("should query block groups for the sample")
+    }
 
     fn insertion_block(
         conn: &gen_models::db::GraphConnection,
@@ -417,11 +427,7 @@ mod tests {
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            params![collection, "child sample"],
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -542,11 +548,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAATTTTTTTTAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            params![collection, "grandchild sample"],
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -607,11 +609,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATTTTTTTTAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            params![collection, "grandchild sample"],
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -678,11 +676,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATTTTTTTTGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            params![collection, "grandchild sample"],
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -743,11 +737,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAAAATTTTTTTTGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            params![collection, "grandchild sample"],
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -808,11 +798,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAAAAAAAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            params![collection, "grandchild sample"],
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -862,11 +848,7 @@ mod tests {
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            params![collection, "child sample"],
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(

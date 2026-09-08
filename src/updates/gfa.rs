@@ -490,11 +490,20 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::path::PathBuf;
 
-    use gen_models::traits::Query;
-    use rusqlite::types::Value as SQLValue;
-
     use super::*;
     use crate::{imports::fasta::import_fasta, test_helpers::setup_gen};
+
+    fn block_groups_for_sample(
+        conn: &gen_models::db::GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Vec<BlockGroup> {
+        BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .load()
+            .expect("should query block groups for the sample")
+    }
 
     #[test]
     fn test_basic_update() {
@@ -537,14 +546,7 @@ mod tests {
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("applied diff".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "applied diff");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -594,14 +596,7 @@ mod tests {
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("applied diff".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "applied diff");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(

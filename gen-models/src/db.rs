@@ -1,13 +1,28 @@
 use std::{ops::Deref, path::Path, rc::Rc, sync::Arc};
 
 use gen_core::{config::Workspace, errors::ConfigError};
-use rusqlite::Connection;
+use rusqlite::{Connection, limits::Limit};
 
 use crate::{
     history::dolt::{active_branch, checkout, connect_branch},
     migrations::{run_config_migrations, run_migrations},
     operations::Defaults,
 };
+
+/// Returns the SQLite variable parameter limit for the provided connection.
+pub fn sqlite_parameter_limit(conn: &Connection) -> usize {
+    let limit = conn
+        .limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
+        .expect("SQLite parameter limit should be readable");
+    usize::try_from(limit).expect("SQLite parameter limit should be positive")
+}
+
+/// Computes how many rows can be inserted per batch given a parameter count.
+pub fn max_rows_per_batch(conn: &Connection, params_per_row: usize) -> usize {
+    let params_per_row = params_per_row.max(1);
+    let max_params = sqlite_parameter_limit(conn);
+    (max_params / params_per_row).max(1)
+}
 
 #[derive(Debug)]
 pub struct GraphConnection(pub Connection);

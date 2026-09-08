@@ -1,4 +1,4 @@
-use gen_models::{Direction, ModelSelectError, select::Connection, traits::Query};
+use gen_models::{Direction, ModelSelectError, select::Connection};
 use gen_models_macros_fixture::{
     CountedModel, CustomSourceModel, CustomSourceModelSelect, DerivedModel, DerivedModelSelect,
     FailingSqlValue, FailingSqlValueModel, FixtureCompositeKey, FixtureCompositeKeySelect,
@@ -248,12 +248,8 @@ fn test_generated_all_loads_every_model() {
 }
 
 #[test]
-fn test_generated_query_implementation_supports_history_and_custom_rows() {
+fn test_generated_model_supports_history_and_custom_rows() {
     let conn = connection();
-
-    assert_eq!(FixtureSample::TABLE_NAME, "fixture_samples");
-    assert_eq!(FixtureSample::HISTORY_TABLE_NAME, Some("fixture_samples"));
-    assert_eq!(DerivedModel::HISTORY_TABLE_NAME, None);
 
     let derived = DerivedModel::select(&conn)
         .load()

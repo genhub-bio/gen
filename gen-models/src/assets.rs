@@ -24,7 +24,6 @@ use crate::{
     errors::{FileAdditionError, FileStoreError, QueryError},
     history::dolt::hash_of,
     operations::FileAddition,
-    traits::Query,
 };
 
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {

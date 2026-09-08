@@ -1,16 +1,15 @@
-use std::{collections::HashMap, rc::Rc};
+use std::collections::HashMap;
 
 use gen_core::{HashId, calculate_hash, traits::Capnp};
 use indexmap::IndexSet;
-use rusqlite::{self, ToSql, types::Value};
+use rusqlite::{self, types::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Direction, ModelSelect,
-    db::GraphConnection,
+    db::{GraphConnection, max_rows_per_batch},
     edge::{Edge, EdgeData},
     gen_models_capnp::block_group_edge,
-    traits::*,
 };
 
 #[derive(
@@ -219,24 +218,12 @@ impl BlockGroupEdge {
         edge_ids: &[HashId],
         history_ref: Option<&str>,
     ) -> Vec<AugmentedEdge> {
-        let query = format!(
-            "SELECT * FROM {} WHERE block_group_id = :block_group_id AND edge_id in rarray(:edge_ids);",
-            Self::table_name_with_history_ref(history_ref),
-        );
-        let edge_id_values = Rc::new(
-            edge_ids
-                .iter()
-                .map(|edge_id| Value::from(*edge_id))
-                .collect::<Vec<_>>(),
-        );
-        let mut params: Vec<(&str, &dyn ToSql)> = vec![
-            (":block_group_id", block_group_id),
-            (":edge_ids", &edge_id_values),
-        ];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        let block_group_edges = BlockGroupEdge::query(conn, &query, &params[..]);
+        let block_group_edges = BlockGroupEdge::select(conn)
+            .block_group_id(*block_group_id)
+            .edge_id_in(edge_ids.iter().copied())
+            .with_ref(history_ref)
+            .load()
+            .expect("should load block group edges");
         let edge_ids = block_group_edges
             .iter()
             .map(|block_group_edge| block_group_edge.edge_id)

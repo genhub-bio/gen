@@ -22,7 +22,6 @@ use gen_models::{
     errors::{AnnotationError, BlockGroupError, PathError, SequenceError},
     node::Node,
     sample::Sample,
-    traits::Query,
 };
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, visit::Dfs};

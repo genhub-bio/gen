@@ -42,7 +42,6 @@ use gen_models::{
     operations::{Defaults, OperationFile, RemoteBranch, add_files_operation},
     reference_alias::ReferenceAlias,
     sample::Sample,
-    traits::Query,
 };
 use rusqlite::{params, types::Value};
 use sha2::digest::typenum::Gr;

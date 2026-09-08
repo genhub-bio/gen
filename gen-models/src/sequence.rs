@@ -18,9 +18,9 @@ use thiserror::Error;
 use crate::{
     ModelSelect, ModelSelectError,
     assets::{AssetRef, AssetUri, LocalAssetUri},
-    db::GraphConnection,
+    db::{GraphConnection, max_rows_per_batch},
     gen_models_capnp::sequence,
-    traits::{Query, max_rows_per_batch},
+    select::ModelSelectRow,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, ModelSelect)]
@@ -614,7 +614,7 @@ impl Sequence {
         T: Clone,
         rusqlite::types::Value: From<T>,
     {
-        let sequence_table = <Self as Query>::table_name_with_history_ref(history_ref);
+        let sequence_table = Self::table_name_with_history_ref(history_ref);
         let asset_table = AssetRef::table_name_with_history_ref(history_ref);
         let query = format!(
             "WITH arr AS (
@@ -656,7 +656,7 @@ impl Sequence {
     }
 
     fn process_joined_row(row: &Row, workspace: &Workspace) -> SqlResult<Self> {
-        let mut sequence = <Self as Query>::process_row(row)?;
+        let mut sequence = <Self as ModelSelectRow>::process_row(row)?;
         if let Some(asset_ref_id) = sequence.asset_ref_id {
             let Some(joined_asset_ref_id): Option<HashId> = row.get(6)? else {
                 sequence.asset_resolution_error =

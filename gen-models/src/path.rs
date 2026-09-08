@@ -24,7 +24,6 @@ use crate::{
     gen_models_capnp::path as PathCapnp,
     node::Node,
     sequence::SequenceError,
-    traits::*,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, ModelSelect)]

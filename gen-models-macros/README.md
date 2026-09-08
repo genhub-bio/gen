@@ -23,7 +23,7 @@ pub struct Sample {
 }
 ```
 
-The derive implements [`Query`](../gen-models/src/traits.rs), adds `Sample::select(conn)`, and
+The derive owns the model's table metadata and row decoder, adds `Sample::select(conn)`, and
 generates `SampleSelect`:
 
 ```rust
@@ -63,6 +63,9 @@ deduplicated, and empty iterators match no rows:
 ```rust
 Sample::select(conn).name_in(["sample-a", "sample-b"]);
 ```
+
+An empty iterator renders an explicit `0 = 1` predicate. This preserves empty-set semantics while
+avoiding invalid `IN ()` SQL; omitting the filter instead would incorrectly match every row.
 
 List values are bound through SQLite's `rarray` virtual table. Each list uses one array parameter
 per selected column, so long lists do not consume one SQLite parameter per value. The renderer
@@ -431,11 +434,11 @@ pub struct Sample {
 }
 ```
 
-- `table = "..."` generates the model's `Query` implementation and supplies `TABLE_NAME`.
+- `table = "..."` is required and supplies the selector's table metadata.
 - `default_sort(field = "direction", ...)` configures the selector's default ordering. Entry order
   defines sort precedence, and each entry names a selectable Rust model field.
-- `history = false` makes `Query::HISTORY_TABLE_NAME` return `None`. If omitted, historical reads
-  use the configured table name.
+- `history = false` disables historical reads. If omitted, historical reads use the configured
+  table name.
 - `from_row = path::to::function` supplies a `fn(&Row) -> rusqlite::Result<Model>` for models that
   need custom row decoding. This is required when any field uses `skip`; otherwise the derive reads
   every field by its configured SQL column name.
@@ -471,8 +474,8 @@ pub struct Example {
 }
 ```
 
-Omitting `table` remains supported for specialized types that provide a handwritten `Query`
-implementation, such as a view over another model's table.
+Every derived model must provide `table`. A view over another model's table should name that table
+and use `alias`, `source`, `select`, or `from_row` when its source or decoding differs.
 
 `source` and `select` are trusted, compile-time raw SQL escape hatches rather than identifiers, as
 are clauses passed directly to `SqlFilter::new`. Their authors are responsible for quoting every
@@ -486,7 +489,7 @@ At compile time, `ModelSelect`:
 
 1. Accepts a non-generic struct with named fields.
 2. Reads the model and field-level `model_select` attributes.
-3. Generates `Query` from `table`, primary-key, default-sort, history, and row-decoding metadata.
+3. Generates private model metadata and row decoding from `table`, `history`, and `from_row`.
 4. Generates the selector struct, typed field constants, filter methods, and `SelectQuery`
    implementation.
 5. Generates `Model::select(conn)`, `Model::all(conn)`, selector `get()`, and selector
@@ -500,8 +503,12 @@ At runtime, [`gen-models::select`](../gen-models/src/select.rs):
    for the base model and its joined sources.
 4. Fallibly converts and binds every runtime value through `rusqlite`; list filters use `rarray`
    relations to retain input order and avoid interpolating placeholder lists.
-5. Maps full base-model loads through the generated or custom fallible `Query::process_row`, or
-   typed field and model projections through fallible decoders generated for their selected types.
+5. Maps full base-model loads through the generated or custom fallible row decoder, or typed field
+   and model projections through fallible decoders generated for their selected types.
+
+The renderer names its synthetic `rarray` relations with an indexed `__model_select_*` prefix.
+The prefix distinguishes renderer-owned aliases from model aliases during SQL review, and the
+indexes keep multiple IN filters and composite-key columns distinct within one statement.
 
 The runtime support cannot live in this proc-macro crate. A proc-macro executes inside the compiler
 and can export procedural macros, but it cannot export the normal reusable runtime types needed by

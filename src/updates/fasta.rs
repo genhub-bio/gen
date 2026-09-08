@@ -244,9 +244,7 @@ mod tests {
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
-        traits::Query,
     };
-    use rusqlite::types::Value as SQLValue;
     use tempfile::NamedTempFile;
 
     use super::*;
@@ -254,6 +252,18 @@ mod tests {
         imports::fasta::import_fasta,
         test_helpers::{get_sample_bg, setup_gen},
     };
+
+    fn block_groups_for_sample(
+        conn: &gen_models::db::GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Vec<BlockGroup> {
+        BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .load()
+            .expect("should query block groups for the sample")
+    }
 
     #[test]
     fn test_update_with_fasta() {
@@ -305,14 +315,7 @@ mod tests {
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("child sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -426,14 +429,7 @@ mod tests {
             "ATGGGGTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATCCCCTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("child sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -500,14 +496,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAATTTTTTTTAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("grandchild sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -574,14 +563,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATTTTTTTTAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("grandchild sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -654,14 +636,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATTTTTTTTGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("grandchild sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -728,14 +703,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAAAATTTTTTTTGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("grandchild sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -800,14 +768,7 @@ mod tests {
             "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATAAAAAAAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("grandchild sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "grandchild sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -915,11 +876,7 @@ mod tests {
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params![collection, "child sample".to_string()],
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -981,14 +938,7 @@ mod tests {
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "AAAAAAAATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("child sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(
@@ -1042,14 +992,7 @@ mod tests {
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
             "ATCGATCGATCGATCGATCGGGAACACACAAAAAAAA".to_string(),
         ];
-        let block_groups = BlockGroup::query(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2;",
-            rusqlite::params!(
-                SQLValue::from(collection),
-                SQLValue::from("child sample".to_string()),
-            ),
-        );
+        let block_groups = block_groups_for_sample(conn, &collection, "child sample");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
             BlockGroup::get_all_sequences(

@@ -7,13 +7,13 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 pub use rusqlite::{Connection, Result as SqlResult, Row};
 use rusqlite::{
-    ToSql, params_from_iter,
+    Params, ToSql, params_from_iter,
     types::{FromSql, ToSqlOutput, Value},
 };
 
 use crate::{
     ModelSelectError,
-    traits::{Query, max_rows_per_batch, sqlite_parameter_limit},
+    db::{max_rows_per_batch, sqlite_parameter_limit},
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -137,6 +137,8 @@ struct OrderedSqlIn {
 #[doc(hidden)]
 pub fn sql_in_filter(column: impl Into<String>, params: Vec<Value>) -> SqlFilter {
     if params.is_empty() {
+        // An empty IN set must match no rows. Keeping an explicit false predicate avoids both
+        // invalid `IN ()` SQL and accidentally dropping the filter, which would match every row.
         SqlFilter::new("0 = 1", params)
     } else {
         SqlFilter {
@@ -166,6 +168,8 @@ pub fn sql_composite_in_filter(
         ));
     }
     if rows.is_empty() {
+        // Composite IN follows the same empty-set semantics as scalar IN: it is a valid selector
+        // that deliberately matches nothing, not an absent filter.
         Ok(SqlFilter::new("0 = 1", Vec::new()))
     } else {
         Ok(SqlFilter {
@@ -441,6 +445,13 @@ pub trait SelectableModel: Sized {
     fn process_row(row: &Row, offset: usize) -> SqlResult<Self>;
 }
 
+/// Connects each derive-generated full-row decoder to the shared loader. This is the only model
+/// behavior the runtime needs generically; table and column metadata stay in generated selectors.
+#[doc(hidden)]
+pub trait ModelSelectRow: Sized {
+    fn process_row(row: &Row) -> SqlResult<Self>;
+}
+
 #[doc(hidden)]
 pub trait ModelSelectSource: Sized + 'static {
     type Selector<'conn>: SelectQuery;
@@ -673,7 +684,7 @@ where
 #[doc(hidden)]
 pub fn load<M, S>(conn: &Connection, select: &S) -> Result<Vec<M>, ModelSelectError>
 where
-    M: Query<Model = M>,
+    M: ModelSelectRow,
     S: SelectQuery,
 {
     let (query, params) = render_query(select, select.select_clause(), None)?;
@@ -683,7 +694,7 @@ where
 #[doc(hidden)]
 pub fn get<M, S>(conn: &Connection, select: &S) -> Result<Option<M>, ModelSelectError>
 where
-    M: Query<Model = M>,
+    M: ModelSelectRow,
     S: SelectQuery,
 {
     let (query, params) = render_query(select, select.select_clause(), Some(2))?;
@@ -766,6 +777,8 @@ where
         .count();
     if ordered_in_count > 0 || !order_by.is_empty() {
         query.push_str(" ORDER BY ");
+        // Each ordered-IN relation exposes the first input position for a value. Sorting by its
+        // internal alias preserves caller order after duplicate inputs have been grouped away.
         for index in 0..ordered_in_count {
             if index > 0 {
                 query.push_str(", ");
@@ -839,6 +852,8 @@ pub fn delete_by_ids(
     }
 
     let quoted_table = quote_sql_identifier(table_name);
+    // Generated aliases share SQL's identifier namespace with model tables and columns. The
+    // distinctive prefix marks them as renderer-owned, while the key index keeps them distinct.
     let aliases = (0..primary_keys.len())
         .map(|index| format!("__model_select_delete_key_{index}"))
         .collect::<Vec<_>>();
@@ -903,6 +918,8 @@ fn append_ordered_in_join(
     index: usize,
 ) {
     let column_count = ordered_in.columns.len();
+    // Ordered-IN expands one rarray relation per key column. The renderer-owned prefix and filter
+    // and column indexes keep those synthetic relations distinct from one another.
     let values_alias = quote_sql_identifier(&format!("__model_select_in_values_{index}"));
     let order_alias = format!("__model_select_in_{index}");
     let value_columns = (0..column_count)
@@ -988,6 +1005,19 @@ fn query_rows<T>(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Decodes model rows for internal SQL that cannot be represented by the fluent selector, such as
+/// recursive CTEs. Callers remain responsible for using bound parameters for runtime values.
+#[doc(hidden)]
+pub fn query_models<M, P>(conn: &Connection, query: &str, params: P) -> SqlResult<Vec<M>>
+where
+    M: ModelSelectRow,
+    P: Params,
+{
+    let mut statement = conn.prepare(query)?;
+    let rows = statement.query_map(params, M::process_row)?;
+    rows.collect()
+}
+
 #[doc(hidden)]
 pub fn qualify_sql_column(alias: &str, column: &str) -> String {
     format!(
@@ -1009,13 +1039,22 @@ pub fn default_sql_source(
     alias: &str,
     history_ref: Option<&str>,
 ) -> String {
-    let source = if history_ref.is_some() {
+    let source = sql_table_name_with_history_ref(table_name, history_table_name, history_ref);
+    format!("{source} AS {}", quote_sql_identifier(alias))
+}
+
+#[doc(hidden)]
+pub fn sql_table_name_with_history_ref(
+    table_name: &str,
+    history_table_name: Option<&str>,
+    history_ref: Option<&str>,
+) -> String {
+    if history_ref.is_some() {
         let history_table_name = history_table_name.expect("should support history ref queries");
         quote_sql_identifier(&format!("dolt_at_{history_table_name}")) + "(:history_ref)"
     } else {
         quote_sql_identifier(table_name)
-    };
-    format!("{source} AS {}", quote_sql_identifier(alias))
+    }
 }
 
 #[doc(hidden)]

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Range as StdRange, rc::Rc};
+use std::{collections::HashMap, ops::Range as StdRange};
 
 use gen_core::{
     HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace,
@@ -8,7 +8,7 @@ use gen_core::{
     traits::Capnp,
 };
 use intervaltree::IntervalTree;
-use rusqlite::{params, types::Value as SQLValue};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -16,11 +16,9 @@ use crate::{
     Direction, ModelSelect, ModelSelectError,
     block_group::{BlockGroup, BlockGroupSelect},
     block_group_edge::AugmentedEdgeData,
-    db::GraphConnection,
-    errors::QueryError,
+    db::{GraphConnection, max_rows_per_batch},
     gen_models_capnp::{accession, accession_node},
     region::ResolvedGenRegion,
-    traits::*,
 };
 
 #[derive(Clone, Deserialize, Serialize, Debug, Eq, PartialEq, ModelSelect)]
@@ -639,21 +637,16 @@ impl AccessionNode {
     pub fn query_accessions(
         conn: &GraphConnection,
         accession_ids: &[HashId],
-    ) -> Result<HashMap<HashId, Vec<AccessionNode>>, QueryError> {
+    ) -> Result<HashMap<HashId, Vec<AccessionNode>>, ModelSelectError> {
         if accession_ids.is_empty() {
             return Ok(HashMap::new());
         }
 
-        let accession_values = accession_ids
-            .iter()
-            .copied()
-            .map(SQLValue::from)
-            .collect::<Vec<_>>();
-        let nodes = AccessionNode::try_query(
-            conn,
-            "select * from accession_nodes where accession_id in rarray(?1) order by accession_id, index_in_path;",
-            params![Rc::new(accession_values)],
-        )?;
+        let nodes = AccessionNode::select(conn)
+            .accession_id_in(accession_ids.iter().copied())
+            .order_by(AccessionNodeSelect::AccessionId, Direction::Asc)
+            .order_by(AccessionNodeSelect::IndexInPath, Direction::Asc)
+            .load()?;
         let mut nodes_by_accession = HashMap::new();
         for node in nodes {
             nodes_by_accession
@@ -898,11 +891,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Accession::query(
-                conn,
-                "select * from accessions where name = ?1",
-                params!["test"],
-            ),
+            Accession::select(conn)
+                .name("test")
+                .load()
+                .expect("should query the accession by name"),
             vec![Accession {
                 id: accession.id,
                 name: "test".to_string(),

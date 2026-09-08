@@ -18,12 +18,11 @@ use thiserror::Error;
 use crate::{
     ModelSelect,
     block_group_edge::{AugmentedEdge, BlockGroupEdge},
-    db::GraphConnection,
+    db::{GraphConnection, max_rows_per_batch},
     errors::NodeError,
     gen_models_capnp::edge,
     node::Node,
     sequence::{Sequence, SequenceError},
-    traits::*,
 };
 
 #[derive(

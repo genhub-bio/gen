@@ -6,26 +6,12 @@ use crate::{
     block_group::{BlockGroup, BlockGroupSelect},
     db::GraphConnection,
     lineage::SqlLineage,
-    traits::Query,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockGroupLineage {
     pub parent_block_group_id: HashId,
     pub child_block_group_id: HashId,
-}
-
-impl Query for BlockGroupLineage {
-    type Model = BlockGroupLineage;
-
-    const TABLE_NAME: &'static str = "block_groups";
-
-    fn process_row(row: &Row) -> rusqlite::Result<Self::Model> {
-        Ok(BlockGroupLineage {
-            parent_block_group_id: row.get(0)?,
-            child_block_group_id: row.get(1)?,
-        })
-    }
 }
 
 impl SqlLineage for BlockGroupLineage {
@@ -37,6 +23,7 @@ impl SqlLineage for BlockGroupLineage {
     const PARENT_COLUMN: &'static str = "parent_block_group_id";
     const PARENT_ID_COLUMN: &'static str = "id";
     const PARENT_TABLE_NAME: &'static str = "block_groups";
+    const TABLE_NAME: &'static str = "block_groups";
 
     fn parent_id(&self) -> &Self::Id {
         &self.parent_block_group_id
@@ -44,6 +31,13 @@ impl SqlLineage for BlockGroupLineage {
 
     fn child_id(&self) -> &Self::Id {
         &self.child_block_group_id
+    }
+
+    fn process_row(row: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            parent_block_group_id: row.get(0)?,
+            child_block_group_id: row.get(1)?,
+        })
     }
 }
 

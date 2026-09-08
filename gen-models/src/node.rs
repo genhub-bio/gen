@@ -8,7 +8,12 @@ use rusqlite::{params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ModelSelect, db::GraphConnection, gen_models_capnp::node, sequence::Sequence, traits};
+use crate::{
+    ModelSelect,
+    db::{GraphConnection, max_rows_per_batch},
+    gen_models_capnp::node,
+    sequence::Sequence,
+};
 
 #[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq, ModelSelect)]
 #[model_select(table = "nodes")]
@@ -56,7 +61,7 @@ impl Node {
     /// Creates nodes in bounded batches, retaining any row that already has the same identifier.
     #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, nodes)))]
     pub fn bulk_create(conn: &GraphConnection, nodes: &[Node]) -> Result<(), NodeError> {
-        let batch_size = traits::max_rows_per_batch(conn, 2);
+        let batch_size = max_rows_per_batch(conn, 2);
 
         for chunk in nodes.chunks(batch_size) {
             let mut sql = String::from("INSERT OR IGNORE INTO nodes (id, sequence_hash) VALUES ");
@@ -156,7 +161,7 @@ impl Node {
         }
 
         let mut lengths = HashMap::new();
-        let batch_size = traits::max_rows_per_batch(conn, 1);
+        let batch_size = max_rows_per_batch(conn, 1);
         let query = "
             WITH arr AS (
                 SELECT value, rowid AS pos

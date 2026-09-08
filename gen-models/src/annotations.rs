@@ -15,14 +15,14 @@ use crate::{
     Direction, ModelSelect, ModelSelectError,
     accession::{Accession, AccessionError, AccessionSelect, AccessionSpan, NewAccession},
     assets::{AssetRef, AssetRole, OperationKind},
-    db::{DbContext, GraphConnection},
+    db::{DbContext, GraphConnection, max_rows_per_batch},
     errors::{FileAdditionError, OperationError},
     file_types::FileTypes,
     gen_models_capnp::{annotation, annotation_group, annotation_group_sample},
     history::{HistoryStore, dolt::DoltHistoryStore},
     operations::{FileAddition, OperationFile, OperationInfo, OperationSummary, track_asset_refs},
     region::GenRegionError,
-    traits::{Query, max_rows_per_batch},
+    select::query_models,
 };
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ModelSelect)]
 #[model_select(table = "annotation_groups")]
@@ -502,11 +502,11 @@ impl Annotation {
                AND bg.name = ?3
              GROUP BY a.id, a.name, a.annotation_group, a.accession_id, a.extra
              ORDER BY min(visible.depth), a.name, a.id";
-        Ok(Annotation::query(
+        Ok(query_models::<Annotation, _>(
             conn,
             query,
             params![collection_name, sample_name, block_group_name],
-        ))
+        )?)
     }
 
     pub fn intervaltree(
@@ -533,7 +533,7 @@ impl RegionResolver for Annotation {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = Annotation::query(
+        let matches = query_models::<Annotation, _>(
             conn,
             "WITH RECURSIVE visible_samples(name, depth, path) AS (
                  SELECT ?2, 0, ',' || ?2 || ','
@@ -564,7 +564,8 @@ impl RegionResolver for Annotation {
              FROM matching_annotations \
              WHERE depth = (SELECT min(depth) FROM matching_annotations)",
             params![collection_name, sample_name, region.name],
-        );
+        )
+        .map_err(AnnotationError::from)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),

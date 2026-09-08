@@ -1,0 +1,5 @@
+error: ModelSelect requires `table = "..."` on the model
+ --> tests/ui/missing_table.rs:4:8
+  |
+4 | struct MissingTable {
+  |        ^^^^^^^^^^^^

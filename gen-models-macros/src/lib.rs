@@ -18,7 +18,7 @@ use syn::{
 /// fields with `.only(...)` or complete models with `.models::<(...)>()`.
 /// Primary-key selectors also provide `get_by_id(...)`, ordered and deduplicated
 /// `query_by_ids(...)` loads, and batched `delete_by_ids(...)` mutations.
-/// `#[model_select(table = "...")]` generates the model's `Query` implementation.
+/// `#[model_select(table = "...")]` defines the selector's table metadata and row decoder.
 /// `#[model_select(column = "...")]` overrides a field's SQL column,
 /// `#[model_select(primary_key)]` marks each field in an explicit primary key,
 /// `#[model_select(default_sort(field = "asc", tie_breaker = "desc"))]` configures default
@@ -65,6 +65,13 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     }
 
     let options = ContainerOptions::from_attributes(&input.attrs)?;
+    let table = options.table.as_ref().ok_or_else(|| {
+        Error::new_spanned(
+            &model,
+            "ModelSelect requires `table = \"...\"` on the model",
+        )
+    })?;
+    let supports_history = options.history.unwrap_or(true);
     let selector = format_ident!("{}Select", model);
     // A SQL alias identifies one occurrence of a table or custom source in a query. It normally
     // matches the table name, but an explicit alias allows the same model to participate more than
@@ -77,7 +84,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             quote! { #alias }
         })
         .unwrap_or_else(|| {
-            quote! { <#model as ::gen_models::traits::Query>::TABLE_NAME }
+            quote! { #table }
         });
 
     let mut selectable_fields = Vec::new();
@@ -146,7 +153,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
             )]
             pub const #selectable_field: ::gen_models::select::SelectField<#model, #field_type, #value_type> =
                 ::gen_models::select::SelectField::new(
-                    <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                    #table,
                     #source_alias,
                     #column_literal,
                 );
@@ -201,57 +208,51 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     } else {
         explicit_primary_keys
     };
-    let primary_key_methods = primary_key_methods(&model, &primary_keys);
+    let primary_key_methods = primary_key_methods(&model, table, &primary_keys);
 
-    let query_impl = if let Some(table) = options.table.as_ref() {
-        let history_table_name = if options.history.unwrap_or(true) {
-            quote! {
-                const HISTORY_TABLE_NAME: ::core::option::Option<&'static str> =
-                    ::core::option::Option::Some(Self::TABLE_NAME);
-            }
-        } else {
-            quote! {
-                const HISTORY_TABLE_NAME: ::core::option::Option<&'static str> =
-                    ::core::option::Option::None;
-            }
-        };
-        let process_row = if let Some(from_row) = options.from_row.as_ref() {
-            quote! { #from_row(row) }
-        } else {
-            if has_skipped_field {
-                return Err(Error::new_spanned(
-                    model,
-                    "ModelSelect requires `from_row = path` when a table-backed model skips fields",
-                ));
-            }
-            quote! {
-                ::core::result::Result::Ok(Self {
-                    #(#query_initializers),*
-                })
-            }
-        };
-        quote! {
-            impl ::gen_models::traits::Query for #model {
-                type Model = Self;
-
-                const TABLE_NAME: &'static str = #table;
-                #history_table_name
-
-                fn process_row(
-                    row: &::gen_models::select::Row,
-                ) -> ::gen_models::select::SqlResult<Self::Model> {
-                    #process_row
-                }
-            }
-        }
+    let process_row = if let Some(from_row) = options.from_row.as_ref() {
+        quote! { #from_row(row) }
     } else {
-        if options.from_row.is_some() || options.history.is_some() {
+        if has_skipped_field {
             return Err(Error::new_spanned(
                 model,
-                "ModelSelect `from_row` and `history` options require `table = \"...\"`",
+                "ModelSelect requires `from_row = path` when a model skips fields",
             ));
         }
-        quote! {}
+        quote! {
+            ::core::result::Result::Ok(Self {
+                #(#query_initializers),*
+            })
+        }
+    };
+    let history_table_name = if supports_history {
+        quote! { ::core::option::Option::Some(#table) }
+    } else {
+        quote! { ::core::option::Option::None }
+    };
+    // Shared loading needs a generic row decoder, while custom SQL paths need the same generated
+    // table/history source without restoring the broader Query trait.
+    let model_select_row_impl = quote! {
+        impl ::gen_models::select::ModelSelectRow for #model {
+            fn process_row(
+                row: &::gen_models::select::Row,
+            ) -> ::gen_models::select::SqlResult<Self> {
+                #process_row
+            }
+        }
+
+        impl #model {
+            #[doc(hidden)]
+            pub fn table_name_with_history_ref(
+                history_ref: ::core::option::Option<&str>,
+            ) -> ::std::string::String {
+                ::gen_models::select::sql_table_name_with_history_ref(
+                    #table,
+                    #history_table_name,
+                    history_ref,
+                )
+            }
+        }
     };
 
     let source_clause = if let Some(source) = options.source.as_ref() {
@@ -261,8 +262,8 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         // renderer selects that source when `history_ref` is present and the model has history.
         quote! {
             ::gen_models::select::default_sql_source(
-                <#model as ::gen_models::traits::Query>::TABLE_NAME,
-                <#model as ::gen_models::traits::Query>::HISTORY_TABLE_NAME,
+                #table,
+                #history_table_name,
                 #source_alias,
                 history_ref,
             )
@@ -285,7 +286,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
         quote! {
             impl ::gen_models::select::SelectableModel for #model {
                 fn table_name() -> &'static str {
-                    <Self as ::gen_models::traits::Query>::TABLE_NAME
+                    #table
                 }
 
                 fn alias() -> &'static str {
@@ -309,7 +310,7 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
     };
 
     Ok(quote! {
-        #query_impl
+        #model_select_row_impl
         #selectable_model_impl
 
         #[derive(Clone, Debug)]
@@ -608,10 +609,10 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
 
             fn source(&self) -> ::gen_models::select::SqlSource {
                 ::gen_models::select::SqlSource::new(
-                    <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                    #table,
                     #source_alias,
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#model)),
-                    <#model as ::gen_models::traits::Query>::HISTORY_TABLE_NAME.is_some(),
+                    #supports_history,
                     Self::source_clause_for,
                 )
             }
@@ -859,17 +860,19 @@ impl FieldOptions {
 
 fn primary_key_methods(
     model: &Ident,
+    table: &LitStr,
     primary_keys: &[PrimaryKeyField],
 ) -> proc_macro2::TokenStream {
     match primary_keys {
         [] => quote! {},
-        [primary_key] => single_primary_key_methods(model, primary_key),
-        primary_keys => composite_primary_key_methods(model, primary_keys),
+        [primary_key] => single_primary_key_methods(model, table, primary_key),
+        primary_keys => composite_primary_key_methods(model, table, primary_keys),
     }
 }
 
 fn single_primary_key_methods(
     model: &Ident,
+    table: &LitStr,
     primary_key: &PrimaryKeyField,
 ) -> proc_macro2::TokenStream {
     let PrimaryKeyField {
@@ -923,7 +926,7 @@ fn single_primary_key_methods(
                     .collect::<::core::result::Result<::std::vec::Vec<_>, _>>()?;
                 ::gen_models::select::delete_by_ids(
                     self.conn,
-                    <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                    #table,
                     &[#column],
                     rows,
                 )
@@ -970,7 +973,7 @@ fn single_primary_key_methods(
                     .collect::<::core::result::Result<::std::vec::Vec<_>, _>>()?;
                 ::gen_models::select::delete_by_ids(
                     self.conn,
-                    <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                    #table,
                     &[#column],
                     rows,
                 )
@@ -981,6 +984,7 @@ fn single_primary_key_methods(
 
 fn composite_primary_key_methods(
     model: &Ident,
+    table: &LitStr,
     primary_keys: &[PrimaryKeyField],
 ) -> proc_macro2::TokenStream {
     let parameter_names = (0..primary_keys.len())
@@ -1111,7 +1115,7 @@ fn composite_primary_key_methods(
                 >>()?;
             ::gen_models::select::delete_by_ids(
                 self.conn,
-                <#model as ::gen_models::traits::Query>::TABLE_NAME,
+                #table,
                 &[#(#columns),*],
                 rows,
             )

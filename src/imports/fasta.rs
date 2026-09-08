@@ -266,7 +266,6 @@ mod tests {
         path::Path,
         sample::Sample,
         sequence::Sequence,
-        traits::Query,
     };
     use noodles::bgzf::gzi;
 
@@ -823,7 +822,10 @@ mod tests {
         .unwrap();
         commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(
-            Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
+            Node::select(conn)
+                .load()
+                .expect("should load imported nodes")
+                .len(),
             3
         );
 

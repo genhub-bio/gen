@@ -36,4 +36,3 @@ pub mod select;
 pub mod sequence;
 #[cfg(test)]
 pub mod test_helpers;
-pub mod traits;

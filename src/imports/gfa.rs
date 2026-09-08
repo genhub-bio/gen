@@ -462,14 +462,22 @@ mod tests {
 
     use gen_models::{
         assets::{OperationKind, OperationLog},
+        db::GraphConnection,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
-        traits::Query,
     };
-    use rusqlite::params;
 
     use super::*;
     use crate::test_helpers::setup_gen;
+
+    fn get_path(conn: &GraphConnection, block_group_id: HashId, name: &str) -> Path {
+        Path::select(conn)
+            .block_group_id(block_group_id)
+            .name(name)
+            .get()
+            .expect("should query the imported path")
+            .expect("should find the imported path")
+    }
 
     #[test]
     fn test_import_simple_gfa() {
@@ -492,17 +500,15 @@ mod tests {
         );
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1 AND name = ?2",
-            params![block_group_id, "m123"],
-        )[0]
-        .clone();
+        let path = get_path(conn, block_group_id, "m123");
 
         let result = path.sequence(conn, context.workspace(), None);
         assert_eq!(result.unwrap(), "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
 
-        let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
+        let node_count = Node::select(conn)
+            .load()
+            .expect("should load imported nodes")
+            .len() as i64;
         assert_eq!(node_count, 6);
     }
 
@@ -542,7 +548,10 @@ mod tests {
             HashSet::from_iter(vec!["AAAATTTTGGGGCCCC".to_string()])
         );
 
-        let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
+        let node_count = Node::select(conn)
+            .load()
+            .expect("should load imported nodes")
+            .len() as i64;
         assert_eq!(node_count, 6);
     }
 
@@ -556,17 +565,15 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1 AND name = ?2",
-            params![block_group_id, "291344"],
-        )[0]
-        .clone();
+        let path = get_path(conn, block_group_id, "291344");
 
         let result = path.sequence(conn, context.workspace(), None);
         assert_eq!(result.unwrap(), "ACCTACAAATTCAAAC");
 
-        let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
+        let node_count = Node::select(conn)
+            .load()
+            .expect("should load imported nodes")
+            .len() as i64;
         assert_eq!(node_count, 6);
     }
 
@@ -580,17 +587,15 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1 AND name = ?2",
-            params![block_group_id, "124"],
-        )[0]
-        .clone();
+        let path = get_path(conn, block_group_id, "124");
 
         let result = path.sequence(conn, context.workspace(), None);
         assert_eq!(result.unwrap(), "TATGCCAGCTGCGAATA");
 
-        let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
+        let node_count = Node::select(conn)
+            .load()
+            .expect("should load imported nodes")
+            .len() as i64;
         assert_eq!(node_count, 6);
     }
 
@@ -607,12 +612,7 @@ mod tests {
         assert_eq!(paths.len(), 20);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1 AND name = ?2",
-            params![block_group_id, "BBa_J23100"],
-        )[0]
-        .clone();
+        let path = get_path(conn, block_group_id, "BBa_J23100");
 
         let result = path.sequence(conn, context.workspace(), None);
         let big_part = "TGCTAGCTACTAGTGAAAGAGGAGAAATACTAGATGGCTTCCTCCGAAGACGTTATCAAAGAGTTCATGCGTTTCAAAGTTCGTATGGAAGGTTCCGTTAACGGTCACGAGTTCGAAATCGAAGGTGAAGGTGAAGGTCGTCCGTACGAAGGTACCCAGACCGCTAAACTGAAAGTTACCAAAGGTGGTCCGCTGCCGTTCGCTTGGGACATCCTGTCCCCGCAGTTCCAGTACGGTTCCAAAGCTTACGTTAAACACCCGGCTGACATCCCGGACTACCTGAAACTGTCCTTCCCGGAAGGTTTCAAATGGGAACGTGTTATGAACTTCGAAGACGGTGGTGTTGTTACCGTTACCCAGGACTCCTCCCTGCAAGACGGTGAGTTCATCTACAAAGTTAAACTGCGTGGTACCAACTTCCCGTCCGACGGTCCGGTTATGCAGAAAAAAACCATGGGTTGGGAAGCTTCCACCGAACGTATGTACCCGGAAGACGGTGCTCTGAAAGGTGAAATCAAAATGCGTCTGAAACTGAAAGACGGTGGTCACTACGACGCTGAAGTTAAAACCACCTACATGGCTAAAAAACCGGTTCAGCTGCCGGGTGCTTACAAAACCGACATCAAACTGGACATCACCTCCCACAACGAAGACTACACCATCGTTGAACAGTACGAACGTGCTGAAGGTCGTCACTCCACCGGTGCTTAATAACGCTGATAGTGCTAGTGTAGATCGCTACTAGAGCCAGGCATCAAATAAAACGAAAGGCTCAGTCGAAAGACTGGGCCTTTCGTTTTATCTGTTGTTTGTCGGTGAACGCTCTCTACTAGAGTCACACTGGCTCACCTTCGGGTGGGCCTTTCTGCGTTTATATACTAGAAGCGGCCGCTGCAGGCTTCCTCGCTCACTGACTCGCTGCGCTCGGTCGTTCGGCTGCGGCGAGCGGTATCAGCTCACTCAAAGGCGGTAATACGGTTATCCACAGAATCAGGGGATAACGCAGGAAAGAACATGTGAGCAAAAGGCCAGCAAAAGGCCAGGAACCGTAAAAAGGCCGCGTTGCTGGCGTTTTTCCATAGGCTCCGCCCCCCTGACGAGCATCACAAAAATCGACGCTCAAGTCAGAGGTGGCGAAACCCGACAGGACTATAAAGATACCAGGCGTTTCCCCCTGGAAGCTCCCTCGTGCGCTCTCCTGTTCCGACCCTGCCGCTTACCGGATACCTGTCCGCCTTTCTCCCTTCGGGAAGCGTGGCGCTTTCTCATAGCTCACGCTGTAGGTATCTCAGTTCGGTGTAGGTCGTTCGCTCCAAGCTGGGCTGTGTGCACGAACCCCCCGTTCAGCCCGACCGCTGCGCCTTATCCGGTAACTATCGTCTTGAGTCCAACCCGGTAAGACACGACTTATCGCCACTGGCAGCAGCCACTGGTAACAGGATTAGCAGAGCGAGGTATGTAGGCGGTGCTACAGAGTTCTTGAAGTGGTGGCCTAACTACGGCTACACTAGAAGGACAGTATTTGGTATCTGCGCTCTGCTGAAGCCAGTTACCTTCGGAAAAAGAGTTGGTAGCTCTTGATCCGGCAAACAAACCACCGCTGGTAGCGGTGGTTTTTTTGTTTGCAAGCAGCAGATTACGCGCAGAAAAAAAGGATCTCAAGAAGATCCTTTGATCTTTTCTACGGGGTCTGACGCTCAGTGGAACGAAAACTCACGTTAAGGGATTTTGGTCATGAGATTATCAAAAAGGATCTTCACCTAGATCCTTTTAAATTAAAAATGAAGTTTTAAATCAATCTAAAGTATATATGAGTAAACTTGGTCTGACAGTTACCAATGCTTAATCAGTGAGGCACCTATCTCAGCGATCTGTCTATTTCGTTCATCCATAGTTGCCTGACTCCCCGTCGTGTAGATAACTACGATACGGGAGGGCTTACCATCTGGCCCCAGTGCTGCAATGATACCGCGAGACCCACGCTCACCGGCTCCAGATTTATCAGCAATAAACCAGCCAGCCGGAAGGGCCGAGCGCAGAAGTGGTCCTGCAACTTTATCCGCCTCCATCCAGTCTATTAATTGTTGCCGGGAAGCTAGAGTAAGTAGTTCGCCAGTTAATAGTTTGCGCAACGTTGTTGCCATTGCTACAGGCATCGTGGTGTCACGCTCGTCGTTTGGTATGGCTTCATTCAGCTCCGGTTCCCAACGATCAAGGCGAGTTACATGATCCCCCATGTTGTGCAAAAAAGCGGTTAGCTCCTTCGGTCCTCCGATCGTTGTCAGAAGTAAGTTGGCCGCAGTGTTATCACTCATGGTTATGGCAGCACTGCATAATTCTCTTACTGTCATGCCATCCGTAAGATGCTTTTCTGTGACTGGTGAGTACTCAACCAAGTCATTCTGAGAATAGTGTATGCGGCGACCGAGTTGCTCTTGCCCGGCGTCAATACGGGATAATACCGCGCCACATAGCAGAACTTTAAAAGTGCTCATCATTGGAAAACGTTCTTCGGGGCGAAAACTCTCAAGGATCTTACCGCTGTTGAGATCCAGTTCGATGTAACCCACTCGTGCACCCAACTGATCTTCAGCATCTTTTACTTTCACCAGCGTTTCTGGGTGAGCAAAAACAGGAAGGCAAAATGCCGCAAAAAAGGGAATAAGGGCGACACGGAAATGTTGAATACTCATACTCTTCCTTTTTCAATATTATTGAAGCATTTATCAGGGTTATTGTCTCATGAGCGGATACATATTTGAATGTATTTAGAAAAATAAACAAATAGGGGTTCCGCGCACATTTCCCCGAAAAGTGCCACCTGACGTCTAAGAAACCATTATTATCATGACATTAACCTATAAAAATAGGCGTATCACGAGGCAGAATTTCAGATAAAAAAAATCCTTAGCTTTCGCTAAGGATGATTTCTGGAATTCGCGGCCGCATCTAGAG";
@@ -699,7 +699,10 @@ mod tests {
         assert_eq!(all_sequences.len(), 1024);
         assert_eq!(all_sequences, expected_sequences);
 
-        let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
+        let node_count = Node::select(conn)
+            .load()
+            .expect("should load imported nodes")
+            .len() as i64;
         assert_eq!(node_count, 28);
     }
 
@@ -713,12 +716,7 @@ mod tests {
         let _ = import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME);
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let path = Path::query(
-            conn,
-            "select * from paths where block_group_id = ?1 AND name = ?2",
-            params![block_group_id, "124"],
-        )[0]
-        .clone();
+        let path = get_path(conn, block_group_id, "124");
 
         let result = path.sequence(conn, context.workspace(), None);
         assert_eq!(result.unwrap(), "AA");
@@ -732,7 +730,10 @@ mod tests {
         .unwrap();
         assert_eq!(all_sequences, HashSet::from_iter(vec!["AA".to_string()]));
 
-        let node_count = Node::query(conn, "select * from nodes", rusqlite::params!()).len() as i64;
+        let node_count = Node::select(conn)
+            .load()
+            .expect("should load imported nodes")
+            .len() as i64;
         assert_eq!(node_count, 4);
     }
 
