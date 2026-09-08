@@ -1,0 +1,16 @@
+error[E0308]: mismatched types
+  --> tests/ui/mismatched_join_types.rs:18:77
+   |
+18 |     let _selector = LeftModel::select(&conn).join_on(LeftModelSelect::Name, RightModelSelect::Id);
+   |                                              -------                        ^^^^^^^^^^^^^^^^^^^^ expected `SelectField<_, _, String>`, found `SelectField<RightModel, i64>`
+   |                                              |
+   |                                              arguments to this method are incorrect
+   |
+   = note: expected struct `gen_models::select::SelectField<_, _, String>`
+              found struct `gen_models::select::SelectField<RightModel, i64, i64>`
+note: method defined here
+  --> tests/ui/mismatched_join_types.rs:3:10
+   |
+ 3 | #[derive(ModelSelect)]
+   |          ^^^^^^^^^^^
+   = note: this error originates in the derive macro `ModelSelect` (in Nightly builds, run with -Z macro-backtrace for more info)

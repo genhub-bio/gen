@@ -126,7 +126,6 @@ mod tests {
         block_group::BlockGroup,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
-        traits::Query,
     };
 
     use super::*;
@@ -158,7 +157,7 @@ mod tests {
         )?;
         let commit_hash = commit_operation_summary(&context, &operation_summary)?;
         assert_eq!(history_store.current_head()?, Some(commit_hash));
-        let mut operation_logs = OperationLog::all(conn);
+        let mut operation_logs = OperationLog::all(conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,

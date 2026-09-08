@@ -695,7 +695,6 @@ mod tests {
         file_types::FileTypes,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::{OperationFile, commit_operation_summary},
-        traits::Query,
     };
     use noodles::fasta;
 
@@ -1038,7 +1037,7 @@ mod tests {
         .unwrap();
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(conn);
+        let mut operation_logs = OperationLog::all(conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,
@@ -1209,7 +1208,9 @@ mod tests {
         );
 
         assert!(AnnotationGroup::query_by_sample(conn, "no-annotation-sample", None).is_empty());
-        let annotations = Annotation::query(conn, "select * from annotations", rusqlite::params!());
+        let annotations = Annotation::select(conn)
+            .load()
+            .expect("should load imported annotations");
         assert!(annotations.is_empty());
     }
 

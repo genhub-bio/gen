@@ -14,6 +14,20 @@ pub use crate::{
 };
 
 #[derive(Debug, Error, PartialEq)]
+pub enum ModelSelectError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] rusqlite::Error),
+    #[error("Invalid selector: {0}")]
+    InvalidSelector(String),
+    #[error("Model `{table_name}` does not support historical queries")]
+    HistoryNotSupported { table_name: String },
+    #[error("Selector returned more than one result")]
+    MultipleResults,
+    #[error("Projection source `{table_name}` with alias `{alias}` is not selected or joined")]
+    ProjectionSourceNotSelected { table_name: String, alias: String },
+}
+
+#[derive(Debug, Error, PartialEq)]
 pub enum QueryError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
@@ -87,6 +101,9 @@ pub enum RemoteError {
 
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
+
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
 
     #[error("Cannot delete remote '{0}' as it is set as the default remote")]
     CannotDeleteDefaultRemote(String),

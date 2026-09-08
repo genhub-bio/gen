@@ -19,6 +19,7 @@ rand = "0.10.1"
 gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.2.1" }
 gen-core = { path = "../gen-core", version = "0.2.1" }
 gen-graph = { path = "../gen-graph", version = "0.2.1" }
+gen-models-macros = { path = "../gen-models-macros", version = "0.2.1" }
 cached = "0.55.1"
 capnp = { version = "0.24" }
 include_dir = "0.7.4"

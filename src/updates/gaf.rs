@@ -4,12 +4,12 @@ use std::{
     io::{BufReader, Read, Write},
     num::ParseIntError,
     path::Path,
-    rc::Rc,
 };
 
 use csv::Error as CsvError;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
+    ModelSelectError,
     block_group::BlockGroup,
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     db::DbContext,
@@ -20,10 +20,8 @@ use gen_models::{
     operations::{OperationFile, OperationInfo, OperationSummary},
     sample::Sample,
     sequence::Sequence,
-    traits::*,
 };
 use regex::Regex;
-use rusqlite::{params, types::Value};
 use thiserror::Error;
 
 use crate::read_lines;
@@ -58,6 +56,8 @@ pub enum GafUpdateError {
     NodeError(#[from] NodeError),
     #[error("Sequence save error: {0}")]
     SequenceError(#[from] SequenceError),
+    #[error("Selector error: {0}")]
+    ModelSelect(#[from] ModelSelectError),
 }
 
 pub fn transform_csv_to_fasta<R, W>(reader: R, writer: &mut W) -> Result<(), GafUpdateError>
@@ -308,7 +308,6 @@ where
             )?;
 
             let mut new_edges = vec![];
-            let mut bg_nodes = vec![];
 
             if change.left.is_empty() && change.right.is_empty() {
                 panic!("Invalid change specification");
@@ -316,7 +315,6 @@ where
                 // we are inserting at the far left side, so our right node mapping is actually
                 // where we want to be
                 let (node, strand, pos) = path_changes["right"];
-                bg_nodes.push(Value::from(node));
                 new_edges.push(EdgeData {
                     source_node_id: PATH_START_NODE_ID,
                     source_coordinate: 0,
@@ -336,7 +334,6 @@ where
             } else if change.right.is_empty() {
                 // we are inserting at the far right side
                 let (node, strand, pos) = path_changes["left"];
-                bg_nodes.push(Value::from(node));
                 new_edges.push(EdgeData {
                     source_node_id: node,
                     source_coordinate: pos,
@@ -356,7 +353,6 @@ where
             } else {
                 // normal insert
                 let (node, strand, pos) = path_changes["left"];
-                bg_nodes.push(Value::from(node));
                 new_edges.push(EdgeData {
                     source_node_id: node,
                     source_coordinate: pos,
@@ -367,7 +363,6 @@ where
                 });
 
                 let (node, strand, pos) = path_changes["right"];
-                bg_nodes.push(Value::from(node));
                 new_edges.push(EdgeData {
                     source_node_id: seq_node,
                     source_coordinate: sequence.length,
@@ -379,16 +374,17 @@ where
             }
 
             let edge_ids = Edge::bulk_create(conn, &new_edges);
-            let bgs = BlockGroup::query(
-                conn,
-                "select distinct bg.* from block_groups bg left join block_group_edges bge on (bg.id = bge.block_group_id) left join edges e on (e.id = bge.edge_id and (e.source_node_id in rarray(?3) or e.target_node_id in rarray(?3))) where collection_name = ?1 and sample_name = ?2",
-                params!(collection_name.to_string(), sample_name, Rc::new(bg_nodes)),
-            );
-            for bg in bgs.iter() {
+            // Inserted edges belong to every block group in the target sample. Selecting that row
+            // set directly also avoids joins whose nullable side never constrained the base rows.
+            let block_groups = BlockGroup::select(conn)
+                .collection_name(collection_name)
+                .sample_name(&sample_name)
+                .load()?;
+            for block_group in &block_groups {
                 let new_block_group_edges = edge_ids
                     .iter()
                     .map(|edge_id| BlockGroupEdgeData {
-                        block_group_id: bg.id,
+                        block_group_id: block_group.id,
                         edge_id: *edge_id,
                         chromosome_index: 0,
                         phased: 0,
@@ -416,11 +412,22 @@ mod tests {
     use std::path::PathBuf;
 
     use gen_graph::{GraphEdge, GraphNode};
-    use gen_models::traits::Query;
+    use gen_models::{db::GraphConnection, node::NodeSelect, sequence::SequenceSelect};
     use petgraph::Direction;
 
     use super::*;
     use crate::{imports::gfa::import_gfa, test_helpers::setup_gen};
+
+    fn nodes_for_sequence(conn: &GraphConnection, sequence: &str) -> Vec<Node> {
+        Node::select(conn)
+            .join_filtered_on(
+                NodeSelect::SequenceHash,
+                SequenceSelect::Hash,
+                Sequence::select(conn).sequence(sequence),
+            )
+            .load()
+            .expect("should query nodes for the sequence")
+    }
 
     mod test_transform {
         use super::*;
@@ -509,11 +516,7 @@ mod tests {
         )
         .unwrap();
 
-        let query = Node::query(
-            conn,
-            "select n.* from nodes n left join sequences s on (n.sequence_hash = s.hash) where s.sequence = ?1",
-            params!("AATCGAATCG".to_string()),
-        );
+        let query = nodes_for_sequence(conn, "AATCGAATCG");
         let insert_node_id = query.first().unwrap().id;
         let insert_node = graph
             .nodes()
@@ -582,11 +585,7 @@ mod tests {
         .unwrap();
 
         // we should end up with a new edge putting our insert to the beginning of the graph, which is node 3.
-        let query = Node::query(
-            conn,
-            "select n.* from nodes n left join sequences s on (n.sequence_hash = s.hash) where s.sequence = ?1",
-            params!("aaa".to_string()),
-        );
+        let query = nodes_for_sequence(conn, "aaa");
         let insert_node_id = query.first().unwrap().id;
         let start_node_id = graph
             .nodes()
@@ -600,11 +599,7 @@ mod tests {
         // This checks that we have an incoming edge from our new insert to the old end of the graph
         assert_eq!(incoming_edges[1].0.node_id, insert_node_id);
 
-        let query = Node::query(
-            conn,
-            "select n.* from nodes n left join sequences s on (n.sequence_hash = s.hash) where s.sequence = ?1",
-            params!("ttt".to_string()),
-        );
+        let query = nodes_for_sequence(conn, "ttt");
         let insert_node_id = query.first().unwrap().id;
         let end_node_id = graph
             .nodes()

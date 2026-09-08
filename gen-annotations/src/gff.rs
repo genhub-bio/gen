@@ -150,7 +150,6 @@ mod tests {
         region::ResolvedGenRegion,
         sample::Sample,
         sequence::Sequence,
-        traits::Query,
     };
     use noodles::gff;
     use tempfile::tempdir;
@@ -307,18 +306,16 @@ mod tests {
         BlockGroup::insert_change(conn, test_workspace(), &change)
             .expect("should apply AA update to child sample");
 
-        let edge_to_insert = Edge::query(
-            conn,
-            "select * from edges where target_node_id = ?1",
-            rusqlite::params![node_id],
-        )[0]
-        .clone();
-        let edge_from_insert = Edge::query(
-            conn,
-            "select * from edges where source_node_id = ?1",
-            rusqlite::params![node_id],
-        )[0]
-        .clone();
+        let edge_to_insert = Edge::select(conn)
+            .target_node_id(node_id)
+            .get()
+            .expect("should query the edge into the inserted node")
+            .expect("should find the edge into the inserted node");
+        let edge_from_insert = Edge::select(conn)
+            .source_node_id(node_id)
+            .get()
+            .expect("should query the edge out of the inserted node")
+            .expect("should find the edge out of the inserted node");
         sample_path
             .new_path_with(conn, 15, 25, &edge_to_insert, &edge_from_insert)
             .unwrap();

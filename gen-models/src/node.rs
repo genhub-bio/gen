@@ -4,18 +4,19 @@ use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_END_SEQUENCE_HASH, PATH_START_NODE_ID, PATH_START_SEQUENCE_HASH,
     Sha256Hash, Workspace, traits::Capnp,
 };
-use rusqlite::{Row, params, types::Value};
+use rusqlite::{params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    db::GraphConnection,
+    ModelSelect,
+    db::{GraphConnection, max_rows_per_batch},
     gen_models_capnp::node,
     sequence::Sequence,
-    traits::{self, *},
 };
 
-#[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq)]
+#[derive(Clone, Debug, Eq, Deserialize, Hash, Serialize, PartialEq, ModelSelect)]
+#[model_select(table = "nodes")]
 pub struct Node {
     pub id: HashId,
     pub sequence_hash: Sha256Hash,
@@ -50,19 +51,6 @@ impl<'a> Capnp<'a> for Node {
     }
 }
 
-impl Query for Node {
-    type Model = Node;
-
-    const TABLE_NAME: &'static str = "nodes";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Node {
-            id: row.get(0).unwrap(),
-            sequence_hash: row.get(1).unwrap(),
-        }
-    }
-}
-
 #[derive(Debug, Error, PartialEq)]
 pub enum NodeError {
     #[error("Database error: {0}")]
@@ -73,7 +61,7 @@ impl Node {
     /// Creates nodes in bounded batches, retaining any row that already has the same identifier.
     #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, nodes)))]
     pub fn bulk_create(conn: &GraphConnection, nodes: &[Node]) -> Result<(), NodeError> {
-        let batch_size = traits::max_rows_per_batch(conn, 2);
+        let batch_size = max_rows_per_batch(conn, 2);
 
         for chunk in nodes.chunks(batch_size) {
             let mut sql = String::from("INSERT OR IGNORE INTO nodes (id, sequence_hash) VALUES ");
@@ -129,7 +117,10 @@ impl Node {
         node_ids: &[HashId],
         history_ref: Option<&str>,
     ) -> HashMap<HashId, Sequence> {
-        let nodes = Node::query_by_ids(conn, node_ids, history_ref);
+        let node_select = Node::select(conn).with_ref(history_ref);
+        let nodes = node_select
+            .query_by_ids(node_ids.iter().copied())
+            .expect("should load nodes by id");
         let sequence_hashes_by_node_id = nodes
             .iter()
             .map(|node| (node.id, node.sequence_hash))
@@ -170,7 +161,7 @@ impl Node {
         }
 
         let mut lengths = HashMap::new();
-        let batch_size = traits::max_rows_per_batch(conn, 1);
+        let batch_size = max_rows_per_batch(conn, 1);
         let query = "
             WITH arr AS (
                 SELECT value, rowid AS pos

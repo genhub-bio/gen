@@ -14,10 +14,8 @@ use gen_models::{
     path::Path,
     region::ResolvedGenRegion,
     sequence::Sequence,
-    traits::Query,
 };
 use itertools::Itertools;
-use rusqlite::{params, types::Value};
 
 use crate::genbank::{EditType, GenBankError, process_sequence};
 
@@ -73,16 +71,10 @@ where
                     )),
                 )?;
 
-                let block_group = if let Ok(bg) = BlockGroup::get(
-                    conn,
-                    "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-                    params![
-                        Value::from(collection.name.clone()),
-                        Value::from(sample_name.to_string()),
-                        Value::from(locus.name.clone())
-                    ],
-                ) {
-                    bg
+                let block_group = if let Ok(block_group) =
+                    BlockGroup::get_by_name(conn, &collection.name, sample_name, &locus.name, None)
+                {
+                    block_group
                 } else {
                     if !create_missing {
                         return Err(GenBankError::LookupError(format!(
@@ -100,14 +92,10 @@ where
                         },
                     )?
                 };
-                let paths = Path::query(
-                    conn,
-                    "SELECT id, block_group_id, name, created_on FROM paths \
-                     WHERE block_group_id = ?1 AND name = ?2",
-                    params![Value::from(block_group.id), Value::from(locus.name.clone())],
-                );
-                let path = if let Some(first) = paths.first() {
-                    first.clone()
+                let path = if let Some(path) =
+                    BlockGroup::get_path_by_name(conn, &block_group.id, &locus.name)?
+                {
+                    path
                 } else {
                     if !create_missing {
                         return Err(GenBankError::LookupError(format!(
@@ -244,7 +232,6 @@ mod tests {
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::{OperationFile, commit_operation_summary},
         sample::Sample,
-        traits::Query,
     };
     use noodles::fasta;
 
@@ -319,7 +306,7 @@ mod tests {
         let history_store = DoltHistoryStore::new(conn);
         let commit_hash = commit_operation_summary(&context, &operation_summary).unwrap();
         assert_eq!(history_store.current_head().unwrap(), Some(commit_hash));
-        let mut operation_logs = OperationLog::all(conn);
+        let mut operation_logs = OperationLog::all(conn).expect("should load operation logs");
         operation_logs.sort_by_key(|operation_log| std::cmp::Reverse(operation_log.created_on));
         assert_eq!(
             operation_logs[0].operation_kind,

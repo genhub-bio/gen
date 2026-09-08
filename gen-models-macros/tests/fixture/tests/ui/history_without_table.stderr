@@ -1,0 +1,5 @@
+error: ModelSelect requires `table = "..."` on the model
+ --> tests/ui/history_without_table.rs:5:8
+  |
+5 | struct HistoryWithoutTable {
+  |        ^^^^^^^^^^^^^^^^^^^

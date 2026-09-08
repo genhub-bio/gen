@@ -1,10 +1,13 @@
 use gen_core::traits::Capnp;
-use rusqlite::{Row, params_from_iter};
+use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    block_group::BlockGroup, db::GraphConnection, gen_models_capnp::collection, traits::*,
+    Direction, ModelSelect,
+    block_group::{BlockGroup, BlockGroupSelect},
+    db::GraphConnection,
+    gen_models_capnp::collection,
 };
 
 #[derive(Debug, Error, PartialEq)]
@@ -15,8 +18,10 @@ pub enum CollectionError {
     Duplicate(Collection),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ModelSelect)]
+#[model_select(table = "collections")]
 pub struct Collection {
+    #[model_select(primary_key)]
     pub name: String,
 }
 
@@ -35,33 +40,7 @@ impl<'a> Capnp<'a> for Collection {
     }
 }
 
-impl Query for Collection {
-    type Model = Collection;
-
-    const PRIMARY_KEY: &'static str = "name";
-    const TABLE_NAME: &'static str = "collections";
-
-    fn process_row(row: &Row) -> Self::Model {
-        Collection {
-            name: row.get(0).unwrap(),
-        }
-    }
-}
-
 impl Collection {
-    /// Returns collections visible at the requested history state, ordered by name.
-    pub fn all(conn: &GraphConnection, history_ref: Option<&str>) -> Vec<Collection> {
-        let query = format!(
-            "select * from {} order by name;",
-            Collection::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        Collection::query(conn, &query, &params[..])
-    }
-
     pub fn exists(conn: &GraphConnection, name: &str) -> bool {
         let mut stmt = conn
             .prepare("select name from collections where name = ?1")
@@ -104,8 +83,10 @@ impl Collection {
         match Collection::create(conn, name) {
             Ok(collection) => Ok(collection),
             Err(CollectionError::Duplicate(_)) => {
-                let collections =
-                    Self::query(conn, "SELECT * FROM collections WHERE name = ?1", [name]);
+                let collections = Self::select(conn)
+                    .name(name)
+                    .load()
+                    .expect("should load existing collection");
                 if let Some(collection) = collections.into_iter().next() {
                     Ok(collection)
                 } else {
@@ -135,16 +116,11 @@ impl Collection {
         collection_name: &str,
         history_ref: Option<&str>,
     ) -> Vec<BlockGroup> {
-        let query = format!(
-            "SELECT * FROM {} WHERE collection_name = :collection_name order by created_on;",
-            BlockGroup::table_name_with_history_ref(history_ref)
-        );
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> =
-            vec![(":collection_name", &collection_name)];
-        if let Some(history_ref) = history_ref.as_ref() {
-            params.push((":history_ref", history_ref));
-        }
-        BlockGroup::query(conn, &query, &params[..])
+        let select = BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .order_by(BlockGroupSelect::CreatedOn, Direction::Asc)
+            .with_ref(history_ref);
+        select.load().expect("should load collection block groups")
     }
 
     pub fn delete_by_name(conn: &GraphConnection, name: &str) {

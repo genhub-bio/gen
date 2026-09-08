@@ -748,9 +748,7 @@ mod tests {
 
     use gen_models::{
         accession::Accession, node::Node, sample::Sample, sample_lineage::SampleLineage,
-        traits::Query,
     };
-    use rusqlite::params;
 
     use super::*;
     use crate::{
@@ -1196,7 +1194,7 @@ mod tests {
         )
         .unwrap();
 
-        let nodes = Node::query(conn, "select * from nodes;", rusqlite::params!());
+        let nodes = Node::select(conn).load().expect("should load nodes");
         assert_eq!(nodes.len(), 5);
 
         let _second_update = update_with_vcf(
@@ -1209,7 +1207,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
+            Node::select(conn).load().expect("should load nodes").len(),
             5
         );
     }
@@ -1234,7 +1232,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
+            Node::select(conn).load().expect("should load nodes").len(),
             5
         );
 
@@ -1249,7 +1247,7 @@ mod tests {
         )
         .unwrap();
 
-        let nodes = Node::query(conn, "select * from nodes;", rusqlite::params!());
+        let nodes = Node::select(conn).load().expect("should load nodes");
         assert_eq!(nodes.len(), 8);
 
         let _second_update = update_with_vcf(
@@ -1262,7 +1260,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            Node::query(conn, "select * from nodes;", rusqlite::params!()).len(),
+            Node::select(conn).load().expect("should load nodes").len(),
             8
         );
     }
@@ -1341,22 +1339,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Accession::query(
-                conn,
-                "select * from accessions where name = ?1;",
-                params!["del1"],
-            )
-            .len(),
+            Accession::select(conn)
+                .name("del1")
+                .load()
+                .expect("should load the named accession")
+                .len(),
             1
         );
 
         assert_eq!(
-            Accession::query(
-                conn,
-                "select * from accessions where name = ?1;",
-                params!["lp1"],
-            )
-            .len(),
+            Accession::select(conn)
+                .name("lp1")
+                .load()
+                .expect("should load the named accession")
+                .len(),
             1
         );
     }
@@ -1394,12 +1390,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            Accession::query(
-                conn,
-                "select * from accessions where name = ?1",
-                params!["lp1"]
-            )
-            .len(),
+            Accession::select(conn)
+                .name("lp1")
+                .load()
+                .expect("should load the named accession")
+                .len(),
             1
         );
 

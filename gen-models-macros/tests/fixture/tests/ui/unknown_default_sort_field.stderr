@@ -1,0 +1,5 @@
+error: default_sort field `missing` is not a selectable model field
+ --> tests/ui/unknown_default_sort_field.rs:4:67
+  |
+4 | #[model_select(table = "unknown_default_sort_field", default_sort(missing = "asc"))]
+  |                                                                   ^^^^^^^

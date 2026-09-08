@@ -1,0 +1,14 @@
+[package]
+name = "gen-models-macros-fixture"
+description = "Integration fixture for the gen-models-macros crate."
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gen-models = { path = "../../../gen-models" }
+gen-models-macros = { path = "../.." }
+rusqlite = { package = "rusqdoltlite", version = "0.40.16", features = ["array", "limits", "trace"] }
+
+[dev-dependencies]
+trybuild = "1.0.111"
