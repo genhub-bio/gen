@@ -453,13 +453,18 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             merge,
             set_remote,
             branch_name,
+            start_point,
         }) => {
             let history_store = DoltHistoryStore::new(graph_conn);
             if create {
                 let branch_name = branch_name
                     .clone()
                     .ok_or("Must provide a branch name to create.")?;
-                history_store.create_branch(&BranchName(branch_name.clone()), None)?;
+                let start_ref = start_point.clone().map(CommitRef);
+                history_store
+                    .create_branch(&BranchName(branch_name.clone()), start_ref.as_ref())?;
+            } else if start_point.is_some() {
+                return Err("A start point is only valid together with --create.".into());
             } else if delete {
                 history_store.delete_branch(&BranchName(
                     branch_name

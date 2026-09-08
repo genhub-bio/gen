@@ -1499,6 +1499,105 @@ mod revision_views {
     }
 
     #[test]
+    fn test_checkout_branch_create_from_hash_starts_new_branch_at_operation() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, feature_sample_name) =
+            setup_repo_with_feature_only_update(repo_dir.path());
+
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &["checkout", "--branch", "from-feature", &feature_update_hash],
+            ),
+            "checkout -b from a feature commit hash should succeed",
+        );
+
+        let samples = run_gen(repo_dir.path(), &["list-samples"]);
+        assert_success(&samples, "list-samples on from-feature should succeed");
+        let stdout = String::from_utf8_lossy(&samples.stdout);
+        assert!(
+            stdout.contains(&feature_sample_name),
+            "new branch should start at the given operation rather than at HEAD: {stdout}"
+        );
+    }
+
+    #[test]
+    fn test_checkout_branch_flag_errors_when_branch_already_exists_with_hash() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, _) = setup_repo_with_feature_only_update(repo_dir.path());
+
+        let checkout = run_gen(
+            repo_dir.path(),
+            &["checkout", "--branch", "feature", &feature_update_hash],
+        );
+        assert!(
+            !checkout.status.success(),
+            "checkout -b with an existing branch name and a start hash should fail: stdout={} stderr={}",
+            String::from_utf8_lossy(&checkout.stdout),
+            String::from_utf8_lossy(&checkout.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&checkout.stderr);
+        assert!(
+            stderr.contains("already exists"),
+            "checkout -b should explain that the branch already exists rather than silently reusing HEAD: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_branch_create_with_start_starts_new_branch_at_operation() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, feature_sample_name) =
+            setup_repo_with_feature_only_update(repo_dir.path());
+
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &[
+                    "branch",
+                    "--create",
+                    "from-feature-branch-create",
+                    &feature_update_hash,
+                ],
+            ),
+            "branch --create with a start point should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "from-feature-branch-create"]),
+            "checkout of the newly created branch should succeed",
+        );
+
+        let samples = run_gen(repo_dir.path(), &["list-samples"]);
+        assert_success(&samples, "list-samples should succeed");
+        let stdout = String::from_utf8_lossy(&samples.stdout);
+        assert!(
+            stdout.contains(&feature_sample_name),
+            "new branch should start at the given operation rather than at HEAD: {stdout}"
+        );
+    }
+
+    #[test]
+    fn test_branch_start_point_without_create_errors() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, _) = setup_repo_with_feature_only_update(repo_dir.path());
+
+        let branch = run_gen(
+            repo_dir.path(),
+            &["branch", "--list", "feature", &feature_update_hash],
+        );
+        assert!(
+            !branch.status.success(),
+            "a start point without --create should fail: stdout={} stderr={}",
+            String::from_utf8_lossy(&branch.stdout),
+            String::from_utf8_lossy(&branch.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&branch.stderr);
+        assert!(
+            stderr.contains("A start point is only valid together with --create"),
+            "should explain a start point requires --create: {stderr}"
+        );
+    }
+
+    #[test]
     fn test_list_samples_ref_reads_selected_commit_state() {
         let repo_dir = tempdir().expect("should create temp repo directory");
         let (_, feature_update_hash, feature_sample_name) =

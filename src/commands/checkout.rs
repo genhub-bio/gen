@@ -68,8 +68,16 @@ pub fn execute(
         .map(|asset| (asset.id, asset))
         .collect();
     if let Some(name) = branch {
-        if !branch_exists(graph, name)? {
-            history_store.create_branch(&BranchName(name.to_string()), None)?;
+        let branch_already_exists = branch_exists(graph, name)?;
+        if branch_already_exists && hash.is_some() {
+            return Err(format!(
+                "Branch '{name}' already exists; cannot start it at a given operation. Choose a new branch name."
+            )
+            .into());
+        }
+        if !branch_already_exists {
+            let start_ref = hash.map(|hash_name| CommitRef(hash_name.to_string()));
+            history_store.create_branch(&BranchName(name.to_string()), start_ref.as_ref())?;
             println!("Created branch {name}");
         }
         println!("Checking out branch {name}");
