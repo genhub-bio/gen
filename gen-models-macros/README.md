@@ -88,6 +88,16 @@ Sample::select(conn).name_case_insensitive("REFERENCE");
 Exact, multi-value, contains, and case-insensitive values are bound SQL parameters. In
 particular, `%` and `_` in user input are ordinary characters rather than `LIKE` wildcards.
 
+Use `_like` when the input is a SQL pattern:
+
+```rust
+Sample::select(conn).name_like("ref_%");
+```
+
+Patterns are bound parameters and preserve `%` (any sequence) and `_` (one character).
+`_like` uses the connection's native LIKE case behavior. `_contains` remains a literal
+substring match. Nullable string fields receive `_like` too; SQL NULL values do not match.
+
 `Option<T>` fields receive an `_is_null` method in addition to an exact-match method that accepts
 `T`:
 
@@ -257,6 +267,35 @@ let samples = Sample::select(conn)
     .load()
     .expect("should load ordered samples");
 ```
+
+Use `order_by_relevance` to retain ranked search behavior entirely in SQL:
+
+```rust
+let names = Collection::select(conn)
+    .with_ref(history_ref)
+    .name_like(format!("%{search}%"))
+    .order_by_relevance(CollectionSelect::Name, search)
+    .order_by(CollectionSelect::Name, Direction::Asc)
+    .limit(10)
+    .only(CollectionSelect::Name)
+    .load()?;
+```
+
+The typed field must belong to the selector and have type `String` or `Option<String>`.
+Ranking uses `CASE WHEN field = ? THEN 0 WHEN lower(field) = lower(?) THEN 1
+WHEN field LIKE ? || '%' THEN 2 WHEN field LIKE '%' || ? || '%' THEN 3 ELSE 4 END`.
+Case-sensitive exact equality ranks first under the usual column collation, followed by
+case-insensitive exact equality using SQL `lower` (ASCII by default, without a promise of
+Unicode case folding). Prefix and contains use native SQL LIKE behavior. Search
+values are bound and their `%` and `_` characters remain wildcards in the LIKE branches.
+Relevance only orders; use the matching `_like` filter to exclude unrelated rows. Unmatched
+rows, including NULL, receive rank 4 from `ELSE` and sort after all matched rows.
+
+Relevance and field ordering are appended in call order and replace the default sort. Chain
+field ordering for deterministic ties. A joined selector carries its relevance ordering into
+`join_filtered_on`, including all bound search values. Historical reads and projections use
+the same SQL ordering before LIMIT/OFFSET. Existing `_in` filters retain their input-order
+precedence ahead of explicit ordering, including relevance.
 
 Available directions are:
 

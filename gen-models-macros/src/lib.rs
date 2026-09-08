@@ -13,7 +13,8 @@ use syn::{
 /// The derive parses the model's named fields and generates a `<Model>Select` type. Calling
 /// `<Model>::select(...)` creates that builder; its generated filter methods, typed field constants,
 /// ordering, joins, and projections are rendered into SQL when the query is loaded.
-/// String fields receive exact and `_contains` filters. Generated selectors can be composed with
+/// String fields receive exact, literal `_contains`, and SQL `_like` filters, plus typed
+/// `.order_by_relevance(field, search)` ordering. Selectors can be composed with
 /// `.join_on(left_field, right_field)` or `.join_filtered_on(...)`. Joined queries can project
 /// fields with `.only(...)` or complete models with `.models::<(...)>()`.
 /// Primary-key selectors also provide `get_by_id(...)`, ordered and deduplicated
@@ -429,6 +430,26 @@ fn expand_model_select(input: DeriveInput) -> syn::Result<proc_macro2::TokenStre
                 self.order_by.push(::gen_models::select::SqlOrder::new(
                     column,
                     direction,
+                ));
+                self
+            }
+
+            /// Orders by exact match, case-insensitive exact match, LIKE prefix, then LIKE contains.
+            ///
+            /// Search values are bound parameters; `%` and `_` retain LIKE wildcard semantics.
+            /// Case-insensitive equality uses SQL lower (ASCII by default); LIKE follows the
+            /// connection's settings. Case-sensitive equality has the highest priority.
+            /// Unmatched rows, including NULL, rank last. Add a `_like` filter to exclude them,
+            /// and chain `order_by` for deterministic ties. Ordering runs before pagination.
+            pub fn order_by_relevance<T>(
+                mut self,
+                field: ::gen_models::select::SelectField<#model, T, ::std::string::String>,
+                search: impl ::core::convert::Into<::std::string::String>,
+            ) -> Self {
+                let column = self.column(field.column());
+                self.order_by.push(::gen_models::select::SqlOrder::relevance(
+                    column,
+                    search.into(),
                 ));
                 self
             }
@@ -1220,6 +1241,30 @@ fn filter_method(
         quote! {}
     };
 
+    let like = if string {
+        let like_method = format_ident!("{}_like", field);
+        quote! {
+            /// Matches a bound SQL LIKE pattern, preserving `%` and `_` wildcards.
+            /// Case sensitivity follows the database connection's LIKE settings.
+            pub fn #like_method(
+                self,
+                pattern: impl ::core::convert::Into<::std::string::String>,
+            ) -> Self {
+                let pattern = pattern.into();
+                let column = self.column(#column);
+                let filter = ::gen_models::select::sql_value(&pattern).map(|pattern| {
+                    ::gen_models::select::SqlFilter::new(
+                        ::std::format!("{column} LIKE ?"),
+                        ::std::vec![pattern],
+                    )
+                });
+                self.push_filter_result(filter)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let case_insensitive = if string {
         let case_insensitive_method = format_ident!("{}_case_insensitive", field);
         quote! {
@@ -1262,6 +1307,7 @@ fn filter_method(
         #exact
         #any_of
         #contains
+        #like
         #case_insensitive
         #is_null
     }
