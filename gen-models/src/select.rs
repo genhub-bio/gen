@@ -200,6 +200,7 @@ impl ToSql for SqlParameter {
 pub struct SqlOrder {
     column: String,
     direction: Direction,
+    relevance_search: Option<String>,
 }
 
 impl SqlOrder {
@@ -207,6 +208,15 @@ impl SqlOrder {
         Self {
             column: column.into(),
             direction,
+            relevance_search: None,
+        }
+    }
+
+    pub fn relevance(column: impl Into<String>, search: String) -> Self {
+        Self {
+            column: column.into(),
+            direction: Direction::Asc,
+            relevance_search: Some(search),
         }
     }
 }
@@ -793,7 +803,19 @@ where
             if ordered_in_count > 0 || index > 0 {
                 query.push_str(", ");
             }
-            query.push_str(&order.column);
+            if let Some(search) = &order.relevance_search {
+                let column = &order.column;
+                query.push_str(&format!(
+                    "CASE WHEN {column} = ? THEN 0 WHEN lower({column}) = lower(?) THEN 1 \
+                     WHEN {column} LIKE ? || '%' THEN 2 \
+                     WHEN {column} LIKE '%' || ? || '%' THEN 3 ELSE 4 END",
+                ));
+                // Ordering parameters follow all source and filter parameters, regardless of
+                // the order in which builder methods or joined selectors were composed.
+                params.extend((0..4).map(|_| SqlParameter::Scalar(Value::from(search.clone()))));
+            } else {
+                query.push_str(&order.column);
+            }
             if order.direction.uses_case_insensitive_collation() {
                 query.push_str(" COLLATE NOCASE");
             }

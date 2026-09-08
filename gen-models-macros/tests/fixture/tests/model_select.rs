@@ -699,3 +699,285 @@ fn test_generated_filter_value_conversion_errors_are_returned_by_load() {
     };
     assert!(message.contains("fixture selector conversion failure"));
 }
+
+#[test]
+fn test_like_preserves_patterns_and_binds_quotes() {
+    let conn = connection();
+    for name in ["Foo%", "foo_", "fooX", "fooXY", "O'Reilly", "unrelated"] {
+        insert_sample(&conn, name, false);
+    }
+    assert_eq!(
+        FixtureSample::select(&conn)
+            .name_like("foo_")
+            .order_by(FixtureSampleSelect::Name, Direction::Asc)
+            .only(FixtureSampleSelect::Name)
+            .load()
+            .expect("should preserve the single-character wildcard"),
+        vec!["Foo%", "fooX", "foo_"],
+    );
+    assert_eq!(
+        FixtureSample::select(&conn)
+            .name_like("%Rei%")
+            .only(FixtureSampleSelect::Name)
+            .load()
+            .expect("should preserve the multi-character wildcard"),
+        vec!["O'Reilly"],
+    );
+    assert_eq!(
+        FixtureSample::select(&conn)
+            .name_like("%O'Reilly%")
+            .order_by_relevance(FixtureSampleSelect::Name, "O'Reilly")
+            .only(FixtureSampleSelect::Name)
+            .load()
+            .expect("should bind quotes in patterns and ranking"),
+        vec!["O'Reilly"],
+    );
+    conn.execute_batch("PRAGMA case_sensitive_like = ON")
+        .expect("should enable case-sensitive LIKE");
+    assert!(
+        FixtureSample::select(&conn)
+            .name_like("FOO_")
+            .load()
+            .expect("should follow case-sensitive LIKE")
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_relevance_ranks_before_limit_and_paginates_with_case_sensitive_exact_matches() {
+    let conn = connection();
+    for name in [
+        "afoo", "bfoo", "cfoo", "Foo", "FOOtail", "foo", "fooz", "zfoo",
+    ] {
+        insert_sample(&conn, name, false);
+    }
+    let alphabetic = FixtureSample::select(&conn)
+        .name_like("%foo%")
+        .order_by(FixtureSampleSelect::Name, Direction::Asc)
+        .limit(3)
+        .only(FixtureSampleSelect::Name)
+        .load()
+        .expect("should load an alphabetic page");
+    assert!(!alphabetic.iter().any(|name| name == "foo"));
+    let ranked = || {
+        FixtureSample::select(&conn)
+            .name_like("%foo%")
+            .order_by_relevance(FixtureSampleSelect::Name, "foo")
+            .order_by(FixtureSampleSelect::Name, Direction::Asc)
+    };
+    assert_eq!(
+        ranked()
+            .only(FixtureSampleSelect::Name)
+            .load()
+            .expect("should rank all matches"),
+        vec![
+            "foo", "Foo", "FOOtail", "fooz", "afoo", "bfoo", "cfoo", "zfoo"
+        ],
+    );
+    assert_eq!(
+        ranked()
+            .limit(3)
+            .only(FixtureSampleSelect::Name)
+            .load()
+            .expect("should rank before limiting"),
+        vec!["foo", "Foo", "FOOtail"],
+    );
+    assert_eq!(
+        ranked()
+            .offset(2)
+            .limit(3)
+            .only(FixtureSampleSelect::Name)
+            .load()
+            .expect("should paginate ranked ties"),
+        vec!["FOOtail", "fooz", "afoo"],
+    );
+    assert_eq!(
+        ranked()
+            .offset(6)
+            .only(FixtureSampleSelect::Name)
+            .load()
+            .expect("should offset without a limit"),
+        vec!["cfoo", "zfoo"],
+    );
+}
+
+#[test]
+fn test_relevance_retains_like_wildcards_and_ranks_unmatched_rows_last() {
+    let conn = connection();
+    for name in ["a_b", "aXb", "zaYb", "unrelated"] {
+        insert_sample(&conn, name, false);
+    }
+    for search in ["a_b", "a%b", ""] {
+        let expected = conn
+            .prepare(
+                "SELECT name FROM fixture_samples WHERE name LIKE ?1 ORDER BY CASE
+             WHEN name = ?2 THEN 0 WHEN lower(name) = lower(?2) THEN 1
+             WHEN name LIKE ?2 || '%' THEN 2 WHEN name LIKE '%' || ?2 || '%' THEN 3 ELSE 4 END, name",
+            )
+            .expect("should prepare the ranking query")
+            .query_map([format!("%{search}%"), search.to_string()], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("should execute the ranking query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("should decode the rankings");
+        assert_eq!(
+            FixtureSample::select(&conn)
+                .name_like(format!("%{search}%"))
+                .order_by_relevance(FixtureSampleSelect::Name, search)
+                .order_by(FixtureSampleSelect::Name, Direction::Asc)
+                .only(FixtureSampleSelect::Name)
+                .load()
+                .expect("should rank wildcard patterns"),
+            expected,
+        );
+    }
+    assert_eq!(
+        FixtureSample::select(&conn)
+            .order_by_relevance(FixtureSampleSelect::Name, "a_b")
+            .order_by(FixtureSampleSelect::Name, Direction::Asc)
+            .only(FixtureSampleSelect::Name)
+            .load()
+            .expect("should rank unrelated rows after every match"),
+        vec!["a_b", "aXb", "zaYb", "unrelated"],
+    );
+}
+
+#[test]
+fn test_relevance_joined_projection_and_history_preserve_parameter_order() {
+    let conn = connection();
+    insert_sample(&conn, "sample's", true);
+    for (id, name, collection) in [
+        (1, "xneedle", "scope"),
+        (2, "needle", "xscope"),
+        (3, "needle", "scope"),
+        (4, "needle-tail", "scope"),
+    ] {
+        insert_group(&conn, id, "sample's", name, collection);
+    }
+    let historical_ref: String = conn
+        .query_row(
+            "SELECT dolt_commit('-A', '-m', 'ranked search fixture')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("should commit ranked search fixtures");
+    insert_group(&conn, 5, "sample's", "needle", "scope");
+    let ranked = || {
+        FixtureSample::select(&conn)
+            .with_ref(historical_ref.as_str())
+            .name_in(["sample's", "missing"])
+            .order_by_relevance(FixtureSampleSelect::Name, "sample's")
+            .join_filtered_on(
+                FixtureSampleSelect::Name,
+                FixtureGroupSelect::SampleName,
+                FixtureGroup::select(&conn)
+                    .name_like("%needle%")
+                    .order_by_relevance(FixtureGroupSelect::Name, "needle")
+                    .order_by_relevance(FixtureGroupSelect::CollectionName, "scope")
+                    .order_by(FixtureGroupSelect::Id, Direction::Asc),
+            )
+            .is_reference(true)
+    };
+    assert_eq!(
+        ranked()
+            .only((FixtureSampleSelect::Name, FixtureGroupSelect::Id))
+            .load()
+            .expect("should bind historical refs, arrays, filters and multiple joined rankings"),
+        vec![
+            ("sample's".to_string(), 3),
+            ("sample's".to_string(), 2),
+            ("sample's".to_string(), 4),
+            ("sample's".to_string(), 1)
+        ],
+    );
+    assert_eq!(
+        ranked()
+            .limit(2)
+            .offset(1)
+            .only(FixtureGroupSelect::Id)
+            .load()
+            .expect("should paginate historical joined projected rankings"),
+        vec![2, 4],
+    );
+    assert_eq!(
+        ranked()
+            .limit(1)
+            .models::<(FixtureSample, FixtureGroup)>()
+            .load()
+            .expect("should project complete joined models")[0]
+            .1
+            .id,
+        3,
+    );
+}
+
+#[test]
+fn test_relevance_quotes_identifiers_and_accepts_nullable_string_fields() {
+    let conn = connection();
+    let matches = QuotedIdentifierModel::select(&conn)
+        .value_like("%af%")
+        .order_by_relevance(QuotedIdentifierModelSelect::Value, "safe")
+        .order_by_relevance(QuotedIdentifierModelSelect::OptionalValue, "safe")
+        .only(QuotedIdentifierModelSelect::Value)
+        .load()
+        .expect("should quote identifiers in LIKE and relevance expressions");
+    assert_eq!(matches, vec!["safe"]);
+    assert!(
+        QuotedIdentifierModel::select(&conn)
+            .optional_value_like("%")
+            .load()
+            .expect("should not match NULL string values")
+            .is_empty()
+    );
+    for value in ["needle", "NEEDLE", "needle-tail", "xneedle", "unrelated"] {
+        conn.execute(
+            r#"INSERT INTO "selector table"" --" VALUES (?1, ?2)"#,
+            [value, value],
+        )
+        .expect("should insert nullable ranking fixtures");
+    }
+    assert_eq!(
+        QuotedIdentifierModel::select(&conn)
+            .order_by_relevance(QuotedIdentifierModelSelect::OptionalValue, "needle")
+            .order_by(QuotedIdentifierModelSelect::Value, Direction::Asc)
+            .only(QuotedIdentifierModelSelect::OptionalValue)
+            .load()
+            .expect("should rank NULL and unrelated strings after every match"),
+        vec![
+            Some("needle".to_string()),
+            Some("NEEDLE".to_string()),
+            Some("needle-tail".to_string()),
+            Some("xneedle".to_string()),
+            None,
+            Some("unrelated".to_string()),
+        ],
+    );
+    assert!(!branch_exists(&conn, IDENTIFIER_INJECTED_BRANCH));
+}
+
+#[test]
+fn test_relevance_parameters_share_the_connection_budget() {
+    let conn = connection();
+    insert_sample(&conn, "needle", false);
+    conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 5)
+        .expect("should leave room for a pattern and four rank parameters");
+    assert_eq!(
+        FixtureSample::select(&conn)
+            .name_like("%needle%")
+            .order_by_relevance(FixtureSampleSelect::Name, "needle")
+            .load()
+            .expect("should fit the complete ranking in the parameter budget")
+            .len(),
+        1
+    );
+    let error = FixtureSample::select(&conn)
+        .name_like("%needle%")
+        .order_by_relevance(FixtureSampleSelect::Name, "needle")
+        .limit(1)
+        .load()
+        .expect_err("should count ranking values alongside pagination");
+    assert!(
+        matches!(error, ModelSelectError::InvalidSelector(message) if message.contains("SQL parameters"))
+    );
+}
