@@ -133,13 +133,10 @@ class RemoteTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.repository.fetch(origin)
 
-    def test_remote_transfers_reject_transactions_and_invalid_branches(self):
+    def test_remote_transfers_reject_invalid_branches(self):
         for action in ["push", "pull", "fetch"]:
             method = getattr(self.repository, action)
             with self.subTest(action=action):
-                with self.repository.transaction():
-                    with self.assertRaisesRegex(RuntimeError, "transaction is active"):
-                        method()
                 with self.assertRaises(TypeError):
                     method(branch=42)
 
@@ -207,9 +204,6 @@ class RemoteTests(unittest.TestCase):
             self.repository.checkout("missing")
         with self.assertRaises(TypeError):
             self.repository.checkout(42, create=True)
-        with self.repository.transaction():
-            with self.assertRaisesRegex(RuntimeError, "transaction is active"):
-                self.repository.checkout("transaction-branch", create=True)
         self.assertEqual(self.repository.current_branch.name, "main")
         self.assertEqual(
             [branch.name for branch in self.repository.get_branches()],

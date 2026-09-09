@@ -146,12 +146,12 @@ make jupyter  # also builds the JS widget bundle and installs the `jupyter` extr
 
 ## Testing
 
-`gen-python/Makefile` has four targets:
+`gen-python/Makefile` has four testing targets:
 
-- `pyenv-test` — runs `cargo test` with the pyenv-managed Python interpreter set
+- `bindings-test` — runs `cargo test` with the pyenv-managed Python interpreter set
   as the PyO3 Python — necessary because PyO3 must link against the same Python
   that will load the extension. Use it when working on the Rust layer.
-- `installed-test` — rebuilds the extension into the project-root `.venv` and runs
+- `api-test` — rebuilds the extension into the project-root `.venv` and runs
   `unittest discover` over `tests/`, exercising the installed extension's public
   API (including remote clone/push/pull/fetch against mock HTTP and file remotes).
 - `notebook-test` — rebuilds the extension into the project-root `.venv` and runs
@@ -159,10 +159,10 @@ make jupyter  # also builds the JS widget bundle and installs the `jupyter` extr
 - `test` — runs all of the above.
 
 ```sh
-cd gen-python && make pyenv-test      # Rust-layer tests
-cd gen-python && make installed-test  # installed-extension tests
-cd gen-python && make notebook-test   # example notebooks
-cd gen-python && make test            # all three
+cd gen-python && make bindings-test  # Rust-layer tests
+cd gen-python && make api-test       # installed public API tests
+cd gen-python && make notebook-test  # example notebooks
+cd gen-python && make test           # all three
 ```
 
 ## For AI agents
