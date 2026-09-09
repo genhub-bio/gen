@@ -108,6 +108,8 @@ The `commit_id` corresponds to a commit listed by `gen operations`.
 Clone a GenHub repository with `gen clone <repository-url>`. Gen creates a
 directory named after the repository, downloads its files and history, and
 records the canonical GenHub URL as the `origin` remote.
+An existing destination directory must be empty. If cloning fails, an existing
+empty directory is preserved; a directory created by the clone is removed.
 
 # Push
 
