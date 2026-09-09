@@ -91,7 +91,7 @@ impl BlockGroupLineage {
         max_depth: Option<usize>,
     ) -> Vec<BlockGroup> {
         let descendant_ids =
-            BlockGroupLineage::get_descendants(conn, parent_block_group_id, max_depth);
+            BlockGroupLineage::get_descendants(conn, parent_block_group_id, max_depth, None);
         BlockGroup::select(conn)
             .query_by_ids(descendant_ids)
             .expect("should load descendant block groups by id")

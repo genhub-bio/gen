@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use gen_core::HashId;
 use rusqlite::{
-    Connection, Row, params,
+    Connection, Row,
     types::{FromSql, ToSql},
 };
 
@@ -137,12 +137,22 @@ pub trait SqlLineage: Sized {
             .collect()
     }
 
+    /// Return unique descendants ordered by minimum depth, then child ID.
+    /// Both lineage edges and child entities are read at `history_ref` when supplied.
     fn get_descendants(
         conn: &Connection,
         parent_id: &Self::Id,
         max_depth: Option<usize>,
+        history_ref: Option<&str>,
     ) -> Vec<Self::Id> {
         let max_depth = max_depth.map(|depth| depth as i64);
+        let lineage_table_name =
+            sql_table_name_with_history_ref(Self::TABLE_NAME, Some(Self::TABLE_NAME), history_ref);
+        let child_table_name = sql_table_name_with_history_ref(
+            Self::CHILD_TABLE_NAME,
+            Some(Self::CHILD_TABLE_NAME),
+            history_ref,
+        );
         let query = format!(
             "WITH RECURSIVE descendants(id, depth, visited) AS (
                 SELECT
@@ -150,7 +160,7 @@ pub trait SqlLineage: Sized {
                     1,
                     printf('|%s|', hex(lineage.{child_column}))
                 FROM {table_name} lineage
-                WHERE lineage.{parent_column} = ?1
+                WHERE lineage.{parent_column} = :parent_id
                 UNION ALL
                 SELECT
                     lineage.{child_column},
@@ -162,7 +172,7 @@ pub trait SqlLineage: Sized {
                     descendants.visited,
                     printf('|%s|', hex(lineage.{child_column}))
                 ) = 0
-                AND (?2 IS NULL OR descendants.depth < ?2)
+                AND (:max_depth IS NULL OR descendants.depth < :max_depth)
             ),
             ranked_descendants(id, depth) AS (
                 SELECT id, MIN(depth)
@@ -172,23 +182,30 @@ pub trait SqlLineage: Sized {
             SELECT child.{child_id_column}
             FROM {child_table_name} child
             JOIN ranked_descendants descendants ON child.{child_id_column} = descendants.id
-            WHERE ?2 IS NULL OR descendants.depth <= ?2
+            WHERE :max_depth IS NULL OR descendants.depth <= :max_depth
             ORDER BY descendants.depth, child.{child_id_column};",
-            table_name = Self::TABLE_NAME,
+            table_name = lineage_table_name,
             parent_column = Self::PARENT_COLUMN,
             child_column = Self::CHILD_COLUMN,
-            child_table_name = Self::CHILD_TABLE_NAME,
+            child_table_name = child_table_name,
             child_id_column = Self::CHILD_ID_COLUMN,
         );
 
         let mut stmt = conn.prepare(&query).unwrap();
-        stmt.query_map(params![parent_id, max_depth], |row| row.get(0))
+        let mut query_params: Vec<(&str, &dyn ToSql)> =
+            vec![(":parent_id", parent_id), (":max_depth", &max_depth)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        stmt.query_map(&query_params[..], |row| row.get(0))
             .unwrap()
             .map(|value| value.unwrap())
             .collect()
     }
 
-    fn get_graph(conn: &Connection) -> Vec<Self> {
+    fn get_graph(conn: &Connection, history_ref: Option<&str>) -> Vec<Self> {
+        let lineage_table_name =
+            sql_table_name_with_history_ref(Self::TABLE_NAME, Some(Self::TABLE_NAME), history_ref);
         let query = format!(
             "WITH RECURSIVE lineage_graph({parent_column}, {child_column}) AS (
                 SELECT {parent_column}, {child_column}
@@ -200,14 +217,18 @@ pub trait SqlLineage: Sized {
             )
             SELECT {parent_column}, {child_column}
             FROM lineage_graph;",
-            table_name = Self::TABLE_NAME,
+            table_name = lineage_table_name,
             parent_column = Self::PARENT_COLUMN,
             child_column = Self::CHILD_COLUMN,
         );
 
         let mut statement = conn.prepare(&query).unwrap();
+        let mut query_params: Vec<(&str, &dyn ToSql)> = Vec::new();
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
         statement
-            .query_map([], Self::process_row)
+            .query_map(&query_params[..], Self::process_row)
             .unwrap()
             .map(Result::unwrap)
             .collect()
@@ -217,17 +238,20 @@ pub trait SqlLineage: Sized {
         conn: &Connection,
         source_id: &Self::Id,
         target_id: &Self::Id,
+        history_ref: Option<&str>,
     ) -> Vec<Self::Id> {
         if source_id == target_id {
             return vec![source_id.clone()];
         }
 
+        let lineage_table_name =
+            sql_table_name_with_history_ref(Self::TABLE_NAME, Some(Self::TABLE_NAME), history_ref);
         let query = format!(
             "WITH RECURSIVE traversal(current_id, visited, node_path, depth) AS (
                 SELECT
-                    ?1,
-                    printf('|%s|', hex(?1)),
-                    printf('%s', hex(?1)),
+                    :source_id,
+                    printf('|%s|', hex(:source_id)),
+                    printf('%s', hex(:source_id)),
                     0
                 UNION ALL
                 SELECT
@@ -249,7 +273,7 @@ pub trait SqlLineage: Sized {
                     ),
                     traversal.depth + 1
                 FROM traversal
-                JOIN {table_name} lineage
+                JOIN {lineage_table_name} lineage
                     ON lineage.{parent_column} = traversal.current_id
                     OR lineage.{child_column} = traversal.current_id
                 WHERE instr(
@@ -267,17 +291,22 @@ pub trait SqlLineage: Sized {
             )
             SELECT node_path
             FROM traversal
-            WHERE current_id = ?2
+            WHERE current_id = :target_id
             ORDER BY depth
             LIMIT 1;",
-            table_name = Self::TABLE_NAME,
+            lineage_table_name = lineage_table_name,
             parent_column = Self::PARENT_COLUMN,
             child_column = Self::CHILD_COLUMN,
         );
 
         let mut stmt = conn.prepare(&query).unwrap();
+        let mut query_params: Vec<(&str, &dyn ToSql)> =
+            vec![(":source_id", source_id), (":target_id", target_id)];
+        if let Some(history_ref) = history_ref.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
         let encoded_path = stmt
-            .query_row(params![source_id, target_id], |row| row.get::<_, String>(0))
+            .query_row(&query_params[..], |row| row.get::<_, String>(0))
             .ok();
 
         encoded_path
@@ -294,22 +323,30 @@ pub trait SqlLineage: Sized {
         conn: &Connection,
         source_id: &Self::Id,
         target_id: &Self::Id,
+        history_ref: Option<&str>,
     ) -> Vec<Self> {
-        let path = Self::get_path_between(conn, source_id, target_id);
+        let path = Self::get_path_between(conn, source_id, target_id, history_ref);
+        let lineage_table_name =
+            sql_table_name_with_history_ref(Self::TABLE_NAME, Some(Self::TABLE_NAME), history_ref);
         let mut edges = Vec::new();
         for pair in path.windows(2) {
             let query = format!(
                 "SELECT {parent_column}, {child_column}
-                FROM {table_name}
-                WHERE ({parent_column} = ?1 AND {child_column} = ?2)
-                   OR ({parent_column} = ?2 AND {child_column} = ?1)
+                FROM {lineage_table_name}
+                WHERE ({parent_column} = :source_id AND {child_column} = :target_id)
+                   OR ({parent_column} = :target_id AND {child_column} = :source_id)
                 LIMIT 1;",
-                table_name = Self::TABLE_NAME,
+                lineage_table_name = lineage_table_name,
                 parent_column = Self::PARENT_COLUMN,
                 child_column = Self::CHILD_COLUMN,
             );
 
-            let edge = conn.query_row(&query, params![&pair[0], &pair[1]], Self::process_row);
+            let mut query_params: Vec<(&str, &dyn ToSql)> =
+                vec![(":source_id", &pair[0]), (":target_id", &pair[1])];
+            if let Some(history_ref) = history_ref.as_ref() {
+                query_params.push((":history_ref", history_ref));
+            }
+            let edge = conn.query_row(&query, &query_params[..], Self::process_row);
             if let Ok(edge) = edge {
                 edges.push(edge);
             }
@@ -454,6 +491,28 @@ mod tests {
     }
 
     #[test]
+    fn test_descendants_deduplicate_shared_paths_and_terminate_cycles() {
+        // The fixture starts with 1 -> 2 -> 3 -> 4 and 2 -> 5. Add 5 -> 3
+        // as a shared route to 3 and 4 -> 2 as the cycle 2 -> 3 -> 4 -> 2.
+
+        let conn = setup_numeric_lineage_connection();
+        // This adds a cycle between 4->2 and a shared path
+        conn.execute_batch(
+            "INSERT INTO numeric_lineage (parent_id, child_id) VALUES (5, 3), (4, 2);",
+        )
+        .expect("should add shared descendant and cycle");
+        assert_eq!(
+            NumericLineage::get_descendants(&conn, &1, None, None),
+            vec![2, 3, 5, 4]
+        );
+        // A depth-two limit keeps direct children and grandchildren, excluding node 4 at depth three.
+        assert_eq!(
+            NumericLineage::get_descendants(&conn, &1, Some(2), None),
+            vec![2, 3, 5]
+        );
+    }
+
+    #[test]
     fn test_sql_lineage_queries_with_numeric_ids() {
         let conn = setup_numeric_lineage_connection();
 
@@ -466,19 +525,19 @@ mod tests {
             vec![3, 2]
         );
         assert_eq!(
-            NumericLineage::get_descendants(&conn, &1, None),
+            NumericLineage::get_descendants(&conn, &1, None, None),
             vec![2, 3, 5, 4]
         );
         assert_eq!(
-            NumericLineage::get_descendants(&conn, &1, Some(2)),
+            NumericLineage::get_descendants(&conn, &1, Some(2), None),
             vec![2, 3, 5]
         );
         assert_eq!(
-            NumericLineage::get_path_between(&conn, &1, &4),
+            NumericLineage::get_path_between(&conn, &1, &4, None),
             vec![1, 2, 3, 4]
         );
         assert_eq!(
-            NumericLineage::get_path_edges_between(&conn, &1, &4),
+            NumericLineage::get_path_edges_between(&conn, &1, &4, None),
             vec![
                 NumericLineage {
                     parent_id: 1,
@@ -495,7 +554,7 @@ mod tests {
             ]
         );
 
-        let mut graph = NumericLineage::get_graph(&conn);
+        let mut graph = NumericLineage::get_graph(&conn, None);
         graph.sort_by(|left, right| {
             left.parent_id
                 .cmp(&right.parent_id)
@@ -528,13 +587,16 @@ mod tests {
     fn test_sql_lineage_path_between_handles_same_and_disconnected_numeric_ids() {
         let conn = setup_numeric_lineage_connection();
 
-        assert_eq!(NumericLineage::get_path_between(&conn, &3, &3), vec![3]);
         assert_eq!(
-            NumericLineage::get_path_between(&conn, &1, &6),
+            NumericLineage::get_path_between(&conn, &3, &3, None),
+            vec![3]
+        );
+        assert_eq!(
+            NumericLineage::get_path_between(&conn, &1, &6, None),
             Vec::<i64>::new()
         );
         assert_eq!(
-            NumericLineage::get_path_edges_between(&conn, &1, &6),
+            NumericLineage::get_path_edges_between(&conn, &1, &6, None),
             Vec::<NumericLineage>::new()
         );
     }
@@ -544,11 +606,11 @@ mod tests {
         let (conn, root, middle, leaf, other) = setup_hash_lineage_connection();
 
         assert_eq!(
-            HashLineage::get_path_between(&conn, &root, &leaf),
+            HashLineage::get_path_between(&conn, &root, &leaf, None),
             vec![root, middle, leaf]
         );
         assert_eq!(
-            HashLineage::get_path_edges_between(&conn, &root, &leaf),
+            HashLineage::get_path_edges_between(&conn, &root, &leaf, None),
             vec![
                 HashLineage {
                     parent_id: root,
@@ -561,7 +623,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            HashLineage::get_path_between(&conn, &root, &other),
+            HashLineage::get_path_between(&conn, &root, &other, None),
             Vec::<HashId>::new()
         );
     }

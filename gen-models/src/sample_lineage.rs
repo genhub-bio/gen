@@ -156,7 +156,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        history::dolt::commit_all,
+        history::dolt::{checkout, commit_all, create_branch},
         lineage::SqlLineage,
         sample::{NewSample, Sample},
         test_helpers::get_connection,
@@ -218,18 +218,18 @@ mod tests {
             vec!["leaf".to_string(), "sibling".to_string()]
         );
 
-        let descendants = SampleLineage::get_descendants(&conn, &"root".to_string(), None);
+        let descendants = SampleLineage::get_descendants(&conn, &"root".to_string(), None, None);
         assert_eq!(descendants, vec!["left", "right", "leaf", "sibling"]);
         assert_eq!(
-            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(1)),
+            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(1), None),
             vec!["left", "right"]
         );
         assert_eq!(
-            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(0)),
+            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(0), None),
             Vec::<String>::new()
         );
 
-        let mut graph = SampleLineage::get_graph(&conn);
+        let mut graph = SampleLineage::get_graph(&conn, None);
         graph.sort_by(|left, right| {
             left.parent_sample_name
                 .cmp(&right.parent_sample_name)
@@ -261,14 +261,19 @@ mod tests {
             ]
         );
 
-        let path =
-            SampleLineage::get_path_between(&conn, &"leaf".to_string(), &"sibling".to_string());
+        let path = SampleLineage::get_path_between(
+            &conn,
+            &"leaf".to_string(),
+            &"sibling".to_string(),
+            None,
+        );
         assert_eq!(path, vec!["leaf", "right", "sibling"]);
 
         let edges = SampleLineage::get_path_edges_between(
             &conn,
             &"leaf".to_string(),
             &"sibling".to_string(),
+            None,
         );
         assert_eq!(
             edges,
@@ -315,11 +320,11 @@ mod tests {
             vec!["left", "right", "root"]
         );
         assert_eq!(
-            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(1)),
+            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(1), None),
             vec!["left", "right"]
         );
         assert_eq!(
-            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(2)),
+            SampleLineage::get_descendants(&conn, &"root".to_string(), Some(2), None),
             vec!["left", "right", "leaf", "sibling"]
         );
     }
@@ -359,6 +364,184 @@ mod tests {
             vec!["grand"]
         );
         assert!(SampleLineage::get_parents(&conn, "parent", Some(&base.to_string())).is_empty());
+    }
+
+    #[test]
+    fn test_lineage_queries_respect_history_and_branches() {
+        // The base snapshot is root -> child -> leaf.
+        // The alternate branch deletes child -> leaf and leaf, then adds root -> later.
+        // The queries compare current state with commit and branch refs before and after checkout.
+        let conn = get_connection(None).unwrap();
+        for name in ["root", "child", "leaf"] {
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name,
+                    ..Default::default()
+                },
+            )
+            .expect("should create sample");
+        }
+        SampleLineage::create(&conn, "root", "child").expect("should create lineage");
+        SampleLineage::create(&conn, "child", "leaf").expect("should create lineage");
+        let base = commit_all(&conn, "base lineage")
+            .expect("should commit lineage")
+            .to_string();
+        create_branch(&conn, "lineage-base").expect("should create branch");
+        create_branch(&conn, "lineage-alternate").expect("should create branch");
+        checkout(&conn, "lineage-alternate").expect("should checkout branch");
+        SampleLineage::delete(&conn, "child", "leaf").expect("should delete lineage");
+        Sample::delete_by_name(&conn, "leaf");
+        Sample::get_or_create(
+            &conn,
+            NewSample {
+                name: "later",
+                ..Default::default()
+            },
+        )
+        .expect("should create later sample");
+        SampleLineage::create(&conn, "root", "later").expect("should create later lineage");
+        commit_all(&conn, "alternate lineage").expect("should commit alternate lineage");
+
+        let root = "root".to_string();
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &root, None, None),
+            vec!["child", "later"]
+        );
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &root, None, Some(&base)),
+            vec!["child", "leaf"]
+        );
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &root, None, Some("lineage-base")),
+            vec!["child", "leaf"]
+        );
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &root, Some(1), Some(&base)),
+            vec!["child"]
+        );
+        assert!(SampleLineage::get_descendants(&conn, &root, Some(0), Some(&base)).is_empty());
+
+        let sort_graph = |graph: &mut Vec<SampleLineage>| {
+            graph.sort_by(|left, right| {
+                left.parent_sample_name
+                    .cmp(&right.parent_sample_name)
+                    .then(left.child_sample_name.cmp(&right.child_sample_name))
+            });
+        };
+        let mut current_graph = SampleLineage::get_graph(&conn, None);
+        sort_graph(&mut current_graph);
+        assert_eq!(
+            current_graph,
+            vec![
+                SampleLineage {
+                    parent_sample_name: "root".to_string(),
+                    child_sample_name: "child".to_string(),
+                },
+                SampleLineage {
+                    parent_sample_name: "root".to_string(),
+                    child_sample_name: "later".to_string(),
+                },
+            ]
+        );
+        let mut base_graph = SampleLineage::get_graph(&conn, Some(&base));
+        sort_graph(&mut base_graph);
+        assert_eq!(
+            base_graph,
+            vec![
+                SampleLineage {
+                    parent_sample_name: "child".to_string(),
+                    child_sample_name: "leaf".to_string(),
+                },
+                SampleLineage {
+                    parent_sample_name: "root".to_string(),
+                    child_sample_name: "child".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            SampleLineage::get_path_between(&conn, &root, &"leaf".to_string(), None),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            SampleLineage::get_path_between(&conn, &root, &"leaf".to_string(), Some(&base)),
+            vec!["root", "child", "leaf"]
+        );
+        assert_eq!(
+            SampleLineage::get_path_edges_between(&conn, &root, &"leaf".to_string(), Some(&base)),
+            vec![
+                SampleLineage {
+                    parent_sample_name: "root".to_string(),
+                    child_sample_name: "child".to_string(),
+                },
+                SampleLineage {
+                    parent_sample_name: "child".to_string(),
+                    child_sample_name: "leaf".to_string(),
+                },
+            ]
+        );
+        checkout(&conn, "lineage-base").expect("should checkout base branch");
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &root, None, Some("lineage-alternate")),
+            vec!["child", "later"]
+        );
+        let mut alternate_graph = SampleLineage::get_graph(&conn, Some("lineage-alternate"));
+        sort_graph(&mut alternate_graph);
+        assert_eq!(alternate_graph, current_graph);
+        assert_eq!(
+            SampleLineage::get_path_between(
+                &conn,
+                &root,
+                &"later".to_string(),
+                Some("lineage-alternate"),
+            ),
+            vec!["root", "later"]
+        );
+        assert_eq!(
+            SampleLineage::get_path_edges_between(
+                &conn,
+                &root,
+                &"later".to_string(),
+                Some("lineage-alternate"),
+            ),
+            vec![SampleLineage {
+                parent_sample_name: "root".to_string(),
+                child_sample_name: "later".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_get_descendants_fetches_five_levels_at_history_ref() {
+        // The committed fixture is the chain root -> one -> two -> three -> four -> five -> six.
+        // The historical reads below check the five-edge cutoff and unlimited traversal.
+        let conn = get_connection(None).unwrap();
+        let names = ["root", "one", "two", "three", "four", "five", "six"];
+        for name in names {
+            Sample::get_or_create(
+                &conn,
+                NewSample {
+                    name,
+                    ..Default::default()
+                },
+            )
+            .expect("should create sample");
+        }
+        for pair in names.windows(2) {
+            SampleLineage::create(&conn, pair[0], pair[1]).expect("should create lineage");
+        }
+        let history = commit_all(&conn, "deep lineage")
+            .expect("should commit lineage")
+            .to_string();
+        let root = "root".to_string();
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &root, Some(5), Some(&history)),
+            vec!["one", "two", "three", "four", "five"]
+        );
+        assert_eq!(
+            SampleLineage::get_descendants(&conn, &root, None, Some(&history)),
+            vec!["one", "two", "three", "four", "five", "six"]
+        );
     }
 
     #[test]
