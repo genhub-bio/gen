@@ -236,7 +236,8 @@ mod tests {
     }
 
     fn has_collection(repository: &PyRepository, name: &str) -> bool {
-        Collection::all(repository.context.graph().conn(), None)
+        Collection::all(repository.context.graph().conn())
+            .expect("should list collections")
             .iter()
             .any(|collection| collection.name == name)
     }

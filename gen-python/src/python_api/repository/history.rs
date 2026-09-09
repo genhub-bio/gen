@@ -403,7 +403,8 @@ mod tests {
                 .checkout(main.as_any(), false)
                 .expect("should checkout branch name");
             assert!(
-                Collection::all(repository.context.graph().conn(), None)
+                Collection::all(repository.context.graph().conn())
+                    .expect("should list collections")
                     .iter()
                     .all(|collection| collection.name != "feature"),
                 "main should not contain feature state before merge"
@@ -414,7 +415,8 @@ mod tests {
                 .expect("should merge Branch object");
             assert!(merged.is_head, "merge result should describe HEAD");
             assert!(
-                Collection::all(repository.context.graph().conn(), None)
+                Collection::all(repository.context.graph().conn())
+                    .expect("should list collections")
                     .iter()
                     .any(|collection| collection.name == "feature"),
                 "merge should bring feature state into main"
@@ -430,7 +432,8 @@ mod tests {
                 "reset result should describe the selected operation"
             );
             assert!(
-                Collection::all(repository.context.graph().conn(), None)
+                Collection::all(repository.context.graph().conn())
+                    .expect("should list collections")
                     .iter()
                     .all(|collection| collection.name != "feature"),
                 "reset should restore graph state from the selected operation"
