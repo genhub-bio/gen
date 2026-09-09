@@ -211,7 +211,6 @@ impl PyRepository {
     /// Creates a branch at HEAD, or at `start` when supplied.
     #[pyo3(signature = (name, start=None))]
     fn create_branch(&self, name: &str, start: Option<&str>) -> PyResult<PyBranch> {
-        self.ensure_no_transaction("create a branch")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let start_ref = start.map(|reference| CommitRef(reference.to_string()));
         history_store
@@ -222,7 +221,6 @@ impl PyRepository {
 
     /// Deletes a branch.
     fn delete_branch(&self, branch: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.ensure_no_transaction("delete a branch")?;
         let name = branch_name(branch)?;
         DoltHistoryStore::new(self.context.graph().conn())
             .delete_branch(&BranchName(name))
@@ -235,7 +233,6 @@ impl PyRepository {
     /// Creating an existing branch is an error.
     #[pyo3(signature = (branch, *, create=false))]
     fn checkout(&self, branch: &Bound<'_, PyAny>, create: bool) -> PyResult<PyBranch> {
-        self.ensure_no_transaction("checkout a branch")?;
         let name = branch_name(branch)?;
         if create {
             let history_store = DoltHistoryStore::new(self.context.graph().conn());
@@ -292,7 +289,6 @@ impl PyRepository {
 
     /// Merges a branch into the current branch and returns the new HEAD operation.
     fn merge(&self, branch: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
-        self.ensure_no_transaction("merge")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "merge")
             .map_err(history_err_to_pyerr)?;
@@ -306,7 +302,6 @@ impl PyRepository {
 
     /// Applies one operation to the current branch and returns the new HEAD operation.
     fn apply(&self, operation: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
-        self.ensure_no_transaction("apply an operation")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "apply")
             .map_err(history_err_to_pyerr)?;
@@ -323,7 +318,6 @@ impl PyRepository {
 
     /// Hard-resets the current branch to an operation and returns the resulting HEAD.
     fn reset(&self, operation: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
-        self.ensure_no_transaction("reset")?;
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "reset")
             .map_err(history_err_to_pyerr)?;
@@ -337,21 +331,17 @@ impl PyRepository {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-
     use gen_models::{
         collection::Collection,
         history::{HistoryStore, dolt::DoltHistoryStore},
     };
     use pyo3::{IntoPyObject as _, Py, Python};
 
-    use super::{PyBranch, PyRepository};
+    use super::PyRepository;
 
     fn make_repository() -> PyRepository {
         PyRepository {
             context: r#gen::test_helpers::setup_gen_on_disk(),
-            in_transaction: false,
-            pending_operation_summaries: RefCell::new(Vec::new()),
         }
     }
 
@@ -437,34 +427,6 @@ mod tests {
                     .iter()
                     .all(|collection| collection.name != "feature"),
                 "reset should restore graph state from the selected operation"
-            );
-        });
-    }
-
-    #[test]
-    fn test_history_actions_reject_repository_transaction() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
-            let mut repository = make_repository();
-            repository.in_transaction = true;
-            let branch = Py::new(
-                python,
-                PyBranch {
-                    name: "main".to_string(),
-                    head: String::new(),
-                    remote: None,
-                    is_current: true,
-                    dirty: false,
-                },
-            )
-            .expect("should create Python branch");
-
-            let error = repository
-                .checkout(branch.bind(python).as_any(), false)
-                .expect_err("should reject checkout during transaction");
-            assert!(
-                error.to_string().contains("transaction is active"),
-                "checkout error should explain the active transaction"
             );
         });
     }

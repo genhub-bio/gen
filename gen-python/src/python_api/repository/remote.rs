@@ -140,7 +140,6 @@ impl PyRepository {
         branch: Option<&Bound<'_, PyAny>>,
         force: bool,
     ) -> PyResult<()> {
-        self.ensure_no_transaction("push")?;
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
@@ -164,7 +163,6 @@ impl PyRepository {
         remote: Option<&Bound<'_, PyAny>>,
         branch: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        self.ensure_no_transaction("pull")?;
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
@@ -187,7 +185,6 @@ impl PyRepository {
         remote: Option<&Bound<'_, PyAny>>,
         branch: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        self.ensure_no_transaction("fetch")?;
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
@@ -405,28 +402,6 @@ mod tests {
                     .expect("should resolve remote feature ref"),
                 "the refreshed connection should observe the fetched tracking ref"
             );
-        });
-    }
-
-    #[test]
-    fn test_remote_transfers_reject_repository_transaction() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
-            let repository_dir = tempdir().expect("should create repository directory");
-            let mut repository = create_repository(repository_dir.path());
-            repository.in_transaction = true;
-
-            for (action, result) in [
-                ("push", repository.push(python, None, None, false)),
-                ("pull", repository.pull(python, None, None)),
-                ("fetch", repository.fetch(python, None, None)),
-            ] {
-                let error = result.expect_err("should reject remote transfer during transaction");
-                assert!(
-                    error.to_string().contains("transaction is active"),
-                    "{action} error should explain the active transaction"
-                );
-            }
         });
     }
 }

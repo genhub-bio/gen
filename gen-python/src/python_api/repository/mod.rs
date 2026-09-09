@@ -1,4 +1,4 @@
-use std::{cell::RefCell, path::PathBuf};
+use std::path::PathBuf;
 
 use r#gen::{get_config_connection, get_connection_for_branch};
 use gen_core::config::Workspace;
@@ -8,7 +8,7 @@ use gen_models::{
     db::DbContext,
     errors::OperationError,
     node::Node,
-    operations::{Defaults, OperationInfo, OperationSummary, commit_operation_summary},
+    operations::{Defaults, OperationSummary, commit_operation_summary},
     sample::Sample,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
@@ -88,64 +88,24 @@ where
     F: FnOnce(&DbContext) -> PyResult<(T, OperationSummary)>,
     M: FnOnce(OperationError) -> PyErr,
 {
-    let managed = !repository.in_transaction;
-    if managed {
-        tx_begin(&repository.context)?;
-    }
+    tx_begin(&repository.context)?;
 
     let (value, operation_summary) = match op(&repository.context) {
         Ok(value) => value,
         Err(err) => {
-            if managed {
-                tx_rollback(&repository.context);
-            }
+            tx_rollback(&repository.context);
             return Err(err);
         }
     };
 
-    if managed {
-        if let Err(err) = tx_commit(&repository.context) {
-            tx_rollback(&repository.context);
-            return Err(err);
-        }
-        commit_operation_summary(&repository.context, &operation_summary)
-            .map_err(map_operation_error)?;
-    } else {
-        repository
-            .pending_operation_summaries
-            .borrow_mut()
-            .push(operation_summary);
+    if let Err(err) = tx_commit(&repository.context) {
+        tx_rollback(&repository.context);
+        return Err(err);
     }
+    commit_operation_summary(&repository.context, &operation_summary)
+        .map_err(map_operation_error)?;
 
     Ok(value)
-}
-
-fn combine_operation_summaries(
-    mut operation_summaries: Vec<OperationSummary>,
-) -> Option<OperationSummary> {
-    match operation_summaries.len() {
-        0 => None,
-        1 => operation_summaries.pop(),
-        _ => {
-            let mut files = Vec::new();
-            let mut summaries = Vec::with_capacity(operation_summaries.len());
-            for operation_summary in operation_summaries {
-                files.extend(operation_summary.operation_info.files);
-                summaries.push(operation_summary.summary);
-            }
-            Some(OperationSummary::new(
-                OperationInfo {
-                    files,
-                    description: "python_transaction".to_string(),
-                },
-                summaries.join("\n"),
-            ))
-        }
-    }
-}
-
-fn operation_err_to_pyerr(err: OperationError) -> PyErr {
-    PyRuntimeError::new_err(err.to_string())
 }
 
 /// The main entry point for the gen Python module.
@@ -155,8 +115,6 @@ fn operation_err_to_pyerr(err: OperationError) -> PyErr {
 #[pyclass(name = "Repository", unsendable)]
 pub struct PyRepository {
     pub context: DbContext,
-    pub in_transaction: bool,
-    pending_operation_summaries: RefCell<Vec<OperationSummary>>,
 }
 
 impl PyRepository {
@@ -178,18 +136,7 @@ impl PyRepository {
         Ok(Self {
             context: DbContext::new(workspace, graph_conn, config_conn)
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
-            in_transaction: false,
-            pending_operation_summaries: RefCell::new(Vec::new()),
         })
-    }
-
-    pub(crate) fn ensure_no_transaction(&self, action: &str) -> PyResult<()> {
-        if self.in_transaction {
-            return Err(PyRuntimeError::new_err(format!(
-                "cannot {action} while a repository transaction is active"
-            )));
-        }
-        Ok(())
     }
 
     /// Reopens the graph connection after orchestration performed work through another connection.
@@ -304,59 +251,6 @@ impl PyRepository {
         path_to_py_path(py, &path)
     }
 
-    // Transaction context manager
-
-    /// Returns self so that Python's `with` statement calls `__enter__`/`__exit__`
-    /// on this repository, batching multiple operations into one transaction.
-    ///
-    /// Example:
-    ///     with repo.transaction():
-    ///         repo.import_fasta("reference.fasta")
-    ///         repo.import_gfa("graph.gfa")
-    fn transaction(slf: Py<Self>) -> Py<Self> {
-        slf
-    }
-
-    fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<()> {
-        if slf.in_transaction {
-            return Err(PyRuntimeError::new_err("transaction already active"));
-        }
-        tx_begin(&slf.context)?;
-        slf.pending_operation_summaries.borrow_mut().clear();
-        slf.in_transaction = true;
-        Ok(())
-    }
-
-    fn __exit__(
-        mut slf: PyRefMut<'_, Self>,
-        exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_val: Option<&Bound<'_, PyAny>>,
-        _exc_tb: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<bool> {
-        slf.in_transaction = false;
-        if exc_type.is_some() {
-            slf.pending_operation_summaries.borrow_mut().clear();
-            tx_rollback(&slf.context);
-            return Ok(false);
-        }
-
-        let operation_summaries = slf
-            .pending_operation_summaries
-            .borrow_mut()
-            .drain(..)
-            .collect::<Vec<_>>();
-        if let Err(err) = tx_commit(&slf.context) {
-            tx_rollback(&slf.context);
-            return Err(err);
-        }
-
-        if let Some(operation_summary) = combine_operation_summaries(operation_summaries) {
-            commit_operation_summary(&slf.context, &operation_summary)
-                .map_err(operation_err_to_pyerr)?;
-        }
-        Ok(false)
-    }
-
     // Raw database access
 
     fn execute(&self, query: &str) -> PyResult<()> {
@@ -467,7 +361,7 @@ impl PyRepository {
 
 #[cfg(test)]
 mod python_tests {
-    use std::{cell::RefCell, fs};
+    use std::fs;
 
     use r#gen::test_helpers::setup_gen_on_disk;
     use pyo3::{PyTypeInfo, prelude::*, py_run};
@@ -477,15 +371,7 @@ mod python_tests {
 
     fn make_repo(py: Python<'_>) -> Py<PyRepository> {
         let ctx = setup_gen_on_disk();
-        Py::new(
-            py,
-            PyRepository {
-                context: ctx,
-                in_transaction: false,
-                pending_operation_summaries: RefCell::new(Vec::new()),
-            },
-        )
-        .unwrap()
+        Py::new(py, PyRepository { context: ctx }).unwrap()
     }
 
     fn write_fasta(
@@ -611,48 +497,6 @@ mod python_tests {
             assert!(
                 err.contains("already exist"),
                 "Expected 'already exist' in error: {err}"
-            );
-        });
-    }
-
-    #[test]
-    fn test_transaction_commits_both_imports() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let py_repo = make_repo(py);
-            let dir = tempdir().unwrap();
-            let fasta1 = write_fasta(&dir, "one.fa", "chr1", "ACGTACGT");
-            let fasta2 = write_fasta(&dir, "two.fa", "chr2", "TTTTGGGG");
-
-            PyRepository::__enter__(py_repo.borrow_mut(py)).unwrap();
-
-            {
-                let borrow = py_repo.borrow(py);
-                borrow
-                    .import_fasta(
-                        fasta1.to_str().unwrap().to_string(),
-                        Some("test".to_string()),
-                        false,
-                        None,
-                    )
-                    .unwrap();
-                borrow
-                    .import_fasta(
-                        fasta2.to_str().unwrap().to_string(),
-                        Some("test".to_string()),
-                        false,
-                        None,
-                    )
-                    .unwrap();
-            }
-
-            PyRepository::__exit__(py_repo.borrow_mut(py), None, None, None).unwrap();
-
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
-            assert_eq!(
-                block_groups.len(),
-                2,
-                "Both imports should have been committed"
             );
         });
     }
@@ -846,39 +690,6 @@ mod python_tests {
             assert!(
                 !index_file.exists(),
                 "Index should be gone after PySequenceGraph::clear_index"
-            );
-        });
-    }
-
-    #[test]
-    fn test_transaction_rolls_back_on_error() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let py_repo = make_repo(py);
-            let dir = tempdir().unwrap();
-            let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
-
-            PyRepository::__enter__(py_repo.borrow_mut(py)).unwrap();
-
-            py_repo
-                .borrow(py)
-                .import_fasta(
-                    fasta.to_str().unwrap().to_string(),
-                    Some("test".to_string()),
-                    false,
-                    None,
-                )
-                .unwrap();
-
-            // Simulate an exception reaching __exit__ — passes a non-None exc_type
-            let fake_exc = py.None().into_bound(py);
-            PyRepository::__exit__(py_repo.borrow_mut(py), Some(&fake_exc), None, None).unwrap();
-
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
-            assert!(
-                block_groups.is_empty(),
-                "Import should have been rolled back, but found {} sequence graph(s)",
-                block_groups.len()
             );
         });
     }
