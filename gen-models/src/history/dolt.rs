@@ -257,6 +257,9 @@ pub fn log_entries_for_hashes(
             .map(|commit_hash| Value::Text(commit_hash.to_string()))
             .collect::<Vec<_>>(),
     );
+    // A plain dolt_log hash filter only sees commits reachable from the active checkout.
+    // Ancestors omits missing hashes and supplies each existing commit as an explicit log
+    // revision, so this batch also includes commits from other branches and root commits.
     let mut statement = conn.prepare(
         "WITH requested AS ( \
              SELECT rowid AS position, value AS commit_hash FROM rarray(?1) \
@@ -264,9 +267,10 @@ pub fn log_entries_for_hashes(
          SELECT commits.commit_hash, ancestors.parent_hash, commits.committer, \
                 commits.email, commits.date, commits.message \
          FROM requested \
-         JOIN dolt_log AS commits ON commits.commit_hash = requested.commit_hash \
-         LEFT JOIN dolt_commit_ancestors AS ancestors \
+         JOIN dolt_commit_ancestors AS ancestors \
            ON ancestors.commit_hash = requested.commit_hash AND ancestors.parent_index = 0 \
+         JOIN dolt_log(ancestors.commit_hash) AS commits \
+           ON commits.commit_hash = requested.commit_hash \
          ORDER BY requested.position",
     )?;
     let rows = statement.query_map([commit_hashes], |row| {
@@ -539,8 +543,9 @@ pub fn hash_of(conn: &GraphConnection, commit_ref: &str) -> SqlResult<DoltHashId
 }
 
 pub fn commit_exists(conn: &GraphConnection, commit_hash: &DoltHashId) -> SqlResult<bool> {
+    // Unlike dolt_log, ancestors resolves hashes independently of the active branch.
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM dolt_log WHERE commit_hash = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM dolt_commit_ancestors WHERE commit_hash = ?1)",
         [commit_hash],
         |row| row.get(0),
     )
@@ -885,8 +890,8 @@ mod tests {
 
     use super::{
         DoltHistoryStore, active_branch, add_remote, branch_exists, branch_hash, branch_rows,
-        checkout, commit_all, commit_staged_all, connect_branch, create_branch, diff_row_count,
-        hash_of, is_current_branch_dirty, log_entries, log_entries_for_hashes,
+        checkout, commit_all, commit_exists, commit_staged_all, connect_branch, create_branch,
+        diff_row_count, hash_of, is_current_branch_dirty, log_entries, log_entries_for_hashes,
         log_entries_for_revision, merge, merge_base, remote_rows, remove_remote, reset_hard,
         search_branch_names, set_commit_author_email, set_commit_author_name, status_rows,
     };
@@ -1453,6 +1458,20 @@ mod tests {
             commit_all(&conn, "feature commit").expect("should commit feature change");
         checkout(&conn, "main").expect("should restore main branch");
 
+        Collection::create(&conn, "uncommitted-collection")
+            .expect("should insert an uncommitted graph row");
+        let dirty_status = status_rows(&conn)
+            .expect("should read dirty status")
+            .into_iter()
+            .map(|row| (row.table_name, row.staged, row.status))
+            .collect::<Vec<_>>();
+        assert!(!dirty_status.is_empty(), "checkout should be dirty");
+        let missing_commit = DoltHashId::try_from("1111111111111111111111111111111111111111")
+            .expect("should parse a missing nonzero hash");
+        assert!(commit_exists(&conn, &feature_commit).expect("should find the feature commit"));
+        assert!(!commit_exists(&conn, &missing_commit).expect("should query missing commit"));
+        assert!(!commit_exists(&conn, &DoltHashId::default()).expect("should query zero hash"));
+
         let entries = log_entries_for_hashes(
             &conn,
             &[
@@ -1460,6 +1479,8 @@ mod tests {
                 main_commit,
                 base_commit,
                 DoltHashId::default(),
+                missing_commit,
+                feature_commit,
             ],
         )
         .expect("should load requested commits from all repository branches");
@@ -1469,7 +1490,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.commit_hash)
                 .collect::<Vec<_>>(),
-            vec![feature_commit, main_commit, base_commit],
+            vec![feature_commit, main_commit, base_commit, feature_commit],
             "all existing commits should be returned in request order while missing hashes are omitted"
         );
         assert_eq!(
@@ -1482,9 +1503,40 @@ mod tests {
             "the requested commit metadata should include its message"
         );
         assert_eq!(
+            status_rows(&conn)
+                .expect("should read status after lookup")
+                .into_iter()
+                .map(|row| (row.table_name, row.staged, row.status))
+                .collect::<Vec<_>>(),
+            dirty_status,
+            "commit metadata lookup should preserve uncommitted changes"
+        );
+        assert!(
+            Collection::exists(&conn, "uncommitted-collection"),
+            "commit metadata lookup should preserve the uncommitted graph row"
+        );
+        assert_eq!(
             active_branch(&conn).expect("should read active branch"),
             "main",
             "commit metadata lookup should not change the active checkout"
+        );
+    }
+
+    #[test]
+    fn test_commit_metadata_lookup_includes_root_commit() {
+        let conn = get_connection(None).expect("should create graph database");
+        let root_commit = log_entries(&conn)
+            .expect("should load initialized history")
+            .into_iter()
+            .find(|entry| entry.parent_hash.is_none())
+            .expect("should contain a root commit");
+
+        assert!(commit_exists(&conn, &root_commit.commit_hash).expect("should find root commit"));
+        assert_eq!(
+            log_entries_for_hashes(&conn, &[root_commit.commit_hash])
+                .expect("should load root metadata"),
+            vec![root_commit],
+            "a commit without parents should retain its metadata"
         );
     }
 
