@@ -24,15 +24,6 @@ pub struct LineagePage<Id> {
     pub has_more: bool,
 }
 
-/// A stable page of descendants ordered by depth and ID.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DescendantPage<Id> {
-    /// Descendants paired with their minimum depth from the requested parent.
-    pub ids: Vec<(usize, Id)>,
-    /// Whether another page can be requested with the next offset.
-    pub has_more: bool,
-}
-
 fn decode_hex_bytes(token: &str) -> Vec<u8> {
     assert_eq!(token.len() % 2, 0, "hex tokens must have an even length");
 
@@ -215,7 +206,7 @@ pub trait SqlLineage: Sized {
         page_size: usize,
         offset: u32,
         history_ref: Option<&str>,
-    ) -> DescendantPage<Self::Id> {
+    ) -> LineagePage<Self::Id> {
         let max_depth = max_depth.map(|depth| depth as i64);
         let lineage_table_name =
             sql_table_name_with_history_ref(Self::TABLE_NAME, Some(Self::TABLE_NAME), history_ref);
@@ -243,7 +234,7 @@ pub trait SqlLineage: Sized {
                  FROM descendants
                  GROUP BY id
              )
-             SELECT ranked_descendants.depth, child.{child_id_column}
+             SELECT child.{child_id_column}
              FROM {child_table_name} child
              JOIN ranked_descendants ON child.{child_id_column} = ranked_descendants.id
              WHERE (:max_depth IS NULL OR ranked_descendants.depth <= :max_depth)
@@ -271,17 +262,15 @@ pub trait SqlLineage: Sized {
         let mut ids = conn
             .prepare(&query)
             .unwrap()
-            .query_map(&query_params[..], |row| {
-                Ok((row.get::<_, i64>(0)? as usize, row.get(1)?))
-            })
+            .query_map(&query_params[..], |row| row.get(0))
             .unwrap()
             .map(|value| value.unwrap())
-            .collect::<Vec<(usize, Self::Id)>>();
+            .collect::<Vec<Self::Id>>();
         let has_more = ids.len() > page_size;
         if has_more {
             ids.truncate(page_size);
         }
-        DescendantPage { ids, has_more }
+        LineagePage { ids, has_more }
     }
 
     fn get_ancestors(
@@ -824,15 +813,15 @@ mod tests {
 
         let first_descendants =
             NumericLineage::get_descendants_page(&conn, &1, Some(2), 2, 0, None);
-        assert_eq!(first_descendants.ids, vec![(1, 2), (1, 7)]);
+        assert_eq!(first_descendants.ids, vec![2, 7]);
         assert!(first_descendants.has_more);
         let second_descendants =
             NumericLineage::get_descendants_page(&conn, &1, Some(2), 2, 2, None);
-        assert_eq!(second_descendants.ids, vec![(1, 8), (1, 9)]);
+        assert_eq!(second_descendants.ids, vec![8, 9]);
         assert!(second_descendants.has_more);
         let third_descendants =
             NumericLineage::get_descendants_page(&conn, &1, Some(2), 2, 4, None);
-        assert_eq!(third_descendants.ids, vec![(2, 3), (2, 5)]);
+        assert_eq!(third_descendants.ids, vec![3, 5]);
         assert!(!third_descendants.has_more);
 
         conn.execute_batch(
@@ -840,12 +829,9 @@ mod tests {
         )
         .expect("should add convergent and cyclic lineage fixtures");
         let page = NumericLineage::get_descendants_page(&conn, &1, Some(5), 20, 0, None);
-        assert_eq!(
-            page.ids,
-            vec![(1, 2), (1, 7), (1, 8), (1, 9), (2, 3), (2, 5), (3, 4)]
-        );
+        assert_eq!(page.ids, vec![2, 7, 8, 9, 3, 5, 4]);
         assert!(!page.has_more);
-        assert!(!page.ids.iter().any(|(_, id)| *id == 1));
+        assert!(!page.ids.contains(&1));
         assert_eq!(
             NumericLineage::get_descendants(&conn, &1, Some(5), None),
             vec![2, 7, 8, 9, 3, 5, 4]

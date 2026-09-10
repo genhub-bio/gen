@@ -421,11 +421,11 @@ mod tests {
         assert!(!historical_children.has_more);
         let historical_descendants =
             SampleLineage::get_descendants_page(&conn, &root, None, 1, 0, Some(&base));
-        assert_eq!(historical_descendants.ids, vec![(1, "child".to_string())]);
+        assert_eq!(historical_descendants.ids, vec!["child".to_string()]);
         assert!(historical_descendants.has_more);
         let historical_descendants =
             SampleLineage::get_descendants_page(&conn, &root, None, 1, 1, Some(&base));
-        assert_eq!(historical_descendants.ids, vec![(2, "leaf".to_string())]);
+        assert_eq!(historical_descendants.ids, vec!["leaf".to_string()]);
         assert!(!historical_descendants.has_more);
         assert_eq!(
             SampleLineage::get_descendants(&conn, &root, None, Some("lineage-base")),
