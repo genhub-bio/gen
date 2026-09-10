@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Example usage, to write results to a file:
-# SAMPLE_LIMIT=100 bin/benchmark_incremental_vcf_updates.sh | tee benchmark-results.tsv
+# SAMPLE_LIMIT=100 bin/benchmark_incremental_vcf_updates.sh | tee benchmark-results.txt
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(dirname "${SCRIPT_DIR}")"
@@ -15,6 +15,7 @@ PROFILE_SAMPLES="${PROFILE_SAMPLES:-}"
 PROFILE_MODE="${PROFILE_MODE:-sample}"
 PROFILE_DIR="${PROFILE_DIR:-${PWD}/incremental-vcf-profiles}"
 BENCHMARK_WORKSPACE=""
+CUMULATIVE_MS=0
 
 usage() {
   printf 'Usage: %s [reference.gb] [aligned.fa[.zst]]\n' "$0"
@@ -39,7 +40,8 @@ elapsed_ms() {
 }
 
 database_size_bytes() {
-  local database_path="${BENCHMARK_WORKSPACE}/.gen/gen.db"
+  # Sequence updates grow the graph database; gen.db only stores configuration.
+  local database_path="${BENCHMARK_WORKSPACE}/.gen/default.db"
   if [[ ! -f "${database_path}" ]]; then
     printf '0\n'
     return
@@ -126,10 +128,23 @@ process_record() {
     "${GEN_BIN}" update vcf --reference reference variants.vcf > /dev/null
   fi
   update_ms="$(elapsed_ms "${update_start}")"
+  CUMULATIVE_MS=$((CUMULATIVE_MS + alignment_ms + update_ms))
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${sample_number}" "${sample_name}" "${alignment_ms}" "${update_ms}" \
-    "$((alignment_ms + update_ms))" "$(database_size_bytes)"
+  local labels=(sample_number sample_name alignment_and_vcf_ms update_ms total_ms cumulative_ms gen_db_bytes)
+  local values=("${sample_number}" "${sample_name}" "${alignment_ms}" "${update_ms}"
+    "$((alignment_ms + update_ms))" "${CUMULATIVE_MS}" "$(database_size_bytes)")
+  local row_format=""
+  local column_index
+  local column_width
+  for column_index in "${!labels[@]}"; do
+    column_width=${#labels[column_index]}
+    if ((${#values[column_index]} > column_width)); then
+      column_width=${#values[column_index]}
+    fi
+    row_format+="%-${column_width}s  "
+  done
+  row_format="${row_format%  }"
+  printf "${row_format}\n" "${labels[@]}" "${values[@]}"
 }
 
 run_records() {
@@ -182,7 +197,6 @@ main() {
   "${GEN_BIN}" import genbank --reference reference "${REFERENCE_PATH}" > /dev/null
   "${GEN_BIN}" export fasta --sample reference reference.fa > /dev/null
 
-  printf 'sample_number\tsample_name\talignment_ms\tupdate_ms\ttotal_ms\tgen_db_bytes\n'
   run_records < <(stream_aligned_fasta)
 }
 
