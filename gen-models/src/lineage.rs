@@ -97,6 +97,15 @@ pub trait SqlLineage: Sized {
             Some(Self::PARENT_TABLE_NAME),
             history_ref,
         );
+        // This query essentially finds all potential parents and declares that as a root. It does so by
+        // identifying all potential parents, and then removing if that potential parent has a parent.
+        // It's done this way instead of doing a lookup of parent_id is null because a join table would
+        // not contain any entries -- such as:
+        // Table 1 having {1,2,3}
+        // A join table having {parent_id: 1, child_id: 3}
+        // Looking at parent_id is null would:
+        //   return no parents if no lineage existed
+        //   fail to identify id 2 as a root
         let query = format!(
             "SELECT parent.{parent_id_column}
              FROM {parent_table_name} parent
