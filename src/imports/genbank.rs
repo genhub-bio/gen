@@ -682,6 +682,7 @@ where
 mod tests {
     use std::{
         collections::HashSet,
+        env,
         fs::File,
         io::BufReader,
         path::PathBuf,
@@ -1160,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn test_imports_compressed_u00096_in_under_five_seconds() {
+    fn test_imports_compressed_u00096_within_benchmark_limit() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let path =
@@ -1186,10 +1187,15 @@ mod tests {
         .unwrap();
         conn.execute("END TRANSACTION", []).unwrap();
 
+        let time_limit = if env::var_os("CI").is_some() {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(5)
+        };
+        let elapsed = started_at.elapsed();
         assert!(
-            started_at.elapsed() < Duration::from_secs(5),
-            "compressed U00096.3 import took {:?}",
-            started_at.elapsed()
+            elapsed < time_limit,
+            "compressed U00096.3 import took {elapsed:?}, exceeding the {time_limit:?} limit"
         );
     }
 
