@@ -86,7 +86,7 @@ pub trait SqlLineage: Sized {
     /// Return root entities that have no incoming lineage edge.
     fn get_roots_page(
         conn: &Connection,
-        page_size: usize,
+        limit: usize,
         offset: u32,
         history_ref: Option<&str>,
     ) -> LineagePage<Self::Id> {
@@ -112,8 +112,8 @@ pub trait SqlLineage: Sized {
             lineage_table_name = lineage_table_name,
             child_column = Self::CHILD_COLUMN,
         );
-        let page_size = page_size.max(1);
-        let fetch_limit = i64::try_from(page_size.saturating_add(1)).unwrap_or(i64::MAX);
+        let limit = limit.max(1);
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let offset = i64::from(offset);
         let history_ref_param = history_ref.map(str::to_owned);
         let mut query_params: Vec<(&str, &dyn ToSql)> =
@@ -128,9 +128,9 @@ pub trait SqlLineage: Sized {
             .unwrap()
             .map(|value| value.unwrap())
             .collect::<Vec<Self::Id>>();
-        let has_more = ids.len() > page_size;
+        let has_more = ids.len() > limit;
         if has_more {
-            ids.truncate(page_size);
+            ids.truncate(limit);
         }
         LineagePage { ids, has_more }
     }
@@ -139,7 +139,7 @@ pub trait SqlLineage: Sized {
     fn get_children_page(
         conn: &Connection,
         parent_id: &Self::Id,
-        page_size: usize,
+        limit: usize,
         offset: u32,
         history_ref: Option<&str>,
     ) -> LineagePage<Self::Id> {
@@ -168,8 +168,8 @@ pub trait SqlLineage: Sized {
             parent_column = Self::PARENT_COLUMN,
             child_column = Self::CHILD_COLUMN,
         );
-        let page_size = page_size.max(1);
-        let fetch_limit = i64::try_from(page_size.saturating_add(1)).unwrap_or(i64::MAX);
+        let limit = limit.max(1);
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let offset = i64::from(offset);
         let history_ref_param = history_ref.map(str::to_owned);
         let mut query_params: Vec<(&str, &dyn ToSql)> = vec![
@@ -187,9 +187,9 @@ pub trait SqlLineage: Sized {
             .unwrap()
             .map(|value| value.unwrap())
             .collect::<Vec<Self::Id>>();
-        let has_more = ids.len() > page_size;
+        let has_more = ids.len() > limit;
         if has_more {
-            ids.truncate(page_size);
+            ids.truncate(limit);
         }
         LineagePage { ids, has_more }
     }
@@ -203,7 +203,7 @@ pub trait SqlLineage: Sized {
         conn: &Connection,
         parent_id: &Self::Id,
         max_depth: Option<usize>,
-        page_size: usize,
+        limit: usize,
         offset: u32,
         history_ref: Option<&str>,
     ) -> LineagePage<Self::Id> {
@@ -246,8 +246,8 @@ pub trait SqlLineage: Sized {
             child_table_name = child_table_name,
             child_id_column = Self::CHILD_ID_COLUMN,
         );
-        let page_size = page_size.max(1);
-        let fetch_limit = i64::try_from(page_size.saturating_add(1)).unwrap_or(i64::MAX);
+        let limit = limit.max(1);
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
         let offset = i64::from(offset);
         let history_ref_param = history_ref.map(str::to_owned);
         let mut query_params: Vec<(&str, &dyn ToSql)> = vec![
@@ -266,9 +266,9 @@ pub trait SqlLineage: Sized {
             .unwrap()
             .map(|value| value.unwrap())
             .collect::<Vec<Self::Id>>();
-        let has_more = ids.len() > page_size;
+        let has_more = ids.len() > limit;
         if has_more {
-            ids.truncate(page_size);
+            ids.truncate(limit);
         }
         LineagePage { ids, has_more }
     }
