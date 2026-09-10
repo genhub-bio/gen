@@ -412,25 +412,19 @@ mod tests {
             SampleLineage::get_descendants(&conn, &root, None, Some(&base)),
             vec!["child", "leaf"]
         );
-        let historical_roots = SampleLineage::get_roots_page(&conn, 10, None, Some(&base));
+        let historical_roots = SampleLineage::get_roots_page(&conn, 10, 0, Some(&base));
         assert_eq!(historical_roots.ids, vec!["root"]);
         assert!(!historical_roots.has_more);
         let historical_children =
-            SampleLineage::get_children_page(&conn, &root, 10, None, Some(&base));
+            SampleLineage::get_children_page(&conn, &root, 10, 0, Some(&base));
         assert_eq!(historical_children.ids, vec!["child"]);
         assert!(!historical_children.has_more);
         let historical_descendants =
-            SampleLineage::get_descendants_page(&conn, &root, None, 1, None, Some(&base));
+            SampleLineage::get_descendants_page(&conn, &root, None, 1, 0, Some(&base));
         assert_eq!(historical_descendants.ids, vec![(1, "child".to_string())]);
         assert!(historical_descendants.has_more);
-        let historical_descendants = SampleLineage::get_descendants_page(
-            &conn,
-            &root,
-            None,
-            1,
-            historical_descendants.next_cursor.as_ref(),
-            Some(&base),
-        );
+        let historical_descendants =
+            SampleLineage::get_descendants_page(&conn, &root, None, 1, 1, Some(&base));
         assert_eq!(historical_descendants.ids, vec![(2, "leaf".to_string())]);
         assert!(!historical_descendants.has_more);
         assert_eq!(
