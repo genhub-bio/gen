@@ -367,7 +367,9 @@ mod python_tests {
     use pyo3::{PyTypeInfo, prelude::*, py_run};
     use tempfile::tempdir;
 
-    use crate::python_api::repository::{PyRepository, clone_repository};
+    use crate::python_api::repository::PyRepository;
+    #[cfg(unix)]
+    use crate::python_api::repository::clone_repository;
 
     fn make_repo(py: Python<'_>) -> Py<PyRepository> {
         let ctx = setup_gen_on_disk();

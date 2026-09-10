@@ -200,7 +200,7 @@ impl PyRepository {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::path::Path;
 
@@ -239,7 +239,6 @@ mod tests {
             .any(|collection| collection.name == name)
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_remote_configuration_accepts_remote_objects() {
         pyo3::prepare_freethreaded_python();
@@ -311,7 +310,6 @@ mod tests {
         });
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_file_remote_push_pull_and_fetch_refresh_repository_connection() {
         pyo3::prepare_freethreaded_python();
