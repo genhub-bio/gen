@@ -3326,7 +3326,7 @@ mod remotes {
     }
 
     #[test]
-    fn test_clone_failure_removes_only_the_new_destination() {
+    fn test_clone_failure_leaves_the_destination_for_the_user_to_clean_up() {
         let clone_parent = tempdir().expect("should create clone parent");
         let unrelated = clone_parent.path().join("unrelated.txt");
         fs::write(&unrelated, "keep me").expect("should create unrelated file");
@@ -3348,8 +3348,8 @@ mod remotes {
             "clone failure before graph-remote creation should not emit a restoration warning: {stderr}"
         );
         assert!(
-            !destination.exists(),
-            "a failed clone should remove the destination it created"
+            destination.exists(),
+            "a failed clone should leave the destination it created for the user to clean up"
         );
         assert!(
             unrelated.exists(),
