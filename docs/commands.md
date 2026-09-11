@@ -72,6 +72,15 @@ To export a sample comparison as GFA, use the same endpoint names:
 gen diff --query <query> --base <base> --gfa <output.gfa>
 ```
 
+GFA export uses the same graph construction as the viewer, splitting shared
+sequence at the boundaries needed by either sample. It includes nodes and links
+on complete start-to-end walks, including alternatives outside the current paths
+and block groups present in only one sample. Disconnected fragments are omitted
+so they do not become new paths when GFA readers infer graph starts and ends.
+Named GFA paths retain each sample's current path through those segments. The
+output uses standard segment, link, and path records; it does not include the
+viewer's colors or operation annotations.
+
 The older `--sample1` and `--sample2` names remain aliases for compatibility.
 
 ## Revision diff
