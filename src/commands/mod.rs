@@ -205,6 +205,9 @@ pub enum Commands {
         /// The branch name
         #[clap(index = 1)]
         branch_name: Option<String>,
+        /// The operation hash to start a newly created branch at, instead of the current HEAD
+        #[clap(index = 2)]
+        start_point: Option<String>,
     },
     /// Merge branches
     #[command(arg_required_else_help(true))]
