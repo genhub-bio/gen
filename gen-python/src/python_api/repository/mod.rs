@@ -1,6 +1,6 @@
-use std::cell::RefCell;
+use std::path::PathBuf;
 
-use r#gen::{get_config_connection, get_connection};
+use r#gen::{get_config_connection, get_connection_for_branch};
 use gen_core::config::Workspace;
 use gen_models::{
     block_group::BlockGroup,
@@ -8,7 +8,7 @@ use gen_models::{
     db::DbContext,
     errors::OperationError,
     node::Node,
-    operations::{Defaults, OperationInfo, OperationSummary, commit_operation_summary},
+    operations::{Defaults, OperationSummary, commit_operation_summary},
     sample::Sample,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
@@ -24,9 +24,40 @@ use super::{
 
 pub mod exports;
 pub mod graph_ops;
+pub mod history;
 pub mod imports;
+pub mod remote;
 pub mod search;
 pub mod updates;
+
+/// Clones a remote Gen repository and opens it.
+///
+/// When `path` is omitted, the remote repository name is used beneath the
+/// current directory. When supplied, `path` is the exact destination and accepts
+/// strings or Python path-like objects. The destination may be an empty directory.
+#[pyfunction(name = "clone")]
+#[pyo3(signature = (url, path=None))]
+pub fn clone_repository(
+    python: Python<'_>,
+    url: &str,
+    path: Option<PathBuf>,
+) -> PyResult<PyRepository> {
+    let workspace = match path {
+        Some(path) => Workspace::new(path),
+        None => {
+            let parent = Workspace::from_current_dir();
+            let destination =
+                r#gen::commands::remote::operations::clone_destination_path(&parent, url)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            Workspace::new(destination)
+        }
+    };
+    python.allow_threads(|| {
+        r#gen::commands::clone::clone_to_workspace(url, &workspace)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    })?;
+    PyRepository::open_workspace(workspace)
+}
 
 fn tx_begin(context: &DbContext) -> PyResult<()> {
     let conn = context.graph().conn();
@@ -57,64 +88,24 @@ where
     F: FnOnce(&DbContext) -> PyResult<(T, OperationSummary)>,
     M: FnOnce(OperationError) -> PyErr,
 {
-    let managed = !repository.in_transaction;
-    if managed {
-        tx_begin(&repository.context)?;
-    }
+    tx_begin(&repository.context)?;
 
     let (value, operation_summary) = match op(&repository.context) {
         Ok(value) => value,
         Err(err) => {
-            if managed {
-                tx_rollback(&repository.context);
-            }
+            tx_rollback(&repository.context);
             return Err(err);
         }
     };
 
-    if managed {
-        if let Err(err) = tx_commit(&repository.context) {
-            tx_rollback(&repository.context);
-            return Err(err);
-        }
-        commit_operation_summary(&repository.context, &operation_summary)
-            .map_err(map_operation_error)?;
-    } else {
-        repository
-            .pending_operation_summaries
-            .borrow_mut()
-            .push(operation_summary);
+    if let Err(err) = tx_commit(&repository.context) {
+        tx_rollback(&repository.context);
+        return Err(err);
     }
+    commit_operation_summary(&repository.context, &operation_summary)
+        .map_err(map_operation_error)?;
 
     Ok(value)
-}
-
-fn combine_operation_summaries(
-    mut operation_summaries: Vec<OperationSummary>,
-) -> Option<OperationSummary> {
-    match operation_summaries.len() {
-        0 => None,
-        1 => operation_summaries.pop(),
-        _ => {
-            let mut files = Vec::new();
-            let mut summaries = Vec::with_capacity(operation_summaries.len());
-            for operation_summary in operation_summaries {
-                files.extend(operation_summary.operation_info.files);
-                summaries.push(operation_summary.summary);
-            }
-            Some(OperationSummary::new(
-                OperationInfo {
-                    files,
-                    description: "python_transaction".to_string(),
-                },
-                summaries.join("\n"),
-            ))
-        }
-    }
-}
-
-fn operation_err_to_pyerr(err: OperationError) -> PyErr {
-    PyRuntimeError::new_err(err.to_string())
 }
 
 /// The main entry point for the gen Python module.
@@ -124,11 +115,51 @@ fn operation_err_to_pyerr(err: OperationError) -> PyErr {
 #[pyclass(name = "Repository", unsendable)]
 pub struct PyRepository {
     pub context: DbContext,
-    pub in_transaction: bool,
-    pending_operation_summaries: RefCell<Vec<OperationSummary>>,
 }
 
 impl PyRepository {
+    fn open_workspace(workspace: Workspace) -> PyResult<Self> {
+        let gen_dir = workspace.ensure_gen_dir();
+        let config_path = gen_dir.join("gen.db");
+        let config_conn = get_config_connection(Some(config_path))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let intended_branch = Defaults::get_current_branch(&config_conn);
+        let db_path = gen_dir.join("default.db");
+        let graph_conn = get_connection_for_branch(db_path.clone(), intended_branch.as_deref())
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!(
+                    "Failed to open database '{}': {error}",
+                    db_path.display()
+                ))
+            })?;
+
+        Ok(Self {
+            context: DbContext::new(workspace, graph_conn, config_conn)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
+        })
+    }
+
+    /// Reopens the graph connection after orchestration performed work through another connection.
+    pub(crate) fn refresh_graph_connection(&mut self) -> PyResult<()> {
+        let graph_path = self
+            .context
+            .workspace()
+            .graph_db_path()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let intended_branch = Defaults::get_current_branch(self.context.config().conn());
+        let graph_connection =
+            get_connection_for_branch(graph_path.clone(), intended_branch.as_deref()).map_err(
+                |error| {
+                    PyRuntimeError::new_err(format!(
+                        "Failed to reopen database '{}': {error}",
+                        graph_path.display()
+                    ))
+                },
+            )?;
+        self.context.set_graph(graph_connection);
+        Ok(())
+    }
+
     pub(crate) fn get_default_collection(&self) -> String {
         Defaults::get(self.context.config().conn())
             .and_then(|d| d.collection_name)
@@ -202,26 +233,7 @@ impl PyRepository {
             None => Workspace::from_current_dir(),
         };
 
-        let gen_dir = workspace.ensure_gen_dir();
-        let config_path = gen_dir.join("gen.db");
-        let config_conn = get_config_connection(Some(config_path))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-        let db_path = gen_dir.join("default.db");
-
-        let graph_conn = get_connection(db_path.clone()).map_err(|err| {
-            PyRuntimeError::new_err(format!(
-                "Failed to open database '{}': {err}",
-                db_path.display()
-            ))
-        })?;
-
-        Ok(PyRepository {
-            context: DbContext::new(workspace, graph_conn, config_conn)
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
-            in_transaction: false,
-            pending_operation_summaries: RefCell::new(Vec::new()),
-        })
+        Self::open_workspace(workspace)
     }
 
     #[getter]
@@ -237,59 +249,6 @@ impl PyRepository {
             .graph_db_path()
             .unwrap_or_else(|_| self.context.workspace().ensure_gen_dir().join("default.db"));
         path_to_py_path(py, &path)
-    }
-
-    // Transaction context manager
-
-    /// Returns self so that Python's `with` statement calls `__enter__`/`__exit__`
-    /// on this repository, batching multiple operations into one transaction.
-    ///
-    /// Example:
-    ///     with repo.transaction():
-    ///         repo.import_fasta("reference.fasta")
-    ///         repo.import_gfa("graph.gfa")
-    fn transaction(slf: Py<Self>) -> Py<Self> {
-        slf
-    }
-
-    fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<()> {
-        if slf.in_transaction {
-            return Err(PyRuntimeError::new_err("transaction already active"));
-        }
-        tx_begin(&slf.context)?;
-        slf.pending_operation_summaries.borrow_mut().clear();
-        slf.in_transaction = true;
-        Ok(())
-    }
-
-    fn __exit__(
-        mut slf: PyRefMut<'_, Self>,
-        exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_val: Option<&Bound<'_, PyAny>>,
-        _exc_tb: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<bool> {
-        slf.in_transaction = false;
-        if exc_type.is_some() {
-            slf.pending_operation_summaries.borrow_mut().clear();
-            tx_rollback(&slf.context);
-            return Ok(false);
-        }
-
-        let operation_summaries = slf
-            .pending_operation_summaries
-            .borrow_mut()
-            .drain(..)
-            .collect::<Vec<_>>();
-        if let Err(err) = tx_commit(&slf.context) {
-            tx_rollback(&slf.context);
-            return Err(err);
-        }
-
-        if let Some(operation_summary) = combine_operation_summaries(operation_summaries) {
-            commit_operation_summary(&slf.context, &operation_summary)
-                .map_err(operation_err_to_pyerr)?;
-        }
-        Ok(false)
     }
 
     // Raw database access
@@ -402,25 +361,19 @@ impl PyRepository {
 
 #[cfg(test)]
 mod python_tests {
-    use std::{cell::RefCell, fs};
+    use std::fs;
 
     use r#gen::test_helpers::setup_gen_on_disk;
     use pyo3::{PyTypeInfo, prelude::*, py_run};
     use tempfile::tempdir;
 
     use crate::python_api::repository::PyRepository;
+    #[cfg(unix)]
+    use crate::python_api::repository::clone_repository;
 
     fn make_repo(py: Python<'_>) -> Py<PyRepository> {
         let ctx = setup_gen_on_disk();
-        Py::new(
-            py,
-            PyRepository {
-                context: ctx,
-                in_transaction: false,
-                pending_operation_summaries: RefCell::new(Vec::new()),
-            },
-        )
-        .unwrap()
+        Py::new(py, PyRepository { context: ctx }).unwrap()
     }
 
     fn write_fasta(
@@ -454,6 +407,45 @@ mod python_tests {
                     assert hasattr(repo, "db_path")
                     "#
                 )
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_clone_returns_open_repository() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let source = make_repo(py);
+            let fasta_dir = tempdir().unwrap();
+            let fasta = write_fasta(&fasta_dir, "test.fa", "chr1", "ACGTACGT");
+            source
+                .borrow(py)
+                .import_fasta(
+                    fasta.to_str().unwrap().to_string(),
+                    Some("test".to_string()),
+                    false,
+                    None,
+                )
+                .unwrap();
+            let source_root = source.borrow(py).context.workspace().repo_root().unwrap();
+            drop(source);
+
+            let destination_parent = tempdir().unwrap();
+            let destination = destination_parent.path().join("clone");
+            let remote_url = format!("file://{}", source_root.display());
+            let cloned = clone_repository(py, &remote_url, Some(destination))
+                .expect("should clone and open repository");
+
+            let block_groups = cloned.get_sequence_graphs().unwrap();
+            assert_eq!(
+                block_groups.len(),
+                1,
+                "clone should contain the source sequence graph"
+            );
+            assert_eq!(
+                block_groups[0].name, "chr1",
+                "clone should preserve the source sequence graph name"
             );
         });
     }
@@ -507,48 +499,6 @@ mod python_tests {
             assert!(
                 err.contains("already exist"),
                 "Expected 'already exist' in error: {err}"
-            );
-        });
-    }
-
-    #[test]
-    fn test_transaction_commits_both_imports() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let py_repo = make_repo(py);
-            let dir = tempdir().unwrap();
-            let fasta1 = write_fasta(&dir, "one.fa", "chr1", "ACGTACGT");
-            let fasta2 = write_fasta(&dir, "two.fa", "chr2", "TTTTGGGG");
-
-            PyRepository::__enter__(py_repo.borrow_mut(py)).unwrap();
-
-            {
-                let borrow = py_repo.borrow(py);
-                borrow
-                    .import_fasta(
-                        fasta1.to_str().unwrap().to_string(),
-                        Some("test".to_string()),
-                        false,
-                        None,
-                    )
-                    .unwrap();
-                borrow
-                    .import_fasta(
-                        fasta2.to_str().unwrap().to_string(),
-                        Some("test".to_string()),
-                        false,
-                        None,
-                    )
-                    .unwrap();
-            }
-
-            PyRepository::__exit__(py_repo.borrow_mut(py), None, None, None).unwrap();
-
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
-            assert_eq!(
-                block_groups.len(),
-                2,
-                "Both imports should have been committed"
             );
         });
     }
@@ -742,39 +692,6 @@ mod python_tests {
             assert!(
                 !index_file.exists(),
                 "Index should be gone after PySequenceGraph::clear_index"
-            );
-        });
-    }
-
-    #[test]
-    fn test_transaction_rolls_back_on_error() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let py_repo = make_repo(py);
-            let dir = tempdir().unwrap();
-            let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
-
-            PyRepository::__enter__(py_repo.borrow_mut(py)).unwrap();
-
-            py_repo
-                .borrow(py)
-                .import_fasta(
-                    fasta.to_str().unwrap().to_string(),
-                    Some("test".to_string()),
-                    false,
-                    None,
-                )
-                .unwrap();
-
-            // Simulate an exception reaching __exit__ — passes a non-None exc_type
-            let fake_exc = py.None().into_bound(py);
-            PyRepository::__exit__(py_repo.borrow_mut(py), Some(&fake_exc), None, None).unwrap();
-
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
-            assert!(
-                block_groups.is_empty(),
-                "Import should have been rolled back, but found {} sequence graph(s)",
-                block_groups.len()
             );
         });
     }

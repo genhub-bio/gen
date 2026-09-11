@@ -23,11 +23,6 @@ impl PyRepository {
         chunk_size: Option<i64>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
-        if self.in_transaction {
-            return Err(PyRuntimeError::new_err(
-                "derive_chunks cannot be called inside a transaction block",
-            ));
-        }
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         derive_chunks_operation(
             &self.context,
@@ -52,11 +47,6 @@ impl PyRepository {
         backbone: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
-        if self.in_transaction {
-            return Err(PyRuntimeError::new_err(
-                "derive_subgraph cannot be called inside a transaction block",
-            ));
-        }
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let parsed_region = Region::parse(&region).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to parse region '{region}': {e}"))
@@ -82,11 +72,6 @@ impl PyRepository {
         new_region: String,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
-        if self.in_transaction {
-            return Err(PyRuntimeError::new_err(
-                "make_stitch cannot be called inside a transaction block",
-            ));
-        }
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         make_stitch_operation(
             &self.context,

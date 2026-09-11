@@ -13,15 +13,20 @@ except PackageNotFoundError:
 # Directly from Rust
 from .gen import (
     Annotation,
+    Asset,
+    Branch,
     HashId,
     Locus,
     Node,
     NodeSlice,
+    Operation,
     Position,
+    Remote,
     Repository,
     Sample,
     SequenceGraph,
     SequencePart,
+    clone,
 )
 
 # Jupyter widget — only available with `pip install gen[jupyter]`
@@ -33,15 +38,20 @@ except ImportError:
 
 __all__ = [
     "Annotation",
+    "Asset",
+    "Branch",
     "GraphWidget",
     "freeze_all_widgets",
     "HashId",
     "Locus",
     "Node",
     "NodeSlice",
+    "Operation",
     "Position",
+    "Remote",
     "Repository",
     "Sample",
     "SequenceGraph",
     "SequencePart",
+    "clone",
 ]
