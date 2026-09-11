@@ -282,6 +282,85 @@ pub trait SqlLineage: Sized {
         LineagePage { ids, has_more }
     }
 
+    /// Return ancestors ordered by minimum depth and ID with a global page bound.
+    ///
+    /// The page limits rows returned to the caller. The recursive traversal still visits the
+    /// bounded-depth subgraph so convergent paths can be deduplicated before the offset is
+    /// applied.
+    fn get_ancestors_page(
+        conn: &Connection,
+        child_id: &Self::Id,
+        max_depth: Option<usize>,
+        limit: usize,
+        offset: u32,
+        history_ref: Option<&str>,
+    ) -> LineagePage<Self::Id> {
+        let max_depth = max_depth.map(|depth| depth as i64);
+        let lineage_table_name =
+            sql_table_name_with_history_ref(Self::TABLE_NAME, Some(Self::TABLE_NAME), history_ref);
+        let parent_table_name = sql_table_name_with_history_ref(
+            Self::PARENT_TABLE_NAME,
+            Some(Self::PARENT_TABLE_NAME),
+            history_ref,
+        );
+        let query = format!(
+            "WITH RECURSIVE ancestors(id, depth, visited) AS (
+                 SELECT lineage.{parent_column}, 1,
+                        printf('|%s|%s|', hex(:child_id), hex(lineage.{parent_column}))
+                 FROM {lineage_table_name} lineage
+                 WHERE lineage.{child_column} = :child_id
+                   AND lineage.{parent_column} != :child_id
+                 UNION ALL
+                 SELECT lineage.{parent_column}, ancestors.depth + 1,
+                        ancestors.visited || hex(lineage.{parent_column}) || '|'
+                 FROM {lineage_table_name} lineage
+                 JOIN ancestors ON lineage.{child_column} = ancestors.id
+                 WHERE instr(ancestors.visited, printf('|%s|', hex(lineage.{parent_column}))) = 0
+                   AND (:max_depth IS NULL OR ancestors.depth < :max_depth)
+             ), ranked_ancestors(id, depth) AS (
+                 SELECT id, MIN(depth)
+                 FROM ancestors
+                 GROUP BY id
+             )
+             SELECT parent.{parent_id_column}
+             FROM {parent_table_name} parent
+             JOIN ranked_ancestors ON parent.{parent_id_column} = ranked_ancestors.id
+             WHERE (:max_depth IS NULL OR ranked_ancestors.depth <= :max_depth)
+             ORDER BY ranked_ancestors.depth, parent.{parent_id_column}
+             LIMIT :limit OFFSET :offset;",
+            lineage_table_name = lineage_table_name,
+            parent_column = Self::PARENT_COLUMN,
+            child_column = Self::CHILD_COLUMN,
+            parent_table_name = parent_table_name,
+            parent_id_column = Self::PARENT_ID_COLUMN,
+        );
+        let limit = limit.max(1);
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let offset = i64::from(offset);
+        let history_ref_param = history_ref.map(str::to_owned);
+        let mut query_params: Vec<(&str, &dyn ToSql)> = vec![
+            (":child_id", child_id),
+            (":max_depth", &max_depth),
+            (":limit", &fetch_limit),
+            (":offset", &offset),
+        ];
+        if let Some(history_ref) = history_ref_param.as_ref() {
+            query_params.push((":history_ref", history_ref));
+        }
+        let mut ids = conn
+            .prepare(&query)
+            .unwrap()
+            .query_map(&query_params[..], |row| row.get(0))
+            .unwrap()
+            .map(|value| value.unwrap())
+            .collect::<Vec<Self::Id>>();
+        let has_more = ids.len() > limit;
+        if has_more {
+            ids.truncate(limit);
+        }
+        LineagePage { ids, has_more }
+    }
+
     fn get_ancestors(
         conn: &Connection,
         child_id: &Self::Id,
@@ -845,6 +924,50 @@ mod tests {
             NumericLineage::get_descendants(&conn, &1, Some(5), None),
             vec![2, 7, 8, 9, 3, 5, 4]
         );
+    }
+
+    #[test]
+    fn test_paged_ancestors_are_stable_and_cycle_safe() {
+        // The fixture is 1 -> 2 -> 3 -> 4, with a convergent route 2 -> 5 -> 3
+        // and a cycle-closing edge 4 -> 2. Ancestors of 4 should be 3, 2, 5, 1:
+        //
+        //     1 -> 2 -> 3 -> 4
+        //          |    ^    |
+        //          v    |    |
+        //          5 ---+    +-> 2
+        //
+        // The anchor 4 is reachable through the cycle but must not be returned.
+        let conn = setup_numeric_lineage_connection();
+        conn.execute_batch(
+            "INSERT INTO numeric_lineage (parent_id, child_id) VALUES (5, 3), (4, 2);",
+        )
+        .expect("should add convergent and cyclic lineage fixtures");
+
+        let first_page = NumericLineage::get_ancestors_page(&conn, &4, Some(5), 2, 0, None);
+        assert_eq!(first_page.ids, vec![3, 2]);
+        assert!(first_page.has_more);
+
+        let second_page = NumericLineage::get_ancestors_page(&conn, &4, Some(5), 2, 2, None);
+        assert_eq!(second_page.ids, vec![5, 1]);
+        assert!(!second_page.has_more);
+
+        let depth_limited = NumericLineage::get_ancestors_page(&conn, &4, Some(2), 20, 0, None);
+        assert_eq!(depth_limited.ids, vec![3, 2, 5]);
+        assert!(!depth_limited.has_more);
+
+        let zero_depth = NumericLineage::get_ancestors_page(&conn, &4, Some(0), 20, 0, None);
+        assert!(zero_depth.ids.is_empty());
+        assert!(!zero_depth.has_more);
+
+        let root = NumericLineage::get_ancestors_page(&conn, &1, None, 20, 0, None);
+        assert!(root.ids.is_empty());
+        assert!(!root.has_more);
+
+        let missing = NumericLineage::get_ancestors_page(&conn, &99, None, 20, 0, None);
+        assert!(missing.ids.is_empty());
+        assert!(!missing.has_more);
+        assert!(!first_page.ids.contains(&4));
+        assert!(!second_page.ids.contains(&4));
     }
 
     #[test]

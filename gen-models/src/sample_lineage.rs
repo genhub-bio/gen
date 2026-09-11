@@ -359,6 +359,23 @@ mod tests {
             ),
             vec!["parent"]
         );
+        let historical_ancestors = SampleLineage::get_ancestors_page(
+            &conn,
+            &"child".to_string(),
+            None,
+            10,
+            0,
+            Some(&base.to_string()),
+        );
+        assert_eq!(historical_ancestors.ids, vec!["parent".to_string()]);
+        assert!(!historical_ancestors.has_more);
+        let current_ancestors =
+            SampleLineage::get_ancestors_page(&conn, &"child".to_string(), None, 10, 0, None);
+        assert_eq!(
+            current_ancestors.ids,
+            vec!["parent".to_string(), "grand".to_string()]
+        );
+        assert!(!current_ancestors.has_more);
         assert_eq!(
             SampleLineage::get_parents(&conn, "parent", None),
             vec!["grand"]
