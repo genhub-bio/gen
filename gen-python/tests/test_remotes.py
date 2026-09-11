@@ -86,6 +86,12 @@ class RemoteTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.repository = gen.Repository(str(self.root / "local"))
+        # Release the SQLite handle before the temp directory is removed: Windows
+        # refuses to delete a file that a live handle still has open.
+        self.addCleanup(self._release_repository)
+
+    def _release_repository(self):
+        self.repository = None
 
     def import_sequence(self, repository, name):
         fasta = self.root / f"{name}.fa"
