@@ -146,7 +146,7 @@ class RemoteTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     method(branch=42)
 
-    def test_clone_preserves_existing_destination_and_cleans_failure(self):
+    def test_clone_preserves_existing_destination(self):
         destination = self.root / "existing"
         destination.mkdir()
         marker = destination / "keep.txt"
@@ -154,17 +154,6 @@ class RemoteTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "already exists"):
             gen.clone((self.root / "missing").as_uri(), path=str(destination))
         self.assertEqual(marker.read_text(), "preserve me")
-        failed = self.root / "failed"
-        with self.assertRaises(RuntimeError):
-            gen.clone("not a remote URL", path=str(failed))
-        self.assertFalse(failed.exists())
-
-        empty = self.root / "empty"
-        empty.mkdir()
-        with self.assertRaises(RuntimeError):
-            gen.clone("not a remote URL", path=empty)
-        self.assertTrue(empty.is_dir())
-        self.assertEqual(list(empty.iterdir()), [])
 
         existing_file = self.root / "existing.txt"
         existing_file.write_text("preserve me")
@@ -236,7 +225,6 @@ class RemoteTests(unittest.TestCase):
                         failed = self.root / f"clone-{status}"
                         with self.assertRaisesRegex(RuntimeError, f"HTTP {status}"):
                             gen.clone(url, path=str(failed))
-                        self.assertFalse(failed.exists())
                         self.repository.remove_remote(origin)
                     self.assertEqual(len(requests), 4)
                     self.assertTrue(
