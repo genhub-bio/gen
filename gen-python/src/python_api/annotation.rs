@@ -12,8 +12,10 @@ use super::graph_search::PyGraphLocus;
 /// **From a database** — obtain via ``SequenceGraph.list_annotations()``
 /// or ``GraphWidget.list_annotations()``.
 ///
-/// **From a search result** — create with ``Annotation(locus, name)``
-/// where *locus* is a ``Locus`` returned by ``SequenceGraph.search()``.
+/// **From a search result** — create an ephemeral display annotation with
+/// ``Annotation(locus, name)`` where *locus* is a ``Locus`` returned by
+/// ``SequenceGraph.search()``. To persist an annotation, use
+/// ``SequenceGraph.add_annotation(locus, name)`` instead.
 #[pyclass(name = "Annotation", unsendable)]
 #[derive(Clone)]
 pub struct PyAnnotation {
