@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod graph_algorithms;
 pub mod graph_controller;
 pub mod graph_widget;
+pub mod key_event;
 pub mod layout;
 pub mod partition;
 pub mod partition_controller;

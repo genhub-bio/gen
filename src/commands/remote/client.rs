@@ -28,16 +28,16 @@
 use std::{env, io};
 
 use chrono::{DateTime, Utc};
+use ::http::StatusCode;
 use gen_core::{DoltHashId, HashId};
-use reqwest::{
-    StatusCode, Url,
-    blocking::{Client, RequestBuilder},
-};
 use serde::{Deserialize, Serialize};
+use serde_json::{from_slice as json_from_slice, to_vec as json_to_vec};
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 use crate::commands::remote::{
+    http::{self, BrowserHttpError, HttpRequest},
     server::AuthTokens,
     utils::{load_tokens, save_tokens},
 };
@@ -210,29 +210,25 @@ pub enum RemoteClientError {
     AuthenticationRequired,
     #[error("GenHub request failed with HTTP {status}: {message}")]
     Http { status: StatusCode, message: String },
-    #[error("HTTP client error: {0}")]
-    Request(#[from] reqwest::Error),
+    #[error("HTTP transport error: {0}")]
+    Transport(#[from] BrowserHttpError),
+    #[error("Malformed GenHub response: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("Token storage error: {0}")]
     TokenStorage(#[from] std::io::Error),
 }
 
 pub fn normalized_origin(remote_url: &str) -> Result<String, RemoteClientError> {
-    let parsed = Url::parse(remote_url)
-        .map_err(|_| RemoteClientError::InvalidRepositoryUrl(remote_url.to_string()))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err(RemoteClientError::InvalidRepositoryUrl(
-            remote_url.to_string(),
-        ));
-    }
-    Ok(parsed.origin().ascii_serialization())
+    crate::commands::remote::utils::normalized_origin(remote_url)
+        .map_err(|error| RemoteClientError::InvalidRepositoryUrl(error.0))
 }
 
-fn response_error(response: reqwest::blocking::Response) -> RemoteClientError {
-    let status = response.status();
-    let message = response
-        .text()
-        .unwrap_or_else(|_| "Unable to read response".to_string());
-    RemoteClientError::Http { status, message }
+fn response_error(response: http::HttpResponse) -> RemoteClientError {
+    RemoteClientError::Http {
+        status: StatusCode::from_u16(response.status)
+            .expect("should receive a valid HTTP response status"),
+        message: String::from_utf8_lossy(&response.body).into_owned(),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -242,89 +238,87 @@ enum RequestAuthorization<'credential> {
     Bearer(&'credential str),
 }
 
-fn authorize_request(
-    builder: RequestBuilder,
-    authorization: RequestAuthorization<'_>,
-) -> RequestBuilder {
+/// The single extra header `authorization` adds on top of `Content-Type: application/json`, if
+/// any. Returned as an owned pair (rather than borrowing `authorization`'s `Bearer`/`ApiKey`
+/// payload directly) only for the `Bearer` case, where the header value must be formatted.
+fn authorization_header(authorization: RequestAuthorization<'_>) -> Option<(&'static str, String)> {
     match authorization {
-        RequestAuthorization::Anonymous => builder,
-        RequestAuthorization::ApiKey(api_key) => builder.header("x-api-key", api_key),
-        RequestAuthorization::Bearer(token) => builder.bearer_auth(token),
+        RequestAuthorization::Anonymous => None,
+        RequestAuthorization::ApiKey(api_key) => Some(("x-api-key", api_key.to_string())),
+        RequestAuthorization::Bearer(token) => Some(("Authorization", format!("Bearer {token}"))),
     }
 }
 
+fn send_json(
+    url: &str,
+    body: &[u8],
+    authorization: RequestAuthorization<'_>,
+) -> Result<http::HttpResponse, RemoteClientError> {
+    let auth_header = authorization_header(authorization);
+    let mut headers: Vec<(&str, &str)> = vec![("Content-Type", "application/json")];
+    if let Some((name, value)) = &auth_header {
+        headers.push((name, value));
+    }
+    let response = http::request(HttpRequest {
+        method: "POST",
+        url,
+        headers: &headers,
+        body: Some(body),
+    })?;
+    if !(200..300).contains(&response.status) {
+        return Err(response_error(response));
+    }
+    Ok(response)
+}
+
 fn send_capability(
-    client: &Client,
     repository: &RepositoryRemote,
     request: &CapabilityRequest<'_>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
-    let response = authorize_request(
-        client.post(repository.capability_url()).json(request),
-        authorization,
-    )
-    .send()?;
-    if !response.status().is_success() {
-        return Err(response_error(response));
-    }
-    Ok(response.json()?)
+    let body = json_to_vec(request)?;
+    let response = send_json(&repository.capability_url(), &body, authorization)?;
+    Ok(json_from_slice(&response.body)?)
 }
 
 fn send_asset_transfers(
-    client: &Client,
     repository: &RepositoryRemote,
     request: &AssetTransferRequest<'_>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<AssetTransferResponse, RemoteClientError> {
-    let response = authorize_request(
-        client.post(repository.asset_transfers_url()).json(request),
-        authorization,
-    )
-    .send()?;
-    if !response.status().is_success() {
-        return Err(response_error(response));
-    }
-    Ok(response.json()?)
+    let body = json_to_vec(request)?;
+    let response = send_json(&repository.asset_transfers_url(), &body, authorization)?;
+    Ok(json_from_slice(&response.body)?)
 }
 
 fn send_asset_transfer_completion(
-    client: &Client,
     repository: &RepositoryRemote,
     request: &AssetTransferCompletionRequest<'_>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<(), RemoteClientError> {
-    let response = authorize_request(
-        client
-            .post(repository.asset_transfer_completion_url())
-            .json(request),
+    let body = serde_json::to_vec(request)?;
+    send_json(
+        &repository.asset_transfer_completion_url(),
+        &body,
         authorization,
-    )
-    .send()?;
-    if !response.status().is_success() {
-        return Err(response_error(response));
-    }
+    )?;
     Ok(())
 }
 
 fn refresh_tokens(
-    client: &Client,
     repository: &RepositoryRemote,
     tokens: &AuthTokens,
 ) -> Result<AuthTokens, RemoteClientError> {
-    let response = client
-        .post(format!(
-            "{}/api/auth/cli/token-refresh",
-            repository.origin()
-        ))
-        .json(&serde_json::json!({
-            "refresh_token": tokens.refresh_token,
-            "client_id": "cli"
-        }))
-        .send()?;
-    if !response.status().is_success() {
-        return Err(response_error(response));
-    }
-    let refreshed: RefreshResponse = response.json()?;
+    let body = json_to_vec(&serde_json::json!({
+        "refresh_token": tokens.refresh_token,
+        "client_id": "cli"
+    }))?;
+    let response = send_json(
+        &format!("{}/api/auth/cli/token-refresh", repository.origin()),
+        &body,
+        RequestAuthorization::Anonymous,
+    )?;
+    let refreshed: RefreshResponse = json_from_slice(&response.body)?;
     Ok(AuthTokens {
         jwt: refreshed.access_token,
         refresh_token: refreshed.refresh_token,
@@ -355,7 +349,6 @@ struct AuthenticationOptions<'credential, Store> {
 }
 
 fn acquire_request_with_store<T, Store: TokenStore>(
-    client: &Client,
     repository: &RepositoryRemote,
     options: AuthenticationOptions<'_, Store>,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
@@ -394,7 +387,7 @@ fn acquire_request_with_store<T, Store: TokenStore>(
                 status: StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND,
                 ..
             }) => {
-                let refreshed = refresh_tokens(client, repository, &tokens)?;
+                let refreshed = refresh_tokens(repository, &tokens)?;
                 options.token_store.save(repository.origin(), &refreshed)?;
                 match send(RequestAuthorization::Bearer(&refreshed.jwt)) {
                     Ok(response) => return Ok(response),
@@ -415,7 +408,6 @@ fn acquire_request_with_store<T, Store: TokenStore>(
 }
 
 fn acquire_capability_with_store(
-    client: &Client,
     repository: &RepositoryRemote,
     request: &CapabilityRequest<'_>,
     api_key: Option<&str>,
@@ -427,7 +419,6 @@ fn acquire_capability_with_store(
         RemoteOperation::Clone | RemoteOperation::Pull
     );
     acquire_request_with_store(
-        client,
         repository,
         AuthenticationOptions {
             api_key,
@@ -435,7 +426,7 @@ fn acquire_capability_with_store(
             token_store,
         },
         interactive_login,
-        |authorization| send_capability(client, repository, request, authorization),
+        |authorization| send_capability(repository, request, authorization),
     )
 }
 
@@ -444,10 +435,8 @@ pub fn acquire_capability(
     request: &CapabilityRequest<'_>,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
-    let client = Client::new();
     let api_key = env::var("GENHUB_API_KEY").ok();
     acquire_capability_with_store(
-        &client,
         repository,
         request,
         api_key.as_deref(),
@@ -461,14 +450,12 @@ pub fn acquire_asset_transfers(
     request: &AssetTransferRequest<'_>,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
 ) -> Result<AssetTransferResponse, RemoteClientError> {
-    let client = Client::new();
     let api_key = env::var("GENHUB_API_KEY").ok();
     let allow_anonymous = matches!(
         request.operation,
         RemoteOperation::Clone | RemoteOperation::Pull
     );
     acquire_request_with_store(
-        &client,
         repository,
         AuthenticationOptions {
             api_key: api_key.as_deref(),
@@ -476,7 +463,7 @@ pub fn acquire_asset_transfers(
             token_store: &FileTokenStore,
         },
         interactive_login,
-        |authorization| send_asset_transfers(&client, repository, request, authorization),
+        |authorization| send_asset_transfers(repository, request, authorization),
     )
 }
 
@@ -485,10 +472,8 @@ pub fn complete_asset_transfers(
     request: &AssetTransferCompletionRequest<'_>,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
 ) -> Result<(), RemoteClientError> {
-    let client = Client::new();
     let api_key = env::var("GENHUB_API_KEY").ok();
     acquire_request_with_store(
-        &client,
         repository,
         AuthenticationOptions {
             api_key: api_key.as_deref(),
@@ -496,7 +481,7 @@ pub fn complete_asset_transfers(
             token_store: &FileTokenStore,
         },
         interactive_login,
-        |authorization| send_asset_transfer_completion(&client, repository, request, authorization),
+        |authorization| send_asset_transfer_completion(repository, request, authorization),
     )
 }
 
@@ -509,7 +494,7 @@ mod tests {
         thread::{self, JoinHandle},
     };
 
-    use reqwest::{StatusCode, blocking::Client};
+    use ::http::StatusCode;
     use uuid::Uuid;
 
     use super::{
@@ -694,7 +679,6 @@ mod tests {
         let repository = repository(&origin);
         let store = MemoryTokenStore::empty();
         let response = acquire_capability_with_store(
-            &Client::new(),
             &repository,
             &CapabilityRequest {
                 operation: RemoteOperation::Clone,
@@ -731,7 +715,6 @@ mod tests {
         )]);
         let repository = repository(&origin);
         acquire_capability_with_store(
-            &Client::new(),
             &repository,
             &CapabilityRequest {
                 operation: RemoteOperation::Push,
@@ -763,7 +746,6 @@ mod tests {
         let mut login_attempted = false;
 
         acquire_capability_with_store(
-            &Client::new(),
             &repository,
             &CapabilityRequest {
                 operation: RemoteOperation::Push,
@@ -808,7 +790,6 @@ mod tests {
         let mut login_attempted = false;
 
         acquire_capability_with_store(
-            &Client::new(),
             &repository,
             &CapabilityRequest {
                 operation: RemoteOperation::Push,
@@ -851,7 +832,6 @@ mod tests {
             let mut login_attempted = false;
 
             acquire_capability_with_store(
-                &Client::new(),
                 &repository,
                 &CapabilityRequest {
                     operation,
@@ -900,7 +880,6 @@ mod tests {
             refresh_token: "old-refresh".to_string(),
         });
         acquire_capability_with_store(
-            &Client::new(),
             &repository,
             &CapabilityRequest {
                 operation: RemoteOperation::Push,
@@ -935,7 +914,6 @@ mod tests {
             refresh_token: "invalid-refresh".to_string(),
         });
         let error = acquire_capability_with_store(
-            &Client::new(),
             &repository,
             &CapabilityRequest {
                 operation: RemoteOperation::Push,
@@ -959,5 +937,18 @@ mod tests {
         ));
         assert_eq!(stored.jwt, "expired-access");
         assert_eq!(stored.refresh_token, "invalid-refresh");
+    }
+
+    #[test]
+    fn test_http_error_includes_status_reason_phrase() {
+        let error = super::response_error(crate::commands::remote::http::HttpResponse {
+            status: 404,
+            body: b"missing".to_vec(),
+        });
+
+        assert_eq!(
+            error.to_string(),
+            "GenHub request failed with HTTP 404 Not Found: missing"
+        );
     }
 }

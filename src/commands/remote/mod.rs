@@ -3,12 +3,17 @@ use gen_models::{
     db::ConfigConnection,
     operations::{Defaults, Remote},
 };
+#[cfg(not(target_os = "emscripten"))]
 use reqwest::{blocking::Client, redirect::Policy};
 use thiserror::Error;
 
 use crate::commands::remote::server::AuthTokens;
 
+// Unconditional (not `#[cfg(target_os = "emscripten")]`) so its pure URL/message-framing logic
+// gets exercised by the normal native test run too; only its actual stdin/stdout I/O is gated.
+pub mod browser;
 pub mod client;
+pub mod http;
 pub mod operations;
 pub mod server;
 pub mod utils;
@@ -49,6 +54,10 @@ pub enum RemoteError {
     NoRedirectUrl(String),
 }
 
+/// Logs in via the native flow: starts a localhost callback listener, opens the GenHub login URL
+/// in the system browser, and blocks until the listener receives the callback. Unavailable on
+/// Emscripten (no TCP sockets, no system browser to open); see the Emscripten variant below.
+#[cfg(not(target_os = "emscripten"))]
 pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn std::error::Error>> {
     println!("Logging in to remote: {origin}");
     let state = utils::generate_state().expect("Unable to generate random nonce.");
@@ -78,6 +87,14 @@ pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn std::error::Erro
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
 }
 
+/// Logs in via the browser flow: the terminal opens the GenHub login URL in a popup (falling
+/// back to a clickable link if the popup is blocked), and waits for the browser callback page to
+/// deliver the result through the Cockle host bridge. See `browser::login_origin` for details.
+#[cfg(target_os = "emscripten")]
+pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn std::error::Error>> {
+    browser::login_origin(origin)
+}
+
 pub fn remove_remote(
     conn: &ConfigConnection,
     name: &str,
@@ -103,7 +120,7 @@ pub fn login_remote(
         .or_else(|| Defaults::get_default_remote(conn))
         .ok_or("No remote specified and no default set.")?;
     let remote = Remote::get_by_name(conn, &remote_name)?;
-    let origin = client::normalized_origin(&remote.url)?;
+    let origin = utils::normalized_origin(&remote.url)?;
     let tokens = login_origin(&origin)?;
     utils::save_tokens(&origin, &tokens).expect("Failed to save login information.");
 

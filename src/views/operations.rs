@@ -4,14 +4,17 @@ use std::{
     time::Instant,
 };
 
-use crossterm::event::{self, KeyCode};
 use gen_core::PATH_START_NODE_ID;
 use gen_diff::operations::{
     BlockGroupChangeKind, BlockGroupDiff, DiffRange, collect_operation_diff,
 };
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{db::DbContext, history::HistoryEntry};
-use gen_tui::{graph_controller::GraphController, theme::current_theme};
+use gen_tui::{
+    graph_controller::GraphController,
+    key_event::{Event, KeyCode},
+    theme::current_theme,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     prelude::Style,
@@ -26,7 +29,7 @@ use crate::views::{
     },
     gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget},
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
-    tui_runtime::TuiSession,
+    tui_runtime::{TuiSession, poll_immediate_event, wait_for_event},
 };
 
 fn clip_text(text: &str, limit: usize) -> String {
@@ -496,9 +499,8 @@ pub fn view_operations(
             render_status_bar(frame, status_bar_area, &panel_messages);
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))?
-            && let event::Event::Key(key) = event::read()?
-        {
+        wait_for_event(std::time::Duration::from_millis(100))?;
+        if let Some(Event::Key(key)) = poll_immediate_event()? {
             if panel_focus.is_navigation() {
                 match key.code {
                     KeyCode::Tab => {

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>gen login</title>
+<meta name="robots" content="noindex" />
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    background: #111;
+    color: #eee;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    margin: 0;
+  }
+  p {
+    max-width: 32rem;
+    text-align: center;
+    padding: 0 1rem;
+  }
+</style>
+</head>
+<body>
+<p id="status">Completing sign-in&hellip;</p>
+<script>
+(function () {
+  "use strict";
+
+  // This page intentionally has no external scripts, analytics, or remote images, and never
+  // displays, logs, or persists the token fields it reads below. It exists solely to relay the
+  // GenHub CLI callback's query parameters to the terminal window that opened it, then close
+  // itself. See src/commands/remote/browser.rs for the Rust side of this flow and the reasoning
+  // behind each step here.
+
+  var statusElement = document.getElementById("status");
+
+  function setStatus(text) {
+    statusElement.textContent = text;
+  }
+
+  var params = new URLSearchParams(window.location.search);
+  var state = params.get("state");
+  var jwt = params.get("jwt");
+  var refreshToken = params.get("refresh_token");
+
+  // Remove the token-bearing query string from the visible URL immediately, before anything
+  // else (retry loop, ack wait), so the tokens never sit in the address bar or browser history.
+  history.replaceState(null, "", window.location.pathname + window.location.hash);
+
+  if (typeof state !== "string" || state.length === 0 ||
+      typeof jwt !== "string" || jwt.length === 0 ||
+      typeof refreshToken !== "string" || refreshToken.length === 0) {
+    setStatus(
+      "Sign-in did not complete: the callback was missing required information. " +
+      "Return to the terminal and try `gen remote login` again."
+    );
+    return;
+  }
+
+  var result = {
+    type: "gen-login-result",
+    state: state,
+    jwt: jwt,
+    refreshToken: refreshToken,
+  };
+
+  if (!window.opener) {
+    setStatus(
+      "Sign-in succeeded, but this window has no opener to deliver the result to. " +
+      "Return to the terminal and retry login."
+    );
+    return;
+  }
+
+  // Same-origin preference (see the design notes in src/commands/remote/browser.rs): this page
+  // is deployed on the same origin as the terminal, so `window.location.origin` is exactly the
+  // terminal's origin -- never a wildcard, and never the GenHub API origin.
+  var terminalOrigin = window.location.origin;
+
+  var RETRY_INTERVAL_MS = 200;
+  var RETRY_TIMEOUT_MS = 10000;
+  var acknowledged = false;
+  var startedAt = Date.now();
+  var retryHandle = null;
+
+  function onAck(event) {
+    if (event.origin !== terminalOrigin) {
+      return;
+    }
+    var data = event.data;
+    if (!data || data.type !== "gen-login-ack" || data.state !== state) {
+      return;
+    }
+    acknowledged = true;
+    window.removeEventListener("message", onAck);
+    if (retryHandle !== null) {
+      window.clearTimeout(retryHandle);
+    }
+    setStatus("Signed in. You can close this window.");
+    window.close();
+  }
+  window.addEventListener("message", onAck);
+
+  function sendResult() {
+    if (acknowledged) {
+      return;
+    }
+    if (Date.now() - startedAt >= RETRY_TIMEOUT_MS) {
+      window.removeEventListener("message", onAck);
+      setStatus(
+        "Sign-in succeeded, but the original terminal could not be reached. " +
+        "Return to the terminal and retry login."
+      );
+      return;
+    }
+    try {
+      window.opener.postMessage(result, terminalOrigin);
+    } catch (error) {
+      // Ignore and retry; a transient postMessage failure shouldn't end the attempt early.
+    }
+    retryHandle = window.setTimeout(sendResult, RETRY_INTERVAL_MS);
+  }
+  sendResult();
+})();
+</script>
+</body>
+</html>

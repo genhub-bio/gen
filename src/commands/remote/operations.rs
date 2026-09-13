@@ -88,9 +88,10 @@ use gen_models::{
 };
 use indexmap::IndexMap;
 use md5::Md5;
+#[cfg(not(target_os = "emscripten"))]
 use reqwest::{
     StatusCode,
-    blocking::{Body, Client, Response},
+    blocking::{Client, Response},
     header::{CONTENT_RANGE, RANGE},
 };
 use rusqlite::Error as SqlError;
@@ -105,6 +106,7 @@ use crate::{
             CapabilityRequest, RemoteClientError, RemoteOperation, RepositoryRemote,
             acquire_asset_transfers, acquire_capability, complete_asset_transfers,
         },
+        http::{self, HttpRequest},
         login_origin,
     },
     get_config_connection, get_connection_for_branch, get_raw_connection,
@@ -359,7 +361,6 @@ fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String
 }
 
 fn upload_asset(
-    client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
@@ -394,25 +395,26 @@ fn upload_asset(
         )
         .into());
     }
-    let file = fs::File::open(&source_path)?;
-    let length = file.metadata()?.len();
-    let response = client
-        .put(url)
-        .header("content-type", "application/octet-stream")
-        // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
-        // composite objects (those > 5GB)
-        .header("content-md5", &md5)
-        .header("x-goog-if-generation-match", "0")
-        .body(Body::sized(file, length))
-        .send()
-        .map_err(|error| error.without_url())?;
-    if !response.status().is_success()
-        && response.status() != reqwest::StatusCode::PRECONDITION_FAILED
-    {
+    // Buffered fully in memory: `http::request` has no streaming-upload path (see
+    // `commands::remote::http`'s module docs). Fine for the asset sizes exercised so far; revisit
+    // if a real upload exposes a memory problem.
+    let contents = fs::read(&source_path)?;
+    let response = http::request(HttpRequest {
+        method: "PUT",
+        url,
+        headers: &[
+            ("Content-Type", "application/octet-stream"),
+            // For GCS, content-md5 will be used as a server side integrity verification. It is
+            // ignored for composite objects (those > 5GB)
+            ("content-md5", &md5),
+            ("x-goog-if-generation-match", "0"),
+        ],
+        body: Some(&contents),
+    })?;
+    if !(200..300).contains(&response.status) && response.status != 412 {
         return Err(format!(
             "Asset {} upload failed with HTTP {}",
-            asset.id,
-            response.status()
+            asset.id, response.status
         )
         .into());
     }
@@ -519,6 +521,7 @@ fn temporary_path(destination_path: &Path) -> Result<PathBuf, Box<dyn Error>> {
 ///
 /// A response is never appended unless this check passes; otherwise the downloader restarts from
 /// byte zero so a server that ignores or mishandles ranges cannot corrupt the staged asset.
+#[cfg(not(target_os = "emscripten"))]
 fn content_range_starts_at(response: &Response, expected_start: u64) -> bool {
     response
         .headers()
@@ -534,6 +537,7 @@ fn content_range_starts_at(response: &Response, expected_start: u64) -> bool {
 ///
 /// Partial bytes are deliberately left in place when the stream fails so the next invocation can
 /// resume them. `append` is true only after validating the response's `Content-Range`.
+#[cfg(not(target_os = "emscripten"))]
 fn stream_asset_response_to_staged_file(
     response: &mut Response,
     staged_path: &Path,
@@ -557,13 +561,15 @@ fn stream_asset_response_to_staged_file(
 /// only the HTTP range protocol. It appends a valid partial response, overwrites the staged file
 /// when a server ignores `Range` and returns a complete response, and retries once from byte zero
 /// after an invalid partial response or a resumed checksum mismatch.
+#[cfg(not(target_os = "emscripten"))]
 fn download_to_staged_path(
-    client: &Client,
     asset: &AssetRef,
     url: &str,
     staged_path: &Path,
     expected_checksum: &Sha256Hash,
 ) -> Result<(), Box<dyn Error>> {
+    static CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(Client::new);
+
     let mut resume_offset = staged_path
         .metadata()
         .map(|metadata| metadata.len())
@@ -582,7 +588,7 @@ fn download_to_staged_path(
     }
 
     loop {
-        let mut request = client.get(url);
+        let mut request = CLIENT.get(url);
         if resume_offset > 0 {
             request = request.header(RANGE, format!("bytes={resume_offset}-"));
         }
@@ -622,13 +628,48 @@ fn download_to_staged_path(
     }
 }
 
+/// Completes one HTTP asset download in its durable staged file.
+///
+/// Emscripten's Fetch transport buffers the whole response body in memory (see
+/// `commands::remote::http`'s module docs) and exposes no response headers, so unlike the native
+/// implementation this cannot validate or resume a `Range` request; every call re-downloads the
+/// asset in full. It retries once from scratch after a checksum mismatch before giving up.
+#[cfg(target_os = "emscripten")]
+fn download_to_staged_path(
+    asset: &AssetRef,
+    url: &str,
+    staged_path: &Path,
+    expected_checksum: &Sha256Hash,
+) -> Result<(), Box<dyn Error>> {
+    for _ in 0..2 {
+        let response = http::request(HttpRequest {
+            method: "GET",
+            url,
+            headers: &[],
+            body: None,
+        })?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!(
+                "Asset {} download failed with HTTP {}",
+                asset.id, response.status
+            )
+            .into());
+        }
+        fs::write(staged_path, &response.body)?;
+        if calculate_file_checksum(staged_path)? == *expected_checksum {
+            return Ok(());
+        }
+    }
+    fs::remove_file(staged_path)?;
+    Err(format!("Downloaded asset {} failed checksum validation", asset.id).into())
+}
+
 /// Ensures that an HTTP asset exists under its checksum-derived `.gen/assets` path.
 ///
 /// [`download_asset`] calls this storage phase before considering the logical workspace path. The
 /// returned boolean reports whether this call published new bytes; the returned file is always
 /// checksum-verified. No logical file is read or written here.
 fn download_to_versioned_store(
-    client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
@@ -651,7 +692,7 @@ fn download_to_versioned_store(
     })?;
     fs::create_dir_all(asset_dir)?;
     let staged_path = temporary_path(&versioned_path)?;
-    download_to_staged_path(client, asset, url, &staged_path, &expected_checksum)?;
+    download_to_staged_path(asset, url, &staged_path, &expected_checksum)?;
     if versioned_path.exists() {
         fs::remove_file(&versioned_path)?;
     }
@@ -825,7 +866,6 @@ pub(crate) fn materialize_versioned_asset(
 /// [`transfer_assets`] calls this for each clone or pull URL returned by GenHub. Keeping the phases
 /// ordered here prevents an already-current logical file from bypassing `.gen/assets` population.
 fn download_asset(
-    client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     previous_assets: &HashMap<HashId, AssetRef>,
@@ -834,7 +874,7 @@ fn download_asset(
     url: &str,
 ) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
     let (versioned_path, versioned_file_created) =
-        download_to_versioned_store(client, workspace, asset, url)?;
+        download_to_versioned_store(workspace, asset, url)?;
     materialize_versioned_asset(
         workspace,
         asset,
@@ -1043,7 +1083,6 @@ fn transfer_assets(
         },
         login_origin,
     )?;
-    let client = Client::new();
     for transfer in &response.assets {
         if !range_assets.contains_key(&transfer.id) && !excluded_assets.contains_key(&transfer.id) {
             return Err(format!(
@@ -1060,7 +1099,7 @@ fn transfer_assets(
             let Some(asset) = assets.remove(&transfer.id) else {
                 continue;
             };
-            upload_receipts.push(upload_asset(&client, workspace, &asset, &transfer.url)?);
+            upload_receipts.push(upload_asset(workspace, &asset, &transfer.url)?);
         }
         if !assets.is_empty() {
             return Err(format!(
@@ -1095,7 +1134,6 @@ fn transfer_assets(
                 None
             };
             if let DownloadAssetOutcome::Conflict(conflict_path) = download_asset(
-                &client,
                 workspace,
                 &asset,
                 &previous_assets,
@@ -1547,7 +1585,6 @@ mod tests {
             RemoteOperationRecord, calculate_reader_checksum,
         },
     };
-    use reqwest::blocking::Client;
     use rusqlite::{Connection, Error as SqlError};
     use serde_json::json;
     use tempfile::tempdir;
@@ -1817,6 +1854,7 @@ mod tests {
         (format!("http://{address}/asset"), handle)
     }
 
+    #[cfg(not(target_os = "emscripten"))]
     fn serve_resumable_asset(
         contents: &[u8],
         resume_offset: usize,
@@ -2038,7 +2076,6 @@ mod tests {
         let (url, server) = serve_asset(remote_contents);
 
         let outcome = download_asset(
-            &Client::new(),
             &workspace,
             &remote_asset,
             &HashMap::new(),
@@ -2077,7 +2114,6 @@ mod tests {
         let (url, server) = serve_asset(remote_contents);
 
         let outcome = download_asset(
-            &Client::new(),
             &workspace,
             &remote_asset,
             &previous_assets,
@@ -2112,7 +2148,6 @@ mod tests {
         let (url, server) = serve_asset(remote_contents);
 
         let outcome = download_asset(
-            &Client::new(),
             &workspace,
             &remote_asset,
             &HashMap::new(),
@@ -2136,6 +2171,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "emscripten"))]
     fn test_download_to_versioned_store_resumes_partial_asset_file() {
         let temp = tempdir().expect("should create workspace");
         let workspace = Workspace::new(temp.path());
@@ -2157,7 +2193,7 @@ mod tests {
         let (url, server) = serve_resumable_asset(remote_contents, resume_offset);
 
         let (downloaded_path, downloaded) =
-            download_to_versioned_store(&Client::new(), &workspace, &remote_asset, &url)
+            download_to_versioned_store(&workspace, &remote_asset, &url)
                 .expect("should resume partial versioned asset download");
         let request = server.join().expect("asset server should finish");
 
@@ -2202,7 +2238,6 @@ mod tests {
         let (url, server) = serve_asset(remote_contents);
 
         let outcome = download_asset(
-            &Client::new(),
             &workspace,
             &remote_asset,
             &previous_assets,
@@ -2235,7 +2270,6 @@ mod tests {
         let (url, server) = serve_asset(remote_contents);
 
         let outcome = download_asset(
-            &Client::new(),
             &workspace,
             &remote_asset,
             &previous_assets,
@@ -2267,7 +2301,6 @@ mod tests {
         let (url, server) = serve_asset(b"tampered version\n");
 
         let error = download_asset(
-            &Client::new(),
             &workspace,
             &remote_asset,
             &HashMap::new(),

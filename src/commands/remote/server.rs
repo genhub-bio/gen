@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "emscripten"))]
 use std::{
     io::prelude::*,
     net::TcpListener,
@@ -5,16 +6,23 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+#[cfg(not(target_os = "emscripten"))]
 use rand::{rng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_os = "emscripten"))]
 use url::Url;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthTokens {
     pub jwt: String,
     pub refresh_token: String,
 }
 
+/// Starts the localhost callback listener used by the native login flow. Unavailable on
+/// Emscripten, which has no real TCP sockets; the browser login flow
+/// (`commands::remote::browser`) receives the callback through a browser-hosted page and a
+/// JS bridge instead.
+#[cfg(not(target_os = "emscripten"))]
 #[allow(clippy::type_complexity)]
 pub fn start_callback_server(
     expected_state: String,
