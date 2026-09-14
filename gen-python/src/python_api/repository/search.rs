@@ -77,8 +77,8 @@ impl PyRepository {
     ///
     /// If `sgs` is None or empty, searches all sequence graphs.
     /// If a seed index was previously built with `build_index()`, it is loaded
-    /// automatically to accelerate the search. Falls back to a full scan
-    /// when no index is found.
+    /// automatically to accelerate the current-graph search. Falls back to a
+    /// full scan when no index is found.
     #[pyo3(signature = (query, bgs=None, sequence_kind="dna"))]
     pub fn search(
         &self,
@@ -118,7 +118,8 @@ impl PyRepository {
                 .map(|d| d.join("search_index").join(format!("{}.bin", bg.id)));
             let index = index_path
                 .and_then(|p| fs::read(p).ok())
-                .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok());
+                .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok())
+                .filter(|index| index.is_valid_for(&matcher));
 
             let matches = match index {
                 Some(idx) => matcher
