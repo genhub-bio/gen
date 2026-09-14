@@ -263,9 +263,11 @@ impl Path {
                     second_edge.source_node_id
                 )));
             }
-            if first_edge.target_coordinate >= second_edge.source_coordinate {
+            // A path may pass through a zero-width junction without consuming bases.
+            // Reject backwards traversal, but allow arrival and departure at one coordinate.
+            if first_edge.target_coordinate > second_edge.source_coordinate {
                 return Err(PathError::Invalid(format!(
-                    "source coordinate {} for edge {} is not after target coordinate {} for edge {}",
+                    "source coordinate {} for edge {} is before target coordinate {} for edge {}",
                     second_edge.source_coordinate,
                     second_edge.id_hash(),
                     first_edge.target_coordinate,
@@ -1563,6 +1565,48 @@ mod tests {
         assert_eq!(
             Path::edge_ids_for_path(conn, &copied_path.id, None),
             edge_ids
+        );
+    }
+
+    #[test]
+    fn test_path_accepts_whole_node_deletion_route() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, original_path) = setup_block_group(conn);
+        let original_edges = Path::edges_for_path(conn, &original_path.id, None);
+        let deleted_node_id = original_edges[1].target_node_id;
+        // Bypass the fixture's T node through its own boundaries, consuming no T bases.
+        let deletion = Edge::create(
+            conn,
+            deleted_node_id,
+            0,
+            Strand::Forward,
+            deleted_node_id,
+            10,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: deletion.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let expected = "AAAAAAAAAACCCCCCCCCCGGGGGGGGGG";
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert!(sequences.contains(expected));
+
+        let mut edge_ids = Path::edge_ids_for_path(conn, &original_path.id, None);
+        edge_ids.insert(2, deletion.id);
+        let path = Path::create(conn, "deletion", &block_group_id, &edge_ids)
+            .expect("should accept a deletion route already supported by the graph");
+        assert_eq!(
+            path.sequence(conn, test_workspace(), None).unwrap(),
+            expected
         );
     }
 
