@@ -6,9 +6,10 @@ use std::{
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
-    db::GraphConnection, locus::GraphLocus, node::Node, sequence::reverse_complement,
+    block_group::BlockGroup, db::GraphConnection, locus::GraphLocus, node::Node,
+    sequence::reverse_complement,
 };
-use petgraph::Direction;
+use petgraph::{Direction, visit::IntoEdgeReferences as _};
 use serde::{Deserialize, Serialize};
 
 /// A position in the graph: a GraphNode (aka Block) plus a local byte offset
@@ -139,6 +140,7 @@ fn degenerate_matches(query_byte: u8, graph_byte: u8) -> bool {
 pub struct GenGraphMatcher {
     graph: GenGraph,
     sequence_kind: SequenceKind,
+    latest_edge_created_on: i64,
     /// Pre-fetched GraphNode sequence bytes, keyed by `GraphNode::node_id`.
     node_sequences: HashMap<HashId, Vec<u8>>,
 }
@@ -170,6 +172,8 @@ impl GenGraphMatcher {
 
     /// Build a matcher from a database connection, graph, and sequence kind.
     ///
+    /// The graph is pruned to the current reachable graph before matching.
+    ///
     /// Batch-loads all full node sequences up front. No further database access
     /// occurs during matching.
     pub fn new_with_sequence_kind(
@@ -178,6 +182,15 @@ impl GenGraphMatcher {
         graph: GenGraph,
         sequence_kind: SequenceKind,
     ) -> Self {
+        let latest_edge_created_on = graph
+            .edge_references()
+            .flat_map(|(_, _, edges)| edges.iter())
+            .map(|edge| edge.created_on)
+            .max()
+            .unwrap_or_default();
+        let mut graph = graph;
+        BlockGroup::prune_graph(&mut graph);
+
         let node_ids: Vec<HashId> = {
             let mut ids: Vec<HashId> = graph.nodes().map(|n| n.node_id).collect();
             ids.sort_unstable();
@@ -205,6 +218,7 @@ impl GenGraphMatcher {
         Self {
             graph,
             sequence_kind,
+            latest_edge_created_on,
             node_sequences,
         }
     }
@@ -215,6 +229,11 @@ impl GenGraphMatcher {
 
     pub fn set_sequence_kind(&mut self, sequence_kind: SequenceKind) {
         self.sequence_kind = sequence_kind;
+    }
+
+    /// Return the creation timestamp of the newest edge in the source graph.
+    pub fn latest_edge_created_on(&self) -> i64 {
+        self.latest_edge_created_on
     }
 
     /// Returns `true` if `query` occurs anywhere in the graph using this
@@ -332,7 +351,9 @@ impl GenGraphMatcher {
 
         let mut out = Vec::new();
         for &pos in positions {
-            self.collect_matches_from(pos, query, matcher, &mut out, strand);
+            if self.graph.contains_node(pos.block) {
+                self.collect_matches_from(pos, query, matcher, &mut out, strand);
+            }
         }
         out
     }
@@ -558,11 +579,12 @@ impl GenGraphMatcher {
 pub struct SeedIndex {
     pub k: usize,
     pub normalized: bool,
+    pub latest_edge_created_on: i64,
     pub table: HashMap<Vec<u8>, Vec<GraphPos>>,
 }
 
 /// Bumped whenever the index format or indexing behavior changes incompatibly.
-const SEED_INDEX_VERSION: u32 = 2;
+const SEED_INDEX_VERSION: u32 = 3;
 
 /// File header written before the `SeedIndex` payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,8 +640,14 @@ impl SeedIndex {
         Self {
             k,
             normalized,
+            latest_edge_created_on: matcher.latest_edge_created_on(),
             table,
         }
+    }
+
+    /// Return whether this index was built for the matcher's current graph state.
+    pub fn is_valid_for(&self, matcher: &GenGraphMatcher) -> bool {
+        self.latest_edge_created_on == matcher.latest_edge_created_on()
     }
 
     /// Serialize `self` to bytes: 4-byte little-endian header length, header, payload.

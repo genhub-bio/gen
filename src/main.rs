@@ -815,6 +815,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         let p = dir.join(format!("{}.bin", bg.id));
                         SeedIndex::load_from_path(p).ok()
                     })
+                    .filter(|index| index.is_valid_for(&matcher))
                     .map(|idx| matcher.find_all_with_seed_index(&idx, query_bytes))
                     .unwrap_or_else(|| Ok(matcher.find_all(query_bytes)))?;
                 for m in matches {

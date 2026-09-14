@@ -1965,7 +1965,8 @@ impl Repository {
             let index_path = index_dir.join(format!("{}.bin", bg.id));
             let index = fs::read(&index_path)
                 .ok()
-                .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok());
+                .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok())
+                .filter(|index| index.is_valid_for(&matcher));
             let matches = match index {
                 Some(idx) => matcher
                     .find_all_with_seed_index(&idx, query_bytes)
@@ -2408,7 +2409,8 @@ impl SequenceGraph {
         let index_path = index_dir.join(format!("{}.bin", self.id));
         let index = fs::read(&index_path)
             .ok()
-            .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok());
+            .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok())
+            .filter(|index| index.is_valid_for(&matcher));
         let query_bytes = query.as_bytes();
         let matches = match index {
             Some(idx) => matcher
