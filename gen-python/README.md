@@ -114,7 +114,7 @@ destination name must be new; copying an existing sample raises an error.
 child = sample.copy("edited")
 sequence = child[0]
 inserted = sequence.replace(annotation, "ACGT")
-sequence.add_annotation(inserted, "mutation") 
+sequence.add_annotation(inserted, "mutation")
 ```
 
 ## Architecture
