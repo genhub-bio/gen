@@ -793,16 +793,6 @@ impl GraphPage {
         Ok(())
     }
 
-    /// Add a list of `Annotation` objects as inline graph overlays grouped under `name`.
-    pub fn add_track_annotations(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
-        let spans: Vec<AnnotationSpan> = annotations
-            .iter()
-            .map(|annotation| annotation_to_span(annotation))
-            .collect();
-        self.push_track_as_overlays(AnnotationTrack::new(name, spans));
-        self.reapply();
-    }
-
     /// Load annotations from a GFF3 or BED file and render them as
     /// inline graph highlights with floating labels.
     ///
@@ -982,85 +972,26 @@ impl GraphPage {
             .iter()
             .filter_map(|o| match &o.source {
                 OverlaySource::Track(name) => Some(name.as_str()),
-                OverlaySource::Annotation(_) | OverlaySource::Adhoc | OverlaySource::Path => None,
+                OverlaySource::Adhoc | OverlaySource::Path => None,
             })
             .filter(|n| seen.insert(*n))
             .collect();
         serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Remove all overlays belonging to the track `name` (loaded via
+    /// Hide all overlays belonging to the track `name` (loaded via
     /// `add_track_group` / `add_track_file` / auto-loaded annotation groups).
-    pub fn remove_track(&mut self, name: &str) {
+    pub fn hide_track(&mut self, name: &str) {
         self.overlays
             .retain(|overlay| !matches!(&overlay.source, OverlaySource::Track(n) if n == name));
         self.reapply();
     }
 
-    /// Clear all annotations from the graph.
-    pub fn clear_all_annotations(&mut self) {
-        // Keep ad hoc highlights (e.g. search matches) and the path; drop everything
-        // added via a track or `add_annotation`, then repaint what remains.
+    /// Hide all loaded annotation tracks from the graph.
+    pub fn hide_all_annotations(&mut self) {
+        // Keep ad hoc highlights (e.g. search matches) and the path; drop loaded tracks.
         self.overlays
             .retain(|overlay| matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path));
-        self.reapply();
-    }
-
-    /// Add annotations rendered directly on the graph canvas.
-    /// Annotations are tinted with an accent colour and labelled below their span.
-    pub fn add_annotation(
-        &mut self,
-        annotations: Vec<PyRef<PyAnnotation>>,
-        track_name: Option<String>,
-    ) {
-        let existing_color = track_name.as_deref().and_then(|name| {
-            self.overlays
-                .iter()
-                .find_map(|overlay| match &overlay.source {
-                    OverlaySource::Annotation(existing) if existing == name => {
-                        Some(overlay.style.color)
-                    }
-                    _ => None,
-                })
-        });
-        let color = existing_color.unwrap_or_else(|| self.controller.next_accent_color());
-        let style = PathStyle::new(color)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        let source = match &track_name {
-            Some(name) => OverlaySource::Annotation(name.clone()),
-            None => OverlaySource::Adhoc,
-        };
-        for annotation in &annotations {
-            self.overlays.push(GraphOverlay {
-                content: OverlayContent::Span(annotation_to_span(annotation)),
-                source: source.clone(),
-                style,
-            });
-        }
-        self.reapply();
-    }
-
-    /// Return a JSON list of annotation names currently loaded (from
-    /// `add_annotation`; annotations loaded as part of a track keep their own
-    /// name here too, separately from the track's name).
-    pub fn get_annotation_names(&self) -> PyResult<String> {
-        let mut seen = std::collections::HashSet::new();
-        let names: Vec<&str> = self
-            .overlays
-            .iter()
-            .filter_map(|o| o.span().map(|s| s.name.as_str()))
-            .filter(|n| !n.is_empty() && seen.insert(*n))
-            .collect();
-        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Remove all overlays whose annotation name matches `name`, regardless of
-    /// which track (if any) they belong to. If the same name was added more
-    /// than once, every copy is removed.
-    pub fn remove_annotation(&mut self, name: &str) {
-        self.overlays
-            .retain(|overlay| overlay.span().is_none_or(|span| span.name != name));
         self.reapply();
     }
 }
@@ -1392,17 +1323,6 @@ impl PyGraphController {
         self.active()?.add_track_group(group)
     }
 
-    /// Build a track panel from a list of `Annotation` objects.
-    /// Each `Annotation` becomes one span; all are grouped under `name`.
-    pub fn add_track_annotations(
-        &mut self,
-        annotations: Vec<PyRef<PyAnnotation>>,
-        name: &str,
-    ) -> PyResult<()> {
-        self.active()?.add_track_annotations(annotations, name);
-        Ok(())
-    }
-
     /// Load annotations from a GFF3 or BED file and add them as a
     /// horizontal track panel below the graph.
     ///
@@ -1468,38 +1388,15 @@ impl PyGraphController {
         self.active()?.get_track_names()
     }
 
-    /// Remove a track-panel annotation by name.
-    pub fn remove_track(&mut self, name: &str) -> PyResult<()> {
-        self.active()?.remove_track(name);
+    /// Hide a track-panel annotation by name without changing the repository.
+    pub fn hide_track(&mut self, name: &str) -> PyResult<()> {
+        self.active()?.hide_track(name);
         Ok(())
     }
 
-    /// Clear all track-panel annotations.
-    pub fn clear_all_annotations(&mut self) -> PyResult<()> {
-        self.active()?.clear_all_annotations();
-        Ok(())
-    }
-
-    /// Add annotations rendered directly on the graph canvas.
-    /// Annotations are tinted with an accent colour and labelled below their span.
-    pub fn add_annotation(
-        &mut self,
-        annotations: Vec<PyRef<PyAnnotation>>,
-        track_name: Option<String>,
-    ) -> PyResult<()> {
-        self.active()?.add_annotation(annotations, track_name);
-        Ok(())
-    }
-
-    /// Return a JSON list of annotation names currently loaded.
-    pub fn get_annotation_names(&mut self) -> PyResult<String> {
-        self.active()?.get_annotation_names()
-    }
-
-    /// Remove all annotations whose track name matches `name`.
-    /// If the same name was added more than once, all copies are removed.
-    pub fn remove_annotation(&mut self, name: &str) -> PyResult<()> {
-        self.active()?.remove_annotation(name);
+    /// Hide all track-panel annotations without changing the repository.
+    pub fn hide_all_annotations(&mut self) -> PyResult<()> {
+        self.active()?.hide_all_annotations();
         Ok(())
     }
 
