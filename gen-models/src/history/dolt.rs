@@ -20,7 +20,7 @@
 //! method delegates to the free function; the two forms are entry points for different callers, not
 //! separate implementations of Dolt behavior.
 
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{BranchName, CommitRef, DoltHashId};
 use rusqlite::{OptionalExtension, Result as SqlResult, params, types::Value};
@@ -529,6 +529,36 @@ pub fn branch_exists(conn: &GraphConnection, branch_name: &str) -> SqlResult<boo
     )
 }
 
+/// Checks whether each distinct requested branch name exists.
+///
+/// The returned map has one entry per distinct input name, including missing names with a `false`
+/// value. Branch names use the same exact equality semantics as [`branch_exists`].
+pub fn branches_exist(
+    conn: &GraphConnection,
+    branch_names: &[&str],
+) -> SqlResult<HashMap<String, bool>> {
+    if branch_names.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let branch_names = Rc::new(
+        branch_names
+            .iter()
+            .map(|branch_name| Value::Text((*branch_name).to_owned()))
+            .collect::<Vec<_>>(),
+    );
+    let mut statement = conn.prepare(
+        "WITH requested AS ( \
+             SELECT DISTINCT value AS branch_name FROM rarray(?1) \
+         ) \
+         SELECT requested.branch_name, branches.name IS NOT NULL \
+         FROM requested \
+         LEFT JOIN dolt_branches AS branches ON branches.name = requested.branch_name",
+    )?;
+    let rows = statement.query_map([branch_names], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
 pub fn branch_hash(conn: &GraphConnection, branch_name: &str) -> SqlResult<Option<DoltHashId>> {
     conn.query_row(
         "SELECT hash FROM dolt_branches WHERE name = ?1",
@@ -883,17 +913,18 @@ impl HistoryStore for DoltHistoryStore<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{collections::HashMap, path::PathBuf};
 
     use gen_core::{BranchName, CommitRef, DoltHashId, HashId};
     use tempfile::tempdir;
 
     use super::{
         DoltHistoryStore, active_branch, add_remote, branch_exists, branch_hash, branch_rows,
-        checkout, commit_all, commit_exists, commit_staged_all, connect_branch, create_branch,
-        diff_row_count, hash_of, is_current_branch_dirty, log_entries, log_entries_for_hashes,
-        log_entries_for_revision, merge, merge_base, remote_rows, remove_remote, reset_hard,
-        search_branch_names, set_commit_author_email, set_commit_author_name, status_rows,
+        branches_exist, checkout, commit_all, commit_exists, commit_staged_all, connect_branch,
+        create_branch, diff_row_count, hash_of, is_current_branch_dirty, log_entries,
+        log_entries_for_hashes, log_entries_for_revision, merge, merge_base, remote_rows,
+        remove_remote, reset_hard, search_branch_names, set_commit_author_email,
+        set_commit_author_name, status_rows,
     };
     use crate::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
@@ -972,6 +1003,58 @@ mod tests {
         assert_eq!(
             branch_hash(&conn, "missing").expect("missing branch should be optional"),
             None
+        );
+    }
+
+    #[test]
+    fn test_branches_exist_returns_distinct_exact_name_results() {
+        let conn = get_connection(None).expect("should create graph database");
+        let special_branch = "release%_branch'quote";
+
+        create_branch(&conn, "feature").expect("should create feature branch");
+        create_branch(&conn, special_branch).expect("should create special-character branch");
+
+        let requested = [
+            "missing",
+            "feature",
+            "feature",
+            special_branch,
+            "missing%_branch'quote",
+            "Feature",
+            "feat%",
+        ];
+        let found = branches_exist(&conn, &requested).expect("should query branch existence");
+
+        assert_eq!(
+            found,
+            HashMap::from([
+                ("missing".to_string(), false),
+                ("feature".to_string(), true),
+                (special_branch.to_string(), true),
+                ("missing%_branch'quote".to_string(), false),
+                ("Feature".to_string(), false),
+                ("feat%".to_string(), false),
+            ])
+        );
+        assert_eq!(found.len(), 6, "duplicate input names should collapse");
+        for branch_name in requested {
+            let single_result =
+                branch_exists(&conn, branch_name).expect("should query single branch existence");
+            assert_eq!(
+                found.get(branch_name).copied(),
+                Some(single_result),
+                "bulk and single branch existence should agree for {branch_name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_branches_exist_returns_empty_for_empty_input() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        assert_eq!(
+            branches_exist(&conn, &[]).expect("should return an empty result"),
+            HashMap::<String, bool>::new()
         );
     }
 
