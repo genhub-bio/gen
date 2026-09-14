@@ -91,7 +91,7 @@ use md5::Md5;
 #[cfg(not(target_os = "emscripten"))]
 use reqwest::{
     StatusCode,
-    blocking::{Client, Response},
+    blocking::{Body, Client, Response},
     header::{CONTENT_RANGE, RANGE},
 };
 use rusqlite::Error as SqlError;
@@ -99,6 +99,8 @@ use sha2::{Digest as _, Sha256};
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(target_os = "emscripten")]
+use crate::commands::remote::http::{self, HttpRequest};
 use crate::{
     commands::remote::{
         client::{
@@ -106,7 +108,6 @@ use crate::{
             CapabilityRequest, RemoteClientError, RemoteOperation, RepositoryRemote,
             acquire_asset_transfers, acquire_capability, complete_asset_transfers,
         },
-        http::{self, HttpRequest},
         login_origin,
     },
     get_config_connection, get_connection_for_branch, get_raw_connection,
@@ -360,11 +361,10 @@ fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String
     ))
 }
 
-fn upload_asset(
+fn upload_source(
     workspace: &Workspace,
     asset: &AssetRef,
-    url: &str,
-) -> Result<AssetUploadReceipt, Box<dyn Error>> {
+) -> Result<(PathBuf, String, String), Box<dyn Error>> {
     let relative_path = LocalAssetUri::path_from_uri(&asset.uri)
         .ok_or_else(|| format!("Invalid local asset URI: {}", asset.uri))?;
     let expected_checksum = asset_checksum(asset)?;
@@ -395,6 +395,52 @@ fn upload_asset(
         )
         .into());
     }
+    Ok((source_path, md5, crc32c))
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn upload_asset(
+    workspace: &Workspace,
+    asset: &AssetRef,
+    url: &str,
+    client: &Client,
+) -> Result<AssetUploadReceipt, Box<dyn Error>> {
+    let (source_path, md5, crc32c) = upload_source(workspace, asset)?;
+    let file = fs::File::open(&source_path)?;
+    let length = file.metadata()?.len();
+    let response = client
+        .put(url)
+        .header("content-type", "application/octet-stream")
+        // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
+        // composite objects (those > 5GB)
+        .header("content-md5", &md5)
+        .header("x-goog-if-generation-match", "0")
+        .body(Body::sized(file, length))
+        .send()
+        .map_err(|error| error.without_url())?;
+    if !response.status().is_success()
+        && response.status() != reqwest::StatusCode::PRECONDITION_FAILED
+    {
+        return Err(format!(
+            "Asset {} upload failed with HTTP {}",
+            asset.id,
+            response.status()
+        )
+        .into());
+    }
+    Ok(AssetUploadReceipt {
+        id: asset.id,
+        crc32c,
+    })
+}
+
+#[cfg(target_os = "emscripten")]
+fn upload_asset(
+    workspace: &Workspace,
+    asset: &AssetRef,
+    url: &str,
+) -> Result<AssetUploadReceipt, Box<dyn Error>> {
+    let (source_path, md5, crc32c) = upload_source(workspace, asset)?;
     // Buffered fully in memory: `http::request` has no streaming-upload path (see
     // `commands::remote::http`'s module docs). Fine for the asset sizes exercised so far; revisit
     // if a real upload exposes a memory problem.
@@ -1095,10 +1141,15 @@ fn transfer_assets(
     if operation == RemoteOperation::Push {
         let mut assets = assets;
         let mut upload_receipts = Vec::new();
+        #[cfg(not(target_os = "emscripten"))]
+        let client = Client::new();
         for transfer in response.assets {
             let Some(asset) = assets.remove(&transfer.id) else {
                 continue;
             };
+            #[cfg(not(target_os = "emscripten"))]
+            upload_receipts.push(upload_asset(workspace, &asset, &transfer.url, &client)?);
+            #[cfg(target_os = "emscripten")]
             upload_receipts.push(upload_asset(workspace, &asset, &transfer.url)?);
         }
         if !assets.is_empty() {
