@@ -1,5 +1,6 @@
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
+use gen_graph::{GraphNode, GraphNodeSlice};
 use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
 use serde_json::{Map, Value, to_string as json_to_string, to_value as json_to_value};
@@ -66,13 +67,12 @@ impl PyAnnotation {
 
     /// The graph-space locus covered by this annotation.
     ///
-    /// Only available for annotations created with ``Annotation(locus, name)``.
-    /// Returns ``None`` for database annotations from ``list_annotations()``.
+    /// For database annotations the locus is rebuilt from the stored node-coordinate
+    /// segments, so it keeps naming the same bases after unrelated graph edits.
+    /// Pass it to ``SequenceGraph.delete()`` and friends to edit those bases.
     #[getter]
-    fn locus(&self) -> Option<PyGraphLocus> {
-        self.locus
-            .as_ref()
-            .map(|l| PyGraphLocus::from_locus(l.clone()))
+    fn locus(&self) -> PyGraphLocus {
+        PyGraphLocus::from_locus(self.graph_locus())
     }
 
     /// Hash ID of this annotation.
@@ -184,5 +184,30 @@ impl PyAnnotation {
             "Annotation(name={:?}, track={track}, len={len})",
             self.inner.name
         )
+    }
+}
+
+impl PyAnnotation {
+    /// The locus this annotation was built from, or one rebuilt from its segments.
+    pub fn graph_locus(&self) -> GraphLocus {
+        if let Some(locus) = &self.locus {
+            return locus.clone();
+        }
+        GraphLocus {
+            slices: self
+                .ann_segments
+                .iter()
+                .map(|segment| {
+                    GraphNodeSlice::full(
+                        GraphNode {
+                            node_id: segment.node_id,
+                            sequence_start: segment.range.start,
+                            sequence_end: segment.range.end,
+                        },
+                        segment.strand,
+                    )
+                })
+                .collect(),
+        }
     }
 }

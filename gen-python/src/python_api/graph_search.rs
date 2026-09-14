@@ -1,9 +1,17 @@
 use r#gen::graphs::graph_search::GraphPos;
 use gen_core::Strand;
 use gen_models::locus::GraphLocus;
-use pyo3::prelude::*;
+use pyo3::{
+    Bound, PyAny, PyRef, PyResult,
+    exceptions::{PyIndexError, PyValueError},
+    pyclass, pymethods,
+    types::PyAnyMethods as _,
+};
 
-use super::graph_node::{PyGraphNode, PyGraphNodeSlice};
+use super::{
+    graph_node::{PyGraphNode, PyGraphNodeSlice},
+    locus::GraphLocusExt as _,
+};
 
 /// A position in the graph: a specific node plus a byte offset within that
 /// node's local text (`0..node.length()`).
@@ -94,15 +102,37 @@ impl PyGraphLocus {
 #[pymethods]
 impl PyGraphLocus {
     /// Position of the first matched byte (start of the locus).
-    fn start(&self) -> PyGraphPos {
-        let s = &self.inner.slices[0];
-        PyGraphPos::new(s.block, s.start)
+    fn start(&self) -> PyResult<PyGraphPos> {
+        let slice = self
+            .inner
+            .slices
+            .first()
+            .ok_or_else(|| PyValueError::new_err("Locus has no position"))?;
+        Ok(PyGraphPos::new(
+            slice.block,
+            if slice.strand == Strand::Reverse {
+                slice.end
+            } else {
+                slice.start
+            },
+        ))
     }
 
     /// Position one past the last matched byte (exclusive end of the locus).
-    fn end(&self) -> PyGraphPos {
-        let s = self.inner.slices.last().unwrap();
-        PyGraphPos::new(s.block, s.end)
+    fn end(&self) -> PyResult<PyGraphPos> {
+        let slice = self
+            .inner
+            .slices
+            .last()
+            .ok_or_else(|| PyValueError::new_err("Locus has no position"))?;
+        Ok(PyGraphPos::new(
+            slice.block,
+            if slice.strand == Strand::Reverse {
+                slice.start
+            } else {
+                slice.end
+            },
+        ))
     }
 
     /// Ordered sequence of block slices that span this locus.
@@ -116,6 +146,45 @@ impl PyGraphLocus {
             .iter()
             .map(|s| PyGraphNodeSlice::from_slice(*s))
             .collect()
+    }
+
+    /// Number of bases covered by this locus.
+    fn __len__(&self) -> usize {
+        self.inner.length()
+    }
+
+    /// The same bases as node-absolute ranges, independent of block carving.
+    ///
+    /// Two loci over the same bases compare equal after ``canonical()`` even if
+    /// the graph was split differently when each was obtained.
+    fn canonical(&self) -> PyGraphLocus {
+        PyGraphLocus::from_locus(self.inner.canonical())
+    }
+
+    /// The same bases read from the opposite strand.
+    fn reverse_complement(&self) -> PyGraphLocus {
+        PyGraphLocus::from_locus(self.inner.reverse_complement())
+    }
+
+    /// Sub-locus covering bases ``start:end`` in reading order.
+    ///
+    /// ``start == end`` gives a zero-length locus usable as an insertion target.
+    fn slice(&self, start: usize, end: usize) -> PyResult<PyGraphLocus> {
+        self.inner
+            .slice(start, end)
+            .map(PyGraphLocus::from_locus)
+            .ok_or_else(|| {
+                PyIndexError::new_err(format!(
+                    "slice {start}:{end} is outside a locus of length {}",
+                    self.inner.length()
+                ))
+            })
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<PyRef<PyGraphLocus>>()
+            .is_ok_and(|other| other.inner == self.inner)
     }
 
     /// Strand of this locus: ``"+"`` forward, ``"-"`` reverse, ``"mixed"`` if slices differ, ``"."`` if empty.

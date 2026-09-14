@@ -82,6 +82,39 @@ is not set, the extension falls back to the same login process the CLI uses. See
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
 
+## Sequence editing
+
+`SequenceGraph.insert(target, sequence)`, `replace(target, sequence)`, and
+`delete(target)` edit the active graph route in place. Each call runs one
+transaction and records one operation. Failures roll back both the edit and its
+operation record. Targets accept region strings, search-result `Locus` objects,
+and `Annotation` objects. Insertions also accept a `Position` from
+`locus.start()` or `locus.end()` and require a zero-length target. Replacement
+and deletion remove the target from the active path; later edits using those
+removed bases raise `ValueError`. Each method accepts an optional `message`
+argument used as the operation's commit message; when omitted, a description
+of the edit is generated instead.
+
+```python
+for annotation in sg.list_annotations():
+    sg.delete(annotation.locus)
+
+inserted = sg.replace("chr1:100-110", "ACGT")
+sg.insert(inserted.end(), "TT")
+sg.delete(inserted.slice(1, 3))
+```
+
+`insert` and `replace` return the inserted region's `Locus`.
+Saved loci remain valid when unrelated edits shift or carve the
+graph. Use `Sample.copy()` to create a complete child sample before editing its sequence graphs. The
+destination name must be new; copying an existing sample raises an error.
+
+```python
+child = sample.copy("edited")
+sequence = child[0]
+inserted = sequence.replace(annotation, "ACGT")
+```
+
 ## Architecture
 
 The package is built from three layers:

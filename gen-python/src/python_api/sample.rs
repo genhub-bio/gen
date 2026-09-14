@@ -1,8 +1,21 @@
-use pyo3::{exceptions::PyIndexError, prelude::*};
+use std::collections::HashSet;
+
+use gen_models::{
+    block_group::BlockGroup,
+    operations::{OperationInfo, OperationSummary},
+    sample::{NewSample, Sample, SampleError},
+    sample_lineage::SampleLineage,
+};
+use pyo3::{
+    exceptions::{PyIndexError, PyRuntimeError, PyValueError},
+    prelude::*,
+};
 
 use crate::python_api::{
     block_group::PySequenceGraph,
     jupyter_widget::{PyGraphController, build_widget},
+    repository::run_context_operation_write,
+    utils::block_group_err_to_pyerr,
 };
 
 /// The sequence graphs produced by a single import/update/derive call, all
@@ -112,6 +125,95 @@ impl PySample {
             lines.push(format!("  {}: {}", i, bg.name));
         }
         lines.join("\n")
+    }
+
+    /// Copy this sample into a new sample with the same sequence graphs.
+    ///
+    /// The destination name must not already exist. The returned sample is
+    /// ready for explicit in-place edits on its sequence graphs. The copy is
+    /// recorded as its own operation, using ``message`` as the operation's
+    /// commit message when given, or a generated description otherwise.
+    #[pyo3(signature = (new_name, message=None))]
+    fn copy(&self, new_name: String, message: Option<&str>) -> PyResult<PySample> {
+        let context = self
+            .block_groups
+            .first()
+            .and_then(|sequence_graph| sequence_graph.context.as_ref())
+            .ok_or_else(|| {
+                PyRuntimeError::new_err("copy() requires a sample with sequence graphs")
+            })?;
+        if new_name.is_empty() || new_name == self.sample_name {
+            return Err(PyValueError::new_err(
+                "copy() requires a different, non-empty sample name",
+            ));
+        }
+
+        run_context_operation_write(
+            context,
+            |context| {
+                let conn = context.graph().conn();
+                let created_sample = Sample::create(
+                    conn,
+                    NewSample {
+                        name: &new_name,
+                        is_reference: false,
+                    },
+                )
+                .map_err(|error| match error {
+                    SampleError::Duplicate(_) => {
+                        PyValueError::new_err(format!("sample '{new_name}' already exists"))
+                    }
+                    other => PyRuntimeError::new_err(format!("cannot copy sample: {other}")),
+                })?;
+                let group_names = self
+                    .block_groups
+                    .iter()
+                    .map(|sequence_graph| sequence_graph.name.clone())
+                    .collect::<HashSet<_>>();
+                for group_name in group_names {
+                    BlockGroup::get_or_create_sample_block_groups(
+                        conn,
+                        &self.collection_name,
+                        &new_name,
+                        &group_name,
+                        vec![self.sample_name.clone()],
+                    )
+                    .map_err(block_group_err_to_pyerr)?;
+                }
+                SampleLineage::create(conn, &self.sample_name, &created_sample.name).map_err(
+                    |error| PyRuntimeError::new_err(format!("cannot copy sample: {error}")),
+                )?;
+
+                let copied_block_groups =
+                    Sample::get_block_groups(conn, &self.collection_name, &new_name, None)
+                        .into_iter()
+                        .map(|block_group| PySequenceGraph {
+                            id: block_group.id,
+                            collection_name: block_group.collection_name,
+                            sample_name: block_group.sample_name,
+                            name: block_group.name,
+                            context: Some(context.clone()),
+                        })
+                        .collect();
+                let copied_sample = PySample::new(
+                    self.collection_name.clone(),
+                    new_name.clone(),
+                    copied_block_groups,
+                );
+                let summary = OperationSummary::new(
+                    OperationInfo {
+                        files: vec![],
+                        description: "sample_copy".to_string(),
+                    },
+                    message.map_or_else(
+                        || format!("copied sample '{}' to '{}'", self.sample_name, new_name),
+                        str::to_string,
+                    ),
+                );
+                Ok((copied_sample, summary))
+            },
+            |error| PyRuntimeError::new_err(format!("failed to copy sample: {error}")),
+        )
     }
 }
 
