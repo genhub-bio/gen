@@ -800,10 +800,16 @@ fn validate_seed_index_header_version(header: &SeedIndexHeader) -> Result<(), Se
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{block_group::BlockGroup, collection::Collection};
+    use std::path::PathBuf;
+
+    use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample};
 
     use super::*;
-    use crate::test_helpers::{setup_block_group, setup_gen};
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{get_sample_bg, setup_block_group, setup_gen},
+        updates::{sequence::update_with_sequence, vcf::update_with_vcf},
+    };
 
     // The test graph is a single linear path built by setup_block_group:
     //   AAAAAAAAAA → TTTTTTTTTT → CCCCCCCCCC → GGGGGGGGGG  (40 bp total)
@@ -1192,6 +1198,129 @@ mod tests {
         assert_eq!(loaded.k, index.k);
         assert_eq!(loaded.normalized, index.normalized);
         assert_eq!(loaded.table.len(), index.table.len());
+    }
+
+    #[test]
+    fn test_search_finds_only_current_zygosity_alleles() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_path = fixture_dir.join("simple.fa").to_str().unwrap().to_string();
+        let vcf_path = fixture_dir
+            .join("simple_zygosity.vcf")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let collection = "test";
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &vcf_path,
+            collection,
+            String::new(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let block_group = get_sample_bg(conn, collection, "SAMPLE1");
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let matcher = GenGraphMatcher::new_with_sequence_kind(
+            conn,
+            context.workspace(),
+            graph,
+            SequenceKind::Exact,
+        );
+
+        // Each query includes the edited allele and enough surrounding sequence
+        // to disambiguate the fixture's repeated ATCG motif. A superseded
+        // reference allele must not be reachable at homozygous sites.
+        for (allele, query) in [
+            (
+                "first homozygous reference allele",
+                b"ATCGATCGATCG" as &[u8],
+            ),
+            ("second homozygous reference allele", b"GATCGATCG"),
+            ("third homozygous reference allele", b"TCGGGAAC"),
+        ] {
+            assert!(
+                matcher.find_all(query).is_empty(),
+                "should not find {allele}"
+            );
+        }
+
+        for (allele, query) in [
+            ("first homozygous alternate allele", b"ATTGATCGATC" as &[u8]),
+            ("second homozygous alternate allele", b"GATCATCG"),
+            ("third homozygous alternate allele", b"TCGGGTTTAAC"),
+            ("first heterozygous reference allele", b"GATCGAT"),
+            ("first heterozygous alternate allele", b"GATAGAT"),
+            ("second heterozygous reference allele", b"TCGATCG"),
+            ("second heterozygous alternate allele", b"TCGTCG"),
+            ("third heterozygous reference allele", b"CACACAG"),
+            ("third heterozygous alternate allele", b"CACGCAG"),
+        ] {
+            assert!(!matcher.find_all(query).is_empty(), "should find {allele}");
+        }
+    }
+
+    #[test]
+    fn test_seed_index_is_invalid_after_in_place_sequence_update() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        let block_group = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let matcher = GenGraphMatcher::new(conn, context.workspace(), graph);
+        let index = SeedIndex::build(&matcher, 4, true);
+        let stored_index =
+            SeedIndex::from_bytes_with_header(&index.to_bytes_with_header().unwrap(), 4).unwrap();
+
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            Sample::DEFAULT_NAME,
+            "m123:1-4",
+            "GGGG",
+            false,
+        )
+        .unwrap();
+
+        let updated_block_group = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let updated_graph =
+            BlockGroup::get_graph(conn, context.workspace(), &updated_block_group.id, None)
+                .unwrap();
+        let updated_matcher = GenGraphMatcher::new(conn, context.workspace(), updated_graph);
+
+        assert!(!stored_index.is_valid_for(&updated_matcher));
     }
 
     // --- Case sensitivity tests ---
