@@ -54,6 +54,34 @@ class EditingTestCase(unittest.TestCase):
             if sample.sample_name == name
         )
 
+    def is_editable(self, sequence_graph, locus):
+        """Can this locus still be named as an edit target? An edit resolves its
+        target against the pruned graph, so this is the strict test of whether a
+        route survived an earlier edit. Probed on a copy so the graph is left alone."""
+        copy = self.sample_named(sequence_graph.sample_name).copy(
+            f"probe{len(self.repository.get_samples())}"
+        )
+        try:
+            next(graph for graph in copy if graph.name == sequence_graph.name).delete(
+                locus
+            )
+        except ValueError:
+            return False
+        return True
+
+    def chromosome_indices(self, sequence_graph, sequence):
+        """The chromosome_index of every edge touching the node holding ``sequence``."""
+        graph = sequence_graph.to_dict()
+        indices = set()
+        for (source, target), weights in graph["edges"].items():
+            touches = any(
+                node.length and sequence_graph.get_node_sequence(node) == sequence
+                for node in (source, target)
+            )
+            if touches:
+                indices.update(weight["chromosome_index"] for weight in weights)
+        return indices
+
 
 class SimpleGraphEditingTests(EditingTestCase):
     def setUp(self):
@@ -280,6 +308,8 @@ class SimpleGraphEditingTests(EditingTestCase):
             self.sample.copy("child")
 
     def test_stack_replace_keeps_original_reachable_and_path_untouched(self):
+        original = self.reference_locus.slice(3, 5)
+
         self.graph.replace("m123:3-5", "TT", stack=True)
 
         self.assertTrue(self.contains(self.graph, "ATCGATCGATCG"))
@@ -288,6 +318,24 @@ class SimpleGraphEditingTests(EditingTestCase):
             self.export_sequence(self.graph),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA",
         )
+        self.assertTrue(self.is_editable(self.graph, original))
+
+    def test_stack_leaves_the_original_route_on_a_live_chromosome_index(self):
+        """A stacked edit is only a bubble if pruning keeps both routes. The bases it
+        bypasses would otherwise be healing markers, which pruning drops."""
+        self.graph.replace("m123:3-5", "TT", stack=True)
+
+        self.assertEqual(self.chromosome_indices(self.graph, "GA"), {0})
+        self.assertEqual(self.chromosome_indices(self.graph, "TT"), {-3})
+
+    def test_plain_replace_supersedes_the_original_route(self):
+        original = self.reference_locus.slice(3, 5)
+
+        self.graph.replace("m123:3-5", "TT")
+
+        self.assertEqual(self.chromosome_indices(self.graph, "GA"), {-2})
+        self.assertEqual(self.chromosome_indices(self.graph, "TT"), {0})
+        self.assertFalse(self.is_editable(self.graph, original))
 
     def test_stack_insert_keeps_original_reachable_and_path_untouched(self):
         [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
@@ -302,6 +350,8 @@ class SimpleGraphEditingTests(EditingTestCase):
         )
 
     def test_stack_delete_keeps_original_reachable_and_path_untouched(self):
+        original = self.reference_locus.slice(20, 28)
+
         self.graph.delete("m123:20-28", stack=True)
 
         self.assertTrue(self.contains(self.graph, "GGAACACACAGAGA"))
@@ -310,6 +360,72 @@ class SimpleGraphEditingTests(EditingTestCase):
             self.export_sequence(self.graph),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGA",
         )
+        self.assertTrue(self.is_editable(self.graph, original))
+
+
+class LibraryGraphEditingTests(EditingTestCase):
+    """A library column is a bubble whose alternatives share the edges that enter and
+    leave it, so an edit there has no single flanking route to hang itself off."""
+
+    LEFT = "AAAACCCCGGGGTTTT"
+    FIRST = "ACGTACGTAC"
+    SECOND = "TTTTGGGGCC"
+    RIGHT = "CCCCAAAATTTTGGGG"
+
+    def setUp(self):
+        super().setUp()
+        part = gen.SequencePart
+        self.graph = self.repository.import_library(
+            "lib",
+            [
+                [part("left", self.LEFT)],
+                [part("alt_a", self.FIRST), part("alt_b", self.SECOND)],
+                [part("right", self.RIGHT)],
+            ],
+            sample="reference",
+        )
+        self.alternative = next(
+            annotation.locus
+            for annotation in self.graph.list_annotations()
+            if annotation.name == "alt_a"
+        )
+
+    def path_count(self):
+        path = self.root / "export.gfa"
+        self.graph.export_gfa(str(path))
+        return sum(1 for line in path.read_text().splitlines() if line.startswith("P"))
+
+    def test_replace_of_an_alternative_keeps_a_route_through_the_graph(self):
+        self.graph.replace(self.alternative, "GGGGGG")
+
+        self.assertTrue(self.contains(self.graph, self.LEFT + "GGGGGG" + self.RIGHT))
+        self.assertEqual(
+            self.export_sequence(self.graph), self.LEFT + "GGGGGG" + self.RIGHT
+        )
+        self.assertEqual(self.path_count(), 1)
+
+    def test_replace_of_an_alternative_supersedes_only_that_alternative(self):
+        self.graph.replace(self.alternative, "GGGGGG")
+
+        self.assertFalse(self.is_editable(self.graph, self.alternative))
+        self.assertEqual(self.chromosome_indices(self.graph, self.FIRST), {-2})
+        self.assertTrue(self.contains(self.graph, self.LEFT + self.SECOND + self.RIGHT))
+
+    def test_delete_of_an_alternative_keeps_a_route_through_the_graph(self):
+        self.graph.delete(self.alternative)
+
+        self.assertTrue(self.contains(self.graph, self.LEFT + self.RIGHT))
+        self.assertEqual(self.export_sequence(self.graph), self.LEFT + self.RIGHT)
+        self.assertEqual(self.path_count(), 1)
+        self.assertFalse(self.is_editable(self.graph, self.alternative))
+
+    def test_stacked_replace_leaves_every_alternative_live(self):
+        self.graph.replace(self.alternative, "GGGGGG", stack=True)
+
+        self.assertTrue(self.contains(self.graph, self.LEFT + "GGGGGG" + self.RIGHT))
+        self.assertTrue(self.contains(self.graph, self.LEFT + self.FIRST + self.RIGHT))
+        self.assertTrue(self.contains(self.graph, self.LEFT + self.SECOND + self.RIGHT))
+        self.assertTrue(self.is_editable(self.graph, self.alternative))
 
 
 if __name__ == "__main__":
