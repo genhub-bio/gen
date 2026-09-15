@@ -22,52 +22,14 @@ import anywidget
 import ipywidgets
 import traitlets
 
+from .ascii_render import frame_text
+
 # Default viewport dimensions (terminal columns × rows).
 DEFAULT_COLS = 60
 DEFAULT_ROWS = 12
 
 
-def _highlighted(cell: dict, frame: dict) -> bool:
-    """True when the cell carries a highlight colour.
-
-    The graph renderer paints text cells with inverted neutral colours
-    (fg=neutral_bg, bg=neutral_fg) by default.  A true highlight changes
-    the cell's *bg* to an accent colour while keeping the inverted fg.
-    Edge cells never set *bg* (highlighted edges are already drawn with
-    heavy/dashed box-drawing glyphs by the Rust renderer), so this only
-    ever fires for text cells.
-    """
-    bg = cell.get("bg")
-    if bg is None:
-        return False
-    return bg != frame.get("neutral_fg")
-
-
-def _transform(text: str, highlighted: bool) -> str:
-    """Adjust casing based on highlight state."""
-    return text.upper() if highlighted else text.lower()
-
-
 _ESM = pathlib.Path(__file__).parent / "static" / "jupyter_widget.js"
-
-# Prefixed onto the text/plain fallback of a not-yet-frozen widget display: the
-# widget-view+json in the same bundle only mounts the interactive canvas inside
-# a live kernel (ipywidgets comms), so a reader without one (a raw notebook
-# diff, an unfrozen commit rendered on GitHub) sees only this ASCII fallback.
-# It orients a reader (human or LLM) skimming the raw notebook JSON who has
-# never seen a Gen graph widget before.
-_LIVE_TEXT_HINT = (
-    "# Gen graph widget (interactive; not yet frozen to a static image).\n"
-    "# If you are viewing this outside a running Jupyter kernel, the interactive canvas\n"
-    "# above could not mount and you are seeing this ASCII fallback instead. It is an\n"
-    "# ASCII rendering of the same frame: each character is one terminal cell from the\n"
-    "# Rust layout engine; UPPERCASE marks a highlighted annotation region, lowercase is\n"
-    "# unhighlighted sequence/graph structure.\n"
-    "# To interact with this graph, run the notebook in a live Jupyter kernel; the\n"
-    "# returned GraphWidget supports .zoom_in()/.zoom_out(), .scroll_left()/.scroll_right()/\n"
-    "# .scroll_up()/.scroll_down(), and .next_page()/.prev_page() for multi-page samples.\n"
-    "# See also `make notebook-freeze`, which bakes a static PNG into the notebook.\n"
-)
 
 # Prefixed onto the text/plain fallback of a frozen widget only (not the live
 # widget's __repr__): a frozen output has no kernel or JS behind it, so unlike
@@ -188,20 +150,7 @@ class GraphWidget(anywidget.AnyWidget):
         server-side by the Rust renderer, so no separate rendering path is
         needed.
         """
-        cols, rows = (
-            self.frame.get("cols", self.cols),
-            self.frame.get("rows", self.rows),
-        )
-        grid = [[" "] * cols for _ in range(rows)]
-        for cell in self.frame.get("cells", []):
-            x, y, text = cell["x"], cell["y"], cell["text"]
-            if text and 0 <= y < rows and 0 <= x < cols:
-                grid[y][x] = _transform(text, _highlighted(cell, self.frame))
-        lines = ["".join(row).rstrip() for row in grid]
-        if self.page_count > 1 and lines:
-            prefix = f"[{self.page_index + 1}/{self.page_count}] "
-            lines[0] = (prefix + lines[0].lstrip()).rstrip()
-        return "\n".join(lines)
+        return frame_text(self.frame, self.page_count, self.page_index)
 
     def _ipython_display_(self, **kwargs):
         """Clone the controller and display an independent widget in this cell.
@@ -216,7 +165,7 @@ class GraphWidget(anywidget.AnyWidget):
         cloned_ctrl = self._controller.clone_controller()
         snapshot = type(self)(cloned_ctrl, cols=self.cols, rows=self.rows)
         data = {
-            "text/plain": _LIVE_TEXT_HINT + repr(snapshot),
+            "text/plain": repr(snapshot),
             "application/vnd.jupyter.widget-view+json": {
                 "version_major": 2,
                 "version_minor": 0,
@@ -320,7 +269,7 @@ class GraphWidget(anywidget.AnyWidget):
                             "model_id": self._model_id,
                         },
                         "image/png": b64,
-                        "text/plain": _LIVE_TEXT_HINT + repr(self),
+                        "text/plain": repr(self),
                     },
                     raw=True,
                 )
