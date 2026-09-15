@@ -23,7 +23,10 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gen_core::{BranchName, CommitRef, DoltHashId};
-use rusqlite::{OptionalExtension, Result as SqlResult, params, types::Value};
+use rusqlite::{
+    OptionalExtension, Result as SqlResult, params,
+    types::{Type, Value},
+};
 
 use crate::{
     db::{ConfigConnection, GraphConnection},
@@ -434,8 +437,21 @@ pub fn connect_branch(conn: &GraphConnection, branch_name: &str) -> SqlResult<()
     run_history_statement(conn, "SELECT dolt_connect_branch(?1)", &[&branch_name])
 }
 
-pub fn merge(conn: &GraphConnection, branch_name: &str) -> SqlResult<()> {
-    run_history_statement(conn, "SELECT dolt_merge(?1)", &[&branch_name])
+/// Merges a branch or commit reference into the active branch and returns the resulting hash.
+pub fn merge(conn: &GraphConnection, reference: &str) -> SqlResult<DoltHashId> {
+    let result = conn.query_row("SELECT dolt_merge(?1)", [reference], |row| {
+        row.get::<_, String>(0)
+    })?;
+    // DoltLite returns a human-readable result for an already-included source instead of a hash.
+    match DoltHashId::try_from(result.as_str()) {
+        Ok(commit_hash) => Ok(commit_hash),
+        Err(_error) if result == "Already up to date" => hash_of(conn, "HEAD"),
+        Err(error) => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            Type::Text,
+            Box::new(error),
+        )),
+    }
 }
 
 pub fn reset_hard(conn: &GraphConnection, target: &str) -> SqlResult<()> {
@@ -577,6 +593,48 @@ pub fn commit_exists(conn: &GraphConnection, commit_hash: &DoltHashId) -> SqlRes
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM dolt_commit_ancestors WHERE commit_hash = ?1)",
         [commit_hash],
+        |row| row.get(0),
+    )
+}
+
+/// Returns every direct parent of a commit in Dolt's parent order.
+pub fn commit_parents(
+    conn: &GraphConnection,
+    commit_hash: &DoltHashId,
+) -> SqlResult<Vec<DoltHashId>> {
+    let mut statement = conn.prepare(
+        "SELECT parent_hash \
+         FROM dolt_commit_ancestors \
+         WHERE commit_hash = ?1 AND parent_hash IS NOT NULL \
+         ORDER BY parent_index",
+    )?;
+    let rows = statement.query_map([commit_hash], |row| row.get(0))?;
+    rows.collect()
+}
+
+/// Returns whether `ancestor_hash` is reachable from `descendant_hash`, including equality.
+pub fn is_ancestor(
+    conn: &GraphConnection,
+    ancestor_hash: &DoltHashId,
+    descendant_hash: &DoltHashId,
+) -> SqlResult<bool> {
+    conn.query_row(
+        "WITH RECURSIVE ancestry(commit_hash) AS ( \
+             SELECT ?2 \
+             WHERE EXISTS( \
+                 SELECT 1 FROM dolt_commit_ancestors WHERE commit_hash = ?2 \
+             ) \
+             UNION \
+             SELECT parents.parent_hash \
+             FROM ancestry \
+             JOIN dolt_commit_ancestors AS parents \
+               ON parents.commit_hash = ancestry.commit_hash \
+             WHERE parents.parent_hash IS NOT NULL \
+         ) \
+         SELECT EXISTS( \
+             SELECT 1 FROM ancestry WHERE commit_hash = ?1 \
+         )",
+        [ancestor_hash, descendant_hash],
         |row| row.get(0),
     )
 }
@@ -842,6 +900,18 @@ impl HistoryStore for DoltHistoryStore<'_> {
         commit_exists(self.graph, commit_hash)
     }
 
+    fn commit_parents(&self, commit_hash: &DoltHashId) -> SqlResult<Vec<DoltHashId>> {
+        commit_parents(self.graph, commit_hash)
+    }
+
+    fn is_ancestor(
+        &self,
+        ancestor_hash: &DoltHashId,
+        descendant_hash: &DoltHashId,
+    ) -> SqlResult<bool> {
+        is_ancestor(self.graph, ancestor_hash, descendant_hash)
+    }
+
     #[cfg_attr(feature = "profiling", tracing::instrument(skip(self, message)))]
     fn commit_all(&self, message: &str) -> SqlResult<DoltHashId> {
         commit_all_with_config(self.graph, self.config, message)
@@ -878,7 +948,7 @@ impl HistoryStore for DoltHistoryStore<'_> {
         merge_base(self.graph, &source.0, &target.0)
     }
 
-    fn merge(&self, reference: &CommitRef) -> SqlResult<()> {
+    fn merge(&self, reference: &CommitRef) -> SqlResult<DoltHashId> {
         merge(self.graph, &reference.0)
     }
 
@@ -920,11 +990,11 @@ mod tests {
 
     use super::{
         DoltHistoryStore, active_branch, add_remote, branch_exists, branch_hash, branch_rows,
-        branches_exist, checkout, commit_all, commit_exists, commit_staged_all, connect_branch,
-        create_branch, diff_row_count, hash_of, is_current_branch_dirty, log_entries,
-        log_entries_for_hashes, log_entries_for_revision, merge, merge_base, remote_rows,
-        remove_remote, reset_hard, search_branch_names, set_commit_author_email,
-        set_commit_author_name, status_rows,
+        branches_exist, checkout, commit_all, commit_exists, commit_parents, commit_staged_all,
+        connect_branch, create_branch, delete_branch_force, diff_row_count, hash_of, is_ancestor,
+        is_current_branch_dirty, log_entries, log_entries_for_hashes, log_entries_for_revision,
+        merge, merge_base, remote_rows, remove_remote, reset_hard, search_branch_names,
+        set_commit_author_email, set_commit_author_name, status_rows,
     };
     use crate::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
@@ -1222,6 +1292,156 @@ mod tests {
                 .expect("should resolve first-parent grandparent"),
             Some(base_commit),
             "HEAD~2 should remain on the main-side first-parent chain"
+        );
+    }
+
+    #[test]
+    fn test_merge_by_commit_returns_all_parents_after_source_branch_deleted() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        Collection::create(&conn, "base").expect("should create base collection");
+        commit_all(&conn, "base").expect("should commit base state");
+        create_branch(&conn, "feature").expect("should create feature branch");
+
+        checkout(&conn, "feature").expect("should checkout feature branch");
+        Collection::create(&conn, "feature").expect("should create feature collection");
+        let source_hash = commit_all(&conn, "feature").expect("should commit feature state");
+
+        checkout(&conn, "main").expect("should checkout main branch");
+        Collection::create(&conn, "target").expect("should create target collection");
+        let target_hash = commit_all(&conn, "target").expect("should commit target state");
+
+        delete_branch_force(&conn, "feature").expect("should delete the source branch");
+        let merge_hash = merge(&conn, &source_hash.to_string())
+            .expect("should merge the immutable source commit");
+        assert_eq!(
+            commit_parents(&conn, &merge_hash).expect("should query all merge parents"),
+            vec![target_hash, source_hash],
+            "merge parents should preserve target then source order"
+        );
+    }
+
+    #[test]
+    fn test_is_ancestor_includes_commit_equality() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        Collection::create(&conn, "base").expect("should create base collection");
+        let base_hash = commit_all(&conn, "base").expect("should commit base state");
+        Collection::create(&conn, "descendant").expect("should create descendant collection");
+        let descendant_hash =
+            commit_all(&conn, "descendant").expect("should commit descendant state");
+
+        assert!(
+            is_ancestor(&conn, &base_hash, &descendant_hash)
+                .expect("should query descendant ancestry"),
+            "a parent commit should be an ancestor of its descendant"
+        );
+        assert!(
+            is_ancestor(&conn, &descendant_hash, &descendant_hash)
+                .expect("should query equal ancestry"),
+            "a commit should be an ancestor of itself"
+        );
+        assert!(
+            !is_ancestor(&conn, &descendant_hash, &base_hash)
+                .expect("should query reverse ancestry"),
+            "a descendant should not be an ancestor of its parent"
+        );
+        let missing_hash = DoltHashId::try_from("0000000000000000000000000000000000000000")
+            .expect("should parse a zero hash");
+        assert!(
+            !is_ancestor(&conn, &missing_hash, &missing_hash)
+                .expect("should query missing ancestry"),
+            "an unknown hash should not be considered its own ancestor"
+        );
+    }
+
+    #[test]
+    fn test_merge_returns_source_hash_for_fast_forward_and_noop() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        Collection::create(&conn, "base").expect("should create base collection");
+        commit_all(&conn, "base").expect("should commit base state");
+        create_branch(&conn, "feature").expect("should create feature branch");
+        checkout(&conn, "feature").expect("should checkout feature branch");
+        Collection::create(&conn, "feature").expect("should create feature collection");
+        let source_hash = commit_all(&conn, "feature").expect("should commit feature state");
+        checkout(&conn, "main").expect("should checkout main branch");
+
+        assert_eq!(
+            merge(&conn, &source_hash.to_string()).expect("should fast-forward to source"),
+            source_hash,
+            "a fast-forward merge should return the resulting source tip"
+        );
+        assert_eq!(
+            merge(&conn, &source_hash.to_string())
+                .expect("should merge an already included source"),
+            source_hash,
+            "an already included source should be a successful no-op returning the current target"
+        );
+    }
+
+    #[test]
+    fn test_merge_conflict_is_atomic_and_preserves_target_hash() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        conn.execute(
+            "CREATE TABLE merge_conflicts (id INTEGER PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )
+        .expect("should create conflict fixture table");
+        conn.execute(
+            "INSERT INTO merge_conflicts (id, value) VALUES (1, 'base')",
+            [],
+        )
+        .expect("should create base conflict row");
+        commit_all(&conn, "base").expect("should commit base state");
+        create_branch(&conn, "feature").expect("should create feature branch");
+
+        checkout(&conn, "feature").expect("should checkout feature branch");
+        conn.execute(
+            "UPDATE merge_conflicts SET value = 'feature' WHERE id = 1",
+            [],
+        )
+        .expect("should update feature conflict row");
+        let source_hash =
+            commit_all(&conn, "feature conflict").expect("should commit feature conflict");
+
+        checkout(&conn, "main").expect("should checkout main branch");
+        conn.execute(
+            "UPDATE merge_conflicts SET value = 'target' WHERE id = 1",
+            [],
+        )
+        .expect("should update target conflict row");
+        let target_hash =
+            commit_all(&conn, "target conflict").expect("should commit target conflict");
+
+        let merge_error = merge(&conn, &source_hash.to_string())
+            .expect_err("should reject conflicting collection rows");
+        assert!(
+            merge_error.to_string().contains("conflict")
+                || merge_error.to_string().contains("CONSTRAINT"),
+            "merge failure should identify the conflicting operation: {merge_error}"
+        );
+        assert_eq!(
+            hash_of(&conn, "main").expect("should read target hash after failed merge"),
+            target_hash,
+            "an aborted DoltLite merge must not advance the target branch"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM merge_conflicts WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("should read target data after failed merge"),
+            "target",
+            "an aborted DoltLite merge must restore the target data"
+        );
+        assert!(
+            status_rows(&conn)
+                .expect("should read working-set status after failed merge")
+                .is_empty(),
+            "an aborted DoltLite merge must leave the working set clean"
         );
     }
 
