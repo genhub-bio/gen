@@ -29,11 +29,12 @@ from .gen import (
     clone,
 )
 
-# Jupyter widget — only available with `pip install gen[jupyter]`
+# Jupyter widget — use a dependency-free textual fallback when the extra is absent.
 try:
     from .jupyter_widget import GraphWidget, freeze_all_widgets
 except ImportError:
-    GraphWidget = None
+    from .text_widget import TextGraphWidget as GraphWidget
+
     freeze_all_widgets = None
 
 __all__ = [

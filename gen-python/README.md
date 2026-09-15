@@ -5,7 +5,8 @@ Python bindings to the Gen version control system for genetic sequences.
 The package installs the `gen` command-line client and exposes the full Gen data
 model — repositories, sequence graphs, import/export pipelines — from Python and
 Jupyter notebooks. An optional Jupyter widget provides interactive graph
-visualization.
+visualization. Without the extra, plotting falls back to a readable textual
+rendering and explains how to install the widget.
 
 ## Quick start
 
