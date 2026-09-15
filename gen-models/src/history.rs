@@ -72,6 +72,12 @@ pub trait HistoryStore {
     fn status(&self) -> SqlResult<Vec<HistoryStatus>>;
     fn conflicts(&self) -> SqlResult<Vec<HistoryConflict>>;
     fn commit_exists(&self, commit_hash: &DoltHashId) -> SqlResult<bool>;
+    fn commit_parents(&self, commit_hash: &DoltHashId) -> SqlResult<Vec<DoltHashId>>;
+    fn is_ancestor(
+        &self,
+        ancestor_hash: &DoltHashId,
+        descendant_hash: &DoltHashId,
+    ) -> SqlResult<bool>;
     fn commit_all(&self, message: &str) -> SqlResult<DoltHashId>;
     fn checkout_branch(&self, branch_name: &BranchName) -> SqlResult<()>;
     fn checkout_commit(&self, commit_hash: &DoltHashId) -> SqlResult<()>;
@@ -82,7 +88,7 @@ pub trait HistoryStore {
     ) -> SqlResult<()>;
     fn delete_branch(&self, branch_name: &BranchName) -> SqlResult<()>;
     fn merge_base(&self, source: &CommitRef, target: &CommitRef) -> SqlResult<DoltHashId>;
-    fn merge(&self, reference: &CommitRef) -> SqlResult<()>;
+    fn merge(&self, reference: &CommitRef) -> SqlResult<DoltHashId>;
     fn cherry_pick(&self, commit_hash: &DoltHashId) -> SqlResult<()>;
     fn reset_hard(&self, target: &CommitRef) -> SqlResult<()>;
     fn push(&self, remote_name: &str, branch_name: &BranchName) -> SqlResult<()>;
