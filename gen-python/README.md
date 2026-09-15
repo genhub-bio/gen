@@ -104,7 +104,8 @@ sg.insert(inserted.end(), "TT")
 sg.delete(inserted.slice(1, 3))
 ```
 
-`insert` and `replace` return the inserted region's `Locus`.
+`insert` and `replace` return the inserted region's `Locus`, which you can then
+immediately annotate using `SequenceGraph.add_annotation(locus, name, track="default")`.
 Saved loci remain valid when unrelated edits shift or carve the
 graph. Use `Sample.copy()` to create a complete child sample before editing its sequence graphs. The
 destination name must be new; copying an existing sample raises an error.
@@ -113,6 +114,7 @@ destination name must be new; copying an existing sample raises an error.
 child = sample.copy("edited")
 sequence = child[0]
 inserted = sequence.replace(annotation, "ACGT")
+sequence.add_annotation(inserted, "mutation")
 ```
 
 ## Architecture

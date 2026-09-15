@@ -12,8 +12,10 @@ use super::graph_search::PyGraphLocus;
 /// **From a database** — obtain via ``SequenceGraph.list_annotations()``
 /// or ``GraphWidget.list_annotations()``.
 ///
-/// **From a search result** — create with ``Annotation(locus, name)``
-/// where *locus* is a ``Locus`` returned by ``SequenceGraph.search()``.
+/// **From a search result** — create an annotation object with
+/// ``Annotation(locus, name)`` where *locus* is a ``Locus`` returned by
+/// ``SequenceGraph.search()``. To persist it in the repository, use
+/// ``SequenceGraph.add_annotation(locus, name)``.
 #[pyclass(name = "Annotation", unsendable)]
 #[derive(Clone)]
 pub struct PyAnnotation {
@@ -28,7 +30,7 @@ pub struct PyAnnotation {
 
 #[pymethods]
 impl PyAnnotation {
-    /// Create an ephemeral annotation from a search-result locus.
+    /// Create an annotation object from a search-result locus.
     ///
     /// Parameters
     /// locus : Locus
@@ -94,7 +96,7 @@ impl PyAnnotation {
     }
 
     /// Track (annotation group) this annotation was loaded from, or ``None`` for
-    /// ephemeral annotations created with ``Annotation(locus, name)``.
+    /// annotations created with ``Annotation(locus, name)``.
     #[getter]
     fn track(&self) -> Option<&str> {
         if self.inner.group.is_empty() {

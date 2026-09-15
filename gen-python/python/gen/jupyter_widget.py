@@ -582,7 +582,6 @@ class GraphWidget(anywidget.AnyWidget):
 
     def add_annotation_track(
         self,
-        annotations=None,
         *,
         file: str | None = None,
         group: str | None = None,
@@ -592,13 +591,10 @@ class GraphWidget(anywidget.AnyWidget):
     ) -> None:
         """Add annotations as inline graph highlights with floating labels.
 
-        Exactly one of *annotations*, *file*, or *group* must be supplied.
+        Exactly one of *file* or *group* must be supplied.
 
         Parameters
         ----------
-        annotations : list[Annotation], optional
-            Annotations built with ``Annotation(locus, name)``.  *name* is
-            required when using this form.
         file : str, optional
             Path to a GFF3 or BED annotation file.  Both standard files
             (chromosome/contig names as reference) and pre-translated files
@@ -617,16 +613,10 @@ class GraphWidget(anywidget.AnyWidget):
         """
         if self._frozen:
             return
-        given = sum(x is not None for x in (annotations, file, group))
+        given = sum(x is not None for x in (file, group))
         if given != 1:
-            raise ValueError(
-                "exactly one of annotations, file, or group must be supplied"
-            )
-        if annotations is not None:
-            if name is None:
-                raise ValueError("name is required when annotations is supplied")
-            self._controller.add_track_annotations(annotations, name)
-        elif file is not None:
+            raise ValueError("exactly one of file or group must be supplied")
+        if file is not None:
             if filter is not None:
                 file = self._apply_row_filter(file, filter)
             self._controller.add_track_file(file, name, from_sample)
@@ -660,40 +650,19 @@ class GraphWidget(anywidget.AnyWidget):
         """Return list of annotation track names currently loaded."""
         return json.loads(self._controller.get_track_names())
 
-    def remove_annotation_track(self, name: str) -> None:
-        """Remove an annotation track by name."""
+    def hide_annotation_track(self, name: str) -> None:
+        """Hide an annotation track by name without changing the repository."""
         if self._frozen:
             return
-        self._controller.remove_track(name)
+        self._controller.hide_track(name)
         self._render()
 
-    def clear_all_annotations(self) -> None:
-        """Clear all annotations from the graph."""
+    def hide_all_annotations(self) -> None:
+        """Hide all annotation tracks without changing the repository."""
         if self._frozen:
             return
-        self._controller.clear_all_annotations()
+        self._controller.hide_all_annotations()
         self._render()
-
-    def add_annotation(self, annotation) -> None:
-        """Render an annotation inline on the graph canvas.
-
-        The annotation is tinted with an accent colour and its name is placed
-        below its bounding box.  Labels avoid each other but give up rather
-        than overwrite existing graph content.
-
-        Parameters
-        ----------
-        annotation : Annotation
-            A named annotation built with ``Annotation(locus, name)``.
-        """
-        if self._frozen:
-            return
-        self._controller.add_annotation([annotation], annotation.name)
-        self._render()
-
-    def annotations(self) -> list:
-        """Return list of annotation names currently displayed."""
-        return json.loads(self._controller.get_annotation_names())
 
     def list_annotations(self) -> list:
         """Return all annotations loaded into the widget as ``Annotation`` objects.
@@ -707,17 +676,6 @@ class GraphWidget(anywidget.AnyWidget):
             widget.go_to(mcs)
         """
         return self._controller.list_annotations()
-
-    def remove_annotation(self, name: str) -> None:
-        """Remove all annotations with the given name.
-
-        If ``add_annotation`` was called more than once with annotations
-        sharing the same name, every copy is removed.
-        """
-        if self._frozen:
-            return
-        self._controller.remove_annotation(name)
-        self._render()
 
 
 async def freeze_all_widgets(timeout: float = 10.0, quiet: float = 1.0) -> None:
