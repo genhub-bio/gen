@@ -317,12 +317,14 @@ class SimpleGraphEditingTests(EditingTestCase):
             self.export_sequence(self.graph), "ATCGATCGATCGATCGATCGCCGGAACACACAGAGA"
         )
 
-    def test_insert_at_region_point_of_a_stacked_fork_is_refused(self):
+    def test_insert_at_region_point_of_a_stacked_fork_or_join_is_refused(self):
         [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
         self.graph.replace(locus, "TTTT", stack=True)
 
         with self.assertRaisesRegex(ValueError, "fork"):
             self.graph.insert("m123:20-20", "CC")
+        with self.assertRaisesRegex(ValueError, "forks or joins"):
+            self.graph.insert("m123:28-28", "CC")
 
     def test_stack_insert_keeps_original_reachable_and_path_untouched(self):
         [locus] = self.graph.search("GGAACACA", sequence_kind="exact")

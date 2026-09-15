@@ -135,6 +135,8 @@ fn resolve_target(
                 block: position.inner.block,
                 start: position.inner.offset,
                 end: position.inner.offset,
+                // TODO: carry the strand of the locus a Position came from, so insertions at a
+                // reverse-strand position are reverse complemented like replacements.
                 strand: Strand::Forward,
             }],
         }
@@ -216,8 +218,10 @@ fn locus_from_region(
             .iter()
             .find(|(range, _)| range.start <= point && point < range.end);
         let ending = blocks.iter().find(|(range, _)| range.end == point);
-        if let (Some((after_range, after_block)), Some((before_range, before_block))) =
-            (containing, ending)
+        let before = ending.or(containing);
+        let after = containing.or(ending);
+        if let (Some((before_range, before_block)), Some((after_range, after_block))) =
+            (before, after)
         {
             require_one_insertion_point(
                 context,
@@ -227,8 +231,7 @@ fn locus_from_region(
                 &slice_of(after_range, after_block, point, point),
             )?;
         }
-        containing
-            .or(ending)
+        after
             .map(|(range, block)| slice_of(range, block, point, point))
             .into_iter()
             .collect()
@@ -264,8 +267,8 @@ fn locus_from_region(
     })
 }
 
-/// A path coordinate on a block edge names both the end of the block before it and the
-/// start of the block after it. Where the graph forks or joins there, those are different
+/// A region point on a block edge in the graph names both the end of the block before it and
+/// the start of the block after it. Where the graph forks or joins there, those are different
 /// insertion points and the coordinate cannot say which one is meant.
 fn require_one_insertion_point(
     context: &DbContext,
@@ -275,16 +278,18 @@ fn require_one_insertion_point(
     after: &GraphNodeSlice,
 ) -> PyResult<()> {
     let graph = current_graph(context, block_group_id)?;
-    let anchors_of = |slice: &GraphNodeSlice| {
+    let resolves = |slice: &GraphNodeSlice, side| {
         let locus = GraphLocus {
             slices: vec![*slice],
         };
-        locate_span(&graph, &locus.canonical(), PositionSide::Preceding)
-            .map(|span| (span.start, span.end))
+        locate_span(&graph, &locus.canonical(), side, &HashMap::new())
     };
-    match (anchors_of(before), anchors_of(after)) {
-        (Ok(before), Ok(after)) if before == after => Ok(()),
-        (Err(_), Err(error)) => Err(error),
+    match (
+        resolves(before, PositionSide::Preceding),
+        resolves(after, PositionSide::Following),
+    ) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(error), Err(_)) => Err(error),
         _ => Err(PyValueError::new_err(format!(
             "region '{region}' is where the graph forks or joins, so it could mean the end of \
              the part before it or the start of the part after it; target one of those \
@@ -309,7 +314,14 @@ fn apply_edit(
             let source = BlockGroup::get_by_id(conn, source_block_group_id, None)
                 .map_err(block_group_err_to_pyerr)?;
             let graph = current_graph(context, &source.id)?;
-            let mut span = locate_span(&graph, &canonical, side)?;
+            let node_ids = canonical
+                .slices
+                .iter()
+                .map(|slice| slice.block.node_id)
+                .collect::<Vec<_>>();
+            let node_lengths = Node::query_nodes_length(conn, &node_ids)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let mut span = locate_span(&graph, &canonical, side, &node_lengths)?;
             if request.stack {
                 // Pruning never competes on this index, so the existing route stays.
                 span.chromosome_index = INDETERMINATE_CHROMOSOME_INDEX;
@@ -478,7 +490,12 @@ fn validate_request(target: &GraphLocus, request: &EditRequest<'_>) -> PyResult<
 /// Resolve the complete target against the active route before selecting flanking
 /// anchors. Reverse search hits may list slices in graph order, whereas a reverse
 /// complement lists them in reading order; validate connectivity in either order.
-fn locate_span(graph: &GenGraph, canonical: &GraphLocus, side: PositionSide) -> PyResult<EditSpan> {
+fn locate_span(
+    graph: &GenGraph,
+    canonical: &GraphLocus,
+    side: PositionSide,
+    node_lengths: &HashMap<HashId, i64>,
+) -> PyResult<EditSpan> {
     let is_reverse = canonical.slices[0].strand == Strand::Reverse;
     if canonical.slices.iter().any(|slice| {
         if is_reverse {
@@ -511,16 +528,23 @@ fn locate_span(graph: &GenGraph, canonical: &GraphLocus, side: PositionSide) -> 
     let (start, end) = if locus.length() == 0 {
         (boundary(graph, first, true)?, boundary(graph, last, false)?)
     } else {
-        (
+        let start = if own_start_is_on_route(graph, first) {
             GraphNodePosition {
                 graph_node: first.block,
                 offset: first.start as i64,
-            },
+            }
+        } else {
+            boundary(graph, first, true)?
+        };
+        let end = if own_end_is_on_route(graph, last, node_lengths) {
             GraphNodePosition {
                 graph_node: last.block,
                 offset: last.end as i64,
-            },
-        )
+            }
+        } else {
+            boundary(graph, last, false)?
+        };
+        (start, end)
     };
     let (chromosome_index, phased) = entry_chromosome(graph, first)?;
     Ok(EditSpan {
@@ -530,6 +554,38 @@ fn locate_span(graph: &GenGraph, canonical: &GraphLocus, side: PositionSide) -> 
         chromosome_index,
         phased,
     })
+}
+
+/// Whether an edge leaving the span's first base resolves to the block before it on this route.
+///
+/// Edges address node coordinates, so at a block edge inside a node they attach to whichever
+/// block of that node ends there, which is off the route when the route reached the span by
+/// skipping bases (for example after a deletion).
+fn own_start_is_on_route(graph: &GenGraph, first: &GraphNodeSlice) -> bool {
+    first.start > 0
+        || first.block.sequence_start == 0
+        || graph
+            .neighbors_directed(first.block, Incoming)
+            .any(|neighbor| {
+                neighbor.node_id == first.block.node_id
+                    && neighbor.sequence_end == first.block.sequence_start
+            })
+}
+
+/// Whether an edge arriving at the span's last base resolves to the block after it on this route.
+fn own_end_is_on_route(
+    graph: &GenGraph,
+    last: &GraphNodeSlice,
+    node_lengths: &HashMap<HashId, i64>,
+) -> bool {
+    last.end < last.block.length() as usize
+        || node_lengths.get(&last.block.node_id) == Some(&last.block.sequence_end)
+        || graph
+            .neighbors_directed(last.block, Outgoing)
+            .any(|neighbor| {
+                neighbor.node_id == last.block.node_id
+                    && neighbor.sequence_start == last.block.sequence_end
+            })
 }
 
 fn forward_edge(graph: &GenGraph, source: GraphNode, target: GraphNode) -> bool {
@@ -800,6 +856,8 @@ fn entry_chromosome(graph: &GenGraph, first: &GraphNodeSlice) -> PyResult<(i64, 
     match chromosomes.as_slice() {
         [] => Ok((0, 0)),
         [chromosome] => Ok(*chromosome),
+        // TODO: edit every allele entering the target instead of refusing. Each allele reaches the
+        // target through its own predecessor, so this needs an anchor and chromosome per route.
         _ => Err(PyValueError::new_err(
             "target boundary is ambiguous across chromosomes",
         )),
@@ -935,7 +993,10 @@ fn describe_locus(locus: &GraphLocus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, ffi::CString};
+    use std::{
+        collections::{HashMap, HashSet},
+        ffi::CString,
+    };
 
     use r#gen::test_helpers::setup_gen_on_disk;
     use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
@@ -1198,6 +1259,18 @@ assert len(repo.get_operations()) == count
     }
 
     #[test]
+    fn test_edit_bases_next_to_an_earlier_deletion() {
+        run_edit_test(
+            r#"
+graph.delete('edits:3-6')
+graph.replace('edits:3-4', 'T')
+graph.replace('edits:2-3', 'C')
+"#,
+            "AACTGGTTTAAACCCGGGTTT",
+        );
+    }
+
+    #[test]
     fn test_edit_repeated_insertion_and_deletion() {
         run_edit_test(
             r#"
@@ -1294,7 +1367,7 @@ assert len(repo.get_operations()) == count
             )],
         };
         assert!(
-            locate_span(&graph, &locus, PositionSide::Preceding).is_err(),
+            locate_span(&graph, &locus, PositionSide::Preceding, &HashMap::new()).is_err(),
             "coverage alone must not establish connectivity"
         );
     }
@@ -1312,7 +1385,7 @@ assert len(repo.get_operations()) == count
             )],
         };
         assert!(
-            locate_span(&graph, &locus, PositionSide::Preceding).is_err(),
+            locate_span(&graph, &locus, PositionSide::Preceding, &HashMap::new()).is_err(),
             "an insertion at a block edge must not pick one flanking route arbitrarily"
         );
     }
@@ -1339,10 +1412,10 @@ assert len(repo.get_operations()) == count
         };
 
         assert!(
-            locate_span(&graph, &locus, PositionSide::Preceding).is_err(),
+            locate_span(&graph, &locus, PositionSide::Preceding, &HashMap::new()).is_err(),
             "the end of a forking block must not pick one of its routes"
         );
-        let span = locate_span(&graph, &locus, PositionSide::Following)
+        let span = locate_span(&graph, &locus, PositionSide::Following, &HashMap::new())
             .expect("should locate the start of the route after the fork");
         assert_eq!(span.start.graph_node, before);
         assert_eq!(span.end.graph_node, after);
@@ -1362,7 +1435,8 @@ assert len(repo.get_operations()) == count
             slices: vec![GraphNodeSlice::full(target, Strand::Forward)],
         };
 
-        let span = locate_span(&graph, &locus, PositionSide::Preceding)
+        let node_lengths = HashMap::from([(target.node_id, 10)]);
+        let span = locate_span(&graph, &locus, PositionSide::Preceding, &node_lengths)
             .expect("should locate a whole-block span");
 
         assert_eq!(span.start.graph_node, target);
@@ -1388,8 +1462,13 @@ assert len(repo.get_operations()) == count
             slices: vec![GraphNodeSlice::full(target, Strand::Forward)],
         };
 
-        let span = locate_span(&graph, &locus, PositionSide::Preceding)
-            .expect("should locate a whole-block span");
+        let span = locate_span(
+            &graph,
+            &locus,
+            PositionSide::Preceding,
+            &HashMap::from([(target.node_id, 10)]),
+        )
+        .expect("should locate a whole-block span");
 
         assert_eq!(span.chromosome_index, 2);
         assert_eq!(span.phased, 1);
@@ -1413,7 +1492,7 @@ assert len(repo.get_operations()) == count
             )],
         };
         assert!(
-            locate_span(&graph, &locus, PositionSide::Preceding).is_err(),
+            locate_span(&graph, &locus, PositionSide::Preceding, &HashMap::new()).is_err(),
             "unsupported graph orientation must fail before mutation"
         );
     }
