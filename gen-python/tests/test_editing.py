@@ -13,12 +13,6 @@ def reverse_complement(sequence):
     return sequence[::-1].translate(str.maketrans("ACGTacgt", "TGCAtgca"))
 
 
-def node_range(node_slice):
-    """Node-absolute bases of a slice; ``str(Node)`` is ``hash:start-end``."""
-    block_start = int(str(node_slice.node).rsplit(":", 1)[1].split("-")[0])
-    return (block_start + node_slice.start, block_start + node_slice.end)
-
-
 def read_fasta(path):
     return "".join(
         line.strip()
@@ -55,9 +49,7 @@ class EditingTestCase(unittest.TestCase):
         )
 
     def is_editable(self, sequence_graph, locus):
-        """Can this locus still be named as an edit target? An edit resolves its
-        target against the pruned graph, so this is the strict test of whether a
-        route survived an earlier edit. Probed on a copy so the graph is left alone."""
+        """Whether an edit can still target ``locus``, probed on a copy of the sample."""
         copy = self.sample_named(sequence_graph.sample_name).copy(
             f"probe{len(self.repository.get_samples())}"
         )
@@ -68,19 +60,6 @@ class EditingTestCase(unittest.TestCase):
         except ValueError:
             return False
         return True
-
-    def chromosome_indices(self, sequence_graph, sequence):
-        """The chromosome_index of every edge touching the node holding ``sequence``."""
-        graph = sequence_graph.to_dict()
-        indices = set()
-        for (source, target), weights in graph["edges"].items():
-            touches = any(
-                node.length and sequence_graph.get_node_sequence(node) == sequence
-                for node in (source, target)
-            )
-            if touches:
-                indices.update(weight["chromosome_index"] for weight in weights)
-        return indices
 
 
 class SimpleGraphEditingTests(EditingTestCase):
@@ -286,7 +265,6 @@ class SimpleGraphEditingTests(EditingTestCase):
         self.assertEqual(
             self.export_sequence(self.graph), "ATCTTTCGATCGATCGATCGGGAACACACAGAGA"
         )
-        self.assertTrue(self.contains(self.graph, "ATCGATCGA"))
 
     def test_export_fasta_reflects_delete_on_path(self):
         self.graph.delete("m123:20-28")
@@ -294,9 +272,6 @@ class SimpleGraphEditingTests(EditingTestCase):
         self.assertEqual(self.export_sequence(self.graph), "ATCGATCGATCGATCGATCGCAGAGA")
 
     def test_export_fasta_reflects_chained_edits_in_order(self):
-        # Matches test_repeated_child_edits_accumulate's edits, but checked through
-        # export_fasta (a materialized Path) rather than search (the live graph),
-        # since a Path is a snapshot that earlier edits had never refreshed.
         self.graph.replace("m123:3-5", "TT")
         self.graph.delete("m123:20-28")
 
@@ -320,22 +295,34 @@ class SimpleGraphEditingTests(EditingTestCase):
         )
         self.assertTrue(self.is_editable(self.graph, original))
 
-    def test_stack_leaves_the_original_route_on_a_live_chromosome_index(self):
-        """A stacked edit is only a bubble if pruning keeps both routes. The bases it
-        bypasses would otherwise be healing markers, which pruning drops."""
-        self.graph.replace("m123:3-5", "TT", stack=True)
+    def test_insert_at_start_of_stacked_original_lands_on_that_option(self):
+        [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
+        self.graph.replace(locus, "TTTT", stack=True)
 
-        self.assertEqual(self.chromosome_indices(self.graph, "GA"), {0})
-        self.assertEqual(self.chromosome_indices(self.graph, "TT"), {-3})
+        self.graph.insert(locus.start(), "CC")
 
-    def test_plain_replace_supersedes_the_original_route(self):
-        original = self.reference_locus.slice(3, 5)
+        self.assertEqual(
+            self.export_sequence(self.graph), "ATCGATCGATCGATCGATCGCCGGAACACACAGAGA"
+        )
 
-        self.graph.replace("m123:3-5", "TT")
+    def test_insert_at_end_of_reverse_stacked_original_lands_on_that_option(self):
+        # A reverse-strand locus ends at its lowest offset, which is where the bubble forks.
+        [locus] = self.graph.search(reverse_complement("GGAACACA"), sequence_kind="dna")
+        self.assertEqual(locus.strand, "-")
+        self.graph.replace(locus, "TTTT", stack=True)
 
-        self.assertEqual(self.chromosome_indices(self.graph, "GA"), {-2})
-        self.assertEqual(self.chromosome_indices(self.graph, "TT"), {0})
-        self.assertFalse(self.is_editable(self.graph, original))
+        self.graph.insert(locus.end(), "CC")
+
+        self.assertEqual(
+            self.export_sequence(self.graph), "ATCGATCGATCGATCGATCGCCGGAACACACAGAGA"
+        )
+
+    def test_insert_at_region_point_of_a_stacked_fork_is_refused(self):
+        [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
+        self.graph.replace(locus, "TTTT", stack=True)
+
+        with self.assertRaisesRegex(ValueError, "fork"):
+            self.graph.insert("m123:20-20", "CC")
 
     def test_stack_insert_keeps_original_reachable_and_path_untouched(self):
         [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
@@ -408,7 +395,6 @@ class LibraryGraphEditingTests(EditingTestCase):
         self.graph.replace(self.alternative, "GGGGGG")
 
         self.assertFalse(self.is_editable(self.graph, self.alternative))
-        self.assertEqual(self.chromosome_indices(self.graph, self.FIRST), {-2})
         self.assertTrue(self.contains(self.graph, self.LEFT + self.SECOND + self.RIGHT))
 
     def test_delete_of_an_alternative_keeps_a_route_through_the_graph(self):

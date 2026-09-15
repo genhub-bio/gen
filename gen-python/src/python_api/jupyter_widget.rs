@@ -51,7 +51,7 @@ use serde::Serialize;
 use crate::python_api::{
     annotation::PyAnnotation,
     block_group::PySequenceGraph,
-    graph_search::{PyGraphLocus, PyGraphPos},
+    graph_search::{PositionSide, PyGraphLocus, PyGraphPos},
     utils::block_group_err_to_pyerr,
 };
 
@@ -131,10 +131,18 @@ fn is_false(b: &bool) -> bool {
 fn locus_target_pos(locus: &GraphLocus, center: bool) -> Option<PyGraphPos> {
     if center {
         let (slice, offset) = locus_midpoint(locus)?;
-        return Some(PyGraphPos::new(slice.block, offset));
+        return Some(PyGraphPos::new(
+            slice.block,
+            offset,
+            PositionSide::Following,
+        ));
     }
     let slice = locus.slices.first()?;
-    Some(PyGraphPos::new(slice.block, slice.start))
+    Some(PyGraphPos::new(
+        slice.block,
+        slice.start,
+        PositionSide::Following,
+    ))
 }
 
 /// Format by which the buffer is to be serialized.

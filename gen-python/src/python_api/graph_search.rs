@@ -13,6 +13,19 @@ use super::{
     locus::GraphLocusExt as _,
 };
 
+/// Which side of a position its locus's bases lie on, in graph order.
+///
+/// At a block edge this picks between the block ending there and the block starting there,
+/// which differ at a fork or join.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PositionSide {
+    /// The bases before the offset; at a block edge, the block ending there.
+    #[default]
+    Preceding,
+    /// The bases after the offset; at a block edge, the block starting there.
+    Following,
+}
+
 /// A position in the graph: a specific node plus a byte offset within that
 /// node's local text (`0..node.length()`).
 ///
@@ -22,12 +35,14 @@ use super::{
 #[derive(Clone)]
 pub struct PyGraphPos {
     pub inner: GraphPos,
+    pub side: PositionSide,
 }
 
 impl PyGraphPos {
-    pub fn new(block: gen_graph::GraphNode, offset: usize) -> Self {
+    pub fn new(block: gen_graph::GraphNode, offset: usize, side: PositionSide) -> Self {
         Self {
             inner: GraphPos { block, offset },
+            side,
         }
     }
 }
@@ -108,14 +123,12 @@ impl PyGraphLocus {
             .slices
             .first()
             .ok_or_else(|| PyValueError::new_err("Locus has no position"))?;
-        Ok(PyGraphPos::new(
-            slice.block,
-            if slice.strand == Strand::Reverse {
-                slice.end
-            } else {
-                slice.start
-            },
-        ))
+        // A reverse-strand locus reads toward lower offsets, so its bases lie before its start.
+        Ok(if slice.strand == Strand::Reverse {
+            PyGraphPos::new(slice.block, slice.end, PositionSide::Preceding)
+        } else {
+            PyGraphPos::new(slice.block, slice.start, PositionSide::Following)
+        })
     }
 
     /// Position one past the last matched byte (exclusive end of the locus).
@@ -125,14 +138,11 @@ impl PyGraphLocus {
             .slices
             .last()
             .ok_or_else(|| PyValueError::new_err("Locus has no position"))?;
-        Ok(PyGraphPos::new(
-            slice.block,
-            if slice.strand == Strand::Reverse {
-                slice.start
-            } else {
-                slice.end
-            },
-        ))
+        Ok(if slice.strand == Strand::Reverse {
+            PyGraphPos::new(slice.block, slice.start, PositionSide::Following)
+        } else {
+            PyGraphPos::new(slice.block, slice.end, PositionSide::Preceding)
+        })
     }
 
     /// Ordered sequence of block slices that span this locus.

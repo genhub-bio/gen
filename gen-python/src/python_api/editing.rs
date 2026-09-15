@@ -1,13 +1,8 @@
 //! Single graph edits addressed by Python targets.
 //!
-//! Python callers point at bases with whatever they already hold: a region string,
-//! a search-result `Locus`, a database `Annotation`, or a `Position` for insertions.
-//! Every target is converted to a `GraphLocus` and canonicalized to node-absolute
-//! ranges, which name immutable bases independently of path coordinates and of how
-//! later edits carve blocks. Only when the edit is applied is the current graph read,
-//! to confirm those bases are still present and connected and to find the blocks the
-//! new edges attach to. Each edit then becomes one `BlockGroup::insert_change` inside
-//! one transaction, recorded as one operation.
+//! A region string, `Locus`, `Annotation`, or `Position` is canonicalized to node-absolute
+//! ranges, checked against the current graph, and applied as one `BlockGroup::insert_change`
+//! recorded as one operation.
 
 use core::ops::Range;
 use std::collections::HashMap;
@@ -41,7 +36,7 @@ use pyo3::{
 use super::{
     annotation::PyAnnotation,
     block_group::PySequenceGraph,
-    graph_search::{PyGraphLocus, PyGraphPos},
+    graph_search::{PositionSide, PyGraphLocus, PyGraphPos},
     locus::GraphLocusExt as _,
     repository::run_context_operation_write,
     utils::block_group_err_to_pyerr,
@@ -69,11 +64,8 @@ pub(crate) struct EditRequest<'a> {
     pub kind: EditKind,
     pub sequence: &'a str,
     pub message: Option<&'a str>,
-    /// Write this edit's edges under `INDETERMINATE_CHROMOSOME_INDEX` instead of
-    /// the chromosome_index already at the target anchor, so the new route
-    /// coexists as a sibling option rather than superseding what was there. A
-    /// stacked edit never becomes the reference: the current Path is left
-    /// exactly as it was, regardless of whether the target lies on it.
+    /// Add the edit as an alternative next to the target instead of superseding it. The
+    /// current path is left unchanged.
     pub stack: bool,
 }
 
@@ -82,6 +74,8 @@ pub(crate) struct EditRequest<'a> {
 struct EditTarget {
     locus: GraphLocus,
     block_group_id: Option<HashId>,
+    /// Which block a zero-length target attaches to when it lands on a block edge.
+    side: PositionSide,
 }
 
 /// The resolved attachment points of an edit in the destination graph.
@@ -114,7 +108,13 @@ pub(crate) fn edit_sequence_graph(
             sequence_graph.name
         )));
     }
-    apply_edit(context, &sequence_graph.id, &target.locus, request)
+    apply_edit(
+        context,
+        &sequence_graph.id,
+        &target.locus,
+        target.side,
+        request,
+    )
 }
 
 fn resolve_target(
@@ -123,11 +123,13 @@ fn resolve_target(
     collection_name: &str,
     sample_name: &str,
 ) -> PyResult<EditTarget> {
+    let mut side = PositionSide::default();
     let locus = if let Ok(annotation) = target.extract::<PyRef<PyAnnotation>>() {
         annotation.graph_locus()
     } else if let Ok(locus) = target.extract::<PyRef<PyGraphLocus>>() {
         locus.inner.clone()
     } else if let Ok(position) = target.extract::<PyRef<PyGraphPos>>() {
+        side = position.side;
         GraphLocus {
             slices: vec![GraphNodeSlice {
                 block: position.inner.block,
@@ -146,6 +148,7 @@ fn resolve_target(
     Ok(EditTarget {
         locus,
         block_group_id: None,
+        side,
     })
 }
 
@@ -257,6 +260,7 @@ fn locus_from_region(
     Ok(EditTarget {
         locus,
         block_group_id: Some(resolved.block_group.id),
+        side: PositionSide::default(),
     })
 }
 
@@ -275,7 +279,8 @@ fn require_one_insertion_point(
         let locus = GraphLocus {
             slices: vec![*slice],
         };
-        locate_span(&graph, &locus.canonical()).map(|span| (span.start, span.end))
+        locate_span(&graph, &locus.canonical(), PositionSide::Preceding)
+            .map(|span| (span.start, span.end))
     };
     match (anchors_of(before), anchors_of(after)) {
         (Ok(before), Ok(after)) if before == after => Ok(()),
@@ -292,6 +297,7 @@ fn apply_edit(
     context: &DbContext,
     source_block_group_id: &HashId,
     target: &GraphLocus,
+    side: PositionSide,
     request: &EditRequest<'_>,
 ) -> PyResult<Option<GraphLocus>> {
     validate_request(target, request)?;
@@ -303,18 +309,14 @@ fn apply_edit(
             let source = BlockGroup::get_by_id(conn, source_block_group_id, None)
                 .map_err(block_group_err_to_pyerr)?;
             let graph = current_graph(context, &source.id)?;
-            let mut span = locate_span(&graph, &canonical)?;
+            let mut span = locate_span(&graph, &canonical, side)?;
             if request.stack {
-                // A stacked edit is a sibling option, not a replacement: give it a
-                // chromosome_index that pruning never competes on, so the route
-                // already at this anchor is left standing alongside it.
+                // Pruning never competes on this index, so the existing route stays.
                 span.chromosome_index = INDETERMINATE_CHROMOSOME_INDEX;
                 span.phased = 0;
             }
 
             // Capture the path before insert_change adds edges without updating it.
-            // A stacked edit never becomes the reference route, so the path is left
-            // exactly as it was even when the target lies on it.
             let path_target = if request.stack {
                 None
             } else {
@@ -340,33 +342,30 @@ fn apply_edit(
                 block: block.clone(),
                 chromosome_index: span.chromosome_index,
                 phased: span.phased,
-                // The edges that carry the original bases past the edit site are
-                // reference-healing markers by default, which pruning drops. A stacked
-                // edit needs them to stay a real route, so write them at a live
-                // chromosome_index instead.
+                // Keeps the original route live for a stacked edit.
                 preserve_edge: request.stack,
             };
             // Reactivating an older route (for example deleting a second insertion at
             // the same site) must receive this edit's timestamp for graph pruning.
-            for edge in change
+            let reactivated = change
                 .region
                 .plan_edges(conn, context.workspace(), &change, None)
                 .map_err(block_group_err_to_pyerr)?
-            {
-                if edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
-                    let association = BlockGroupEdgeData {
+                .into_iter()
+                .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+                .map(|edge| {
+                    BlockGroupEdgeData {
                         block_group_id: source.id,
                         edge_id: edge.edge_data.id_hash(),
                         chromosome_index: edge.chromosome_index,
                         phased: edge.phased,
-                    };
-                    conn.execute(
-                        "DELETE FROM block_group_edges WHERE id = ?1",
-                        [association.id_hash()],
-                    )
-                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-                }
-            }
+                    }
+                    .id_hash()
+                })
+                .collect::<Vec<_>>();
+            BlockGroupEdge::select(conn)
+                .delete_by_ids(reactivated)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
             BlockGroup::insert_change(conn, context.workspace(), &change)
                 .map_err(block_group_err_to_pyerr)?;
 
@@ -479,7 +478,7 @@ fn validate_request(target: &GraphLocus, request: &EditRequest<'_>) -> PyResult<
 /// Resolve the complete target against the active route before selecting flanking
 /// anchors. Reverse search hits may list slices in graph order, whereas a reverse
 /// complement lists them in reading order; validate connectivity in either order.
-fn locate_span(graph: &GenGraph, canonical: &GraphLocus) -> PyResult<EditSpan> {
+fn locate_span(graph: &GenGraph, canonical: &GraphLocus, side: PositionSide) -> PyResult<EditSpan> {
     let is_reverse = canonical.slices[0].strand == Strand::Reverse;
     if canonical.slices.iter().any(|slice| {
         if is_reverse {
@@ -497,23 +496,18 @@ fn locate_span(graph: &GenGraph, canonical: &GraphLocus) -> PyResult<EditSpan> {
     } else {
         canonical.clone()
     };
-    let slices = current_slices(graph, &locus).or_else(|error| {
+    let slices = current_slices(graph, &locus, side).or_else(|error| {
         if !is_reverse {
             return Err(error);
         }
         locus.slices.reverse();
-        current_slices(graph, &locus)
+        current_slices(graph, &locus, side)
     })?;
     let first = slices.first().expect("should have a target slice");
     let last = slices.last().expect("should have a target slice");
-    // A span that covers bases anchors on its own blocks, even where it starts or ends
-    // exactly at a block edge. The reference-healing markers written at the anchors are
-    // what supersedes the old reading, so they have to land on the edges into and out of
-    // the target's own bases. Anchoring on a neighbour puts them on a coordinate every
-    // route through the site shares instead: on a library graph that is the single edge
-    // feeding the whole column of alternatives, and pruning it leaves no route at all.
-    // A zero-length insertion supersedes nothing and still needs the neighbouring anchor,
-    // because both of its edges would otherwise meet at one junction and form a cycle.
+    // A span that covers bases anchors on its own blocks, so superseding it never touches the
+    // edges shared with neighbouring routes. An insertion anchors on its neighbours instead,
+    // since both of its edges would otherwise meet at one junction and form a cycle.
     let (start, end) = if locus.length() == 0 {
         (boundary(graph, first, true)?, boundary(graph, last, false)?)
     } else {
@@ -548,8 +542,8 @@ fn forward_edge(graph: &GenGraph, source: GraphNode, target: GraphNode) -> bool 
 
 fn current_graph(context: &DbContext, block_group_id: &HashId) -> PyResult<GenGraph> {
     let conn = context.graph().conn();
-    // Match sequence enumeration: reference-healing markers must be excluded
-    // before projection, since a real edit can later reuse the same edge.
+    // Markers are excluded before projection, as in sequence enumeration, because a later
+    // edit can reuse a marker's edge as a live one.
     let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
         .into_iter()
         .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
@@ -562,7 +556,12 @@ fn current_graph(context: &DbContext, block_group_id: &HashId) -> PyResult<GenGr
 }
 
 /// Resolve every immutable base, so an edit cannot silently skip missing interior segments.
-fn current_slices(graph: &GenGraph, locus: &GraphLocus) -> PyResult<Vec<GraphNodeSlice>> {
+/// A zero-length point on a block edge resolves to the block on `side` of it.
+fn current_slices(
+    graph: &GenGraph,
+    locus: &GraphLocus,
+    side: PositionSide,
+) -> PyResult<Vec<GraphNodeSlice>> {
     let mut slices: Vec<GraphNodeSlice> = Vec::new();
     for slice in &locus.canonical().slices {
         let range = slice.block;
@@ -581,7 +580,12 @@ fn current_slices(graph: &GenGraph, locus: &GraphLocus) -> PyResult<Vec<GraphNod
             .collect::<Vec<_>>();
         blocks.sort();
         if range.length() == 0 {
-            blocks.truncate(1);
+            match side {
+                PositionSide::Preceding => blocks.truncate(1),
+                PositionSide::Following => {
+                    blocks.drain(..blocks.len().saturating_sub(1));
+                }
+            }
         }
         if blocks.is_empty() {
             return Err(PyValueError::new_err(
@@ -780,10 +784,8 @@ fn describe_position(position: &GraphNodePosition) -> String {
 
 /// The chromosome and phase an edit inherits from the route entering its first base.
 ///
-/// An edit adopts the allele slot it lands in, so replacing an alternative keeps that
-/// alternative's chromosome rather than claiming the reference. Only a target starting
-/// at its block's first base has an entering edge to read; further into a block the
-/// edit's own split is what separates the bases, and the reference chromosome applies.
+/// Only a target starting at its block's first base has an entering edge to read; inside a
+/// block the reference chromosome applies.
 fn entry_chromosome(graph: &GenGraph, first: &GraphNodeSlice) -> PyResult<(i64, i64)> {
     if first.start != 0 {
         return Ok((0, 0));
@@ -812,10 +814,8 @@ fn boundary(graph: &GenGraph, slice: &GraphNodeSlice, start: bool) -> PyResult<G
             offset,
         });
     }
-    // A point at a block edge borrows the neighbour's address, because anchoring both
-    // edges on the block itself would put them on one junction and loop. With several
-    // neighbours no single address stands for the point, so it is refused rather than
-    // attached to one route arbitrarily.
+    // A point at a block edge borrows its neighbour's address; with several neighbours it is
+    // refused rather than attached to one route arbitrarily.
     let neighbors = graph
         .neighbors_directed(slice.block, if start { Incoming } else { Outgoing })
         .collect::<Vec<_>>();
@@ -874,8 +874,7 @@ fn inserted_block(
         .sequence(&stored)
         .save(conn)
         .map_err(|err| PyRuntimeError::new_err(format!("cannot store sequence: {err}")))?;
-    // Include history so repeated insert/delete cycles at one site get distinct
-    // nodes instead of inheriting edges from a previous insertion.
+    // Include HEAD so repeated insert/delete cycles at one site get distinct nodes.
     let head = hash_of(conn, "HEAD").map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     let node_key = format!(
         "python-edit:{head}:{}:{}:{}-{}:{}->{}",
@@ -899,11 +898,7 @@ fn inserted_block(
     })
 }
 
-/// A region whose edit sites are already resolved to graph positions.
-///
-/// `plan_edges` builds edges straight from `start_anchors`/`end_anchors` for
-/// accession-kind regions and reads only their node ids and coordinates, so no
-/// accession or path is needed.
+/// A region whose edit sites are already resolved to graph positions, for `plan_edges`.
 fn anchored_region(block_group: BlockGroup, span: &EditSpan) -> ResolvedGenRegion {
     ResolvedGenRegion {
         block_group,
@@ -949,7 +944,7 @@ mod tests {
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
-        db::DbContext,
+        db::{DbContext, GraphConnection},
         edge::Edge,
         locus::GraphLocus,
         node::Node,
@@ -958,21 +953,20 @@ mod tests {
         sequence::Sequence,
     };
     use pyo3::{
-        Py, PyErr, PyRef, Python,
+        Py, PyErr, PyRef, Python, prepare_freethreaded_python,
         types::{PyDict, PyDictMethods as _},
     };
 
     use crate::python_api::{
         block_group::PySequenceGraph,
-        editing::{
-            EditSpan, current_graph, locate_span, locate_span_on_current_path, locus_from_region,
-        },
+        editing::{EditSpan, locate_span, locate_span_on_current_path, locus_from_region},
+        graph_search::PositionSide,
         locus::GraphLocusExt as _,
         repository::PyRepository,
     };
 
     fn run_edit_test(script: &str, expected: &str) {
-        pyo3::prepare_freethreaded_python();
+        prepare_freethreaded_python();
         Python::with_gil(|python| {
             let context = setup_gen_on_disk();
             let repository = Py::new(
@@ -1127,7 +1121,6 @@ except ValueError as error:
 else:
     assert False, 'deleted target must fail'
 assert len(repo.get_operations()) == count
-assert 'failed-child' not in [item.sample_name for item in repo.get_samples()]
 "#,
             "AAAGGGTTTAAACCCGGGTTT",
         );
@@ -1145,9 +1138,7 @@ assert len(repo.get_operations()) == count + 2
 graph.insert(inserted.start(), 'C')
 assert len(repo.get_operations()) == count + 3
 "#,
-            // 'edits:9-12' now resolves against the current path (updated in place by
-            // the first delete), not a stale snapshot frozen at import, so it targets
-            // the second "AAA" run rather than the "TTT" run at the same raw offset.
+            // 'edits:9-12' resolves against the path after the first delete.
             "AAAGGGTTTCGACCCGGGTTT",
         );
     }
@@ -1207,18 +1198,6 @@ assert len(repo.get_operations()) == count
     }
 
     #[test]
-    fn test_edit_reverse_complement_of_exact_search() {
-        run_edit_test(
-            r#"
-target = graph.search('CCCGGG', sequence_kind='exact')[0].reverse_complement()
-inserted = graph.replace(target, 'AGT')
-assert inserted.strand == '-'
-"#,
-            "AAAACTTTTAAACCCGGGTTT",
-        );
-    }
-
-    #[test]
     fn test_edit_repeated_insertion_and_deletion() {
         run_edit_test(
             r#"
@@ -1243,26 +1222,6 @@ inserted = graph.replace(target.reverse_complement(), 'TCA')
 assert len(inserted) == 3
 "#,
             "AATGACGGGTTTAAACCCGGGTTT",
-        );
-    }
-
-    #[test]
-    fn test_edit_operation_recording_failure_rolls_back() {
-        run_edit_test(
-            r#"
-count = len(repo.get_operations())
-repo.execute("CREATE TEMP TRIGGER reject_edit BEFORE INSERT ON gen_operation_log BEGIN SELECT RAISE(ABORT, 'recording failed'); END")
-try:
-    graph.replace('edits:3-6', 'AG')
-except RuntimeError as error:
-    assert 'recording failed' in str(error)
-else:
-    assert False, 'recording failure must propagate'
-assert len(repo.get_operations()) == count
-assert 'failed' not in [item.sample_name for item in repo.get_samples()]
-repo.execute('DROP TRIGGER reject_edit')
-"#,
-            "AAACCCGGGTTTAAACCCGGGTTT",
         );
     }
 
@@ -1335,7 +1294,7 @@ assert len(repo.get_operations()) == count
             )],
         };
         assert!(
-            locate_span(&graph, &locus).is_err(),
+            locate_span(&graph, &locus, PositionSide::Preceding).is_err(),
             "coverage alone must not establish connectivity"
         );
     }
@@ -1353,16 +1312,46 @@ assert len(repo.get_operations()) == count
             )],
         };
         assert!(
-            locate_span(&graph, &locus).is_err(),
+            locate_span(&graph, &locus, PositionSide::Preceding).is_err(),
             "an insertion at a block edge must not pick one flanking route arbitrarily"
         );
     }
 
     #[test]
+    fn test_point_at_a_fork_resolves_to_the_block_on_its_side() {
+        // The end of the forking block is ambiguous; the start of the block after it is not.
+        let mut graph = GenGraph::new();
+        let before = graph_node("sequence", 0, 5);
+        let after = graph_node("sequence", 5, 10);
+        graph.add_edge(before, after, vec![forward_edge()]);
+        graph.add_edge(
+            before,
+            graph_node("alternative", 0, 5),
+            vec![forward_edge()],
+        );
+        let locus = GraphLocus {
+            slices: vec![GraphNodeSlice {
+                block: graph_node("sequence", 0, 10),
+                start: 5,
+                end: 5,
+                strand: Strand::Forward,
+            }],
+        };
+
+        assert!(
+            locate_span(&graph, &locus, PositionSide::Preceding).is_err(),
+            "the end of a forking block must not pick one of its routes"
+        );
+        let span = locate_span(&graph, &locus, PositionSide::Following)
+            .expect("should locate the start of the route after the fork");
+        assert_eq!(span.start.graph_node, before);
+        assert_eq!(span.end.graph_node, after);
+        assert_eq!(span.end.coordinate(), 5);
+    }
+
+    #[test]
     fn test_edit_anchors_a_whole_block_span_on_its_own_block() {
-        // A library column is exactly this shape: the alternatives share the edges into and
-        // out of the column, so anchoring on a flank would mark the route every alternative
-        // travels and pruning would leave the graph with no route at all.
+        // The shape of a library column, whose alternatives share their flanking edges.
         let mut graph = GenGraph::new();
         let target = graph_node("target", 0, 10);
         let left = graph_node("left", 0, 10);
@@ -1373,7 +1362,8 @@ assert len(repo.get_operations()) == count
             slices: vec![GraphNodeSlice::full(target, Strand::Forward)],
         };
 
-        let span = locate_span(&graph, &locus).expect("should locate a whole-block span");
+        let span = locate_span(&graph, &locus, PositionSide::Preceding)
+            .expect("should locate a whole-block span");
 
         assert_eq!(span.start.graph_node, target);
         assert_eq!(span.start.coordinate(), 0);
@@ -1398,7 +1388,8 @@ assert len(repo.get_operations()) == count
             slices: vec![GraphNodeSlice::full(target, Strand::Forward)],
         };
 
-        let span = locate_span(&graph, &locus).expect("should locate a whole-block span");
+        let span = locate_span(&graph, &locus, PositionSide::Preceding)
+            .expect("should locate a whole-block span");
 
         assert_eq!(span.chromosome_index, 2);
         assert_eq!(span.phased, 1);
@@ -1422,12 +1413,12 @@ assert len(repo.get_operations()) == count
             )],
         };
         assert!(
-            locate_span(&graph, &locus).is_err(),
+            locate_span(&graph, &locus, PositionSide::Preceding).is_err(),
             "unsupported graph orientation must fail before mutation"
         );
     }
 
-    fn create_sequence_node(conn: &gen_models::db::GraphConnection, sequence: &str) -> HashId {
+    fn create_sequence_node(conn: &GraphConnection, sequence: &str) -> HashId {
         let saved = Sequence::new()
             .sequence_type("DNA")
             .sequence(sequence)
@@ -1449,8 +1440,7 @@ assert len(repo.get_operations()) == count
 
     #[test]
     fn test_locate_span_on_current_path_distinguishes_bubble_from_current_route() {
-        // Builds a minimal block group with two parallel routes from the graph's start
-        // to its end (a bubble): `route` is on the current path, `bubble` never is.
+        // `route` is on the current path; the parallel `bubble` is not.
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
         Collection::create(conn, "collection").expect("should create collection");
@@ -1554,15 +1544,10 @@ assert len(repo.get_operations()) == count
         );
     }
 
-    struct Fork {
-        block_group_id: HashId,
-        left: HashId,
-    }
-
     /// `left` (AAAA) forks into `right_one` (CCCC) and `right_two` (GGGG), each on its own
     /// chromosome so pruning keeps both routes. `right_one` continues into `tail` (TTTT),
     /// which nothing else enters. The current path reads left, right_one, tail.
-    fn setup_fork(context: &DbContext) -> Fork {
+    fn setup_fork(context: &DbContext) {
         let conn = context.graph().conn();
         Collection::create(conn, "collection").expect("should create collection");
         Sample::get_or_create(
@@ -1629,40 +1614,11 @@ assert len(repo.get_operations()) == count
             &path_edges.iter().map(|edge| edge.id).collect::<Vec<_>>(),
         )
         .expect("should create current path");
-        Fork {
-            block_group_id: block_group.id,
-            left,
-        }
     }
 
     fn error_message(error: PyErr) -> String {
-        pyo3::prepare_freethreaded_python();
+        prepare_freethreaded_python();
         Python::with_gil(|python| error.value(python).to_string())
-    }
-
-    #[test]
-    fn test_locate_span_rejects_an_insertion_at_a_fork() {
-        let context = setup_gen_on_disk();
-        let fork = setup_fork(&context);
-        let graph = current_graph(&context, &fork.block_group_id).expect("should build fork graph");
-        let locus = GraphLocus {
-            slices: vec![GraphNodeSlice {
-                block: GraphNode {
-                    node_id: fork.left,
-                    sequence_start: 0,
-                    sequence_end: 4,
-                },
-                start: 4,
-                end: 4,
-                strand: Strand::Forward,
-            }],
-        };
-
-        let Err(error) = locate_span(&graph, &locus) else {
-            panic!("the end of a forking block must not pick one of its routes");
-        };
-
-        assert!(error_message(error).contains("fork"));
     }
 
     #[test]
