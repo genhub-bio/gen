@@ -4,6 +4,7 @@ use gen_core::{
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
 use gen_graph::{GraphNode, GraphNodePosition, GraphNodeSlice};
+use indexmap::IndexSet;
 use intervaltree::IntervalTree;
 use thiserror::Error;
 
@@ -16,6 +17,7 @@ use crate::{
     edge::EdgeData,
     errors::PathError,
     locus::GraphLocus,
+    node::Node,
     path::Path,
 };
 
@@ -839,8 +841,43 @@ impl ResolvedGenRegion {
             }
         }
 
-        Ok(new_edges)
+        drop_markers_at_node_ends(conn, new_edges)
     }
+}
+
+/// Removes edit-site markers at a node's first or last base, where there is nothing to heal.
+///
+/// Such a marker would add a zero-width block at that node end and route every edge through it,
+/// so pruning the marker would disconnect a later edit anchored there. Stacked (live) markers stay.
+fn drop_markers_at_node_ends(
+    conn: &GraphConnection,
+    new_edges: Vec<AugmentedEdgeData>,
+) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
+    let is_marker = |edge: &AugmentedEdgeData| {
+        edge.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+            && edge.edge_data.source_node_id == edge.edge_data.target_node_id
+            && edge.edge_data.source_coordinate == edge.edge_data.target_coordinate
+    };
+    let node_ids = new_edges
+        .iter()
+        .filter(|edge| is_marker(edge))
+        .map(|edge| edge.edge_data.source_node_id)
+        .collect::<IndexSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let node_lengths = Node::query_nodes_length(conn, &node_ids)?;
+    Ok(new_edges
+        .into_iter()
+        .filter(|edge| {
+            !is_marker(edge)
+                || !node_lengths
+                    .get(&edge.edge_data.source_node_id)
+                    .is_some_and(|length| {
+                        edge.edge_data.source_coordinate == 0
+                            || edge.edge_data.source_coordinate == *length
+                    })
+        })
+        .collect())
 }
 
 impl IntervalTreeSource for ResolvedGenRegion {
@@ -2041,6 +2078,174 @@ mod tests {
                     (HashId::convert_str("node-ttt"), 1),
                     (HashId::convert_str("node-ttt"), 3)
                 ])
+            );
+        }
+    }
+
+    mod plan_edges {
+        use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, PathBlock, Strand};
+        use gen_graph::{GraphNode, GraphNodePosition};
+        use petgraph::algo::has_path_connecting;
+
+        use crate::{
+            block_group::{BlockGroup, BlockGroupChange},
+            node::Node,
+            region::{ResolvedGenRegion, ResolvedRegionKind},
+            sequence::Sequence,
+            test_helpers::{get_connection, setup_block_group, test_workspace},
+        };
+
+        #[test]
+        fn test_insertion_chained_onto_an_insertion_keeps_the_pruned_graph_connected() {
+            let conn = get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(&conn);
+            let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None).unwrap();
+            let first_block = path
+                .intervaltree(&conn)
+                .unwrap()
+                .query_point(5)
+                .next()
+                .expect("should find the first path block")
+                .value;
+            let reference = GraphNode {
+                node_id: first_block.node_id,
+                sequence_start: 0,
+                sequence_end: 10,
+            };
+            let split = GraphNodePosition {
+                graph_node: reference,
+                offset: 5,
+            };
+
+            let saved = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("TTTT")
+                .save(&conn)
+                .expect("should save inserted sequence");
+            let node_id = Node::create(
+                &conn,
+                &saved.hash,
+                &HashId::convert_str(&format!("insert.{}", saved.hash)),
+            )
+            .expect("should create inserted node");
+            // A non-stacked insertion splits the original node. This edit does not want to
+            // preserve the old edge, so pruning will retire the old route.
+            let first_change = BlockGroupChange {
+                region: ResolvedGenRegion {
+                    block_group: block_group.clone(),
+                    path: None,
+                    accession: None,
+                    annotation: None,
+                    kind: ResolvedRegionKind::Accession,
+                    anchor_start: 0,
+                    anchor_end: 0,
+                    feature_length: 0,
+                    start: split.coordinate(),
+                    end: split.coordinate(),
+                    start_anchors: Some(vec![split]),
+                    end_anchors: Some(vec![split]),
+                    remove_ambiguous_positions: false,
+                },
+                path_accession: None,
+                block: PathBlock {
+                    node_id,
+                    block_sequence: "TTTT".to_string(),
+                    sequence_start: 0,
+                    sequence_end: saved.length,
+                    path_start: 0,
+                    path_end: 0,
+                    strand: Strand::Forward,
+                },
+                chromosome_index: 0,
+                phased: 0,
+                preserve_edge: false,
+            };
+            BlockGroup::insert_change(&conn, test_workspace(), &first_change)
+                .expect("should insert change");
+            let first = GraphNode {
+                node_id,
+                sequence_start: 0,
+                sequence_end: saved.length,
+            };
+            // The next non-stacked insertion is anchored at the first insertion's node boundary.
+            let second_start = GraphNodePosition {
+                graph_node: first,
+                offset: first.length(),
+            };
+            let second_end = GraphNodePosition {
+                graph_node: GraphNode {
+                    sequence_start: 5,
+                    ..reference
+                },
+                offset: 0,
+            };
+            let saved = Sequence::new()
+                .sequence_type("DNA")
+                .sequence("CC")
+                .save(&conn)
+                .expect("should save inserted sequence");
+            let node_id = Node::create(
+                &conn,
+                &saved.hash,
+                &HashId::convert_str(&format!("insert.{}", saved.hash)),
+            )
+            .expect("should create inserted node");
+            // This edit also does not want to preserve the old edge; the new route must replace
+            // the route through the boundary being edited.
+            let second_change = BlockGroupChange {
+                region: ResolvedGenRegion {
+                    block_group,
+                    path: None,
+                    accession: None,
+                    annotation: None,
+                    kind: ResolvedRegionKind::Accession,
+                    anchor_start: 0,
+                    anchor_end: 0,
+                    feature_length: 0,
+                    start: second_start.coordinate(),
+                    end: second_end.coordinate(),
+                    start_anchors: Some(vec![second_start]),
+                    end_anchors: Some(vec![second_end]),
+                    remove_ambiguous_positions: false,
+                },
+                path_accession: None,
+                block: PathBlock {
+                    node_id,
+                    block_sequence: "CC".to_string(),
+                    sequence_start: 0,
+                    sequence_end: saved.length,
+                    path_start: 0,
+                    path_end: 0,
+                    strand: Strand::Forward,
+                },
+                chromosome_index: 0,
+                phased: 0,
+                preserve_edge: false,
+            };
+            BlockGroup::insert_change(&conn, test_workspace(), &second_change)
+                .expect("should insert change");
+            let second = GraphNode {
+                node_id,
+                sequence_start: 0,
+                sequence_end: saved.length,
+            };
+
+            let mut graph =
+                BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+            BlockGroup::prune_graph(&mut graph);
+            let start = graph
+                .nodes()
+                .find(|node| node.node_id == PATH_START_NODE_ID)
+                .expect("should find the path start");
+            let reaches = |target: GraphNode| {
+                graph.contains_node(target) && has_path_connecting(&graph, start, target, None)
+            };
+            assert!(reaches(second), "should reach the second insertion");
+            assert!(
+                graph
+                    .nodes()
+                    .any(|node| node.node_id == PATH_END_NODE_ID && reaches(node)),
+                "should reach the path end"
             );
         }
     }
