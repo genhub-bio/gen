@@ -15,8 +15,8 @@ use r#gen::{
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, locus_midpoint,
-            reapply_overlays,
+            GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
+            draw_annotation_labels, locus_midpoint, reapply_overlays,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
@@ -314,9 +314,7 @@ impl Page {
 
 impl GraphPage {
     fn new(name: String, db_path: PathBuf, workspace: Workspace, graph: GenGraph) -> Self {
-        let mut controller = GraphController::new(graph, GenGraphNodeSizer);
-        controller.set_detail_level(VisualDetail::Truncated);
-        controller.hide_cursor();
+        let controller = create_gen_graph_controller(graph);
         Self {
             name,
             db_path,
