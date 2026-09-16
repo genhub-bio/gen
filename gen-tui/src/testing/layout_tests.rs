@@ -1728,6 +1728,36 @@ fn backward_edge_minimal_triangle() {
 }
 
 #[test]
+fn backward_edge_tall_nodes_marks_vertical_legs() {
+    let _ = env_logger::try_init();
+    // Tall nodes make the bypass's endpoint legs long enough to carry directional markers,
+    // exercising the up/down arrows that a one-row loop cannot show.
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<_> = (0..3).map(|_| domain_graph.add_node(())).collect();
+    domain_graph.add_edge(nodes[0], nodes[1], ());
+    domain_graph.add_edge(nodes[1], nodes[2], ());
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        132,
+        50,
+        FixedNodeSizer {
+            width: 5,
+            height: 31,
+        },
+        TestRenderers::debug(),
+        &[(nodes[2], nodes[0])],
+        GapSizes::default(),
+    );
+
+    assert!(
+        snapshot.contains('▲') && snapshot.contains('▼'),
+        "tall backward-edge legs should carry vertical direction markers"
+    );
+    insta::assert_snapshot!("backward_edge_tall_nodes_marks_vertical_legs", snapshot);
+}
+
+#[test]
 fn backward_edge_six_node_cycle() {
     let _ = env_logger::try_init();
     // 6-node cycle mirroring the cycle_no_path.gfa fixture from the view-cycles branch.

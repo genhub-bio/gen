@@ -1,6 +1,9 @@
 // This module implements graph rendering using the ViewportGraph system.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use petgraph::{
     graph::NodeIndex,
@@ -20,14 +23,8 @@ use crate::{
     viewport_state::WorldBuffer,
 };
 
-/// Number of world-x units between direction markers on a backward-edge bypass's main span.
+/// Target distance in world cells per direction marker along a backward edge's full route.
 const ARROW_GAPS: i64 = 16;
-
-/// A main-span segment shorter than this (in world-x cells) gets no arrows at all, rather
-/// than one landing right against a pin - short segments are common right next to a pin (see
-/// `draw_arrows`), where there isn't enough run for a marker to read as "on the line" instead
-/// of "touching the box".
-const MIN_ARROW_SEGMENT_LENGTH: i64 = 3;
 
 /// Line style for path highlighting
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,7 +377,7 @@ pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
         }
     }
 
-    // Mark the horizontal bypass of any rewired backward edge with direction arrows.
+    // Mark each backward edge along its full route, including the legs to its endpoints.
     for &(source, target) in &viewport_graph.backward_edges {
         draw_arrows(buffer, viewport_graph, source, target, ARROW_GAPS);
     }
@@ -496,14 +493,66 @@ fn draw_edge_with_style(
     }
 }
 
-/// Place direction markers on the `left_pin -> right_pin` main-span segment(s) of a backward
-/// edge rewired onto pin nodes by `crawl::build_window_graph`. The loop's other two legs
-/// (`source -> right_pin`, `left_pin -> target`) are short excursions connecting a pin to its
-/// real endpoint, not the backward direction itself, so they are never marked.
-///
-/// The main span always runs toward decreasing x (`◀`): a pin always floats to the extreme
-/// rank of its own window, so `right_pin` sits to the right of `left_pin` by construction,
-/// regardless of which part of the loop the current viewport happens to show.
+/// Trace a backward edge's routed segments in domain source-to-target order.
+/// Bundles distinguish the route from other edges sharing its junctions.
+fn backward_edge_route(
+    viewport_graph: &ViewportGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+) -> Option<Vec<WorldPos>> {
+    let &source_pos = viewport_graph.node_positions.get(&source)?;
+    let &target_pos = viewport_graph.node_positions.get(&target)?;
+    let follows_edge = |start, end| {
+        viewport_graph
+            .graph
+            .edge_weight(start, end)
+            .is_some_and(|bundle| bundle.contains(&(source, target)))
+    };
+
+    // A self-loop has the same domain endpoint twice, so its undirected bundle alone
+    // cannot distinguish the two directions. The layered router attaches outgoing
+    // legs to the node's right port and incoming legs to its left port.
+    let first_pos = if source == target {
+        viewport_graph
+            .neighbors(source_pos)
+            .find(|&neighbor| neighbor.x > source_pos.x && follows_edge(source_pos, neighbor))?
+    } else {
+        source_pos
+    };
+    let mut previous = HashMap::from([(first_pos, source_pos)]);
+    let mut pending = VecDeque::from([first_pos]);
+    while let Some(position) = pending.pop_front() {
+        if position == target_pos {
+            let mut route = vec![position];
+            let mut current = position;
+            while current != first_pos {
+                current = previous[&current];
+                route.push(current);
+            }
+            if source == target {
+                route.push(source_pos);
+            }
+            route.reverse();
+            return Some(route);
+        }
+        for neighbor in viewport_graph.neighbors(position) {
+            // Close a self-loop through its incoming leg, not by retracing its first segment.
+            if source == target && position == first_pos && neighbor == source_pos {
+                continue;
+            }
+            if follows_edge(position, neighbor) && !previous.contains_key(&neighbor) {
+                previous.insert(neighbor, position);
+                pending.push_back(neighbor);
+            }
+        }
+    }
+    None
+}
+
+/// Distribute direction markers by distance along the full routed backward edge.
+/// Endpoint gaps and inter-marker gaps are equal to within one cell after rounding;
+/// segment boundaries never restart the spacing. At bends, markers point along the
+/// outgoing segment; data nodes keep their contents when they cover a marker.
 fn draw_arrows(
     buffer: &mut WorldBuffer,
     viewport_graph: &ViewportGraph,
@@ -511,61 +560,216 @@ fn draw_arrows(
     target: NodeIndex,
     gaps: i64,
 ) {
-    // The main span may be split across several collinear segments that render as one
-    // continuous line: a pin with 2+ neighbors survives `prune_pin_stubs` re-roled to
-    // `Routing` (see `window_graph::WindowNode::Pin`) but, running after `simplify_graph`,
-    // is never merged back into its neighbors, leaving it as a permanent break point.
-    // Collect the segments first and compute a single margin from their combined span, so
-    // the marker grid stays aligned across segment boundaries instead of each segment
-    // centering itself.
-    let mut segments: Vec<(WorldPos, WorldPos)> = Vec::new();
-    let mut span: Option<(i64, i64)> = None;
-    for (seg_a, seg_b, bundle) in viewport_graph.edges() {
-        if seg_a.y != seg_b.y || !bundle.contains(&(source, target)) {
-            continue;
-        }
-
-        let (lo, hi) = if seg_a.x <= seg_b.x {
-            (seg_a, seg_b)
-        } else {
-            (seg_b, seg_a)
-        };
-        // Only the main span gets arrows - the loop's two excursions are skipped entirely.
-        if !viewport_graph.backward_span_edges.contains(&(lo, hi)) {
-            continue;
-        }
-        segments.push((lo, hi));
-        span = Some(match span {
-            Some((min_x, max_x)) => (min_x.min(lo.x), max_x.max(hi.x)),
-            None => (lo.x, hi.x),
-        });
-    }
-
-    let Some((min_x, max_x)) = span else {
+    let Some(route) = backward_edge_route(viewport_graph, source, target) else {
         return;
     };
-
-    // Center the markers across the full span: split the leftover space (total
-    // length mod gaps) evenly between both ends, so the first/last arrow sits the
-    // same distance from its endpoint as every other arrow sits from its neighbor.
-    let margin = (max_x - min_x).rem_euclid(gaps) / 2;
-
-    for (lo, hi) in segments {
-        if hi.x - lo.x < MIN_ARROW_SEGMENT_LENGTH {
-            continue;
-        }
-        let arrow = '◀';
-        for x in lo.x..=hi.x {
-            let pos = WorldPos::new(x, lo.y);
-            if (x - min_x - margin).rem_euclid(gaps) == 0
-                && matches!(
-                    buffer.get_char(pos),
-                    Some('─') | Some('━') | Some('┄') | Some('╌')
-                )
-                && let Some((_, style)) = buffer.get_char_styled(pos)
+    let total_length: i64 = route
+        .windows(2)
+        .map(|segment| (segment[1].x - segment[0].x).abs() + (segment[1].y - segment[0].y).abs())
+        .sum();
+    if total_length < 2 {
+        return;
+    }
+    let arrow_count = (total_length / gaps).max(1);
+    let intervals = arrow_count + 1;
+    let mut arrow_index = 1;
+    let mut traced_length = 0;
+    for segment in route.windows(2) {
+        let start = segment[0];
+        let end = segment[1];
+        let delta = end - start;
+        let length = delta.x.abs() + delta.y.abs();
+        let direction = WorldPos::new(delta.x.signum(), delta.y.signum());
+        let arrow = match (direction.x, direction.y) {
+            (1, 0) => '▶',
+            (-1, 0) => '◀',
+            (0, 1) => '▲',
+            (0, -1) => '▼',
+            _ => return,
+        };
+        while arrow_index <= arrow_count {
+            let distance = (arrow_index * total_length + intervals / 2) / intervals;
+            if distance >= traced_length + length {
+                break;
+            }
+            let position = start + direction * (distance - traced_length);
+            let inside_node = viewport_graph.nodes().any(|(center, node)| {
+                matches!(node.role, NodeRole::Data(_))
+                    && WorldRect::from_center_and_size(*center, node.size).contains(position)
+            });
+            if !inside_node
+                && let Some((character, style)) = buffer.get_char_styled(position)
+                && matches!(character, '\u{2500}'..='\u{257f}')
             {
-                buffer.set_char_styled(pos, arrow, style);
+                buffer.set_char_styled(position, arrow, style);
+            }
+            arrow_index += 1;
+        }
+        traced_length += length;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use petgraph::graph::NodeIndex;
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+
+    use super::{ARROW_GAPS, LineStyle, backward_edge_route, draw_arrows, draw_edge_with_style};
+    use crate::{
+        geometry::WorldPos,
+        viewport_graph::ViewportGraph,
+        viewport_state::{ViewportState, WorldBuffer},
+    };
+
+    fn routed_edge(points: &[WorldPos]) -> (ViewportGraph, NodeIndex, NodeIndex) {
+        let source = NodeIndex::new(0);
+        let target = NodeIndex::new(usize::from(points.first() != points.last()));
+        let mut graph = ViewportGraph::empty();
+        graph.node_positions.insert(source, points[0]);
+        graph
+            .node_positions
+            .insert(target, points[points.len() - 1]);
+        // Reverse insertion order so tracing cannot rely on graph storage order.
+        for segment in points.windows(2).rev() {
+            graph
+                .graph
+                .add_edge(segment[1], segment[0], vec![(source, target)]);
+        }
+        (graph, source, target)
+    }
+
+    fn rendered_arrows(points: &[WorldPos], state: &ViewportState) -> Vec<(WorldPos, char)> {
+        let (graph, source, target) = routed_edge(points);
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let mut world_buffer = WorldBuffer::new(&mut buffer, state);
+        for (start, end, _) in graph.edges() {
+            draw_edge_with_style(&mut world_buffer, start, end, Color::Red, LineStyle::Bold);
+        }
+        draw_arrows(&mut world_buffer, &graph, source, target, ARROW_GAPS);
+        let mut arrows = Vec::new();
+        let bounds = world_buffer.visible_world_area();
+        for x in bounds.min.x..=bounds.max.x {
+            for y in bounds.min.y..=bounds.max.y {
+                let position = WorldPos::new(x, y);
+                if let Some((character, style)) = world_buffer.get_char_styled(position)
+                    && matches!(character, '▶' | '◀' | '▲' | '▼')
+                {
+                    assert_eq!(style.fg, Some(Color::Red));
+                    arrows.push((position, character));
+                }
             }
         }
+        arrows
+    }
+
+    fn viewport() -> ViewportState {
+        ViewportState {
+            viewport_bounds: Rect::new(0, 0, 100, 80),
+            ..ViewportState::default()
+        }
+    }
+
+    #[test]
+    fn test_backward_edge_route_follows_only_its_bundle() {
+        let points = [
+            WorldPos::new(20, 0),
+            WorldPos::new(20, -10),
+            WorldPos::new(-20, -10),
+            WorldPos::new(-20, 0),
+        ];
+        let (mut graph, source, target) = routed_edge(&points);
+        graph
+            .graph
+            .add_edge(points[0], points[3], vec![(target, source)]);
+        graph.graph.add_edge(
+            points[1],
+            WorldPos::new(30, -10),
+            vec![(source, NodeIndex::new(2))],
+        );
+        assert_eq!(
+            backward_edge_route(&graph, source, target),
+            Some(points.to_vec())
+        );
+    }
+
+    #[test]
+    fn test_arrows_are_evenly_spaced_along_all_four_directions() {
+        let points = [
+            WorldPos::new(0, 0),
+            WorldPos::new(20, 0),
+            WorldPos::new(20, 20),
+            WorldPos::new(-20, 20),
+            WorldPos::new(-20, 0),
+        ];
+        // A 100-cell route has six arrows at rounded distances 100 * k / 7.
+        assert_eq!(
+            rendered_arrows(&points, &viewport()),
+            vec![
+                (WorldPos::new(-20, 14), '▼'),
+                (WorldPos::new(-11, 20), '◀'),
+                (WorldPos::new(3, 20), '◀'),
+                (WorldPos::new(14, 0), '▶'),
+                (WorldPos::new(17, 20), '◀'),
+                (WorldPos::new(20, 9), '▲'),
+            ]
+        );
+        let split_points = [
+            points[0],
+            WorldPos::new(7, 0),
+            points[1],
+            points[2],
+            WorldPos::new(3, 20),
+            points[3],
+            points[4],
+        ];
+        assert_eq!(
+            rendered_arrows(&split_points, &viewport()),
+            rendered_arrows(&points, &viewport())
+        );
+    }
+
+    #[test]
+    fn test_arrows_keep_spacing_when_route_is_clipped() {
+        let points = [WorldPos::new(-40, 0), WorldPos::new(40, 0)];
+        let small_viewport = ViewportState {
+            viewport_bounds: Rect::new(0, 0, 20, 10),
+            ..ViewportState::default()
+        };
+        let expected: Vec<_> = rendered_arrows(&points, &viewport())
+            .into_iter()
+            .filter(|(position, _)| small_viewport.world_to_terminal(*position).is_some())
+            .collect();
+        assert_eq!(rendered_arrows(&points, &small_viewport), expected);
+        assert!(!expected.is_empty());
+    }
+
+    #[test]
+    fn test_backward_edge_route_traces_self_loop_from_outgoing_port() {
+        let points = [
+            WorldPos::new(0, 0),
+            WorldPos::new(20, 0),
+            WorldPos::new(20, -20),
+            WorldPos::new(-20, -20),
+            WorldPos::new(-20, 0),
+            WorldPos::new(0, 0),
+        ];
+        let (graph, source, target) = routed_edge(&points);
+        assert_eq!(
+            backward_edge_route(&graph, source, target),
+            Some(points.to_vec())
+        );
+        assert_eq!(rendered_arrows(&points, &viewport()).len(), 7);
+    }
+
+    #[test]
+    fn test_backward_edge_route_does_not_decorate_disconnected_segments() {
+        let points = [
+            WorldPos::new(0, 0),
+            WorldPos::new(20, 0),
+            WorldPos::new(20, 20),
+        ];
+        let (mut graph, source, target) = routed_edge(&points);
+        graph.graph.remove_edge(points[1], points[2]);
+        assert!(backward_edge_route(&graph, source, target).is_none());
     }
 }
