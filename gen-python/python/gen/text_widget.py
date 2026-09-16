@@ -40,6 +40,30 @@ _TEXT_FALLBACK_HINT = (
 )
 
 
+# Public GraphWidget methods with no TextGraphWidget equivalent. Kept as a
+# literal list rather than introspected from jupyter_widget.GraphWidget:
+# importing that module here would itself raise ImportError (it requires
+# anywidget/ipywidgets/traitlets), which is exactly the case this file exists
+# to handle.
+_GRAPHWIDGET_ONLY_METHODS = frozenset(
+    {
+        "handle_click",
+        "highlight_match",
+        "clear_highlights",
+        "show_path",
+        "clear_path",
+        "add_annotation_track",
+        "annotation_tracks",
+        "remove_annotation_track",
+        "clear_all_annotations",
+        "add_annotation",
+        "annotations",
+        "list_annotations",
+        "remove_annotation",
+    }
+)
+
+
 class TextGraphWidget:
     """Render a Gen graph as plain text when Jupyter extras are unavailable.
 
@@ -195,3 +219,16 @@ class TextGraphWidget:
     def refresh(self) -> None:
         """Refresh the text output from the current controller state."""
         self._render()
+
+    def __getattr__(self, name: str):
+        """Point a call to a GraphWidget-only method at the install fix.
+
+        Only names that actually exist on GraphWidget (handle_click,
+        highlight_match, clear_highlights, show_path, clear_path, and the
+        annotation-track methods) get the install hint; anything else falls
+        through to Python's normal AttributeError so a typo still reads as a
+        typo.
+        """
+        if name in _GRAPHWIDGET_ONLY_METHODS:
+            raise AttributeError("install gen[jupyter] to get the full suite of functions")
+        raise AttributeError(f"'TextGraphWidget' object has no attribute {name!r}")
