@@ -118,24 +118,24 @@ pub fn span_is_single_node(span: &AnnotationSpan, graph: &GenGraph) -> bool {
     }
 }
 
-/// Return `true` if the annotation `span` should be dropped from the inline
-/// overlay in `Truncated` detail level.
+/// Return `true` if the annotation `span` should be kept in the inline overlay
+/// at `Truncated` detail level.
 ///
 /// An annotation that crosses a node boundary, or that covers the full width
 /// of the single node it lies on, is kept. This way you avoid pileups of many
 /// small annotations that lie within the truncated sequence, but still show
 /// the annotations that get interrupted by variants since those are relevant.
-pub fn span_should_hide_in_truncated(span: &AnnotationSpan, graph: &GenGraph) -> bool {
+pub fn span_should_show_in_truncated(span: &AnnotationSpan, graph: &GenGraph) -> bool {
     if !span_is_single_node(span, graph) {
-        return false;
+        return true;
     }
     let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
-        return false;
+        return true;
     };
     let Some(first) = locus.slices.first() else {
-        return false;
+        return true;
     };
-    !(first.start == 0 && first.end as i64 >= first.block.length())
+    first.start == 0 && first.end as i64 >= first.block.length()
 }
 
 /// Return `true` if every segment of `span` at `idx` is fully contained within
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn test_span_should_hide_in_truncated_true_for_partial_single_node_span() {
+    fn test_span_should_show_in_truncated_false_for_partial_single_node_span() {
         let node = make_node("n1", 0, 20);
         let graph = make_graph(&[node]);
         let span = AnnotationSpan {
@@ -437,11 +437,11 @@ mod tests {
             name: "x".into(),
             segments: vec![make_segment("n1", 5, 10, Strand::Forward)],
         };
-        assert!(span_should_hide_in_truncated(&span, &graph));
+        assert!(!span_should_show_in_truncated(&span, &graph));
     }
 
     #[test]
-    fn test_span_should_hide_in_truncated_false_for_full_width_single_node_span() {
+    fn test_span_should_show_in_truncated_true_for_full_width_single_node_span() {
         let node = make_node("n1", 0, 20);
         let graph = make_graph(&[node]);
         let span = AnnotationSpan {
@@ -449,11 +449,11 @@ mod tests {
             name: "x".into(),
             segments: vec![make_segment("n1", 0, 20, Strand::Forward)],
         };
-        assert!(!span_should_hide_in_truncated(&span, &graph));
+        assert!(span_should_show_in_truncated(&span, &graph));
     }
 
     #[test]
-    fn test_span_should_hide_in_truncated_false_for_multi_node_span() {
+    fn test_span_should_show_in_truncated_true_for_multi_node_span() {
         let node_1 = make_node("n1", 0, 20);
         let node_2 = make_node("n2", 0, 20);
         let graph = make_graph(&[node_1, node_2]);
@@ -465,13 +465,13 @@ mod tests {
                 make_segment("n2", 0, 5, Strand::Forward),
             ],
         };
-        assert!(!span_should_hide_in_truncated(&span, &graph));
+        assert!(span_should_show_in_truncated(&span, &graph));
     }
 
     /// Regression test: an annotation spanning a variant bubble must stay visible in
     /// `Truncated`, even though its segments share one `node_id`.
     #[test]
-    fn test_span_should_hide_in_truncated_false_for_bubble_span() {
+    fn test_span_should_show_in_truncated_true_for_bubble_span() {
         let node_id = HashId::convert_str("split-node");
         let before_bubble = GraphNode {
             node_id,
@@ -492,6 +492,6 @@ mod tests {
                 make_segment("split-node", 10, 15, Strand::Forward),
             ],
         };
-        assert!(!span_should_hide_in_truncated(&span, &graph));
+        assert!(span_should_show_in_truncated(&span, &graph));
     }
 }

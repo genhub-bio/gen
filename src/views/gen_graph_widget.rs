@@ -25,7 +25,7 @@ use ratatui::{
 use crate::views::{
     annotation_track::{
         AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
-        span_should_hide_in_truncated,
+        span_should_show_in_truncated,
     },
     graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
     inline_label_placement::draw_label_near_pos,
@@ -635,7 +635,7 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
                 })
                 .filter(|span| {
                     detail_level != VisualDetail::Truncated
-                        || !span_should_hide_in_truncated(span, graph)
+                        || span_should_show_in_truncated(span, graph)
                 })
                 .map(|_| idx)
         })
@@ -770,7 +770,7 @@ pub fn draw_annotation_labels<S: NodeSizer<GenGraph>>(
             continue;
         }
         if detail_level == VisualDetail::Truncated
-            && span_should_hide_in_truncated(span, controller.graph())
+            && !span_should_show_in_truncated(span, controller.graph())
         {
             any_hidden = true;
             continue;
