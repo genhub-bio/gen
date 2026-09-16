@@ -31,8 +31,7 @@ pub struct ViewportGraph {
     /// World position pairs whose edge is a backward edge's `left_pin -> right_pin` main
     /// span (`LayoutEdge::is_backward_span`), keyed by both `(source, target)` orderings so a
     /// lookup doesn't need to know which ordering `graph.all_edges()` happened to store.
-    /// Used by `plotter::draw_arrows`, which only marks direction on the main span - the
-    /// loop's two short excursions to/from its real endpoints are left unmarked.
+    /// Preserves the main-span classification from the routed geometry.
     pub backward_span_edges: HashSet<(WorldPos, WorldPos)>,
 }
 
