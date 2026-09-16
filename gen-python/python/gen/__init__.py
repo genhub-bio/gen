@@ -33,9 +33,20 @@ from .gen import (
 try:
     from .jupyter_widget import GraphWidget, freeze_all_widgets
 except ImportError:
+    import warnings
+
     from .text_widget import TextGraphWidget as GraphWidget
+    from .text_widget import _in_jupyter_kernel
 
     freeze_all_widgets = None
+
+    if _in_jupyter_kernel():
+        warnings.warn(
+            "gen[jupyter] is not installed, so GraphWidget falls back to a plain-text "
+            "renderer: no interactive canvas, highlighting, or annotation tracks. Run "
+            "`pip install gen[jupyter]` and restart the kernel for the full widget.",
+            stacklevel=2,
+        )
 
 __all__ = [
     "Annotation",
