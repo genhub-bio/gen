@@ -1197,7 +1197,7 @@ mod tests {
         let nodes = Node::select(conn).load().expect("should load nodes");
         assert_eq!(nodes.len(), 5);
 
-        let _second_update = update_with_vcf(
+        update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -1205,7 +1205,8 @@ mod tests {
             None,
             vec![Sample::DEFAULT_NAME.to_string()],
             false,
-        );
+        )
+        .unwrap();
         assert_eq!(
             Node::select(conn).load().expect("should load nodes").len(),
             5
@@ -1250,7 +1251,7 @@ mod tests {
         let nodes = Node::select(conn).load().expect("should load nodes");
         assert_eq!(nodes.len(), 8);
 
-        let _second_update = update_with_vcf(
+        update_with_vcf(
             &context,
             &vcf_path.to_str().unwrap().to_string(),
             &collection,
@@ -1258,7 +1259,8 @@ mod tests {
             None,
             vec![Sample::DEFAULT_NAME.to_string()],
             false,
-        );
+        )
+        .unwrap();
         assert_eq!(
             Node::select(conn).load().expect("should load nodes").len(),
             8
