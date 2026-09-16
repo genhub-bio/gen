@@ -15,7 +15,7 @@ use gen_tui::{
     plotter::{NodeRenderer, NodeSizer, PathStyle},
     theme::current_theme,
 };
-use petgraph::{Direction, visit::NodeIndexable};
+use petgraph::{Direction, algo::kosaraju_scc, visit::NodeIndexable};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -307,17 +307,58 @@ fn compute_pruned_edges(graph: &GenGraph) -> HashSet<(GraphNode, GraphNode)> {
     pruned
 }
 
+/// Choose canonical path starts or inferred roots for a graph fragment.
+///
+/// When a fragment lacks a canonical start, each source strongly connected
+/// component is an entry region. Using all nodes in those components as roots
+/// avoids arbitrarily choosing a node within a cycle.
+fn graph_roots(graph: &GenGraph) -> VecDeque<GraphNode> {
+    let path_starts: VecDeque<GraphNode> = graph
+        .nodes()
+        .filter(|node| is_start_node(node.node_id))
+        .collect();
+    if !path_starts.is_empty() {
+        return path_starts;
+    }
+
+    let strongly_connected_components = kosaraju_scc(graph);
+    let component_by_node: HashMap<GraphNode, usize> = strongly_connected_components
+        .iter()
+        .enumerate()
+        .flat_map(|(component_index, component)| {
+            component.iter().map(move |node| (*node, component_index))
+        })
+        .collect();
+    let mut has_incoming_component_edge = vec![false; strongly_connected_components.len()];
+
+    for source_node in graph.nodes() {
+        let source_component = component_by_node[&source_node];
+        for target_node in graph.neighbors_directed(source_node, Direction::Outgoing) {
+            let target_component = component_by_node[&target_node];
+            if source_component != target_component {
+                has_incoming_component_edge[target_component] = true;
+            }
+        }
+    }
+
+    strongly_connected_components
+        .into_iter()
+        .enumerate()
+        .filter(|(component_index, _)| !has_incoming_component_edge[*component_index])
+        .flat_map(|(_, component)| component)
+        .collect()
+}
+
 /// Find nodes that become inaccessible when all pruned edges are removed.
 ///
-/// BFS from all start nodes following only non-pruned edges. Any node not reached
+/// BFS from the graph roots following only non-pruned edges. Any node not reached
 /// is only reachable through pruned (lowlighted) edges and should be dimmed.
 fn compute_inaccessible_nodes(
     graph: &GenGraph,
     pruned: &HashSet<(GraphNode, GraphNode)>,
-) -> Vec<GraphNode> {
+) -> HashSet<GraphNode> {
     let mut reachable: HashSet<GraphNode> = HashSet::new();
-    let mut queue: VecDeque<GraphNode> =
-        graph.nodes().filter(|n| is_start_node(n.node_id)).collect();
+    let mut queue = graph_roots(graph);
     for &node in &queue {
         reachable.insert(node);
     }
@@ -330,7 +371,29 @@ fn compute_inaccessible_nodes(
         }
     }
 
-    graph.nodes().filter(|n| !reachable.contains(n)).collect()
+    graph
+        .nodes()
+        .filter(|node| !reachable.contains(node))
+        .collect()
+}
+
+/// Find edges whose source is inaccessible after pruning.
+///
+/// An edge leaving an inaccessible node cannot be reached from a path start without
+/// first traversing a pruned edge, so it should be lowlighted with that node.
+fn compute_inaccessible_edges(
+    graph: &GenGraph,
+    inaccessible_nodes: &HashSet<GraphNode>,
+) -> HashSet<(GraphNode, GraphNode)> {
+    graph
+        .nodes()
+        .flat_map(|node| graph.edges(node))
+        .filter_map(|(source_node, target_node, _)| {
+            inaccessible_nodes
+                .contains(&source_node)
+                .then_some((source_node, target_node))
+        })
+        .collect()
 }
 
 /// Create a configured GraphController for a GenGraph with the standard theme and settings.
@@ -347,11 +410,12 @@ fn compute_inaccessible_nodes(
 pub fn create_gen_graph_controller(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
-    let pruned = compute_pruned_edges(&graph);
-    let inaccessible = compute_inaccessible_nodes(&graph, &pruned);
+    let mut dimmed_edges = compute_pruned_edges(&graph);
+    let inaccessible = compute_inaccessible_nodes(&graph, &dimmed_edges);
+    dimmed_edges.extend(compute_inaccessible_edges(&graph, &inaccessible));
     let node_sizer = GenGraphNodeSizer;
     let mut controller = GraphController::new(graph, node_sizer);
-    for edge in pruned {
+    for edge in dimmed_edges {
         controller.dim_edge(edge);
     }
     for node in inaccessible {
@@ -834,7 +898,7 @@ pub fn locus_midpoint(locus: &GraphLocus) -> Option<(GraphNodeSlice, usize)> {
 mod tests {
     use std::path::PathBuf;
 
-    use gen_core::{HashId, PATH_START_NODE_ID, Strand};
+    use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::sample::Sample;
     use gen_tui::{
         geometry::WorldPos,
@@ -932,6 +996,164 @@ mod tests {
         let s = "hello world";
         let truncated = inner_truncation(s, 3);
         assert_eq!(truncated, NODE_GLYPH.to_string());
+    }
+
+    #[test]
+    fn test_pruned_edit_site_dims_inaccessible_nodes_and_edges() {
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let upstream = GraphNode {
+            node_id: HashId::convert_str("upstream"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let inaccessible = GraphNode {
+            node_id: HashId::convert_str("inaccessible"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let downstream = GraphNode {
+            node_id: HashId::convert_str("downstream"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let end = GraphNode {
+            node_id: PATH_END_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let edge = |chromosome_index| {
+            vec![GraphEdge {
+                edge_id: HashId::convert_str(&format!("edge-{chromosome_index}")),
+                source_strand: Strand::Forward,
+                target_strand: Strand::Forward,
+                chromosome_index,
+                phased: 0,
+                created_on: 0,
+            }]
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(start, upstream, edge(NO_CHROMOSOME_INDEX));
+        graph.add_edge(
+            upstream,
+            inaccessible,
+            edge(PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+        );
+        graph.add_edge(inaccessible, downstream, edge(NO_CHROMOSOME_INDEX));
+        graph.add_edge(downstream, end, edge(NO_CHROMOSOME_INDEX));
+
+        let controller = create_gen_graph_controller(graph);
+        let dimmed_edges: HashSet<(GraphNode, GraphNode)> =
+            controller.get_lowlights().iter().copied().collect();
+        let dimmed_nodes: HashSet<GraphNode> =
+            controller.get_node_lowlights().iter().copied().collect();
+
+        assert_eq!(
+            dimmed_edges,
+            HashSet::from([
+                (upstream, inaccessible),
+                (inaccessible, downstream),
+                (downstream, end),
+            ]),
+            "edges that require the -2 edge from the start should be dimmed"
+        );
+        assert_eq!(
+            dimmed_nodes,
+            HashSet::from([inaccessible, downstream, end]),
+            "nodes that require the -2 edge from the start should be dimmed"
+        );
+    }
+
+    #[test]
+    fn test_fragment_without_start_uses_graph_roots_for_dimming() {
+        let source = GraphNode {
+            node_id: HashId::convert_str("fragment-source"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let target = GraphNode {
+            node_id: HashId::convert_str("fragment-target"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let downstream = GraphNode {
+            node_id: HashId::convert_str("fragment-downstream"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let pruned_edge = vec![GraphEdge {
+            edge_id: HashId::convert_str("fragment-pruned-edge"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+            phased: 0,
+            created_on: 0,
+        }];
+        let normal_edge = vec![GraphEdge {
+            edge_id: HashId::convert_str("fragment-normal-edge"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            created_on: 0,
+        }];
+        let mut graph = GenGraph::new();
+        graph.add_edge(source, target, pruned_edge);
+        graph.add_edge(target, downstream, normal_edge);
+
+        let controller = create_gen_graph_controller(graph);
+
+        let dimmed_edges: HashSet<(GraphNode, GraphNode)> =
+            controller.get_lowlights().iter().copied().collect();
+        let dimmed_nodes: HashSet<GraphNode> =
+            controller.get_node_lowlights().iter().copied().collect();
+
+        assert_eq!(
+            dimmed_edges,
+            HashSet::from([(source, target), (target, downstream)]),
+            "a source node in the graph fragment should propagate -2 dimming downstream"
+        );
+        assert_eq!(
+            dimmed_nodes,
+            HashSet::from([target, downstream]),
+            "nodes downstream of a -2 edge should be dimmed from the graph fragment root"
+        );
+    }
+
+    #[test]
+    fn test_graph_roots_include_every_node_in_a_source_cycle() {
+        let first = GraphNode {
+            node_id: HashId::convert_str("cycle-first"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let second = GraphNode {
+            node_id: HashId::convert_str("cycle-second"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let edge = vec![GraphEdge {
+            edge_id: HashId::convert_str("cycle-edge"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            created_on: 0,
+        }];
+        let mut graph = GenGraph::new();
+        graph.add_edge(first, second, edge.clone());
+        graph.add_edge(second, first, edge);
+
+        let roots: HashSet<GraphNode> = graph_roots(&graph).into_iter().collect();
+
+        assert_eq!(
+            roots,
+            HashSet::from([first, second]),
+            "each node in a source cycle is a graph-fragment entry point"
+        );
     }
 
     #[test]
