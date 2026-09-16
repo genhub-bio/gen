@@ -1499,6 +1499,185 @@ mod revision_views {
     }
 
     #[test]
+    fn test_checkout_branch_create_from_hash_starts_new_branch_at_operation() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, feature_sample_name) =
+            setup_repo_with_feature_only_update(repo_dir.path());
+
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &["checkout", "--branch", "from-feature", &feature_update_hash],
+            ),
+            "checkout -b from a feature commit hash should succeed",
+        );
+
+        let samples = run_gen(repo_dir.path(), &["list-samples"]);
+        assert_success(&samples, "list-samples on from-feature should succeed");
+        let stdout = String::from_utf8_lossy(&samples.stdout);
+        assert!(
+            stdout.contains(&feature_sample_name),
+            "new branch should start at the given operation rather than at HEAD: {stdout}"
+        );
+    }
+
+    #[test]
+    fn test_checkout_branch_flag_errors_when_branch_already_exists_with_hash() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, _) = setup_repo_with_feature_only_update(repo_dir.path());
+
+        let checkout = run_gen(
+            repo_dir.path(),
+            &["checkout", "--branch", "feature", &feature_update_hash],
+        );
+        assert!(
+            !checkout.status.success(),
+            "checkout -b with an existing branch name and a start hash should fail: stdout={} stderr={}",
+            String::from_utf8_lossy(&checkout.stdout),
+            String::from_utf8_lossy(&checkout.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&checkout.stderr);
+        assert!(
+            stderr.contains("already exists"),
+            "checkout -b should explain that the branch already exists rather than silently reusing HEAD: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_branch_create_with_start_starts_new_branch_at_operation() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, feature_sample_name) =
+            setup_repo_with_feature_only_update(repo_dir.path());
+
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &[
+                    "branch",
+                    "--create",
+                    "from-feature-branch-create",
+                    &feature_update_hash,
+                ],
+            ),
+            "branch --create with a start point should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "from-feature-branch-create"]),
+            "checkout of the newly created branch should succeed",
+        );
+
+        let samples = run_gen(repo_dir.path(), &["list-samples"]);
+        assert_success(&samples, "list-samples should succeed");
+        let stdout = String::from_utf8_lossy(&samples.stdout);
+        assert!(
+            stdout.contains(&feature_sample_name),
+            "new branch should start at the given operation rather than at HEAD: {stdout}"
+        );
+    }
+
+    #[test]
+    fn test_branch_create_with_start_starts_new_branch_at_non_tip_operation() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, feature_sample_name) =
+            setup_repo_with_feature_only_update(repo_dir.path());
+
+        // Advance the feature branch past `feature_update_hash` so that hash is
+        // an ancestor operation rather than the branch tip, which is what the
+        // new branch should actually resolve against.
+        let second_update_fasta_path = repo_dir.path().join("feature-second-update.fa");
+        fs::write(&second_update_fasta_path, ">m123\nGGGG\n")
+            .expect("should write second branch update fasta fixture");
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "feature"]),
+            "checkout feature should succeed",
+        );
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &[
+                    "update",
+                    "fasta",
+                    second_update_fasta_path
+                        .to_str()
+                        .expect("should encode second update fasta path"),
+                    "--name",
+                    "test-collection",
+                    "--sample",
+                    &feature_sample_name,
+                    "--new-sample",
+                    "feature-sample-second",
+                    "--region-name",
+                    "m123:10-14",
+                ],
+            ),
+            "second feature branch update should succeed",
+        );
+
+        let feature_history = operations_stdout(repo_dir.path());
+        let feature_tip_hash = head_commit_hash(&feature_history);
+        assert_ne!(
+            feature_update_hash, feature_tip_hash,
+            "feature_update_hash should now be an ancestor of the feature branch tip"
+        );
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "main"]),
+            "checkout main should succeed",
+        );
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &[
+                    "branch",
+                    "--create",
+                    "from-feature-non-tip",
+                    &feature_update_hash,
+                ],
+            ),
+            "branch --create with a non-tip start point should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "from-feature-non-tip"]),
+            "checkout of the newly created branch should succeed",
+        );
+
+        let samples = run_gen(repo_dir.path(), &["list-samples"]);
+        assert_success(&samples, "list-samples should succeed");
+        let stdout = String::from_utf8_lossy(&samples.stdout);
+        assert!(
+            stdout.contains(&feature_sample_name),
+            "new branch should start at the given non-tip operation: {stdout}"
+        );
+        assert!(
+            !stdout.contains("feature-sample-second"),
+            "new branch should not include operations made after the given start point: {stdout}"
+        );
+    }
+
+    #[test]
+    fn test_branch_start_point_without_create_errors() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let (_, feature_update_hash, _) = setup_repo_with_feature_only_update(repo_dir.path());
+
+        let branch = run_gen(
+            repo_dir.path(),
+            &["branch", "--list", "feature", &feature_update_hash],
+        );
+        assert!(
+            !branch.status.success(),
+            "a start point without --create should fail: stdout={} stderr={}",
+            String::from_utf8_lossy(&branch.stdout),
+            String::from_utf8_lossy(&branch.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&branch.stderr);
+        assert!(
+            stderr.contains("A start point is only valid together with --create"),
+            "should explain a start point requires --create: {stderr}"
+        );
+    }
+
+    #[test]
     fn test_list_samples_ref_reads_selected_commit_state() {
         let repo_dir = tempdir().expect("should create temp repo directory");
         let (_, feature_update_hash, feature_sample_name) =
