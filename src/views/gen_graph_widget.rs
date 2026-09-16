@@ -5,7 +5,10 @@ use gen_core::{
     Workspace, is_end_node, is_start_node,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
-use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
+use gen_models::{
+    block_group::BlockGroup, db::GraphConnection, locus::GraphLocus, node::Node,
+    sequence::SequenceError,
+};
 use gen_tui::{
     ViewportState,
     geometry::{WorldPos, WorldRect},
@@ -256,11 +259,10 @@ pub fn create_gen_graph_widget<'a>(
     GraphWidget::with_renderer(renderer)
 }
 
-/// Compute which edges would be removed by `BlockGroup::prune_graph`.
+/// Compute the directly pruned edges for a graph fragment without a path start.
 ///
-/// Mirrors the per-source-node, per-chromosome_index deduplication logic: for each
-/// chromosome_index appearing on outgoing edges of a node, the edge with the highest
-/// `created_on` is kept; all others are dimmed. Edges with
+/// This mirrors the per-source-node, per-chromosome_index deduplication step in
+/// `BlockGroup::prune_graph`. Edges with
 /// `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` are always dimmed; edges with
 /// `NO_CHROMOSOME_INDEX` or `INDETERMINATE_CHROMOSOME_INDEX` are never dimmed.
 fn compute_pruned_edges(graph: &GenGraph) -> HashSet<(GraphNode, GraphNode)> {
@@ -305,6 +307,34 @@ fn compute_pruned_edges(graph: &GenGraph) -> HashSet<(GraphNode, GraphNode)> {
     }
 
     pruned
+}
+
+/// Compute lowlights from the normal pruning result when a canonical start exists.
+///
+/// The visual graph retains every element so it can be dimmed rather than removed.
+/// Comparing it with a cloned, normally pruned graph keeps its lowlights exactly in
+/// sync with `BlockGroup::prune_graph`.
+fn compute_normal_pruning_lowlights(
+    graph: &GenGraph,
+) -> (HashSet<(GraphNode, GraphNode)>, HashSet<GraphNode>) {
+    let mut pruned_graph = graph.clone();
+    BlockGroup::prune_graph(&mut pruned_graph);
+
+    let dimmed_edges = graph
+        .all_edges()
+        .filter_map(|(source_node, target_node, _)| {
+            pruned_graph
+                .edge_weight(source_node, target_node)
+                .is_none()
+                .then_some((source_node, target_node))
+        })
+        .collect();
+    let dimmed_nodes = graph
+        .nodes()
+        .filter(|node| !pruned_graph.contains_node(*node))
+        .collect();
+
+    (dimmed_edges, dimmed_nodes)
 }
 
 /// Choose canonical path starts or inferred roots for a graph fragment.
@@ -410,15 +440,21 @@ fn compute_inaccessible_edges(
 pub fn create_gen_graph_controller(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
-    let mut dimmed_edges = compute_pruned_edges(&graph);
-    let inaccessible = compute_inaccessible_nodes(&graph, &dimmed_edges);
-    dimmed_edges.extend(compute_inaccessible_edges(&graph, &inaccessible));
+    let has_path_start = graph.nodes().any(|node| is_start_node(node.node_id));
+    let (dimmed_edges, dimmed_nodes) = if has_path_start {
+        compute_normal_pruning_lowlights(&graph)
+    } else {
+        let mut dimmed_edges = compute_pruned_edges(&graph);
+        let dimmed_nodes = compute_inaccessible_nodes(&graph, &dimmed_edges);
+        dimmed_edges.extend(compute_inaccessible_edges(&graph, &dimmed_nodes));
+        (dimmed_edges, dimmed_nodes)
+    };
     let node_sizer = GenGraphNodeSizer;
     let mut controller = GraphController::new(graph, node_sizer);
     for edge in dimmed_edges {
         controller.dim_edge(edge);
     }
-    for node in inaccessible {
+    for node in dimmed_nodes {
         controller.dim_node(node);
     }
     controller.set_detail_level(VisualDetail::Truncated);
