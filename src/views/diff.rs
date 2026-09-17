@@ -22,7 +22,7 @@ use crate::views::{
         DiffGraphComponent, apply_diff_highlights, block_group_label, build_diff_graph_component,
         change_label_for_block_group,
     },
-    gen_graph_widget::{create_gen_graph_controller, create_gen_graph_widget},
+    gen_graph_widget::{create_gen_graph_controller_without_dimming, create_gen_graph_widget},
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
     tui_runtime::TuiSession,
 };
@@ -96,7 +96,8 @@ pub fn view_diff(
     panel_focus.include_panel(DiffPanel::Graph);
     let panel_styles = PanelStyles::default();
 
-    let mut graph_controller = create_gen_graph_controller(current_component.render.graph.clone());
+    let mut graph_controller =
+        create_gen_graph_controller_without_dimming(current_component.render.graph.clone());
     apply_diff_highlights(&mut graph_controller, &current_component.render);
 
     let mut last_frame_time = Instant::now();
@@ -108,7 +109,8 @@ pub fn view_diff(
             && selected_component.render.title != current_component.render.title
         {
             current_component = selected_component;
-            graph_controller = create_gen_graph_controller(current_component.render.graph.clone());
+            graph_controller =
+                create_gen_graph_controller_without_dimming(current_component.render.graph.clone());
             apply_diff_highlights(&mut graph_controller, &current_component.render);
         }
 
@@ -256,7 +258,7 @@ pub fn view_diff_graph(
     let component = build_diff_graph_component(diff_graph, title);
     let mut session = TuiSession::enter()?;
     let terminal = session.terminal_mut();
-    let mut graph_controller = create_gen_graph_controller(component.graph.clone());
+    let mut graph_controller = create_gen_graph_controller_without_dimming(component.graph.clone());
     apply_diff_highlights(&mut graph_controller, &component);
     let mut last_frame_time = Instant::now();
 
