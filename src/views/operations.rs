@@ -852,8 +852,8 @@ mod tests {
         let main_commit = history
             .commit_all("main")
             .expect("should commit main state");
-        history
-            .merge(&CommitRef("feature".to_string()))
+        graph
+            .with_transaction(|| history.merge(&CommitRef("feature".to_string())))
             .expect("should merge feature branch");
         let merge_commit = history
             .current_head()

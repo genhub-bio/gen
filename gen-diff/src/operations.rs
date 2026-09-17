@@ -2095,8 +2095,8 @@ mod tests {
         commit_operation(&context, "feature");
 
         switch_branch(&context, "main");
-        history_store
-            .merge(&CommitRef("feature".to_string()))
+        graph_conn
+            .with_transaction(|| history_store.merge(&CommitRef("feature".to_string())))
             .expect("should merge feature branch");
         let merge_commit = history_store
             .current_head()

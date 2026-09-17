@@ -437,21 +437,135 @@ pub fn connect_branch(conn: &GraphConnection, branch_name: &str) -> SqlResult<()
     run_history_statement(conn, "SELECT dolt_connect_branch(?1)", &[&branch_name])
 }
 
-/// Merges a branch or commit reference into the active branch and returns the resulting hash.
-pub fn merge(conn: &GraphConnection, reference: &str) -> SqlResult<DoltHashId> {
-    let result = conn.query_row("SELECT dolt_merge(?1)", [reference], |row| {
-        row.get::<_, String>(0)
+fn resolve_created_on_conflicts(
+    conn: &GraphConnection,
+    conflicts: &[HistoryConflict],
+) -> SqlResult<()> {
+    for conflict in conflicts {
+        if conflict.num_conflicts == 0 {
+            continue;
+        }
+
+        let Some(query) = (match conflict.table_name.as_str() {
+            "block_groups" => Some(
+                "DELETE FROM dolt_conflicts_block_groups \
+                 WHERE our_created_on IS NOT their_created_on \
+                   AND our_id IS their_id \
+                   AND our_collection_name IS their_collection_name \
+                   AND our_sample_name IS their_sample_name \
+                   AND our_name IS their_name \
+                   AND our_parent_block_group_id IS their_parent_block_group_id \
+                   AND our_is_default IS their_is_default",
+            ),
+            "paths" => Some(
+                "DELETE FROM dolt_conflicts_paths \
+                 WHERE our_created_on IS NOT their_created_on \
+                   AND our_id IS their_id \
+                   AND our_block_group_id IS their_block_group_id \
+                   AND our_name IS their_name \
+                   AND our_edge_ids IS their_edge_ids",
+            ),
+            "block_group_edges" => Some(
+                "DELETE FROM dolt_conflicts_block_group_edges \
+                 WHERE our_created_on IS NOT their_created_on \
+                   AND our_id IS their_id \
+                   AND our_block_group_id IS their_block_group_id \
+                   AND our_edge_id IS their_edge_id \
+                   AND our_chromosome_index IS their_chromosome_index \
+                   AND our_phased IS their_phased",
+            ),
+            "gen_asset_refs" => Some(
+                "DELETE FROM dolt_conflicts_gen_asset_refs \
+                 WHERE our_created_on IS NOT their_created_on \
+                   AND our_id IS their_id \
+                   AND our_uri IS their_uri \
+                   AND our_file_type IS their_file_type \
+                   AND our_checksum IS their_checksum \
+                   AND our_size IS their_size \
+                   AND our_role IS their_role \
+                   AND our_logical_path IS their_logical_path \
+                   AND our_name IS their_name \
+                   AND our_upstream_asset_ref_id IS their_upstream_asset_ref_id",
+            ),
+            "gen_operation_log" => Some(
+                "DELETE FROM dolt_conflicts_gen_operation_log \
+                 WHERE our_created_on IS NOT their_created_on \
+                   AND our_id IS their_id \
+                   AND our_operation_kind IS their_operation_kind \
+                   AND our_command IS their_command",
+            ),
+            _ => None,
+        }) else {
+            continue;
+        };
+        conn.execute(query, [])?;
+    }
+    Ok(())
+}
+
+fn merge_commit(conn: &GraphConnection, message: &str) -> SqlResult<DoltHashId> {
+    let result: Value = conn.query_row("SELECT dolt_commit('-A', '-m', ?1)", [message], |row| {
+        row.get(0)
     })?;
-    // DoltLite returns a human-readable result for an already-included source instead of a hash.
-    match DoltHashId::try_from(result.as_str()) {
-        Ok(commit_hash) => Ok(commit_hash),
-        Err(_error) if result == "Already up to date" => hash_of(conn, "HEAD"),
-        Err(error) => Err(rusqlite::Error::FromSqlConversionFailure(
+    let Value::Text(result) = result else {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
             0,
             Type::Text,
-            Box::new(error),
-        )),
+            "dolt_commit returned a non-text result".into(),
+        ));
+    };
+    DoltHashId::try_from(result.as_str())
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
+}
+
+/// Merges a branch or commit reference into the active branch and returns the resulting hash.
+///
+/// Callers must invoke this operation inside [`GraphConnection::with_transaction`] for the
+/// supported merge workflow: the transaction both rolls back failed merges and keeps DoltLite
+/// conflict state available while conflicts are inspected and resolved.
+pub fn merge(conn: &GraphConnection, reference: &str) -> SqlResult<DoltHashId> {
+    let target_branch = active_branch(conn)?;
+    let merge_message = format!("Merge branch '{reference}' into {target_branch}");
+
+    let merge_result: Result<Value, rusqlite::Error> =
+        conn.query_row("SELECT dolt_merge('--no-commit', ?1)", [reference], |row| {
+            row.get(0)
+        });
+
+    let result = match merge_result {
+        Ok(Value::Text(result)) if result == "Already up to date" => {
+            return hash_of(conn, "HEAD");
+        }
+        Ok(Value::Text(result)) => match DoltHashId::try_from(result.as_str()) {
+            Ok(commit_hash) => return Ok(commit_hash),
+            Err(error) => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    Type::Text,
+                    Box::new(error),
+                ));
+            }
+        },
+        Ok(Value::Integer(0)) => None,
+        Ok(result) => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                Type::Text,
+                format!("unexpected dolt_merge result: {result:?}").into(),
+            ));
+        }
+        Err(error) => Some(error),
+    };
+
+    let conflicts = conflict_rows(conn)?;
+    let had_data_conflicts = conflicts.iter().any(|conflict| conflict.num_conflicts > 0);
+    resolve_created_on_conflicts(conn, &conflicts)?;
+
+    if !had_data_conflicts && let Some(error) = result {
+        return Err(error);
     }
+
+    merge_commit(conn, &merge_message)
 }
 
 pub fn reset_hard(conn: &GraphConnection, target: &str) -> SqlResult<()> {
@@ -1162,7 +1276,8 @@ mod tests {
         Collection::create(&conn, "main-second-collection")
             .expect("should insert a main branch graph row");
         commit_all(&conn, "main branch commit").expect("should commit main branch change");
-        merge(&conn, "feature").expect("should merge feature branch");
+        conn.with_transaction(|| merge(&conn, "feature"))
+            .expect("should merge feature branch");
 
         let feature_sample_exists_after_merge = conn
             .query_row(
@@ -1244,8 +1359,7 @@ mod tests {
         let main_commit = history_store
             .commit_all("main")
             .expect("should commit main state");
-        history_store
-            .merge(&CommitRef("feature".to_string()))
+        conn.with_transaction(|| history_store.merge(&CommitRef("feature".to_string())))
             .expect("should merge feature branch");
         let merge_commit = history_store
             .current_head()
@@ -1312,7 +1426,8 @@ mod tests {
         let target_hash = commit_all(&conn, "target").expect("should commit target state");
 
         delete_branch_force(&conn, "feature").expect("should delete the source branch");
-        let merge_hash = merge(&conn, &source_hash.to_string())
+        let merge_hash = conn
+            .with_transaction(|| merge(&conn, &source_hash.to_string()))
             .expect("should merge the immutable source commit");
         assert_eq!(
             commit_parents(&conn, &merge_hash).expect("should query all merge parents"),
@@ -1368,15 +1483,226 @@ mod tests {
         checkout(&conn, "main").expect("should checkout main branch");
 
         assert_eq!(
-            merge(&conn, &source_hash.to_string()).expect("should fast-forward to source"),
+            conn.with_transaction(|| merge(&conn, &source_hash.to_string()))
+                .expect("should fast-forward to source"),
             source_hash,
             "a fast-forward merge should return the resulting source tip"
         );
         assert_eq!(
-            merge(&conn, &source_hash.to_string())
+            conn.with_transaction(|| merge(&conn, &source_hash.to_string()))
                 .expect("should merge an already included source"),
             source_hash,
             "an already included source should be a successful no-op returning the current target"
+        );
+    }
+
+    #[test]
+    fn test_merge_resolves_created_on_only_conflict_and_merges_independent_row() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        conn.execute(
+            "INSERT INTO gen_operation_log (id, operation_kind, command, created_on) \
+             VALUES (x'01', 'base', 'base', 1)",
+            [],
+        )
+        .expect("should create base created_on row");
+        commit_all(&conn, "base").expect("should commit base state");
+        create_branch(&conn, "feature").expect("should create feature branch");
+
+        checkout(&conn, "feature").expect("should checkout feature branch");
+        conn.execute(
+            "UPDATE gen_operation_log SET created_on = 2 WHERE id = x'01'",
+            [],
+        )
+        .expect("should update feature timestamp");
+        conn.execute(
+            "INSERT INTO gen_operation_log (id, operation_kind, command, created_on) \
+             VALUES (x'02', 'feature', 'feature', 2)",
+            [],
+        )
+        .expect("should insert independent feature row");
+        let source_hash = commit_all(&conn, "feature").expect("should commit feature state");
+
+        checkout(&conn, "main").expect("should checkout main branch");
+        conn.execute(
+            "UPDATE gen_operation_log SET created_on = 3 WHERE id = x'01'",
+            [],
+        )
+        .expect("should update target timestamp");
+        let target_hash = commit_all(&conn, "target").expect("should commit target state");
+
+        let merge_hash = conn
+            .with_transaction(|| merge(&conn, "feature"))
+            .expect("should resolve created_on-only conflict");
+        assert_eq!(
+            conn.query_row(
+                "SELECT created_on FROM gen_operation_log WHERE id = x'01'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("should read the resolved row"),
+            3,
+            "the target created_on value should win the conflict"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT operation_kind FROM gen_operation_log WHERE id = x'02'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("should read the independent source row"),
+            "feature",
+            "an independent source row should be merged"
+        );
+        assert_eq!(
+            commit_parents(&conn, &merge_hash).expect("should query merge parents"),
+            vec![target_hash, source_hash],
+            "the resolved merge should retain target then source parents"
+        );
+        assert!(
+            status_rows(&conn)
+                .expect("should read merged working-set status")
+                .is_empty(),
+            "the resolved merge should leave a clean working set"
+        );
+    }
+
+    #[test]
+    fn test_merge_rejects_created_on_and_other_field_conflict_atomically() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        conn.execute(
+            "INSERT INTO gen_operation_log (id, operation_kind, command, created_on) \
+             VALUES (x'11', 'base', 'base', 1)",
+            [],
+        )
+        .expect("should create base conflict row");
+        commit_all(&conn, "base").expect("should commit base state");
+        create_branch(&conn, "feature").expect("should create feature branch");
+
+        checkout(&conn, "feature").expect("should checkout feature branch");
+        conn.execute(
+            "UPDATE gen_operation_log \
+             SET operation_kind = 'feature', created_on = 2 WHERE id = x'11'",
+            [],
+        )
+        .expect("should update feature conflict row");
+        let source_hash = commit_all(&conn, "feature").expect("should commit feature conflict");
+
+        checkout(&conn, "main").expect("should checkout main branch");
+        conn.execute(
+            "UPDATE gen_operation_log \
+             SET operation_kind = 'target', created_on = 3 WHERE id = x'11'",
+            [],
+        )
+        .expect("should update target conflict row");
+        let target_hash = commit_all(&conn, "target").expect("should commit target conflict");
+
+        let merge_error = conn
+            .with_transaction(|| merge(&conn, "feature"))
+            .expect_err("should reject created_on plus value conflicts");
+        assert!(
+            merge_error.to_string().contains("conflict")
+                || merge_error.to_string().contains("CONSTRAINT"),
+            "merge failure should identify the unresolved conflict: {merge_error}"
+        );
+        assert_eq!(
+            hash_of(&conn, "main").expect("should read target hash after failed merge"),
+            target_hash,
+            "an aborted merge must not advance the target branch"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT operation_kind, created_on FROM gen_operation_log WHERE id = x'11'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("should read target data after failed merge"),
+            ("target".to_string(), 3),
+            "an aborted merge must restore the target row"
+        );
+        assert!(
+            status_rows(&conn)
+                .expect("should read working-set status after failed merge")
+                .is_empty(),
+            "an aborted merge must leave the working set clean"
+        );
+
+        assert_eq!(
+            commit_parents(&conn, &source_hash)
+                .expect("should query source parents")
+                .len(),
+            1,
+            "the source commit should remain unchanged after the failed merge"
+        );
+    }
+
+    #[test]
+    fn test_merge_does_not_resolve_created_on_only_conflict_in_custom_table() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        conn.execute(
+            "CREATE TABLE custom_created_on_conflict (\
+                id INTEGER PRIMARY KEY,\
+                value TEXT NOT NULL,\
+                created_on INTEGER NOT NULL\
+            )",
+            [],
+        )
+        .expect("should create custom conflict fixture table");
+        conn.execute(
+            "INSERT INTO custom_created_on_conflict (id, value, created_on) \
+             VALUES (1, 'same', 1)",
+            [],
+        )
+        .expect("should create base custom row");
+        commit_all(&conn, "base").expect("should commit base state");
+        create_branch(&conn, "feature").expect("should create feature branch");
+
+        checkout(&conn, "feature").expect("should checkout feature branch");
+        conn.execute(
+            "UPDATE custom_created_on_conflict SET created_on = 2 WHERE id = 1",
+            [],
+        )
+        .expect("should update feature timestamp");
+        let source_hash = commit_all(&conn, "feature").expect("should commit feature state");
+
+        checkout(&conn, "main").expect("should checkout main branch");
+        conn.execute(
+            "UPDATE custom_created_on_conflict SET created_on = 3 WHERE id = 1",
+            [],
+        )
+        .expect("should update target timestamp");
+        let target_hash = commit_all(&conn, "target").expect("should commit target state");
+
+        let merge_error = conn
+            .with_transaction(|| merge(&conn, &source_hash.to_string()))
+            .expect_err("should reject custom created_on-only conflicts");
+        assert!(
+            merge_error.to_string().contains("conflict")
+                || merge_error.to_string().contains("CONSTRAINT"),
+            "merge failure should identify the unresolved conflict: {merge_error}"
+        );
+        assert_eq!(
+            hash_of(&conn, "main").expect("should read target hash after failed merge"),
+            target_hash,
+            "an aborted merge must not advance the target branch"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value, created_on FROM custom_created_on_conflict WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("should read target data after failed merge"),
+            ("same".to_string(), 3),
+            "an aborted merge must restore the target row"
+        );
+        assert!(
+            status_rows(&conn)
+                .expect("should read working-set status after failed merge")
+                .is_empty(),
+            "an aborted merge must leave the working set clean"
         );
     }
 
@@ -1415,7 +1741,8 @@ mod tests {
         let target_hash =
             commit_all(&conn, "target conflict").expect("should commit target conflict");
 
-        let merge_error = merge(&conn, &source_hash.to_string())
+        let merge_error = conn
+            .with_transaction(|| merge(&conn, &source_hash.to_string()))
             .expect_err("should reject conflicting collection rows");
         assert!(
             merge_error.to_string().contains("conflict")

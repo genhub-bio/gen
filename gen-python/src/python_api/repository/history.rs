@@ -293,8 +293,10 @@ impl PyRepository {
         r#gen::history::ensure_clean_working_set(&history_store, "merge")
             .map_err(history_err_to_pyerr)?;
         let name = branch_name(branch)?;
-        history_store
-            .merge(&CommitRef(name))
+        self.context
+            .graph()
+            .conn()
+            .with_transaction(|| history_store.merge(&CommitRef(name)))
             .map_err(|error| r#gen::history::history_action_error("Merge", &error))
             .map_err(history_err_to_pyerr)?;
         self.head_operation()

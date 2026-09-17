@@ -36,6 +36,60 @@ impl Deref for GraphConnection {
     }
 }
 
+impl GraphConnection {
+    /// Starts a plain SQL transaction unless one is already active.
+    ///
+    /// The returned flag is true when the caller already owned the transaction. Pass it to
+    /// [`Self::end_transaction`] so only the transaction started by this method is finalized.
+    pub fn start_transaction(&self) -> rusqlite::Result<bool> {
+        let in_transaction = !self.is_autocommit();
+        if !in_transaction {
+            self.execute("BEGIN;", [])?;
+        }
+        Ok(in_transaction)
+    }
+
+    /// Finishes a transaction started by [`Self::start_transaction`].
+    ///
+    /// An existing transaction remains owned by its caller. Dolt version-control statements can
+    /// seal a transaction opened by this helper themselves, so commit and rollback are
+    /// conditional on the connection still being in a transaction after the operation returns.
+    pub fn end_transaction<T>(
+        &self,
+        in_transaction: bool,
+        result: rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        if in_transaction || self.is_autocommit() {
+            return result;
+        }
+
+        match result {
+            Ok(value) => {
+                self.execute("COMMIT;", [])?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.execute("ROLLBACK;", [])?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Runs an operation in a plain SQL transaction owned by this helper when needed.
+    ///
+    /// An existing transaction remains owned by its caller. Dolt version-control statements can
+    /// seal a transaction opened by this helper themselves, so commit and rollback are
+    /// conditional on the connection still being in a transaction after the operation returns.
+    pub fn with_transaction<T>(
+        &self,
+        operation: impl FnOnce() -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        let in_transaction = self.start_transaction()?;
+        let result = operation();
+        self.end_transaction(in_transaction, result)
+    }
+}
+
 pub fn get_connection(path: impl AsRef<Path>) -> Result<GraphConnection, rusqlite::Error> {
     let mut conn = Connection::open(path)?;
     rusqlite::vtab::array::load_module(&conn)?;
@@ -198,6 +252,7 @@ mod tests {
         history::dolt::{active_branch, commit_all, connect_branch, create_branch},
         operations::Defaults,
         sample::{NewSample, Sample},
+        test_helpers::get_connection as test_graph_connection,
     };
 
     fn branch_has_sample(context: &DbContext, sample_name: &str) -> bool {
@@ -295,6 +350,178 @@ mod tests {
         assert!(
             !branch_has_sample(&context, "feature-sample"),
             "explicit ref checkout should override the saved branch intent"
+        );
+    }
+
+    #[test]
+    fn test_with_transaction_commits_successful_operation() {
+        let conn = test_graph_connection(None).expect("should create graph database");
+        conn.execute("CREATE TABLE transaction_rows (value TEXT NOT NULL)", [])
+            .expect("should create transaction fixture table");
+
+        conn.with_transaction(|| {
+            conn.execute(
+                "INSERT INTO transaction_rows (value) VALUES ('committed')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("should commit successful transaction operation");
+
+        assert_eq!(
+            conn.query_row("SELECT value FROM transaction_rows", [], |row| row
+                .get::<_, String>(0))
+                .expect("should query committed transaction row"),
+            "committed",
+            "successful transaction should commit its inserted row"
+        );
+    }
+
+    #[test]
+    fn test_with_transaction_rolls_back_failed_operation() {
+        let conn = test_graph_connection(None).expect("should create graph database");
+        conn.execute("CREATE TABLE transaction_rows (value TEXT NOT NULL)", [])
+            .expect("should create transaction fixture table");
+
+        let error: rusqlite::Result<()> = conn.with_transaction(|| {
+            conn.execute(
+                "INSERT INTO transaction_rows (value) VALUES ('rolled back')",
+                [],
+            )?;
+            Err(rusqlite::Error::InvalidParameterName(
+                "expected transaction failure".to_string(),
+            ))
+        });
+        assert!(error.is_err(), "failed operation should return its error");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM transaction_rows", [], |row| row
+                .get::<_, i64>(0))
+                .expect("should query rolled-back transaction rows"),
+            0,
+            "failed transaction should roll back its inserted row"
+        );
+    }
+
+    #[test]
+    fn test_start_and_end_transaction_commits_successful_operation() {
+        let conn = test_graph_connection(None).expect("should create graph database");
+        conn.execute("CREATE TABLE transaction_rows (value TEXT NOT NULL)", [])
+            .expect("should create transaction fixture table");
+
+        let in_transaction = conn
+            .start_transaction()
+            .expect("should start transaction explicitly");
+        assert!(
+            !in_transaction,
+            "start_transaction should own a newly opened transaction"
+        );
+        let result = conn
+            .execute(
+                "INSERT INTO transaction_rows (value) VALUES ('explicit commit')",
+                [],
+            )
+            .map(|_| ());
+        conn.end_transaction(in_transaction, result)
+            .expect("should commit explicit transaction");
+
+        assert_eq!(
+            conn.query_row("SELECT value FROM transaction_rows", [], |row| row
+                .get::<_, String>(0))
+                .expect("should query explicitly committed row"),
+            "explicit commit",
+            "end_transaction should commit a successful explicit transaction"
+        );
+    }
+
+    #[test]
+    fn test_end_transaction_rolls_back_explicit_error() {
+        let conn = test_graph_connection(None).expect("should create graph database");
+        conn.execute("CREATE TABLE transaction_rows (value TEXT NOT NULL)", [])
+            .expect("should create transaction fixture table");
+
+        let in_transaction = conn
+            .start_transaction()
+            .expect("should start transaction explicitly");
+        let result: rusqlite::Result<()> = (|| {
+            conn.execute(
+                "INSERT INTO transaction_rows (value) VALUES ('explicit rollback')",
+                [],
+            )?;
+            Err(rusqlite::Error::InvalidParameterName(
+                "expected explicit transaction failure".to_string(),
+            ))
+        })();
+        let error = conn.end_transaction(in_transaction, result);
+        assert!(error.is_err(), "explicit failure should return its error");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM transaction_rows", [], |row| row
+                .get::<_, i64>(0))
+                .expect("should query explicitly rolled-back rows"),
+            0,
+            "end_transaction should roll back an explicit transaction error"
+        );
+    }
+
+    #[test]
+    fn test_start_transaction_preserves_outer_transaction() {
+        let conn = test_graph_connection(None).expect("should create graph database");
+        conn.execute("CREATE TABLE transaction_rows (value TEXT NOT NULL)", [])
+            .expect("should create transaction fixture table");
+        conn.execute("BEGIN;", [])
+            .expect("should begin outer transaction");
+
+        let in_transaction = conn
+            .start_transaction()
+            .expect("should inspect outer transaction");
+        assert!(
+            in_transaction,
+            "start_transaction should report an existing outer transaction"
+        );
+        let result = conn
+            .execute("INSERT INTO transaction_rows (value) VALUES ('outer')", [])
+            .map(|_| ());
+        conn.end_transaction(in_transaction, result)
+            .expect("should leave outer transaction active");
+
+        assert!(
+            !conn.is_autocommit(),
+            "end_transaction should leave an outer transaction active"
+        );
+        conn.execute("ROLLBACK;", [])
+            .expect("should roll back outer transaction");
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transaction_rows", [], |row| {
+                row.get(0)
+            })
+            .expect("should count transaction rows");
+        assert_eq!(
+            row_count, 0,
+            "rolling back the outer transaction should discard its inserted row"
+        );
+    }
+
+    #[test]
+    fn test_end_transaction_accepts_dolt_commit_sealing_transaction() {
+        let conn = test_graph_connection(None).expect("should create graph database");
+        Collection::create(&conn, "transaction-commit")
+            .expect("should create Dolt transaction fixture row");
+
+        let in_transaction = conn
+            .start_transaction()
+            .expect("should start transaction explicitly");
+        let result = commit_all(&conn, "transaction commit");
+        let commit_hash = conn
+            .end_transaction(in_transaction, result)
+            .expect("should preserve a Dolt commit that seals its transaction");
+
+        assert_eq!(
+            conn.query_row("SELECT dolt_hashof('HEAD')", [], |row| row
+                .get::<_, gen_core::DoltHashId>(
+                0
+            ))
+            .expect("should query Dolt head after transaction commit"),
+            commit_hash,
+            "end_transaction should preserve a Dolt commit that sealed its transaction"
         );
     }
 }

@@ -546,7 +546,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else if merge {
                 let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
-                history_store.merge(&CommitRef(branch_name))?;
+                graph_conn.with_transaction(|| history_store.merge(&CommitRef(branch_name)))?;
                 println!("Merge successful");
             } else if let Some(remote_name) = set_remote {
                 let current_branch_name = history_store
@@ -578,7 +578,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             let branch_name = branch_name.clone().ok_or("Branch name must be provided.")?;
             let history_store = DoltHistoryStore::new(graph_conn);
             ensure_clean_working_set(&history_store, "merge")?;
-            match history_store.merge(&CommitRef(branch_name)) {
+            match graph_conn.with_transaction(|| history_store.merge(&CommitRef(branch_name))) {
                 Ok(_) => {
                     println!("Merge successful");
                     Ok(())
