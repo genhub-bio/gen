@@ -24,11 +24,11 @@ _INSTALL_HINT = (
     "# To include the notebook widget, please reinstall as gen[jupyter].\n"
 )
 
-# Shown everywhere else (plain scripts, terminals, AI agent tool calls): there
-# is no interactive canvas to fall back to, so this orients a reader who has
-# never seen a Gen graph widget before at reading the ASCII grid itself.
+# Shown everywhere outside a live Jupyter kernel (plain scripts, terminals, AI
+# agent tool calls). The Jupyter extra may be installed, but no browser canvas
+# can be displayed in this session, so orient a reader to the ASCII grid.
 _TEXT_FALLBACK_HINT = (
-    "# Gen graph textual output (the optional Jupyter widget is not installed).\n"
+    "# Gen graph textual output (this session has no interactive Jupyter display).\n"
     "# This is an ASCII rendering of the native layout: each character is one\n"
     "# terminal cell from the Rust layout engine; UPPERCASE marks a highlighted\n"
     "# annotation region, lowercase is unhighlighted sequence/graph structure.\n"
@@ -36,8 +36,24 @@ _TEXT_FALLBACK_HINT = (
     "# .scroll_up()/.scroll_down(), .next_page()/.prev_page() for multi-page samples,\n"
     "# and .go_to(target)/.show(target) to jump to a Position/Locus/Annotation; call\n"
     "# refresh() or repr() again after any of these to see the update.\n"
-    "# To install the interactive notebook widget instead, reinstall as gen[jupyter].\n"
+    "# In a live Jupyter kernel with gen[jupyter] installed, plot() opens an interactive canvas.\n"
 )
+
+# Text fallback output can occur many times in one notebook or agent session.
+# Show the orientation once, when the first frame is actually displayed, then
+# keep later frames compact. A module global naturally lasts for the current
+# Python process (and therefore the current Jupyter kernel).
+_text_fallback_hint_shown = False
+
+
+def _text_fallback_hint() -> str:
+    """Return the one-time explanation for the first displayed text frame."""
+    global _text_fallback_hint_shown
+
+    if _text_fallback_hint_shown:
+        return ""
+    _text_fallback_hint_shown = True
+    return _INSTALL_HINT if _in_jupyter_kernel() else _TEXT_FALLBACK_HINT
 
 
 # Public GraphWidget methods with no TextGraphWidget equivalent. Kept as a
@@ -65,7 +81,7 @@ _GRAPHWIDGET_ONLY_METHODS = frozenset(
 
 
 class TextGraphWidget:
-    """Render a Gen graph as plain text when Jupyter extras are unavailable.
+    """Render a Gen graph as plain text when no live Jupyter canvas is available.
 
     The native controller still owns layout and graph state, so this fallback
     remains useful in notebooks, terminals, and environments used by AI agents.
@@ -83,8 +99,9 @@ class TextGraphWidget:
 
     def __repr__(self) -> str:
         """Return the current native render frame as readable plain text."""
-        hint = _INSTALL_HINT if _in_jupyter_kernel() else _TEXT_FALLBACK_HINT
-        return hint + frame_text(self.frame, self.page_count, self.page_index)
+        return _text_fallback_hint() + frame_text(
+            self.frame, self.page_count, self.page_index
+        )
 
     def _load_initial_annotations(self, colors) -> None:
         """Apply the same annotation loading policy as the interactive widget."""
@@ -230,5 +247,7 @@ class TextGraphWidget:
         typo.
         """
         if name in _GRAPHWIDGET_ONLY_METHODS:
-            raise AttributeError("install gen[jupyter] to get the full suite of functions")
+            raise AttributeError(
+                "install gen[jupyter] to get the full suite of functions"
+            )
         raise AttributeError(f"'TextGraphWidget' object has no attribute {name!r}")

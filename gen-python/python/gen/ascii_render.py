@@ -2,9 +2,9 @@
 
 Shared by ``jupyter_widget.GraphWidget.__repr__`` (the ``text/plain``
 fallback used whenever the widget JS can't run) and
-``text_widget.TextGraphWidget`` (used when the ``jupyter`` extra isn't
-installed at all). Neither caller's import requirements apply here: this
-module must stay free of anywidget/ipywidgets/traitlets imports.
+``text_widget.TextGraphWidget`` (used without the extra or outside a live
+Jupyter kernel). Neither caller's import requirements apply here: this module
+must stay free of anywidget/ipywidgets/traitlets imports.
 """
 
 from __future__ import annotations

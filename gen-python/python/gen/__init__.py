@@ -29,24 +29,20 @@ from .gen import (
     clone,
 )
 
-# Jupyter widget — use a dependency-free textual fallback when the extra is absent.
-try:
-    from .jupyter_widget import GraphWidget, freeze_all_widgets
-except ImportError:
-    import warnings
+# Only a live Jupyter kernel can display the browser canvas. Route terminals,
+# scripts, and AI REPLs to the text widget even when the optional dependencies
+# happen to be installed.
+from .text_widget import TextGraphWidget, _in_jupyter_kernel
 
-    from .text_widget import TextGraphWidget as GraphWidget
-    from .text_widget import _in_jupyter_kernel
-
+if _in_jupyter_kernel():
+    try:
+        from .jupyter_widget import GraphWidget, freeze_all_widgets
+    except ImportError:
+        GraphWidget = TextGraphWidget
+        freeze_all_widgets = None
+else:
+    GraphWidget = TextGraphWidget
     freeze_all_widgets = None
-
-    if _in_jupyter_kernel():
-        warnings.warn(
-            "gen[jupyter] is not installed, so GraphWidget falls back to a plain-text "
-            "renderer: no interactive canvas, highlighting, or annotation tracks. Run "
-            "`pip install gen[jupyter]` and restart the kernel for the full widget.",
-            stacklevel=2,
-        )
 
 __all__ = [
     "Annotation",
