@@ -520,6 +520,15 @@ fn merge_commit(conn: &GraphConnection, message: &str) -> SqlResult<DoltHashId> 
 
 /// Merges a branch or commit reference into the active branch and returns the resulting hash.
 ///
+/// The `dolt_merge('--no-commit', reference)` outcomes are:
+///
+/// | Result | Meaning |
+/// | --- | --- |
+/// | `Text("Already up to date")` | No-op; return the current HEAD. |
+/// | `Text(commit hash)` | Fast-forward; return the resulting hash. |
+/// | `Integer(0)` | Clean non-fast-forward working set; requires `dolt_commit`. |
+/// | `SQLITE_ERROR` with data conflicts | Conflict rows materialized for selective resolution before commit. |
+///
 /// Callers must invoke this operation inside [`GraphConnection::with_transaction`] for the
 /// supported merge workflow: the transaction both rolls back failed merges and keeps DoltLite
 /// conflict state available while conflicts are inspected and resolved.
@@ -1099,7 +1108,9 @@ impl HistoryStore for DoltHistoryStore<'_> {
 mod tests {
     use std::{collections::HashMap, path::PathBuf};
 
-    use gen_core::{BranchName, CommitRef, DoltHashId, HashId};
+    use gen_core::{
+        BranchName, CommitRef, DoltHashId, HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand,
+    };
     use tempfile::tempdir;
 
     use super::{
@@ -1113,12 +1124,15 @@ mod tests {
     use crate::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         assets::{AssetRef, AssetRole, OperationAsset, OperationKind},
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
         db,
+        edge::Edge,
         history::{HistoryError, HistoryStore},
         operations::Defaults,
+        path::Path,
         sample::{NewSample, Sample},
-        test_helpers::{get_connection, setup_gen_on_disk},
+        test_helpers::{create_bg, get_connection, setup_gen_on_disk},
     };
 
     #[test]
@@ -1497,36 +1511,60 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_resolves_created_on_only_conflict_and_merges_independent_row() {
+    fn test_merge_resolves_block_group_edge_created_on_only_conflict_and_merges_independent_row() {
         let conn = get_connection(None).expect("should create graph database");
 
-        conn.execute(
-            "INSERT INTO gen_operation_log (id, operation_kind, command, created_on) \
-             VALUES (x'01', 'base', 'base', 1)",
-            [],
+        Collection::create(&conn, "merge-collection").expect("should create merge collection");
+        let block_group = create_bg(&conn, "merge-collection", "merge-sample", "chr1");
+        let edge = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
         )
-        .expect("should create base created_on row");
+        .expect("should create merge edge");
+        let base_block_group_edge = BlockGroupEdgeData {
+            block_group_id: block_group.id,
+            edge_id: edge.id,
+            chromosome_index: 0,
+            phased: 0,
+        };
+        let base_block_group_edge_id = base_block_group_edge.id_hash();
+        BlockGroupEdge::bulk_create(&conn, std::slice::from_ref(&base_block_group_edge));
+        conn.execute(
+            "UPDATE block_group_edges SET created_on = ?1 WHERE id = ?2",
+            rusqlite::params![1_i64, base_block_group_edge_id],
+        )
+        .expect("should set deterministic base timestamp");
         commit_all(&conn, "base").expect("should commit base state");
         create_branch(&conn, "feature").expect("should create feature branch");
 
         checkout(&conn, "feature").expect("should checkout feature branch");
         conn.execute(
-            "UPDATE gen_operation_log SET created_on = 2 WHERE id = x'01'",
-            [],
+            "UPDATE block_group_edges SET created_on = ?1 WHERE id = ?2",
+            rusqlite::params![2_i64, base_block_group_edge_id],
         )
         .expect("should update feature timestamp");
+        let independent_block_group_edge = BlockGroupEdgeData {
+            chromosome_index: 1,
+            ..base_block_group_edge
+        };
+        let independent_block_group_edge_id = independent_block_group_edge.id_hash();
+        BlockGroupEdge::bulk_create(&conn, std::slice::from_ref(&independent_block_group_edge));
         conn.execute(
-            "INSERT INTO gen_operation_log (id, operation_kind, command, created_on) \
-             VALUES (x'02', 'feature', 'feature', 2)",
-            [],
+            "UPDATE block_group_edges SET created_on = ?1 WHERE id = ?2",
+            rusqlite::params![20_i64, independent_block_group_edge_id],
         )
-        .expect("should insert independent feature row");
+        .expect("should set independent feature timestamp");
         let source_hash = commit_all(&conn, "feature").expect("should commit feature state");
 
         checkout(&conn, "main").expect("should checkout main branch");
         conn.execute(
-            "UPDATE gen_operation_log SET created_on = 3 WHERE id = x'01'",
-            [],
+            "UPDATE block_group_edges SET created_on = ?1 WHERE id = ?2",
+            rusqlite::params![3_i64, base_block_group_edge_id],
         )
         .expect("should update target timestamp");
         let target_hash = commit_all(&conn, "target").expect("should commit target state");
@@ -1536,8 +1574,8 @@ mod tests {
             .expect("should resolve created_on-only conflict");
         assert_eq!(
             conn.query_row(
-                "SELECT created_on FROM gen_operation_log WHERE id = x'01'",
-                [],
+                "SELECT created_on FROM block_group_edges WHERE id = ?1",
+                [&base_block_group_edge_id],
                 |row| row.get::<_, i64>(0),
             )
             .expect("should read the resolved row"),
@@ -1546,12 +1584,12 @@ mod tests {
         );
         assert_eq!(
             conn.query_row(
-                "SELECT operation_kind FROM gen_operation_log WHERE id = x'02'",
-                [],
-                |row| row.get::<_, String>(0),
+                "SELECT created_on FROM block_group_edges WHERE id = ?1",
+                [&independent_block_group_edge_id],
+                |row| row.get::<_, i64>(0),
             )
             .expect("should read the independent source row"),
-            "feature",
+            20,
             "an independent source row should be merged"
         );
         assert_eq!(
@@ -1568,34 +1606,98 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_rejects_created_on_and_other_field_conflict_atomically() {
+    fn test_merge_rejects_block_group_edge_and_path_conflicts_atomically() {
         let conn = get_connection(None).expect("should create graph database");
 
-        conn.execute(
-            "INSERT INTO gen_operation_log (id, operation_kind, command, created_on) \
-             VALUES (x'11', 'base', 'base', 1)",
-            [],
+        Collection::create(&conn, "merge-collection").expect("should create merge collection");
+        let block_group = create_bg(&conn, "merge-collection", "merge-sample", "chr1");
+        let base_edge = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
         )
-        .expect("should create base conflict row");
+        .expect("should create base edge");
+        let feature_edge = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            1,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            1,
+            Strand::Forward,
+        )
+        .expect("should create feature edge");
+        let target_edge = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            2,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            2,
+            Strand::Forward,
+        )
+        .expect("should create target edge");
+        let base_block_group_edge = BlockGroupEdgeData {
+            block_group_id: block_group.id,
+            edge_id: base_edge.id,
+            chromosome_index: 0,
+            phased: 0,
+        };
+        let feature_block_group_edge = BlockGroupEdgeData {
+            edge_id: feature_edge.id,
+            ..base_block_group_edge
+        };
+        let target_block_group_edge = BlockGroupEdgeData {
+            edge_id: target_edge.id,
+            ..base_block_group_edge
+        };
+        let base_block_group_edge_id = base_block_group_edge.id_hash();
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[
+                base_block_group_edge,
+                feature_block_group_edge,
+                target_block_group_edge,
+            ],
+        );
+        let path = Path::create(&conn, "chr1", &block_group.id, &[base_edge.id])
+            .expect("should create base path");
+        conn.execute(
+            "UPDATE block_group_edges SET created_on = ?1 WHERE id = ?2",
+            rusqlite::params![1_i64, base_block_group_edge_id],
+        )
+        .expect("should set deterministic base timestamp");
         commit_all(&conn, "base").expect("should commit base state");
         create_branch(&conn, "feature").expect("should create feature branch");
 
         checkout(&conn, "feature").expect("should checkout feature branch");
         conn.execute(
-            "UPDATE gen_operation_log \
-             SET operation_kind = 'feature', created_on = 2 WHERE id = x'11'",
-            [],
+            "UPDATE block_group_edges SET created_on = ?1 WHERE id = ?2",
+            rusqlite::params![2_i64, base_block_group_edge_id],
         )
-        .expect("should update feature conflict row");
+        .expect("should update feature timestamp");
+        conn.execute(
+            "UPDATE paths SET edge_ids = ?1 WHERE id = ?2",
+            rusqlite::params![feature_edge.id.0.to_vec(), path.id],
+        )
+        .expect("should update feature path edges");
         let source_hash = commit_all(&conn, "feature").expect("should commit feature conflict");
 
         checkout(&conn, "main").expect("should checkout main branch");
         conn.execute(
-            "UPDATE gen_operation_log \
-             SET operation_kind = 'target', created_on = 3 WHERE id = x'11'",
-            [],
+            "UPDATE block_group_edges SET created_on = ?1 WHERE id = ?2",
+            rusqlite::params![3_i64, base_block_group_edge_id],
         )
-        .expect("should update target conflict row");
+        .expect("should update target timestamp");
+        conn.execute(
+            "UPDATE paths SET edge_ids = ?1 WHERE id = ?2",
+            rusqlite::params![target_edge.id.0.to_vec(), path.id],
+        )
+        .expect("should update target path edges");
         let target_hash = commit_all(&conn, "target").expect("should commit target conflict");
 
         let merge_error = conn
@@ -1613,13 +1715,18 @@ mod tests {
         );
         assert_eq!(
             conn.query_row(
-                "SELECT operation_kind, created_on FROM gen_operation_log WHERE id = x'11'",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                "SELECT created_on FROM block_group_edges WHERE id = ?1",
+                [&base_block_group_edge_id],
+                |row| row.get::<_, i64>(0),
             )
-            .expect("should read target data after failed merge"),
-            ("target".to_string(), 3),
-            "an aborted merge must restore the target row"
+            .expect("should read target block group edge after failed merge"),
+            3,
+            "an aborted merge must restore the target block group edge"
+        );
+        assert_eq!(
+            Path::edge_ids_for_path(&conn, &path.id, None),
+            vec![target_edge.id],
+            "an aborted merge must restore the target path edges"
         );
         assert!(
             status_rows(&conn)
