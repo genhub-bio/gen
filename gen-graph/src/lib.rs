@@ -110,6 +110,136 @@ pub enum GraphError {
     NoPath,
 }
 
+/// Find graph positions a given number of bases from an anchor.
+///
+/// The callback is invoked when traversal reaches a graph boundary and may add topology before
+/// traversal retries. Keeping the traversal here makes it reusable by callers that own different
+/// graph-loading policies, while the graph algorithm itself remains independent of persistence.
+pub fn find_offset(
+    graph: &mut GenGraph,
+    anchor: &GraphNodePosition,
+    distance: i64,
+    mut expand: impl FnMut(&mut GenGraph, HashId) -> bool,
+) -> Result<Vec<GraphNodePosition>, GraphError> {
+    if distance == 0 {
+        return Ok(vec![*anchor]);
+    }
+
+    match find_offset_with_optional_expansion(graph, anchor, distance, false, &mut expand) {
+        Ok(results) => Ok(results),
+        Err(GraphError::OutOfBounds(_)) => {
+            find_offset_with_optional_expansion(graph, anchor, distance, true, &mut expand)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn find_offset_with_optional_expansion(
+    graph: &mut GenGraph,
+    anchor: &GraphNodePosition,
+    distance: i64,
+    expand_through_existing_paths: bool,
+    expand: &mut impl FnMut(&mut GenGraph, HashId) -> bool,
+) -> Result<Vec<GraphNodePosition>, GraphError> {
+    let forward = distance > 0;
+    let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
+    let mut results = Vec::new();
+    let mut result_seen = HashSet::new();
+
+    queue.push_back((*anchor, distance));
+    visited.insert((*anchor, distance));
+
+    while let Some((position, remaining)) = queue.pop_front() {
+        let node = position.graph_node;
+        let node_length = node.length();
+
+        if remaining == 0 {
+            if result_seen.insert(position) {
+                results.push(position);
+            }
+            continue;
+        }
+
+        if forward {
+            let in_node = node_length - position.offset;
+            if remaining <= in_node {
+                let result = GraphNodePosition {
+                    graph_node: node,
+                    offset: position.offset + remaining,
+                };
+                if result_seen.insert(result) {
+                    results.push(result);
+                }
+                continue;
+            }
+
+            let mut neighbors: Vec<GraphNode> = graph
+                .neighbors_directed(node, Direction::Outgoing)
+                .collect();
+            if (neighbors.is_empty() || expand_through_existing_paths)
+                && expand(graph, node.node_id)
+            {
+                neighbors = graph
+                    .neighbors_directed(node, Direction::Outgoing)
+                    .collect();
+            }
+
+            for neighbor in neighbors {
+                let next_position = GraphNodePosition {
+                    graph_node: neighbor,
+                    offset: 0,
+                };
+                let next_remaining = remaining - in_node;
+                if visited.insert((next_position, next_remaining)) {
+                    queue.push_back((next_position, next_remaining));
+                }
+            }
+        } else {
+            let in_node = position.offset;
+            let absolute_remaining = -remaining;
+            if absolute_remaining <= in_node {
+                let result = GraphNodePosition {
+                    graph_node: node,
+                    offset: position.offset + remaining,
+                };
+                if result_seen.insert(result) {
+                    results.push(result);
+                }
+                continue;
+            }
+
+            let mut neighbors: Vec<GraphNode> = graph
+                .neighbors_directed(node, Direction::Incoming)
+                .collect();
+            if (neighbors.is_empty() || expand_through_existing_paths)
+                && expand(graph, node.node_id)
+            {
+                neighbors = graph
+                    .neighbors_directed(node, Direction::Incoming)
+                    .collect();
+            }
+
+            for neighbor in neighbors {
+                let next_position = GraphNodePosition {
+                    graph_node: neighbor,
+                    offset: neighbor.length(),
+                };
+                let next_remaining = remaining + in_node;
+                if visited.insert((next_position, next_remaining)) {
+                    queue.push_back((next_position, next_remaining));
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Err(GraphError::OutOfBounds(distance));
+    }
+
+    Ok(results)
+}
+
 // #[derive(Debug)]
 // pub struct OperationGraph {
 //     pub graph: DiGraphMap<usize, ()>,
@@ -682,6 +812,134 @@ mod tests {
     use petgraph::graphmap::DiGraphMap;
 
     use super::*;
+
+    fn test_edge(edge_id: &str) -> Vec<GraphEdge> {
+        vec![GraphEdge {
+            edge_id: HashId::convert_str(edge_id),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 0,
+        }]
+    }
+
+    fn variable_length_branched_graph() -> GenGraph {
+        let node_aaa = GraphNode {
+            node_id: HashId::convert_str("node-aaa"),
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let node_cc = GraphNode {
+            node_id: HashId::convert_str("node-cc"),
+            sequence_start: 0,
+            sequence_end: 2,
+        };
+        let node_gggg = GraphNode {
+            node_id: HashId::convert_str("node-gggg"),
+            sequence_start: 0,
+            sequence_end: 4,
+        };
+        let node_ttt = GraphNode {
+            node_id: HashId::convert_str("node-ttt"),
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+
+        let mut graph = GenGraph::new();
+        graph.add_edge(node_aaa, node_cc, test_edge("edge-aaa-cc"));
+        graph.add_edge(node_aaa, node_gggg, test_edge("edge-aaa-gggg"));
+        graph.add_edge(node_cc, node_ttt, test_edge("edge-cc-ttt"));
+        graph.add_edge(node_gggg, node_ttt, test_edge("edge-gggg-ttt"));
+        graph
+    }
+
+    fn position_set(positions: &[GraphNodePosition]) -> HashSet<(HashId, i64)> {
+        positions
+            .iter()
+            .map(|position| (position.graph_node.node_id, position.offset))
+            .collect()
+    }
+
+    #[test]
+    fn test_find_offset_in_variable_length_branch_finds_middle_nodes() {
+        let mut graph = variable_length_branched_graph();
+        let aaa_anchor = GraphNodePosition {
+            graph_node: GraphNode {
+                node_id: HashId::convert_str("node-aaa"),
+                sequence_start: 0,
+                sequence_end: 3,
+            },
+            offset: 2,
+        };
+
+        let from_aaa = find_offset(&mut graph, &aaa_anchor, 2, |_, _| false).unwrap();
+        assert_eq!(
+            position_set(&from_aaa),
+            HashSet::from([
+                (HashId::convert_str("node-cc"), 1),
+                (HashId::convert_str("node-gggg"), 1)
+            ])
+        );
+
+        let ttt_anchor = GraphNodePosition {
+            graph_node: GraphNode {
+                node_id: HashId::convert_str("node-ttt"),
+                sequence_start: 0,
+                sequence_end: 3,
+            },
+            offset: 0,
+        };
+        let from_ttt = find_offset(&mut graph, &ttt_anchor, -2, |_, _| false).unwrap();
+        assert_eq!(
+            position_set(&from_ttt),
+            HashSet::from([
+                (HashId::convert_str("node-cc"), 0),
+                (HashId::convert_str("node-gggg"), 2)
+            ])
+        );
+    }
+
+    #[test]
+    fn test_find_offset_in_variable_length_branch_returns_single_position_within_node() {
+        let mut graph = variable_length_branched_graph();
+        let anchor = GraphNodePosition {
+            graph_node: GraphNode {
+                node_id: HashId::convert_str("node-aaa"),
+                sequence_start: 0,
+                sequence_end: 3,
+            },
+            offset: 1,
+        };
+
+        let positions = find_offset(&mut graph, &anchor, 1, |_, _| false).unwrap();
+        assert_eq!(
+            position_set(&positions),
+            HashSet::from([(HashId::convert_str("node-aaa"), 2)])
+        );
+    }
+
+    #[test]
+    fn test_find_offset_in_variable_length_branch_finds_different_ttt_offsets() {
+        let mut graph = variable_length_branched_graph();
+        let anchor = GraphNodePosition {
+            graph_node: GraphNode {
+                node_id: HashId::convert_str("node-aaa"),
+                sequence_start: 0,
+                sequence_end: 3,
+            },
+            offset: 2,
+        };
+
+        let positions = find_offset(&mut graph, &anchor, 6, |_, _| false).unwrap();
+        assert_eq!(
+            position_set(&positions),
+            HashSet::from([
+                (HashId::convert_str("node-ttt"), 1),
+                (HashId::convert_str("node-ttt"), 3)
+            ])
+        );
+    }
 
     #[test]
     fn test_path_graph() {

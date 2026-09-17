@@ -876,7 +876,12 @@ mod tests {
     };
 
     use flate2::{Compression, write::GzEncoder};
-    use gen_core::{HashId, Sha256Hash, Strand};
+    use gen_annotations::projection as annotation_projection;
+    use gen_core::{
+        HashId, Sha256Hash, Strand,
+        range::Range,
+        region::{Region, RegionResolver as _},
+    };
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
@@ -1283,6 +1288,193 @@ mod tests {
             names,
             ["cds1", "cds2", "cds3", "p1", "p2", "p3"],
             "annotations should be queried with the entry source ID and projected onto the selected graph"
+        );
+    }
+
+    #[test]
+    fn test_file_annotation_relative_region_uses_shared_resolver() {
+        let context = setup_gen_on_disk();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let gff_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+        let fasta_path = fasta_path
+            .to_str()
+            .expect("should encode fixture FASTA path")
+            .to_string();
+        let gff_path = gff_path
+            .to_str()
+            .expect("should encode fixture GFF path")
+            .to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            "test",
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .expect("should import simple FASTA fixture");
+        add_annotation_file(
+            &context,
+            &gff_path,
+            Some("gff3"),
+            None,
+            Some("simple.gff"),
+            Some("add simple GFF annotation"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should add simple GFF fixture");
+
+        let conn = context.graph().conn();
+        let entry = load_annotation_file_entries(conn, None)
+            .into_iter()
+            .find(|entry| entry.name.as_deref() == Some("simple.gff"))
+            .expect("should find fixture annotation entry");
+        let block_group = Sample::get_block_groups(conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find fixture block group");
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)
+            .expect("should load fixture graph");
+        let node_filter = graph
+            .nodes()
+            .map(|node| node.node_id)
+            .collect::<HashSet<_>>();
+        let loaded = load_annotation_file_track(&AnnotationFileTrackRequest {
+            conn,
+            history_ref: None,
+            workspace: context.workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            block_group_name: Some("m123"),
+            query_window: Some((0, 34)),
+            node_filter: &node_filter,
+            entry: &entry,
+        })
+        .expect("should load simple GFF fixture through the file track path");
+        let file_span = loaded
+            .track
+            .annotations
+            .iter()
+            .find(|annotation| annotation.name == "gene-a0001")
+            .expect("should load gene-a0001 from simple GFF fixture");
+        let file_segments = file_span
+            .segments
+            .iter()
+            .map(|segment| annotation_projection::AnnotationSegment {
+                node_id: segment.node_id,
+                range: Range {
+                    start: segment.start,
+                    end: segment.end,
+                },
+                strand: segment.strand,
+            })
+            .collect::<Vec<_>>();
+        let mut file_graph = graph.clone();
+        let file_region = gen_annotations::region::resolve_annotation_region(
+            &Region::parse("gene-a0001:-3").expect("should parse annotation-relative region"),
+            &file_segments,
+            &mut file_graph,
+        )
+        .expect("should resolve file-backed annotation relative to its start");
+        assert_eq!(file_region.start_anchors.len(), 1);
+        assert_eq!(file_region.end_anchors.len(), 1);
+        assert_eq!(file_region.start_anchors[0].coordinate(), 1);
+        assert_eq!(file_region.end_anchors[0].coordinate(), 2);
+        assert_eq!(file_region.segments.len(), 1);
+        assert_eq!(file_region.segments[0].range.start, 1);
+        assert_eq!(file_region.segments[0].range.end, 2);
+
+        let zero_region = gen_annotations::region::resolve_annotation_region(
+            &Region::parse("gene-a0001:0").expect("should parse zero annotation offset"),
+            &file_segments,
+            &mut file_graph,
+        )
+        .expect("should resolve a zero annotation offset");
+        assert_eq!(
+            (
+                zero_region.start_anchors[0].coordinate(),
+                zero_region.end_anchors[0].coordinate()
+            ),
+            (4, 5)
+        );
+        assert_eq!(zero_region.segments[0].range, Range { start: 4, end: 5 });
+
+        let positive_slice = gen_annotations::region::resolve_annotation_region(
+            &Region::parse("gene-a0001:5-8").expect("should parse positive annotation slice"),
+            &file_segments,
+            &mut file_graph,
+        )
+        .expect("should resolve a positive annotation slice");
+        assert_eq!(
+            (
+                positive_slice.start_anchors[0].coordinate(),
+                positive_slice.end_anchors[0].coordinate()
+            ),
+            (8, 12)
+        );
+        assert_eq!(
+            positive_slice.segments[0].range,
+            Range { start: 8, end: 12 }
+        );
+
+        let reverse_segments = file_segments
+            .iter()
+            .map(|segment| annotation_projection::AnnotationSegment {
+                strand: Strand::Reverse,
+                ..segment.clone()
+            })
+            .collect::<Vec<_>>();
+        let reverse_region = gen_annotations::region::resolve_annotation_region(
+            &Region::parse("gene-a0001:0").expect("should parse reverse annotation offset"),
+            &reverse_segments,
+            &mut file_graph,
+        )
+        .expect("should resolve a reverse annotation offset");
+        assert_eq!(reverse_region.anchor.offset, 20);
+        assert_eq!(
+            (
+                reverse_region.start_anchors[0].coordinate(),
+                reverse_region.end_anchors[0].coordinate()
+            ),
+            (20, 19)
+        );
+        assert_eq!(
+            reverse_region.segments[0].range,
+            Range { start: 19, end: 20 }
+        );
+
+        add_annotation(
+            &context,
+            "test",
+            "gene-persisted",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:4-20",
+        )
+        .expect("should create persisted comparison annotation");
+        let persisted = gen_models::annotations::Annotation::resolve(
+            &Region::parse("gene-persisted").expect("should parse persisted annotation name"),
+            conn,
+            "test",
+            Sample::DEFAULT_NAME,
+        )
+        .expect("should load persisted comparison annotation");
+        let persisted_segments = annotation_projection::annotation_segments(conn, &persisted, None);
+        let mut persisted_graph = graph;
+        let persisted_region = gen_annotations::region::resolve_annotation_region(
+            &Region::parse("gene-persisted:-3").expect("should parse persisted relative region"),
+            &persisted_segments,
+            &mut persisted_graph,
+        )
+        .expect("should resolve persisted annotation with shared resolver");
+        assert_eq!(
+            file_region.start_anchors, persisted_region.start_anchors,
+            "file-backed and persisted segments should resolve to the same start"
+        );
+        assert_eq!(
+            file_region.end_anchors, persisted_region.end_anchors,
+            "file-backed and persisted segments should resolve to the same end"
         );
     }
 

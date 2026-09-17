@@ -9,6 +9,46 @@ pub struct Region {
     pub end: Option<i64>,
 }
 
+/// Coordinate space used when resolving a parsed region into internal bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegionCoordinateSpace {
+    /// Coordinates are absolute within a path-like feature.
+    Absolute {
+        /// Exclusive upper bound of the path-like feature in internal coordinates.
+        length: i64,
+    },
+    /// Coordinates are relative to an existing feature interval.
+    Relative {
+        /// Internal coordinate of the existing feature's start boundary.
+        anchor_start: i64,
+        /// Internal coordinate of the existing feature's exclusive end boundary.
+        anchor_end: i64,
+    },
+}
+
+/// Internal zero-based bounds produced from a parsed region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegionCoordinates {
+    /// Inclusive internal start boundary.
+    pub start: i64,
+    /// Exclusive internal end boundary.
+    pub end: i64,
+}
+
+impl RegionCoordinates {
+    /// Widen an exact point to the one-base half-open interval it identifies.
+    pub fn into_half_open_point(self) -> Self {
+        if self.start == self.end {
+            Self {
+                end: self.end.saturating_add(1),
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+}
+
 #[derive(Debug, Error, PartialEq)]
 pub enum RegionParseError {
     #[error("Region start is less than region end")]
@@ -50,6 +90,43 @@ pub trait RegionResolver: Sized {
 }
 
 impl Region {
+    /// Resolve parsed coordinates in an explicitly selected internal coordinate space.
+    ///
+    /// This method preserves parsed zero-based coordinates. User-facing one-based search input
+    /// must first pass through [`normalize_user_search_region`]. Exact points remain zero-width
+    /// here so callers that need a selected base can explicitly call
+    /// [`RegionCoordinates::into_half_open_point`].
+    pub fn resolve_coordinates(
+        &self,
+        coordinate_space: RegionCoordinateSpace,
+    ) -> Result<RegionCoordinates, RegionParseError> {
+        let (anchor_start, anchor_end, absolute_length) = match coordinate_space {
+            RegionCoordinateSpace::Absolute { length } => (0, length, Some(length)),
+            RegionCoordinateSpace::Relative {
+                anchor_start,
+                anchor_end,
+            } => (anchor_start, anchor_end, None),
+        };
+
+        match (self.start, self.end, absolute_length) {
+            (None, None, _) => Ok(RegionCoordinates {
+                start: anchor_start,
+                end: anchor_end,
+            }),
+            (Some(start), None, Some(length)) => Ok(RegionCoordinates { start, end: length }),
+            (Some(start), None, None) => Ok(RegionCoordinates {
+                start: anchor_start + start,
+                end: anchor_end,
+            }),
+            (Some(start), Some(end), Some(_)) => Ok(RegionCoordinates { start, end }),
+            (Some(start), Some(end), None) => Ok(RegionCoordinates {
+                start: anchor_start + start,
+                end: anchor_start + end,
+            }),
+            (None, Some(_), _) => Err(RegionParseError::InvalidSyntax),
+        }
+    }
+
     /// Parse a region string.
     ///
     /// Supported forms:
@@ -157,6 +234,20 @@ impl Region {
     }
 }
 
+/// Normalize a user-facing search region exactly once before internal resolution.
+///
+/// Positive starts are one-based and become zero-based. Ends, zero starts, and negative starts
+/// already use the relative search convention and are preserved unchanged.
+pub fn normalize_user_search_region(region: &Region) -> Region {
+    Region {
+        name: region.name.clone(),
+        start: region
+            .start
+            .map(|start| if start > 0 { start - 1 } else { start }),
+        end: region.end,
+    }
+}
+
 impl std::fmt::Display for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.start, self.end) {
@@ -209,6 +300,74 @@ mod tests {
                 start: Some(100),
                 end: Some(100),
             })
+        );
+    }
+
+    #[test]
+    fn test_resolve_coordinates_in_absolute_and_relative_spaces() {
+        let absolute = Region::parse("chr1:5-10").unwrap();
+        assert_eq!(
+            absolute
+                .resolve_coordinates(RegionCoordinateSpace::Absolute { length: 20 })
+                .unwrap(),
+            RegionCoordinates { start: 5, end: 10 }
+        );
+
+        let relative = Region::parse("gene:5-10").unwrap();
+        assert_eq!(
+            relative
+                .resolve_coordinates(RegionCoordinateSpace::Relative {
+                    anchor_start: 100,
+                    anchor_end: 120,
+                })
+                .unwrap(),
+            RegionCoordinates {
+                start: 105,
+                end: 110,
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_coordinates_preserves_points_and_rejects_open_start() {
+        let point = Region::parse("gene:0").unwrap();
+        let coordinates = point
+            .resolve_coordinates(RegionCoordinateSpace::Relative {
+                anchor_start: 10,
+                anchor_end: 20,
+            })
+            .unwrap();
+        assert_eq!(coordinates, RegionCoordinates { start: 10, end: 10 });
+        assert_eq!(
+            coordinates.into_half_open_point(),
+            RegionCoordinates { start: 10, end: 11 }
+        );
+
+        let open_start = Region::parse("gene:..5").unwrap();
+        assert_eq!(
+            open_start
+                .resolve_coordinates(RegionCoordinateSpace::Relative {
+                    anchor_start: 10,
+                    anchor_end: 20,
+                })
+                .unwrap_err(),
+            RegionParseError::InvalidSyntax
+        );
+    }
+
+    #[test]
+    fn test_normalize_user_search_region_only_converts_positive_start() {
+        assert_eq!(
+            normalize_user_search_region(&Region::parse("gene:5-20").unwrap()),
+            Region::parse("gene:4-20").unwrap()
+        );
+        assert_eq!(
+            normalize_user_search_region(&Region::parse("gene:0-0").unwrap()),
+            Region::parse("gene:0-0").unwrap()
+        );
+        assert_eq!(
+            normalize_user_search_region(&Region::parse("gene:-3--1").unwrap()),
+            Region::parse("gene:-3--1").unwrap()
         );
     }
 

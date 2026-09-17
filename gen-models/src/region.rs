@@ -1,7 +1,7 @@
 pub use gen_core::region::Region;
 use gen_core::{
     HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_terminal,
-    region::{RegionParseError, RegionResolutionError, RegionResolver},
+    region::{RegionCoordinateSpace, RegionParseError, RegionResolutionError, RegionResolver},
 };
 use gen_graph::{GraphNode, GraphNodePosition};
 use intervaltree::IntervalTree;
@@ -243,26 +243,20 @@ fn resolve_target(
     region: &Region,
     target: RegionTarget,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let (start, end) = match (region.start, region.end) {
-        (None, None) => (target.anchor_start, target.anchor_end),
-        (Some(start), None) => {
-            if target.kind == RegionTargetKind::Path || target.kind == RegionTargetKind::BlockGroup
-            {
-                (start, target.feature_length)
-            } else {
-                (target.anchor_start + start, target.anchor_end)
+    let coordinate_space = match target.kind {
+        RegionTargetKind::Path | RegionTargetKind::BlockGroup => RegionCoordinateSpace::Absolute {
+            length: target.feature_length,
+        },
+        RegionTargetKind::Annotation | RegionTargetKind::Accession => {
+            RegionCoordinateSpace::Relative {
+                anchor_start: target.anchor_start,
+                anchor_end: target.anchor_end,
             }
         }
-        (Some(start), Some(end)) => {
-            if target.kind == RegionTargetKind::Path || target.kind == RegionTargetKind::BlockGroup
-            {
-                (start, end)
-            } else {
-                (target.anchor_start + start, target.anchor_start + end)
-            }
-        }
-        (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
     };
+    let coordinates = region.resolve_coordinates(coordinate_space)?;
+    let start = coordinates.start;
+    let end = coordinates.end;
 
     let out_of_bounds = match target.kind {
         RegionTargetKind::Path | RegionTargetKind::BlockGroup => {
@@ -549,11 +543,11 @@ impl ResolvedGenRegion {
         let end_anchor = resolved.resolve_anchor(self.end, conn, workspace)?;
 
         let start_positions =
-            crate::graph::find_offset(&mut graph, &start_anchor, start_offset, |g, nid| {
+            gen_graph::find_offset(&mut graph, &start_anchor, start_offset, |g, nid| {
                 crate::graph::expand(conn, workspace, g, &self.block_group.id, nid)
             })?;
         let end_positions =
-            crate::graph::find_offset(&mut graph, &end_anchor, end_offset, |g, nid| {
+            gen_graph::find_offset(&mut graph, &end_anchor, end_offset, |g, nid| {
                 crate::graph::expand(conn, workspace, g, &self.block_group.id, nid)
             })?;
 

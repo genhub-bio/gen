@@ -1862,6 +1862,7 @@ dependencies = [
  "gen-models",
  "interavl",
  "noodles",
+ "petgraph 0.6.5",
  "rusqdoltlite",
  "tempfile",
  "thiserror 2.0.18",
