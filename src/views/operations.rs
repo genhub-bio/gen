@@ -24,7 +24,9 @@ use crate::views::{
         DiffGraphComponent, apply_diff_highlights, block_group_label, build_diff_graph_component,
         change_label_for_block_group,
     },
-    gen_graph_widget::{GenGraphNodeSizer, create_gen_graph_controller, create_gen_graph_widget},
+    gen_graph_widget::{
+        GenGraphNodeSizer, create_gen_graph_controller_without_dimming, create_gen_graph_widget,
+    },
     panels::{PanelFocus, PanelStyles, panel_block, render_status_bar},
     tui_runtime::TuiSession,
 };
@@ -180,11 +182,12 @@ fn build_graph_controller(
     empty_graph: &GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
     if let Some(component) = resolve_current_component(samples, entries, selected_entry) {
-        let mut controller = create_gen_graph_controller(component.render.graph.clone());
+        let mut controller =
+            create_gen_graph_controller_without_dimming(component.render.graph.clone());
         apply_diff_highlights(&mut controller, &component.render);
         controller
     } else {
-        create_gen_graph_controller(empty_graph.clone())
+        create_gen_graph_controller_without_dimming(empty_graph.clone())
     }
 }
 
@@ -303,7 +306,7 @@ pub fn view_operations(
     let mut expanded_samples = BTreeSet::new();
     let mut entries: Vec<ExplorerEntry> = Vec::new();
     let mut selected_entry = 0usize;
-    let mut graph_controller = create_gen_graph_controller(empty_graph.clone());
+    let mut graph_controller = create_gen_graph_controller_without_dimming(empty_graph.clone());
 
     let mut view_graph = false;
     let mut graph_view_focus = GraphViewFocus::List;
