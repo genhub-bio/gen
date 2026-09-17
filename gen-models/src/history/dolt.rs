@@ -441,6 +441,8 @@ fn resolve_created_on_conflicts(
     conn: &GraphConnection,
     conflicts: &[HistoryConflict],
 ) -> SqlResult<()> {
+    // This handles known conflict cases automatically. The cases are:
+    // Created_on dates between otherwise identical can differ. Automatically use the older created_on date for a conflict
     for conflict in conflicts {
         if conflict.num_conflicts == 0 {
             continue;
@@ -1511,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_resolves_block_group_edge_created_on_only_conflict_and_merges_independent_row() {
+    fn test_merge_resolves_created_on_conflict_and_merges_independent_row() {
         let conn = get_connection(None).expect("should create graph database");
 
         Collection::create(&conn, "merge-collection").expect("should create merge collection");
@@ -1606,7 +1608,9 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_rejects_block_group_edge_and_path_conflicts_atomically() {
+    fn test_merge_rejects_unhandled_conflicts_atomically() {
+        // Currently we do not handle a case where a path between 2 branches has a differing edge_id paths. This shows that
+        // conflict emerges and prevents the merge
         let conn = get_connection(None).expect("should create graph database");
 
         Collection::create(&conn, "merge-collection").expect("should create merge collection");
@@ -1745,7 +1749,8 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_does_not_resolve_created_on_only_conflict_in_custom_table() {
+    fn test_merge_does_not_resolve_conflict_in_custom_table() {
+        // Shows we only resolve conflicts in our explicit tables
         let conn = get_connection(None).expect("should create graph database");
 
         conn.execute(
