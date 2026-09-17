@@ -190,16 +190,21 @@ impl PySequenceGraph {
     ///     - **list** ``[color, ...]`` — assigns colours from the list cyclically.
     ///
     ///     When omitted the theme accent palette is used automatically.
-    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None))]
+    /// show_history : bool, optional
+    ///     Keep retired edit-site and pruned edges in the graph, dimmed,
+    ///     instead of removing them along with the nodes only they reach.
+    ///     Defaults to ``False``.
+    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None, show_history=false))]
     fn plot(
         slf: &Bound<'_, PySequenceGraph>,
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
         colors: Option<PyObject>,
+        show_history: bool,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow())?;
+        let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow(), show_history)?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }

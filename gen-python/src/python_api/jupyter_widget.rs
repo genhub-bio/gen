@@ -293,6 +293,7 @@ struct PageRef {
     branch: String,
     workspace: Workspace,
     block_group_id: HashId,
+    show_history: bool,
 }
 
 /// One page of a `PyGraphController`: either already loaded, or pending lazy
@@ -313,7 +314,16 @@ impl Page {
 }
 
 impl GraphPage {
-    fn new(name: String, db_path: PathBuf, workspace: Workspace, graph: GenGraph) -> Self {
+    fn new(
+        name: String,
+        db_path: PathBuf,
+        workspace: Workspace,
+        mut graph: GenGraph,
+        show_history: bool,
+    ) -> Self {
+        if !show_history {
+            BlockGroup::prune_graph(&mut graph);
+        }
         let controller = create_gen_graph_controller(graph);
         Self {
             name,
@@ -1088,7 +1098,7 @@ fn load_track_from_file(
 
 /// Build an eagerly-loaded `GraphPage` for a `PySequenceGraph`, loading its
 /// graph and auto-loading any stored annotation groups.
-fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
+fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<GraphPage> {
     let context = sg.context.clone().ok_or_else(|| {
         PyRuntimeError::new_err(
             "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
@@ -1101,7 +1111,13 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
     let graph = BlockGroup::get_graph(graph_conn, context.workspace(), &sg.id, None)
         .map_err(block_group_err_to_pyerr)?;
-    let mut page = GraphPage::new(sg.name.clone(), db_path, context.workspace().clone(), graph);
+    let mut page = GraphPage::new(
+        sg.name.clone(),
+        db_path,
+        context.workspace().clone(),
+        graph,
+        show_history,
+    );
     page.branch = Some(
         active_branch(graph_conn).map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
     );
@@ -1111,7 +1127,7 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
 
 /// Capture the information needed to lazily build a page for `sg` later,
 /// without holding a live (non-`Send`) database handle in the meantime.
-fn page_ref_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<PageRef> {
+fn page_ref_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<PageRef> {
     let context = sg.context.clone().ok_or_else(|| {
         PyRuntimeError::new_err(
             "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
@@ -1130,6 +1146,7 @@ fn page_ref_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<PageRef> {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
         workspace: context.workspace().clone(),
         block_group_id: sg.id,
+        show_history,
     })
 }
 
@@ -1164,29 +1181,44 @@ pub struct PyGraphController {
 
 impl PyGraphController {
     /// Wrap a single, already-loaded graph as a one-page controller.
-    pub fn new(db_path: PathBuf, workspace: Workspace, graph: GenGraph) -> Self {
+    pub fn new(
+        db_path: PathBuf,
+        workspace: Workspace,
+        graph: GenGraph,
+        show_history: bool,
+    ) -> Self {
         Self {
             pages: vec![Page::Loaded(Box::new(GraphPage::new(
                 String::new(),
                 db_path,
                 workspace,
                 graph,
+                show_history,
             )))],
             current_index: 0,
         }
     }
 
     /// Build a single-page controller for `sg`, loading its graph eagerly.
-    pub(crate) fn for_sequence_graph(sg: &PySequenceGraph) -> PyResult<Self> {
+    ///
+    /// `show_history` keeps retired edit-site and pruned edges (and the nodes
+    /// only they reach) in the graph, dimmed, instead of removing them.
+    pub(crate) fn for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<Self> {
         Ok(Self {
-            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(sg)?))],
+            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(
+                sg,
+                show_history,
+            )?))],
             current_index: 0,
         })
     }
 
     /// Build a multi-page controller paging through every sequence graph in
     /// `block_groups`. Each page's graph is loaded lazily on first visit.
-    pub(crate) fn for_sample(block_groups: &[PySequenceGraph]) -> PyResult<Self> {
+    pub(crate) fn for_sample(
+        block_groups: &[PySequenceGraph],
+        show_history: bool,
+    ) -> PyResult<Self> {
         if block_groups.is_empty() {
             return Err(PyRuntimeError::new_err(
                 "Sample has no sequence graphs to plot",
@@ -1194,7 +1226,7 @@ impl PyGraphController {
         }
         let pages = block_groups
             .iter()
-            .map(|sg| page_ref_for_sequence_graph(sg).map(Page::Pending))
+            .map(|sg| page_ref_for_sequence_graph(sg, show_history).map(Page::Pending))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(Self {
             pages,
@@ -1215,6 +1247,7 @@ impl PyGraphController {
                 page_ref.db_path.clone(),
                 page_ref.workspace.clone(),
                 graph,
+                page_ref.show_history,
             );
             loaded.block_group_id = Some(page_ref.block_group_id);
             loaded.branch = Some(page_ref.branch.clone());
@@ -1559,9 +1592,9 @@ mod tests {
             name: block_group.name,
             context: Some(context.clone()),
         };
-        let mut graph_controller = PyGraphController::for_sequence_graph(&sequence_graph)
+        let mut graph_controller = PyGraphController::for_sequence_graph(&sequence_graph, true)
             .expect("should create graph widget on design branch");
-        let mut sample_controller = PyGraphController::for_sample(&[sequence_graph])
+        let mut sample_controller = PyGraphController::for_sample(&[sequence_graph], true)
             .expect("should capture lazy sample page on design branch");
         history_store
             .checkout_branch(&BranchName("main".to_string()))
@@ -1591,7 +1624,7 @@ mod tests {
         let (bg_id, _) = setup_block_group(graph_handle.conn());
         let graph = BlockGroup::get_graph(graph_handle.conn(), ctx.workspace(), &bg_id, None)
             .map_err(crate::python_api::utils::block_group_err_to_pyerr)?;
-        let mut ctrl = PyGraphController::new(db_path, ctx.workspace().clone(), graph);
+        let mut ctrl = PyGraphController::new(db_path, ctx.workspace().clone(), graph, true);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }

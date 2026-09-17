@@ -322,7 +322,15 @@ impl PyRepository {
 
     // Plot
 
-    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None, colors=None))]
+    /// show_history : bool, optional
+    ///     Keep retired edit-site and pruned edges in the graph, dimmed,
+    ///     instead of removing them along with the nodes only they reach.
+    ///     Defaults to ``False``.
+    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None, colors=None, show_history=false))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors plot()'s Python signature"
+    )]
     fn plot(
         &self,
         py: Python<'_>,
@@ -331,8 +339,9 @@ impl PyRepository {
         cols: Option<u32>,
         detail: Option<&str>,
         colors: Option<PyObject>,
+        show_history: bool,
     ) -> PyResult<PyObject> {
-        let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph)?;
+        let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph, show_history)?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
