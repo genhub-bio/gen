@@ -251,6 +251,19 @@ impl<'a> PathCache<'a> {
 }
 
 impl BlockGroup {
+    pub(crate) fn resolve_candidates(
+        region: &Region,
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Vec<Self>, BlockGroupError> {
+        Ok(BlockGroup::select(conn)
+            .collection_name(collection_name)
+            .sample_name(sample_name)
+            .name_case_insensitive(&region.name)
+            .load()?)
+    }
+
     #[cfg_attr(
         all(debug_assertions, feature = "profiling"),
         tracing::instrument(skip(conn, new_block_group))
@@ -1273,12 +1286,7 @@ impl RegionResolver for BlockGroup {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = BlockGroup::select(conn)
-            .collection_name(collection_name)
-            .sample_name(sample_name)
-            .name_case_insensitive(&region.name)
-            .load()
-            .map_err(BlockGroupError::from)?;
+        let matches = Self::resolve_candidates(region, conn, collection_name, sample_name)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),

@@ -418,7 +418,12 @@ impl GraphPage {
     fn track_accent_base(&self) -> usize {
         self.overlays
             .iter()
-            .filter(|overlay| !matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path))
+            .filter(|overlay| {
+                !matches!(
+                    overlay.source,
+                    OverlaySource::Adhoc | OverlaySource::Search | OverlaySource::Path
+                )
+            })
             .count()
     }
 
@@ -974,7 +979,10 @@ impl GraphPage {
             .iter()
             .filter_map(|o| match &o.source {
                 OverlaySource::Track(name) => Some(name.as_str()),
-                OverlaySource::Annotation(_) | OverlaySource::Adhoc | OverlaySource::Path => None,
+                OverlaySource::Annotation(_)
+                | OverlaySource::Adhoc
+                | OverlaySource::Search
+                | OverlaySource::Path => None,
             })
             .filter(|n| seen.insert(*n))
             .collect();
@@ -991,10 +999,14 @@ impl GraphPage {
 
     /// Clear all annotations from the graph.
     pub fn clear_all_annotations(&mut self) {
-        // Keep ad hoc highlights (e.g. search matches) and the path; drop everything
+        // Keep ad hoc/search highlights and the path; drop everything
         // added via a track or `add_annotation`, then repaint what remains.
-        self.overlays
-            .retain(|overlay| matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path));
+        self.overlays.retain(|overlay| {
+            matches!(
+                overlay.source,
+                OverlaySource::Adhoc | OverlaySource::Search | OverlaySource::Path
+            )
+        });
         self.reapply();
     }
 

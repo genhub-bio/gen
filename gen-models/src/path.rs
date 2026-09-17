@@ -154,6 +154,26 @@ pub struct Annotation {
 }
 
 impl Path {
+    pub(crate) fn resolve_candidates(
+        region: &Region,
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Vec<(Self, BlockGroup)>, PathError> {
+        Path::select(conn)
+            .name_case_insensitive(&region.name)
+            .join_filtered_on(
+                PathSelect::BlockGroupId,
+                BlockGroupSelect::Id,
+                BlockGroup::select(conn)
+                    .collection_name(collection_name)
+                    .sample_name(sample_name),
+            )
+            .models::<(Path, BlockGroup)>()
+            .load()
+            .map_err(PathError::from)
+    }
+
     fn encode_edge_ids(edge_ids: &[HashId]) -> Vec<u8> {
         let mut encoded = Vec::with_capacity(edge_ids.len() * HASH_ID_SIZE);
         for edge_id in edge_ids {
@@ -1094,18 +1114,7 @@ impl RegionResolver for Path {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = Path::select(conn)
-            .name_case_insensitive(&region.name)
-            .join_filtered_on(
-                PathSelect::BlockGroupId,
-                BlockGroupSelect::Id,
-                BlockGroup::select(conn)
-                    .collection_name(collection_name)
-                    .sample_name(sample_name),
-            )
-            .models::<(Path, BlockGroup)>()
-            .load()
-            .map_err(PathError::from)?;
+        let matches = Self::resolve_candidates(region, conn, collection_name, sample_name)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),

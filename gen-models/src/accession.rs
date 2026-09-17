@@ -249,6 +249,25 @@ pub struct NewAccession {
 }
 
 impl Accession {
+    pub(crate) fn resolve_candidates(
+        region: &Region,
+        conn: &GraphConnection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Vec<Self>, AccessionError> {
+        Accession::select(conn)
+            .name_case_insensitive(&region.name)
+            .join_filtered_on(
+                AccessionSelect::BlockGroupId,
+                BlockGroupSelect::Id,
+                BlockGroup::select(conn)
+                    .collection_name(collection_name)
+                    .sample_name(sample_name),
+            )
+            .load()
+            .map_err(AccessionError::from)
+    }
+
     /// An accession is an ordered array of slices of nodes. The purpose
     /// of an accession is to provide additional layers of information to
     /// a graph. These extra pieces of information can be features such
@@ -604,17 +623,7 @@ impl RegionResolver for Accession {
         collection_name: &str,
         sample_name: &str,
     ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = Accession::select(conn)
-            .name_case_insensitive(&region.name)
-            .join_filtered_on(
-                AccessionSelect::BlockGroupId,
-                BlockGroupSelect::Id,
-                BlockGroup::select(conn)
-                    .collection_name(collection_name)
-                    .sample_name(sample_name),
-            )
-            .load()
-            .map_err(AccessionError::from)?;
+        let matches = Self::resolve_candidates(region, conn, collection_name, sample_name)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),

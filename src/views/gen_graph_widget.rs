@@ -620,7 +620,7 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
 
     // DB-loaded tracks are too busy to paint at minimal detail. At truncated detail, a span
     // confined to a partial slice of a single node remains suppressed for ordinary annotations,
-    // while an ad-hoc search highlight stays visible as the explicit user target.
+    // while explicit search/ad-hoc highlights stay visible as user targets.
     let mut span_indices: Vec<usize> = overlays
         .iter()
         .enumerate()
@@ -635,7 +635,10 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
                 })
                 .filter(|span| {
                     detail_level != VisualDetail::Truncated
-                        || matches!(&overlay.source, OverlaySource::Adhoc)
+                        || matches!(
+                            &overlay.source,
+                            OverlaySource::Adhoc | OverlaySource::Search
+                        )
                         || span_should_show_in_truncated(span, graph)
                 })
                 .map(|_| idx)

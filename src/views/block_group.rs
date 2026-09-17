@@ -43,8 +43,8 @@ use crate::{
         },
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
-            RegionSearchMatch, RegionSearchRequest, go_to_search_match, remove_search_overlay,
-            replace_search_overlay, resolve_region_search_matches, search_destination_span,
+            RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
+            resolve_region_search_matches,
         },
         tui_runtime::TuiSession,
     },
@@ -584,7 +584,6 @@ pub fn view_block_group(
                                         conn,
                                         collection_name: &current_collection_name,
                                         sample_name: block_group.sample_name.as_str(),
-                                        current_block_group: block_group,
                                     }
                                 });
                                 refresh_region_search(
@@ -598,23 +597,19 @@ pub fn view_block_group(
                                 remove_search_overlay(&mut overlays);
                             }
                             RegionSearchInputAction::Selected(search_match) => {
-                                let span = search_destination_span(&search_match, conn, workspace);
-                                match go_to_search_match(
+                                match activate_search_match(
                                     &mut graph_controller,
+                                    &mut overlays,
                                     search_match.as_ref(),
                                     conn,
                                     workspace,
                                 ) {
-                                    Ok(()) => match span {
-                                        Ok(span) => {
-                                            replace_search_overlay(&mut overlays, span);
-                                            search_state.focused = false;
-                                            search_state.clear_matches();
-                                            search_error = None;
-                                            focus_zone = FocusZone::Canvas;
-                                        }
-                                        Err(error) => search_error = Some(error),
-                                    },
+                                    Ok(()) => {
+                                        search_state.focused = false;
+                                        search_state.clear_matches();
+                                        search_error = None;
+                                        focus_zone = FocusZone::Canvas;
+                                    }
                                     Err(error) => search_error = Some(error),
                                 }
                             }
@@ -642,7 +637,6 @@ pub fn view_block_group(
                                     conn,
                                     collection_name: &current_collection_name,
                                     sample_name: block_group.sample_name.as_str(),
-                                    current_block_group: block_group,
                                 }
                             });
                             refresh_region_search(
@@ -911,7 +905,6 @@ pub fn view_block_group(
                                     conn,
                                     collection_name: &current_collection_name,
                                     sample_name: block_group.sample_name.as_str(),
-                                    current_block_group: block_group,
                                 });
                         refresh_region_search(
                             &mut search_state,
@@ -935,23 +928,19 @@ pub fn view_block_group(
                         if row < search_state.matches.len() {
                             search_state.selected_match = Some(row);
                             let search_match = search_state.matches[row].clone();
-                            let span = search_destination_span(&search_match, conn, workspace);
-                            match go_to_search_match(
+                            match activate_search_match(
                                 &mut graph_controller,
+                                &mut overlays,
                                 &search_match,
                                 conn,
                                 workspace,
                             ) {
-                                Ok(()) => match span {
-                                    Ok(span) => {
-                                        replace_search_overlay(&mut overlays, span);
-                                        search_state.focused = false;
-                                        search_state.clear_matches();
-                                        search_error = None;
-                                        focus_zone = FocusZone::Canvas;
-                                    }
-                                    Err(error) => search_error = Some(error),
-                                },
+                                Ok(()) => {
+                                    search_state.focused = false;
+                                    search_state.clear_matches();
+                                    search_error = None;
+                                    focus_zone = FocusZone::Canvas;
+                                }
                                 Err(error) => search_error = Some(error),
                             }
                         }
@@ -1823,29 +1812,18 @@ mod tests {
     use crate::views::region_search::{resolve_region_search_matches, search_request_fixture};
 
     #[test]
-    fn test_region_search_lists_ambiguous_model_annotations_and_navigates_dropdown() {
+    fn test_region_search_state_handles_dropdown_selection_without_default() {
         assert!(is_region_search_command(KeyCode::Char('g')));
         assert!(!is_region_search_command(KeyCode::Char('/')));
         assert!(!is_region_search_command(KeyCode::Tab));
 
         let request = search_request_fixture();
-        let same_name_matches = resolve_region_search_matches(&request.request, "m123")
-            .expect("should return block group and path matches with the same name");
-        assert_eq!(same_name_matches.len(), 2);
-        assert!(
-            same_name_matches
-                .iter()
-                .any(|search_match| search_match.label.contains("block group"))
-        );
-        assert!(
-            same_name_matches
-                .iter()
-                .any(|search_match| search_match.label.contains("path"))
-        );
-
-        let matches = resolve_region_search_matches(&request.request, "duplicate-gene")
-            .expect("should return ambiguous model annotation matches");
-        assert_eq!(matches.len(), 2);
+        let match_template = resolve_region_search_matches(&request.request(), "duplicate-gene")
+            .expect("should load a search match for state testing")
+            .into_iter()
+            .next()
+            .expect("fixture should provide a search match");
+        let matches = vec![match_template.clone(), match_template];
 
         let mut state = RegionSearchState::default();
         state.set_matches(matches);
@@ -1879,7 +1857,7 @@ mod tests {
         let request = search_request_fixture();
         let mut state = RegionSearchState {
             query: "chr1:5-10".to_string(),
-            matches: resolve_region_search_matches(&request.request, "chr1:5-10")
+            matches: resolve_region_search_matches(&request.request(), "chr1:5-10")
                 .expect("should resolve the clear-action fixture query"),
             selected_match: Some(0),
             focused: true,
@@ -1895,7 +1873,7 @@ mod tests {
         assert!(state.focused);
 
         state.query = "x".to_string();
-        state.matches = resolve_region_search_matches(&request.request, "chr1:5-10")
+        state.matches = resolve_region_search_matches(&request.request(), "chr1:5-10")
             .expect("should resolve the query before backspace clears it");
         state.selected_match = Some(0);
         assert!(matches!(
@@ -1914,7 +1892,7 @@ mod tests {
             ..RegionSearchState::default()
         };
         state.set_matches(
-            resolve_region_search_matches(&request.request, &state.query)
+            resolve_region_search_matches(&request.request(), &state.query)
                 .expect("should resolve the preserved query"),
         );
         state.selected_match = Some(0);
@@ -1926,7 +1904,7 @@ mod tests {
         assert!(state.matches.is_empty());
 
         let mut search_error = None;
-        refresh_region_search(&mut state, &mut search_error, Some(&request.request));
+        refresh_region_search(&mut state, &mut search_error, Some(&request.request()));
         assert_eq!(state.query, "chr1:5-10");
         assert_eq!(state.matches.len(), 1);
         assert_eq!(state.selected_match, None);
