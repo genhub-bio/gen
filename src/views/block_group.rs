@@ -4,7 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use crossterm::event::{
+    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use gen_core::{HashId, PATH_START_NODE_ID, Workspace};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, node::Node};
@@ -17,7 +19,7 @@ use ratatui::{
     layout::{Constraint, Direction, HorizontalAlignment, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Padding, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, Padding, Paragraph, Wrap},
 };
 
 use crate::{
@@ -40,9 +42,143 @@ use crate::{
             remove_track_overlays, replace_track_overlays, set_path_overlay,
         },
         panels::{render_status_bar, render_with_optional_clear},
+        region_search::{
+            RegionSearchMatch, RegionSearchRequest, go_to_search_match, remove_search_overlay,
+            replace_search_overlay, resolve_region_search_matches, search_destination_span,
+        },
         tui_runtime::TuiSession,
     },
 };
+
+#[derive(Debug, Default)]
+struct RegionSearchState {
+    query: String,
+    matches: Vec<RegionSearchMatch>,
+    selected_match: Option<usize>,
+    focused: bool,
+}
+
+impl RegionSearchState {
+    fn clear_matches(&mut self) {
+        self.matches.clear();
+        self.selected_match = None;
+    }
+
+    fn set_matches(&mut self, matches: Vec<RegionSearchMatch>) {
+        self.matches = matches;
+        self.selected_match = self.selected_match.and_then(|selected_match| {
+            (selected_match < self.matches.len()).then_some(selected_match)
+        });
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        if self.matches.is_empty() {
+            self.selected_match = None;
+            return;
+        }
+        let count = self.matches.len() as isize;
+        self.selected_match = Some(match self.selected_match {
+            Some(selected_match) => ((selected_match as isize + delta).rem_euclid(count)) as usize,
+            None if delta < 0 => self.matches.len() - 1,
+            None => 0,
+        });
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> RegionSearchInputAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
+            self.query.clear();
+            self.clear_matches();
+            return RegionSearchInputAction::Cleared;
+        }
+        match key.code {
+            KeyCode::Char(character) => {
+                self.query.push(character);
+                self.selected_match = None;
+                RegionSearchInputAction::Changed
+            }
+            KeyCode::Backspace => {
+                if self.query.pop().is_some() {
+                    self.selected_match = None;
+                    if self.query.is_empty() {
+                        self.clear_matches();
+                        RegionSearchInputAction::Cleared
+                    } else {
+                        RegionSearchInputAction::Changed
+                    }
+                } else {
+                    RegionSearchInputAction::Ignored
+                }
+            }
+            KeyCode::Up => {
+                self.move_selection(-1);
+                RegionSearchInputAction::Ignored
+            }
+            KeyCode::Down => {
+                self.move_selection(1);
+                RegionSearchInputAction::Ignored
+            }
+            KeyCode::Enter => self
+                .selected_match
+                .and_then(|selected_match| self.matches.get(selected_match))
+                .cloned()
+                .map_or(RegionSearchInputAction::Ignored, |region_match| {
+                    RegionSearchInputAction::Selected(Box::new(region_match))
+                }),
+            KeyCode::Esc => RegionSearchInputAction::Closed,
+            _ => RegionSearchInputAction::Ignored,
+        }
+    }
+}
+
+fn is_region_search_command(key_code: KeyCode) -> bool {
+    key_code == KeyCode::Char('g')
+}
+
+fn focus_region_search(state: &mut RegionSearchState) {
+    state.focused = true;
+    state.clear_matches();
+}
+
+#[derive(Clone, Debug)]
+enum RegionSearchInputAction {
+    Changed,
+    Cleared,
+    Selected(Box<RegionSearchMatch>),
+    Closed,
+    Ignored,
+}
+
+fn refresh_region_search(
+    state: &mut RegionSearchState,
+    search_error: &mut Option<String>,
+    request: Option<&RegionSearchRequest<'_>>,
+) {
+    state.selected_match = None;
+    *search_error = None;
+    if state.query.trim().is_empty() {
+        state.clear_matches();
+        return;
+    }
+    let Some(request) = request else {
+        state.clear_matches();
+        *search_error = Some("select a block group first".to_string());
+        return;
+    };
+    match resolve_region_search_matches(request, state.query.trim()) {
+        Ok(matches) => state.set_matches(matches),
+        Err(error) => {
+            state.clear_matches();
+            *search_error = Some(error);
+        }
+    }
+}
+
+fn search_match_window_start(selected_match: Option<usize>, match_count: usize) -> usize {
+    selected_match
+        .unwrap_or(0)
+        .saturating_sub(4)
+        .min(match_count.saturating_sub(5))
+}
 
 // Frequency by which we check for external updates to the db
 const REFRESH_INTERVAL: u64 = 3; // seconds
@@ -423,6 +559,10 @@ pub fn view_block_group(
     let mut mouse_last_pos: Option<(u16, u16)> = None;
     let mut mouse_is_dragging = false;
     let mut last_sidebar_area = Rect::default();
+    let mut last_search_area = Rect::default();
+    let mut last_search_dropdown_area = Rect::default();
+    let mut search_state = RegionSearchState::default();
+    let mut search_error: Option<String> = None;
 
     // Track the last selected block group to detect changes
     let mut last_selected_block_group_id = block_group_id;
@@ -435,6 +575,85 @@ pub fn view_block_group(
         while crossterm::event::poll(Duration::from_millis(0))? {
             match event::read()? {
                 event::Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if search_state.focused && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+                    {
+                        match search_state.handle_key(key) {
+                            RegionSearchInputAction::Changed => {
+                                let request = current_block_group.as_ref().map(|block_group| {
+                                    RegionSearchRequest {
+                                        conn,
+                                        collection_name: &current_collection_name,
+                                        sample_name: block_group.sample_name.as_str(),
+                                        current_block_group: block_group,
+                                    }
+                                });
+                                refresh_region_search(
+                                    &mut search_state,
+                                    &mut search_error,
+                                    request.as_ref(),
+                                );
+                            }
+                            RegionSearchInputAction::Cleared => {
+                                search_error = None;
+                                remove_search_overlay(&mut overlays);
+                            }
+                            RegionSearchInputAction::Selected(search_match) => {
+                                let span = search_destination_span(&search_match, conn, workspace);
+                                match go_to_search_match(
+                                    &mut graph_controller,
+                                    search_match.as_ref(),
+                                    conn,
+                                    workspace,
+                                ) {
+                                    Ok(()) => match span {
+                                        Ok(span) => {
+                                            replace_search_overlay(&mut overlays, span);
+                                            search_state.focused = false;
+                                            search_state.clear_matches();
+                                            search_error = None;
+                                            focus_zone = FocusZone::Canvas;
+                                        }
+                                        Err(error) => search_error = Some(error),
+                                    },
+                                    Err(error) => search_error = Some(error),
+                                }
+                            }
+                            RegionSearchInputAction::Closed => {
+                                search_state.focused = false;
+                                search_state.clear_matches();
+                                search_error = None;
+                            }
+                            RegionSearchInputAction::Ignored => {}
+                        }
+                        continue;
+                    }
+
+                    if search_state.focused {
+                        search_state.focused = false;
+                        search_state.clear_matches();
+                        search_error = None;
+                    }
+
+                    if is_region_search_command(key.code) {
+                        if !search_state.focused {
+                            focus_region_search(&mut search_state);
+                            let request = current_block_group.as_ref().map(|block_group| {
+                                RegionSearchRequest {
+                                    conn,
+                                    collection_name: &current_collection_name,
+                                    sample_name: block_group.sample_name.as_str(),
+                                    current_block_group: block_group,
+                                }
+                            });
+                            refresh_region_search(
+                                &mut search_state,
+                                &mut search_error,
+                                request.as_ref(),
+                            );
+                        }
+                        continue;
+                    }
+
                     // Any keyboard navigation shows the cursor.
                     if !graph_controller.is_cursor_visible()
                         && matches!(
@@ -673,6 +892,73 @@ pub fn view_block_group(
                 }
                 event::Event::Mouse(mouse)
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                        && (last_search_area.contains(Position {
+                            x: mouse.column,
+                            y: mouse.row,
+                        }) || (search_state.focused
+                            && last_search_dropdown_area.contains(Position {
+                                x: mouse.column,
+                                y: mouse.row,
+                            }))) =>
+                {
+                    let was_focused = search_state.focused;
+                    if !was_focused {
+                        focus_region_search(&mut search_state);
+                        let request =
+                            current_block_group
+                                .as_ref()
+                                .map(|block_group| RegionSearchRequest {
+                                    conn,
+                                    collection_name: &current_collection_name,
+                                    sample_name: block_group.sample_name.as_str(),
+                                    current_block_group: block_group,
+                                });
+                        refresh_region_search(
+                            &mut search_state,
+                            &mut search_error,
+                            request.as_ref(),
+                        );
+                    }
+                    focus_zone = FocusZone::Canvas;
+                    if last_search_dropdown_area.contains(Position {
+                        x: mouse.column,
+                        y: mouse.row,
+                    }) {
+                        let row = mouse
+                            .row
+                            .saturating_sub(last_search_dropdown_area.top() + 1)
+                            as usize
+                            + search_match_window_start(
+                                search_state.selected_match,
+                                search_state.matches.len(),
+                            );
+                        if row < search_state.matches.len() {
+                            search_state.selected_match = Some(row);
+                            let search_match = search_state.matches[row].clone();
+                            let span = search_destination_span(&search_match, conn, workspace);
+                            match go_to_search_match(
+                                &mut graph_controller,
+                                &search_match,
+                                conn,
+                                workspace,
+                            ) {
+                                Ok(()) => match span {
+                                    Ok(span) => {
+                                        replace_search_overlay(&mut overlays, span);
+                                        search_state.focused = false;
+                                        search_state.clear_matches();
+                                        search_error = None;
+                                        focus_zone = FocusZone::Canvas;
+                                    }
+                                    Err(error) => search_error = Some(error),
+                                },
+                                Err(error) => search_error = Some(error),
+                            }
+                        }
+                    }
+                }
+                event::Event::Mouse(mouse)
+                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                         && last_sidebar_area.contains(Position {
                             x: mouse.column,
                             y: mouse.row,
@@ -827,6 +1113,9 @@ pub fn view_block_group(
             annotation_groups_loaded = false;
             is_loading = false;
             last_refresh = Instant::now();
+            search_state.clear_matches();
+            search_state.focused = false;
+            search_error = None;
         }
 
         // Trigger reload if selection changed to a new block group
@@ -990,17 +1279,43 @@ pub fn view_block_group(
             last_sidebar_area = sidebar_area;
             let viewer_root_area = sidebar_layout[1];
 
+            let visible_search_matches = search_state.matches.len().min(5);
+            let search_dropdown_rows = if visible_search_matches > 0 {
+                visible_search_matches as u16 + 2
+            } else if search_state.focused && search_error.is_some() {
+                3
+            } else {
+                0
+            };
+            let search_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(vec![
+                    Constraint::Length(3),
+                    Constraint::Length(search_dropdown_rows),
+                    Constraint::Min(1),
+                ])
+                .split(viewer_root_area);
+            let search_input_area = search_layout[0];
+            let search_dropdown_area = search_layout[1];
+            last_search_area = search_input_area;
+            last_search_dropdown_area = if search_state.focused {
+                search_dropdown_area
+            } else {
+                Rect::default()
+            };
+            let viewer_content_area = search_layout[2];
+
             // The panel pops up in the graph area, it does not overlap with the sidebar
             let panel_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(vec![Constraint::Percentage(80), Constraint::Percentage(20)])
-                .split(viewer_root_area);
+                .split(viewer_content_area);
             let panel_area = panel_layout[1];
 
             let canvas_area = if show_panel {
                 panel_layout[0]
             } else {
-                viewer_root_area
+                viewer_content_area
             };
 
             // Set viewport bounds to the actual canvas area before updating animations
@@ -1030,6 +1345,87 @@ pub fn view_block_group(
                 }
             }
 
+            let search_border_style = if search_state.focused {
+                Style::default()
+                    .fg(current_theme()[0x07])
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(current_theme()[0x05])
+            };
+            let search_value = if search_state.query.is_empty() {
+                Span::styled(
+                    "type a region such as chr1:20-30 (1-based)",
+                    Style::default()
+                        .fg(current_theme()[0x04])
+                        .add_modifier(Modifier::DIM),
+                )
+            } else {
+                Span::styled(
+                    search_state.query.clone(),
+                    Style::default().fg(current_theme()[0x05]),
+                )
+            };
+            let search_input = Paragraph::new(Line::from(vec![Span::raw(" "), search_value]))
+                .block(
+                    Block::bordered()
+                        .title("Region search (g) ")
+                        .border_style(search_border_style),
+                );
+            frame.render_widget(search_input, search_input_area);
+
+            let visible_search_matches = search_state.matches.len().min(5);
+            let search_dropdown_rows = if visible_search_matches > 0 {
+                visible_search_matches as u16 + 2
+            } else if search_error.is_some() && search_state.focused {
+                3
+            } else {
+                0
+            };
+            if search_state.focused && search_dropdown_rows > 0 {
+                let dropdown_items = if search_state.matches.is_empty() {
+                    vec![ListItem::new(Line::from(Span::styled(
+                        search_error
+                            .as_deref()
+                            .unwrap_or("no matching regions"),
+                        Style::default().fg(current_theme()[0x04]),
+                    )))]
+                } else {
+                    let window_start = search_match_window_start(
+                        search_state.selected_match,
+                        search_state.matches.len(),
+                    );
+                    search_state
+                        .matches
+                        .iter()
+                        .skip(window_start)
+                        .take(visible_search_matches)
+                        .enumerate()
+                        .map(|(index, search_match)| {
+                            let style = if search_state.selected_match
+                                == Some(index + window_start)
+                            {
+                                Style::default()
+                                    .fg(current_theme()[0x00])
+                                    .bg(current_theme()[0x07])
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(current_theme()[0x05])
+                            };
+                            ListItem::new(Line::from(Span::styled(
+                                format!(" {}", search_match.label),
+                                style,
+                            )))
+                        })
+                        .collect()
+                };
+                let dropdown = List::new(dropdown_items).block(
+                    Block::bordered()
+                        .title("Matches (↑↓, Enter)")
+                        .border_style(search_border_style),
+                );
+                frame.render_widget(dropdown, search_dropdown_area);
+            }
+
             // Render message bar if there are messages
             if let Some(area) = message_bar_area
                 && let Some(msg) = messages.latest()
@@ -1041,23 +1437,33 @@ pub fn view_block_group(
             }
 
             // Status bar
-            let mut status_message = match focus_zone {
-                FocusZone::Canvas => {
-                    let tab_dest = if show_panel { "to panel" } else { "to sidebar" };
-                    if !graph_controller.is_cursor_visible() {
-                        format!("*drag* pan | *click* select | *↑↓←→* show cursor | *tab* {tab_dest}")
-                    } else if graph_controller.cursor.is_coarse_mode() {
-                        format!("*←→↑↓* navigate by block | *enter* by character | *+/-* zoom | *p* path | *m* messages | *tab* {tab_dest}")
-                    } else {
-                        format!("*←→↑↓* navigate by character | *enter* details | *+/-* zoom | *p* path | *m* messages | *tab* {tab_dest}")
+            let mut status_message = if search_state.focused {
+                "type region | *↑↓* choose match | *enter* go | *ctrl-u* clear | *esc* close"
+                    .to_string()
+            } else {
+                match focus_zone {
+                    FocusZone::Canvas => {
+                        if !graph_controller.is_cursor_visible() {
+                            "*drag* pan | *click* select | *↑↓←→* show cursor | *g* search".to_string()
+                        } else if graph_controller.cursor.is_coarse_mode() {
+                            "*←→↑↓* navigate by block | *enter* by character | *+/-* zoom | *p* path | *m* messages | *g* search".to_string()
+                        } else {
+                            "*←→↑↓* navigate by character | *enter* details | *+/-* zoom | *p* path | *m* messages | *g* search".to_string()
+                        }
                     }
+                    FocusZone::Panel => match panel_mode {
+                        PanelMode::Messages => "*c* clear | *esc* close | *tab* to sidebar".to_string(),
+                        PanelMode::Details => "*esc* close | *tab* to sidebar".to_string(),
+                    },
+                    FocusZone::Sidebar => CollectionExplorer::get_status_line(),
                 }
-                FocusZone::Panel => match panel_mode {
-                    PanelMode::Messages => "*c* clear | *esc* close | *tab* to sidebar".to_string(),
-                    PanelMode::Details => "*esc* close | *tab* to sidebar".to_string(),
-                },
-                FocusZone::Sidebar => CollectionExplorer::get_status_line(),
             };
+            if let Some(error) = search_error.as_deref() {
+                status_message = format!("search: {error}");
+            }
+            if !search_state.focused && focus_zone != FocusZone::Canvas {
+                status_message.push_str(" | *g* search");
+            }
             status_message.push_str(" | *q* quit"); // Universal controls
             render_status_bar(frame, status_bar_area, &status_message);
 
@@ -1374,6 +1780,9 @@ pub fn view_block_group(
             annotation_files_loaded = false;
 
             is_loading = false;
+            search_state.clear_matches();
+            search_state.focused = false;
+            search_error = None;
             continue;
         }
 
@@ -1401,4 +1810,126 @@ pub fn view_block_group(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::{
+        RegionSearchInputAction, RegionSearchState, focus_region_search, is_region_search_command,
+        refresh_region_search,
+    };
+    use crate::views::region_search::{resolve_region_search_matches, search_request_fixture};
+
+    #[test]
+    fn test_region_search_lists_ambiguous_model_annotations_and_navigates_dropdown() {
+        assert!(is_region_search_command(KeyCode::Char('g')));
+        assert!(!is_region_search_command(KeyCode::Char('/')));
+        assert!(!is_region_search_command(KeyCode::Tab));
+
+        let request = search_request_fixture();
+        let same_name_matches = resolve_region_search_matches(&request.request, "m123")
+            .expect("should return block group and path matches with the same name");
+        assert_eq!(same_name_matches.len(), 2);
+        assert!(
+            same_name_matches
+                .iter()
+                .any(|search_match| search_match.label.contains("block group"))
+        );
+        assert!(
+            same_name_matches
+                .iter()
+                .any(|search_match| search_match.label.contains("path"))
+        );
+
+        let matches = resolve_region_search_matches(&request.request, "duplicate-gene")
+            .expect("should return ambiguous model annotation matches");
+        assert_eq!(matches.len(), 2);
+
+        let mut state = RegionSearchState::default();
+        state.set_matches(matches);
+        assert_eq!(state.selected_match, None);
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            RegionSearchInputAction::Ignored
+        ));
+        state.move_selection(1);
+        assert_eq!(state.selected_match, Some(0));
+        state.move_selection(1);
+        assert_eq!(state.selected_match, Some(1));
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            RegionSearchInputAction::Changed
+        ));
+        assert_eq!(state.selected_match, None);
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            RegionSearchInputAction::Ignored
+        ));
+        state.move_selection(1);
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            RegionSearchInputAction::Selected(_)
+        ));
+    }
+
+    #[test]
+    fn test_region_search_clear_action_empties_query_and_matches() {
+        let request = search_request_fixture();
+        let mut state = RegionSearchState {
+            query: "chr1:5-10".to_string(),
+            matches: resolve_region_search_matches(&request.request, "chr1:5-10")
+                .expect("should resolve the clear-action fixture query"),
+            selected_match: Some(0),
+            focused: true,
+        };
+
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            RegionSearchInputAction::Cleared
+        ));
+        assert!(state.query.is_empty());
+        assert!(state.matches.is_empty());
+        assert_eq!(state.selected_match, None);
+        assert!(state.focused);
+
+        state.query = "x".to_string();
+        state.matches = resolve_region_search_matches(&request.request, "chr1:5-10")
+            .expect("should resolve the query before backspace clears it");
+        state.selected_match = Some(0);
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            RegionSearchInputAction::Cleared
+        ));
+        assert!(state.query.is_empty());
+        assert!(state.matches.is_empty());
+    }
+
+    #[test]
+    fn test_region_search_refocus_preserves_query_without_default_selection() {
+        let request = search_request_fixture();
+        let mut state = RegionSearchState {
+            query: "chr1:5-10".to_string(),
+            ..RegionSearchState::default()
+        };
+        state.set_matches(
+            resolve_region_search_matches(&request.request, &state.query)
+                .expect("should resolve the preserved query"),
+        );
+        state.selected_match = Some(0);
+        state.focused = false;
+
+        focus_region_search(&mut state);
+        assert_eq!(state.query, "chr1:5-10");
+        assert_eq!(state.selected_match, None);
+        assert!(state.matches.is_empty());
+
+        let mut search_error = None;
+        refresh_region_search(&mut state, &mut search_error, Some(&request.request));
+        assert_eq!(state.query, "chr1:5-10");
+        assert_eq!(state.matches.len(), 1);
+        assert_eq!(state.selected_match, None);
+        assert!(search_error.is_none());
+    }
 }

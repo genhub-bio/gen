@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-use gen_core::{HashId, Strand};
+use gen_core::{HashId, NodeIntervalBlock, Strand, Workspace, is_terminal};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
-use gen_models::locus::GraphLocus;
+use gen_models::{db::GraphConnection, locus::GraphLocus, region::ResolvedGenRegion};
+use intervaltree::IntervalTree;
 use petgraph::visit::IntoNodeIdentifiers;
 
 #[derive(Clone, Debug)]
@@ -36,21 +37,97 @@ impl AnnotationTrack {
 }
 
 pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> AnnotationSpan {
-    let segments = locus
-        .slices
-        .iter()
-        .map(|s| AnnotationSegment {
-            node_id: s.block.node_id,
-            start: s.block.sequence_start + s.start as i64,
-            end: s.block.sequence_start + s.end as i64,
-            strand: s.strand,
-        })
-        .collect();
+    let segments = annotation_segments_from_graph_locus(locus);
     AnnotationSpan {
         id: HashId::convert_str(name),
         name: name.to_string(),
         segments,
     }
+}
+
+/// Convert a resolved database region into the span representation used by graph overlays.
+pub fn annotation_span_from_resolved_region(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    region: &ResolvedGenRegion,
+) -> Result<AnnotationSpan, String> {
+    let interval_tree = region
+        .intervaltree(conn, workspace)
+        .map_err(|error| format!("failed to load region interval tree: {error}"))?;
+    let locus = graph_locus_from_interval_tree(&interval_tree, region.start, region.end);
+    let mut span = annotation_span_from_graph_locus(&locus, "");
+    span.id = HashId::convert_str(&format!(
+        "region-search:{:?}:{}-{}",
+        region.kind, region.start, region.end
+    ));
+    Ok(span)
+}
+
+fn graph_locus_from_interval_tree(
+    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
+    start: i64,
+    end: i64,
+) -> GraphLocus {
+    // Interval-tree coordinates follow the resolved region, while graph-locus slices use node
+    // coordinates. Mirror partial reverse-strand intervals through sequence_end; sorting by
+    // region coordinate preserves traversal order across multiple accession blocks.
+    let mut slices = interval_tree
+        .iter()
+        .filter_map(|entry| {
+            let block = entry.value;
+            if is_terminal(block.node_id) {
+                return None;
+            }
+            let clipped_start = start.max(block.start);
+            let clipped_end = end.min(block.end);
+            if clipped_start >= clipped_end {
+                return None;
+            }
+            let local_start = clipped_start - block.start;
+            let local_end = clipped_end - block.start;
+            let (sequence_start, sequence_end) = if block.strand == Strand::Reverse {
+                (
+                    block.sequence_end - local_end,
+                    block.sequence_end - local_start,
+                )
+            } else {
+                (
+                    block.sequence_start + local_start,
+                    block.sequence_start + local_end,
+                )
+            };
+            Some((
+                clipped_start,
+                GraphNodeSlice {
+                    block: GraphNode {
+                        node_id: block.node_id,
+                        sequence_start: block.sequence_start,
+                        sequence_end: block.sequence_end,
+                    },
+                    start: (sequence_start - block.sequence_start) as usize,
+                    end: (sequence_end - block.sequence_start) as usize,
+                    strand: block.strand,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    slices.sort_by_key(|(coordinate, _)| *coordinate);
+    GraphLocus {
+        slices: slices.into_iter().map(|(_, slice)| slice).collect(),
+    }
+}
+
+fn annotation_segments_from_graph_locus(locus: &GraphLocus) -> Vec<AnnotationSegment> {
+    locus
+        .slices
+        .iter()
+        .map(|slice| AnnotationSegment {
+            node_id: slice.block.node_id,
+            start: slice.block.sequence_start + slice.start as i64,
+            end: slice.block.sequence_start + slice.end as i64,
+            strand: slice.strand,
+        })
+        .collect()
 }
 
 /// Map `span`'s per-node segments onto the current graph.
@@ -178,6 +255,7 @@ pub fn span_covered_by_later(
 #[cfg(test)]
 mod tests {
     use gen_graph::{GenGraph, GraphNode};
+    use intervaltree::IntervalTree;
 
     use super::*;
 
@@ -216,6 +294,33 @@ mod tests {
         assert_eq!(seg.start, 105); // sequence_start + slice.start
         assert_eq!(seg.end, 115); // sequence_start + slice.end
         assert_eq!(seg.strand, Strand::Forward);
+    }
+
+    #[test]
+    fn test_annotation_span_from_interval_tree_preserves_reverse_coordinates() {
+        let node_id = HashId::convert_str("reverse-node");
+        let interval_tree: IntervalTree<i64, NodeIntervalBlock> = vec![(
+            0..10,
+            NodeIntervalBlock {
+                node_id,
+                start: 0,
+                end: 10,
+                sequence_start: 20,
+                sequence_end: 30,
+                strand: Strand::Reverse,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let locus = graph_locus_from_interval_tree(&interval_tree, 2, 6);
+        let span = annotation_span_from_graph_locus(&locus, "");
+
+        assert_eq!(span.segments.len(), 1);
+        assert_eq!(span.segments[0].node_id, node_id);
+        assert_eq!(span.segments[0].start, 24);
+        assert_eq!(span.segments[0].end, 28);
+        assert_eq!(span.segments[0].strand, Strand::Reverse);
     }
 
     #[test]

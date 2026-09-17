@@ -333,6 +333,31 @@ fn target_from_accession(
 }
 
 impl ResolvedGenRegion {
+    pub fn from_block_group(
+        conn: &GraphConnection,
+        block_group: &BlockGroup,
+        start: i64,
+        end: i64,
+    ) -> Result<Self, BlockGroupError> {
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None)?;
+        let path_length = path.length(conn, None)?;
+        Ok(ResolvedGenRegion {
+            block_group: block_group.clone(),
+            path: Some(path),
+            accession: None,
+            annotation: None,
+            kind: ResolvedRegionKind::BlockGroup,
+            anchor_start: 0,
+            anchor_end: path_length,
+            feature_length: path_length,
+            start,
+            end,
+            start_anchors: None,
+            end_anchors: None,
+            remove_ambiguous_positions: false,
+        })
+    }
+
     pub fn from_path(
         conn: &GraphConnection,
         block_group_id: HashId,
@@ -839,6 +864,27 @@ mod tests {
                 resolve_block_group(&Region::parse("chr1:30-10").unwrap(), &conn, "test", "test")
                     .unwrap();
             assert_eq!((wrap.start, wrap.end), (30, 10));
+        }
+
+        #[test]
+        fn test_from_block_group_uses_current_path() {
+            let (conn, block_group, path, _accession, _annotation) = setup_targets();
+
+            let resolved = ResolvedGenRegion::from_block_group(&conn, &block_group, 5, 10).unwrap();
+
+            assert_eq!(resolved.kind, ResolvedRegionKind::BlockGroup);
+            assert_eq!(resolved.block_group.id, block_group.id);
+            assert_eq!(resolved.path.as_ref().unwrap().id, path.id);
+            assert_eq!(
+                (
+                    resolved.anchor_start,
+                    resolved.anchor_end,
+                    resolved.feature_length,
+                    resolved.start,
+                    resolved.end,
+                ),
+                (0, 40, 40, 5, 10)
+            );
         }
 
         #[test]
