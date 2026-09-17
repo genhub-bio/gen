@@ -2,10 +2,12 @@ use pyo3::{Bound, prelude::*, types::PyModule};
 
 pub mod annotation;
 pub mod block_group;
+pub mod editing;
 pub mod graph_node;
 pub mod graph_search;
 pub mod hash_id;
 pub mod jupyter_widget;
+pub mod locus;
 pub mod repository;
 pub mod sample;
 pub mod sequence_part;

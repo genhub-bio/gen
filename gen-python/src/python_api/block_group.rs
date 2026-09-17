@@ -27,7 +27,9 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
 
 use super::{
     annotation::PyAnnotation,
+    editing::{EditKind, EditRequest, edit_sequence_graph},
     graph_node::PyGraphNode,
+    graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
     translation::build_translation_params,
@@ -711,7 +713,7 @@ impl PySequenceGraph {
 }
 
 impl PySequenceGraph {
-    fn require_context(&self, method: &str) -> PyResult<&DbContext> {
+    pub(crate) fn require_context(&self, method: &str) -> PyResult<&DbContext> {
         self.context.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(format!(
                 "{method} requires a Repository context; obtain SequenceGraph via Repository"
@@ -815,5 +817,111 @@ impl PySequenceGraph {
                 .map(|bg| self.to_py_block_group(bg))
                 .collect(),
         )
+    }
+}
+
+#[pymethods]
+impl PySequenceGraph {
+    /// Insert ``sequence`` at a zero-length target in this sequence graph.
+    ///
+    /// The target may be a ``Position`` (for example ``locus.start()``), a
+    /// zero-length ``Locus``, or a region string such as ``"chr1:10-10"``.
+    /// The edit is recorded as its own operation, using ``message`` as the
+    /// operation's commit message when given, or a generated description
+    /// otherwise. Returns the ``Locus`` of the inserted bases, read on the
+    /// target's strand.
+    ///
+    /// Parameters
+    /// stack : bool, optional
+    ///     Add this insertion as a sibling option at the target instead of
+    ///     superseding what's there, so bases already there are left standing
+    ///     alongside it (default ``False``). A stacked insertion never
+    ///     becomes the reference route: the sequence graph's current Path is
+    ///     left exactly as it was, even when the target lies on it.
+    #[pyo3(signature = (target, sequence, message=None, stack=false))]
+    fn insert(
+        &self,
+        target: &Bound<'_, PyAny>,
+        sequence: &str,
+        message: Option<&str>,
+        stack: bool,
+    ) -> PyResult<PyGraphLocus> {
+        let request = EditRequest {
+            kind: EditKind::Insert,
+            sequence,
+            message,
+            stack,
+        };
+        edit_sequence_graph(self, target, &request)
+            .map(|locus| PyGraphLocus::from_locus(locus.expect("should return the inserted locus")))
+    }
+
+    /// Replace the bases covered by ``target`` with ``sequence``.
+    ///
+    /// The target may be a region string, a ``Locus`` from ``search()``, or an
+    /// ``Annotation`` from ``list_annotations()``. On a reverse-strand target the
+    /// sequence is read on that strand. The edit is recorded as its own operation,
+    /// using ``message`` as the operation's commit message when given, or a
+    /// generated description otherwise. Returns the ``Locus`` of the replacement
+    /// bases.
+    ///
+    /// Parameters
+    /// stack : bool, optional
+    ///     Add this replacement as a sibling option at the target instead of
+    ///     superseding what's there, so the original bases are left standing
+    ///     alongside it (default ``False``). A stacked replacement never
+    ///     becomes the reference route: the sequence graph's current Path is
+    ///     left exactly as it was, even when the target lies on it.
+    #[pyo3(signature = (target, sequence, message=None, stack=false))]
+    fn replace(
+        &self,
+        target: &Bound<'_, PyAny>,
+        sequence: &str,
+        message: Option<&str>,
+        stack: bool,
+    ) -> PyResult<PyGraphLocus> {
+        let request = EditRequest {
+            kind: EditKind::Replace,
+            sequence,
+            message,
+            stack,
+        };
+        edit_sequence_graph(self, target, &request).map(|locus| {
+            PyGraphLocus::from_locus(locus.expect("should return the replacement locus"))
+        })
+    }
+
+    /// Delete the bases covered by ``target``.
+    ///
+    /// The target may be a region string, a ``Locus`` from ``search()``, or an
+    /// ``Annotation`` from ``list_annotations()``. The edit is recorded as its own
+    /// operation, using ``message`` as the operation's commit message when given,
+    /// or a generated description otherwise::
+    ///
+    ///     for annotation in sg.list_annotations():
+    ///         sg.delete(annotation.locus)
+    ///
+    /// Parameters
+    /// stack : bool, optional
+    ///     Add the deletion as a sibling option at the target instead of
+    ///     removing the only route through it, so the original bases stay
+    ///     reachable alongside the shortcut around them (default ``False``).
+    ///     A stacked deletion never becomes the reference route: the
+    ///     sequence graph's current Path is left exactly as it was, even
+    ///     when the target lies on it.
+    #[pyo3(signature = (target, message=None, stack=false))]
+    fn delete(
+        &self,
+        target: &Bound<'_, PyAny>,
+        message: Option<&str>,
+        stack: bool,
+    ) -> PyResult<()> {
+        let request = EditRequest {
+            kind: EditKind::Delete,
+            sequence: "",
+            message,
+            stack,
+        };
+        edit_sequence_graph(self, target, &request).map(|_| ())
     }
 }
