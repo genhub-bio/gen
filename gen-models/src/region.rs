@@ -1,7 +1,7 @@
 pub use gen_core::region::Region;
 use gen_core::{
     HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_terminal,
-    region::{RegionCoordinateSpace, RegionParseError, RegionResolutionError, RegionResolver},
+    region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
 use gen_graph::{GraphNode, GraphNodePosition};
 use intervaltree::IntervalTree;
@@ -243,20 +243,17 @@ fn resolve_target(
     region: &Region,
     target: RegionTarget,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let coordinate_space = match target.kind {
-        RegionTargetKind::Path | RegionTargetKind::BlockGroup => RegionCoordinateSpace::Absolute {
-            length: target.feature_length,
+    let (start, end) = match target.kind {
+        RegionTargetKind::Path | RegionTargetKind::BlockGroup => match (region.start, region.end) {
+            (None, None) => (target.anchor_start, target.anchor_end),
+            (Some(start), None) => (start, target.feature_length),
+            (Some(start), Some(end)) => (start, end),
+            (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
         },
         RegionTargetKind::Annotation | RegionTargetKind::Accession => {
-            RegionCoordinateSpace::Relative {
-                anchor_start: target.anchor_start,
-                anchor_end: target.anchor_end,
-            }
+            region.resolve_relative_bounds(target.anchor_start, target.anchor_end)?
         }
     };
-    let coordinates = region.resolve_coordinates(coordinate_space)?;
-    let start = coordinates.start;
-    let end = coordinates.end;
 
     let out_of_bounds = match target.kind {
         RegionTargetKind::Path | RegionTargetKind::BlockGroup => {
@@ -543,11 +540,11 @@ impl ResolvedGenRegion {
         let end_anchor = resolved.resolve_anchor(self.end, conn, workspace)?;
 
         let start_positions =
-            gen_graph::find_offset(&mut graph, &start_anchor, start_offset, |g, nid| {
+            crate::graph::find_offset(&mut graph, &start_anchor, start_offset, |g, nid| {
                 crate::graph::expand(conn, workspace, g, &self.block_group.id, nid)
             })?;
         let end_positions =
-            gen_graph::find_offset(&mut graph, &end_anchor, end_offset, |g, nid| {
+            crate::graph::find_offset(&mut graph, &end_anchor, end_offset, |g, nid| {
                 crate::graph::expand(conn, workspace, g, &self.block_group.id, nid)
             })?;
 

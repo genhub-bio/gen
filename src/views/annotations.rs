@@ -880,7 +880,7 @@ mod tests {
     use gen_core::{
         HashId, Sha256Hash, Strand,
         range::Range,
-        region::{Region, RegionResolver as _},
+        region::{Region, RegionResolver as _, normalize_user_search_region},
     };
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
@@ -968,6 +968,10 @@ mod tests {
             assert_eq!(served_get_count, expected_get_count);
         });
         (format!("http://{address}/asset"), handle)
+    }
+
+    fn normalized_region(region: &str) -> Region {
+        normalize_user_search_region(&Region::parse(region).unwrap())
     }
 
     #[test]
@@ -1372,7 +1376,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut file_graph = graph.clone();
         let file_region = gen_annotations::region::resolve_annotation_region(
-            &Region::parse("gene-a0001:-3").expect("should parse annotation-relative region"),
+            &normalized_region("gene-a0001:-3"),
             &file_segments,
             &mut file_graph,
         )
@@ -1380,13 +1384,11 @@ mod tests {
         assert_eq!(file_region.start_anchors.len(), 1);
         assert_eq!(file_region.end_anchors.len(), 1);
         assert_eq!(file_region.start_anchors[0].coordinate(), 1);
-        assert_eq!(file_region.end_anchors[0].coordinate(), 2);
-        assert_eq!(file_region.segments.len(), 1);
-        assert_eq!(file_region.segments[0].range.start, 1);
-        assert_eq!(file_region.segments[0].range.end, 2);
+        assert_eq!(file_region.end_anchors[0].coordinate(), 1);
+        assert_eq!((file_region.start_offset, file_region.end_offset), (-3, -3));
 
         let zero_region = gen_annotations::region::resolve_annotation_region(
-            &Region::parse("gene-a0001:0").expect("should parse zero annotation offset"),
+            &normalized_region("gene-a0001:0"),
             &file_segments,
             &mut file_graph,
         )
@@ -1396,12 +1398,12 @@ mod tests {
                 zero_region.start_anchors[0].coordinate(),
                 zero_region.end_anchors[0].coordinate()
             ),
-            (4, 5)
+            (4, 4)
         );
-        assert_eq!(zero_region.segments[0].range, Range { start: 4, end: 5 });
+        assert_eq!((zero_region.start_offset, zero_region.end_offset), (0, 0));
 
         let positive_slice = gen_annotations::region::resolve_annotation_region(
-            &Region::parse("gene-a0001:5-8").expect("should parse positive annotation slice"),
+            &normalized_region("gene-a0001:5-8"),
             &file_segments,
             &mut file_graph,
         )
@@ -1414,8 +1416,8 @@ mod tests {
             (8, 12)
         );
         assert_eq!(
-            positive_slice.segments[0].range,
-            Range { start: 8, end: 12 }
+            (positive_slice.start_offset, positive_slice.end_offset),
+            (4, 8)
         );
 
         let reverse_segments = file_segments
@@ -1426,22 +1428,21 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let reverse_region = gen_annotations::region::resolve_annotation_region(
-            &Region::parse("gene-a0001:0").expect("should parse reverse annotation offset"),
+            &normalized_region("gene-a0001:0"),
             &reverse_segments,
             &mut file_graph,
         )
         .expect("should resolve a reverse annotation offset");
-        assert_eq!(reverse_region.anchor.offset, 20);
         assert_eq!(
             (
                 reverse_region.start_anchors[0].coordinate(),
                 reverse_region.end_anchors[0].coordinate()
             ),
-            (20, 19)
+            (20, 20)
         );
         assert_eq!(
-            reverse_region.segments[0].range,
-            Range { start: 19, end: 20 }
+            (reverse_region.start_offset, reverse_region.end_offset),
+            (0, 0)
         );
 
         add_annotation(
@@ -1463,7 +1464,7 @@ mod tests {
         let persisted_segments = annotation_projection::annotation_segments(conn, &persisted, None);
         let mut persisted_graph = graph;
         let persisted_region = gen_annotations::region::resolve_annotation_region(
-            &Region::parse("gene-persisted:-3").expect("should parse persisted relative region"),
+            &normalized_region("gene-persisted:-3"),
             &persisted_segments,
             &mut persisted_graph,
         )
