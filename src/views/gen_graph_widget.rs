@@ -618,9 +618,9 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
     let node_sizer = &controller.partition_controller.node_sizer;
     let graph = controller.graph();
 
-    // DB-loaded tracks are too busy to paint at minimal detail; a span confined to a
-    // partial slice of a single node is also dropped at truncated detail, mirroring the
-    // label suppression below.
+    // DB-loaded tracks are too busy to paint at minimal detail. At truncated detail, a span
+    // confined to a partial slice of a single node remains suppressed for ordinary annotations,
+    // while an ad-hoc search highlight stays visible as the explicit user target.
     let mut span_indices: Vec<usize> = overlays
         .iter()
         .enumerate()
@@ -635,6 +635,7 @@ pub fn reapply_overlays<S: NodeSizer<GenGraph>>(
                 })
                 .filter(|span| {
                     detail_level != VisualDetail::Truncated
+                        || matches!(&overlay.source, OverlaySource::Adhoc)
                         || span_should_show_in_truncated(span, graph)
                 })
                 .map(|_| idx)
@@ -1405,6 +1406,55 @@ mod tests {
         assert_eq!(
             cell_highlights_zoomed_in, 2,
             "both overlays should paint once zoomed in past minimal detail"
+        );
+    }
+
+    #[test]
+    fn test_reapply_overlays_keeps_partial_adhoc_spans_at_truncated_detail() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("block"),
+            sequence_start: 0,
+            sequence_end: 20,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_node(node);
+        let mut controller = create_gen_graph_controller(graph);
+        controller.set_detail_level(VisualDetail::Truncated);
+
+        let partial_span = |name: &str| AnnotationSpan {
+            id: HashId::convert_str(name),
+            name: name.to_string(),
+            segments: vec![AnnotationSegment {
+                node_id: node.node_id,
+                start: 2,
+                end: 5,
+                strand: Strand::Forward,
+            }],
+        };
+        let mut overlays = vec![
+            GraphOverlay {
+                content: OverlayContent::Span(partial_span("track")),
+                source: OverlaySource::Track("file:1".to_string()),
+                style: PathStyle::new(Color::Cyan),
+            },
+            GraphOverlay {
+                content: OverlayContent::Span(partial_span("adhoc")),
+                source: OverlaySource::Adhoc,
+                style: PathStyle::new(Color::Yellow),
+            },
+        ];
+
+        let mut color_cache = AnnotationColorCache::new();
+        reapply_overlays(&mut controller, &mut overlays, &mut color_cache);
+
+        let cell_highlights = controller
+            .highlights
+            .iter()
+            .filter(|(kind, _)| matches!(kind, HighlightKind::Cells { .. }))
+            .count();
+        assert_eq!(
+            cell_highlights, 1,
+            "partial ad-hoc search spans should remain visible at truncated detail"
         );
     }
 

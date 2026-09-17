@@ -65,26 +65,35 @@ pub fn graph_locus_from_annotation_span(
     for node in graph.node_identifiers() {
         node_map.entry(node.node_id).or_default().push(node);
     }
-    let slices: Option<Vec<GraphNodeSlice>> = span
-        .segments
-        .iter()
-        .map(|seg| {
-            let candidates = node_map.get(&seg.node_id)?;
-            let block = *candidates
-                .iter()
-                .find(|block| seg.start < block.sequence_end && block.sequence_start < seg.end)
-                .or_else(|| candidates.first())?;
-            let start = (seg.start - block.sequence_start).max(0) as usize;
-            let end = (seg.end - block.sequence_start).max(0) as usize;
-            Some(GraphNodeSlice {
-                block,
-                start,
-                end,
-                strand: seg.strand,
+    for candidates in node_map.values_mut() {
+        candidates.sort_unstable_by_key(|block| block.sequence_start);
+    }
+
+    let mut slices = Vec::new();
+    for segment in &span.segments {
+        let candidates = node_map.get(&segment.node_id)?;
+        let mut segment_slices = candidates
+            .iter()
+            .filter_map(|block| {
+                let start = segment.start.max(block.sequence_start);
+                let end = segment.end.min(block.sequence_end);
+                (start < end).then_some(GraphNodeSlice {
+                    block: *block,
+                    start: (start - block.sequence_start) as usize,
+                    end: (end - block.sequence_start) as usize,
+                    strand: segment.strand,
+                })
             })
-        })
-        .collect();
-    Some(GraphLocus { slices: slices? })
+            .collect::<Vec<_>>();
+        if segment_slices.is_empty() {
+            return None;
+        }
+        if segment.strand == Strand::Reverse {
+            segment_slices.reverse();
+        }
+        slices.extend(segment_slices);
+    }
+    Some(GraphLocus { slices })
 }
 
 /// Compute the display label for a span, appending a strand arrow when all
@@ -293,6 +302,36 @@ mod tests {
         assert_eq!(locus.slices[1].block, right_fragment);
         assert_eq!(locus.slices[1].start, 0);
         assert_eq!(locus.slices[1].end, 2203); // 2686 - 483, local to the right fragment
+    }
+
+    #[test]
+    fn test_graph_locus_from_annotation_span_splits_a_range_across_node_fragments() {
+        let node_id = HashId::convert_str("split-node");
+        let left_fragment = GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 395,
+        };
+        let right_fragment = GraphNode {
+            node_id,
+            sequence_start: 483,
+            sequence_end: 2686,
+        };
+        let graph = make_graph(&[left_fragment, right_fragment]);
+        let span = AnnotationSpan {
+            id: HashId::convert_str("source"),
+            name: "source".into(),
+            segments: vec![make_segment("split-node", 300, 600, Strand::Forward)],
+        };
+
+        let locus = graph_locus_from_annotation_span(&span, &graph).unwrap();
+        assert_eq!(locus.slices.len(), 2);
+        assert_eq!(locus.slices[0].block, left_fragment);
+        assert_eq!(locus.slices[0].start, 300);
+        assert_eq!(locus.slices[0].end, 395);
+        assert_eq!(locus.slices[1].block, right_fragment);
+        assert_eq!(locus.slices[1].start, 0);
+        assert_eq!(locus.slices[1].end, 117);
     }
 
     fn make_segment(node_id: &str, start: i64, end: i64, strand: Strand) -> AnnotationSegment {
