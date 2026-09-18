@@ -291,7 +291,6 @@ pub fn make_rectilinear(
 
             // Rectilinear edge routing to replace the original edges
             let mut layer_graph = layout_layer(&left_nodes, &right_nodes, &edges, &edge_bundles)?;
-            simplify_graph(&mut layer_graph)?;
             // Label the rectilinear edges with a reference to original edge(s) they represent
             make_bundles(&mut layer_graph, graph)?;
             compress_graph(
