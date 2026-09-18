@@ -10,7 +10,7 @@ mod gff;
 
 pub use bed::{BedAnnotation, BedRecord};
 use gen_core::{HashId, Workspace};
-use gen_models::{annotations::MaterializedAnnotationError, db::GraphConnection};
+use gen_models::{annotations::Annotation, db::GraphConnection};
 pub use gff::GffAnnotation;
 use thiserror::Error;
 
@@ -41,6 +41,15 @@ pub enum FileAnnotationError {
     Empty,
     #[error("translated annotation reference is not a node id: {0}")]
     InvalidNode(String),
-    #[error(transparent)]
-    MaterializedAnnotation(#[from] MaterializedAnnotationError),
+}
+
+pub(super) fn source_annotation(name: &str, group: &str) -> Annotation {
+    let id = HashId::convert_str(name);
+    Annotation {
+        id,
+        name: name.to_string(),
+        group: group.to_string(),
+        accession_id: id,
+        extra: None,
+    }
 }

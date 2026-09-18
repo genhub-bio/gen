@@ -887,6 +887,7 @@ mod tests {
         block_group::BlockGroup,
         file_types::FileTypes,
         operations::commit_operation_summary,
+        region::resolve_annotation_region,
         sample::Sample,
     };
     use noodles::{bgzf, core::Position, csi, gff, tabix};
@@ -1360,30 +1361,28 @@ mod tests {
         )
         .expect("should match and translate gene-a0001 from simple GFF fixture");
         let mut file_graph = graph.clone();
-        let file_region = file_source
-            .annotation()
-            .resolve_normalized(
-                &normalized_region("gene-a0001:-3"),
-                conn,
-                context.workspace(),
-                &mut file_graph,
-            )
-            .expect("should resolve file-backed annotation relative to its start");
+        let file_region = resolve_annotation_region(
+            &normalized_region("gene-a0001:-3"),
+            &file_source,
+            conn,
+            context.workspace(),
+            &mut file_graph,
+        )
+        .expect("should resolve file-backed annotation relative to its start");
         assert_eq!(file_region.start_anchors.len(), 1);
         assert_eq!(file_region.end_anchors.len(), 1);
         assert_eq!(file_region.start_anchors[0].coordinate(), 1);
         assert_eq!(file_region.end_anchors[0].coordinate(), 1);
         assert_eq!((file_region.start_offset, file_region.end_offset), (-3, -3));
 
-        let zero_region = file_source
-            .annotation()
-            .resolve_normalized(
-                &normalized_region("gene-a0001:0"),
-                conn,
-                context.workspace(),
-                &mut file_graph,
-            )
-            .expect("should resolve a zero annotation offset");
+        let zero_region = resolve_annotation_region(
+            &normalized_region("gene-a0001:0"),
+            &file_source,
+            conn,
+            context.workspace(),
+            &mut file_graph,
+        )
+        .expect("should resolve a zero annotation offset");
         assert_eq!(
             (
                 zero_region.start_anchors[0].coordinate(),
@@ -1393,15 +1392,14 @@ mod tests {
         );
         assert_eq!((zero_region.start_offset, zero_region.end_offset), (0, 0));
 
-        let positive_slice = file_source
-            .annotation()
-            .resolve_normalized(
-                &normalized_region("gene-a0001:5-8"),
-                conn,
-                context.workspace(),
-                &mut file_graph,
-            )
-            .expect("should resolve a positive annotation slice");
+        let positive_slice = resolve_annotation_region(
+            &normalized_region("gene-a0001:5-8"),
+            &file_source,
+            conn,
+            context.workspace(),
+            &mut file_graph,
+        )
+        .expect("should resolve a positive annotation slice");
         assert_eq!(
             (
                 positive_slice.start_anchors[0].coordinate(),
@@ -1443,15 +1441,14 @@ mod tests {
         )
         .expect("should translate reverse-strand gene record");
         let mut reverse_graph = graph.clone();
-        let reverse_region = reverse_source
-            .annotation()
-            .resolve_normalized(
-                &normalized_region("gene-a0001:0"),
-                conn,
-                context.workspace(),
-                &mut reverse_graph,
-            )
-            .expect("should resolve reverse-strand fixture record");
+        let reverse_region = resolve_annotation_region(
+            &normalized_region("gene-a0001:0"),
+            &reverse_source,
+            conn,
+            context.workspace(),
+            &mut reverse_graph,
+        )
+        .expect("should resolve reverse-strand fixture record");
         assert_eq!(
             (
                 reverse_region.start_anchors[0].coordinate(),
@@ -1481,17 +1478,14 @@ mod tests {
         )
         .expect("should load persisted comparison annotation");
         let mut persisted_graph = graph;
-        let persisted_materialized = persisted
-            .materialize(conn)
-            .expect("should materialize persisted comparison annotation");
-        let persisted_region = persisted_materialized
-            .resolve_normalized(
-                &normalized_region("gene-persisted:-3"),
-                conn,
-                context.workspace(),
-                &mut persisted_graph,
-            )
-            .expect("should resolve persisted annotation with shared resolver");
+        let persisted_region = resolve_annotation_region(
+            &normalized_region("gene-persisted:-3"),
+            &persisted,
+            conn,
+            context.workspace(),
+            &mut persisted_graph,
+        )
+        .expect("should resolve persisted annotation with shared resolver");
         assert_eq!(
             file_region.start_anchors, persisted_region.start_anchors,
             "file-backed and persisted segments should resolve to the same start"

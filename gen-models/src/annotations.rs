@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use gen_core::{
-    DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, Strand, calculate_hash,
+    DoltHashId, HashId, NodeIntervalBlock, Sha256Hash, calculate_hash,
     config::Workspace,
-    is_terminal,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
 };
@@ -98,106 +97,6 @@ pub struct Annotation {
     pub accession_id: HashId,
     #[model_select(skip)]
     pub extra: Option<AnnotationExtra>,
-}
-
-/// A translated annotation selected by name and ready for relative-coordinate resolution.
-///
-/// File-backed sources construct this value after the application has selected a reader and
-/// existing translators have projected matching records onto graph nodes. Persisted annotations
-/// construct it from their accession interval tree. Keeping the materialized form here means both
-/// sources use the same graph traversal and database-backed expansion without making this crate
-/// responsible for source selection or file access.
-#[derive(Clone, Debug)]
-pub struct MaterializedAnnotation {
-    /// Identifier or display name selected by the caller.
-    name: String,
-    /// Block group providing graph topology for this annotation.
-    block_group_id: HashId,
-    /// Zero-based, half-open cumulative intervals over the annotation feature.
-    interval_tree: IntervalTree<i64, NodeIntervalBlock>,
-    /// Validated uniform directional strand of the feature.
-    strand: Strand,
-    /// Total feature length represented by `interval_tree`.
-    feature_length: i64,
-}
-
-/// Errors raised while validating translated annotation intervals.
-#[derive(Debug, Error, PartialEq)]
-pub enum MaterializedAnnotationError {
-    #[error("annotation has no translated intervals")]
-    EmptyAnnotation,
-    #[error("annotation intervals have mixed strands")]
-    MixedStrands,
-    #[error("annotation strand is not directional")]
-    NonDirectionalStrand,
-}
-
-impl MaterializedAnnotation {
-    /// Validate and construct a materialized annotation from translated intervals.
-    pub fn new(
-        name: impl Into<String>,
-        block_group_id: HashId,
-        interval_tree: IntervalTree<i64, NodeIntervalBlock>,
-    ) -> Result<Self, MaterializedAnnotationError> {
-        let (strand, feature_length) = materialized_annotation_shape(&interval_tree)?;
-        Ok(Self {
-            name: name.into(),
-            block_group_id,
-            interval_tree,
-            strand,
-            feature_length,
-        })
-    }
-
-    /// Return the selected identifier or display name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Return the graph block group containing this annotation.
-    pub fn block_group_id(&self) -> HashId {
-        self.block_group_id
-    }
-
-    /// Return the translated cumulative interval tree.
-    pub fn interval_tree(&self) -> &IntervalTree<i64, NodeIntervalBlock> {
-        &self.interval_tree
-    }
-
-    /// Return the validated uniform directional strand.
-    pub fn strand(&self) -> Strand {
-        self.strand
-    }
-
-    /// Return the total translated feature length.
-    pub fn feature_length(&self) -> i64 {
-        self.feature_length
-    }
-}
-
-fn materialized_annotation_shape(
-    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
-) -> Result<(Strand, i64), MaterializedAnnotationError> {
-    let mut strand = None;
-    let mut feature_length = 0;
-    for item in interval_tree.iter() {
-        if is_terminal(item.value.node_id) {
-            continue;
-        }
-        if Strand::is_ambiguous(item.value.strand) {
-            return Err(MaterializedAnnotationError::NonDirectionalStrand);
-        }
-        match strand {
-            Some(previous) if previous != item.value.strand => {
-                return Err(MaterializedAnnotationError::MixedStrands);
-            }
-            None => strand = Some(item.value.strand),
-            Some(_) => {}
-        }
-        feature_length = feature_length.max(item.value.end);
-    }
-    let strand = strand.ok_or(MaterializedAnnotationError::EmptyAnnotation)?;
-    Ok((strand, feature_length))
 }
 
 fn annotation_from_row(row: &Row) -> SqlResult<Annotation> {
@@ -363,8 +262,6 @@ pub enum AnnotationError {
     AccessionError(#[from] AccessionError),
     #[error("Annotation extra serialization error: {0}")]
     SerializationError(String),
-    #[error(transparent)]
-    MaterializedAnnotation(#[from] MaterializedAnnotationError),
 }
 
 #[derive(Debug, Error)]
@@ -623,26 +520,6 @@ impl Annotation {
             .next()
             .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         accession.intervaltree(conn).map_err(Into::into)
-    }
-
-    /// Materialize this persisted annotation for shared relative-coordinate resolution.
-    pub fn materialize(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<MaterializedAnnotation, AnnotationError> {
-        let accession = Accession::select(conn)
-            .id(self.accession_id)
-            .load()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                AnnotationError::AccessionError(AccessionError::MissingPath(self.accession_id))
-            })?;
-        Ok(MaterializedAnnotation::new(
-            self.name.clone(),
-            accession.block_group_id,
-            accession.intervaltree(conn)?,
-        )?)
     }
 }
 
