@@ -129,17 +129,38 @@ pub fn resolve_all(
     let mut resolved_regions = Vec::new();
 
     for block_group in BlockGroup::resolve_candidates(region, conn, collection_name, sample_name)? {
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None)?;
+        let path_length = path.length(conn, None)?;
         resolved_regions.push(resolve_target(
             region,
-            target_for_block_group(conn, block_group)?,
+            RegionTarget {
+                kind: RegionTargetKind::BlockGroup,
+                block_group,
+                path: Some(path),
+                accession: None,
+                annotation: None,
+                anchor_start: 0,
+                anchor_end: path_length,
+                feature_length: path_length,
+            },
         )?);
     }
 
     for (path, block_group) in Path::resolve_candidates(region, conn, collection_name, sample_name)?
     {
+        let path_length = path.length(conn, None)?;
         resolved_regions.push(resolve_target(
             region,
-            target_for_path(conn, path, block_group)?,
+            RegionTarget {
+                kind: RegionTargetKind::Path,
+                block_group,
+                path: Some(path),
+                accession: None,
+                annotation: None,
+                anchor_start: 0,
+                anchor_end: path_length,
+                feature_length: path_length,
+            },
         )?);
     }
 
@@ -201,7 +222,20 @@ pub fn resolve_path(
         Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
     };
     let block_group = BlockGroup::get_by_id(conn, &path.block_group_id, None)?;
-    resolve_target(region, target_for_path(conn, path, block_group)?)
+    let path_length = path.length(conn, None)?;
+    resolve_target(
+        region,
+        RegionTarget {
+            kind: RegionTargetKind::Path,
+            block_group,
+            path: Some(path),
+            accession: None,
+            annotation: None,
+            anchor_start: 0,
+            anchor_end: path_length,
+            feature_length: path_length,
+        },
+    )
 }
 
 pub fn resolve_block_group(
@@ -218,7 +252,21 @@ pub fn resolve_block_group(
         Err(RegionResolutionError::Ambiguous(name)) => return Err(GenRegionError::Ambiguous(name)),
         Err(RegionResolutionError::Lookup(err)) => return Err(err.into()),
     };
-    resolve_target(region, target_for_block_group(conn, block_group)?)
+    let path = BlockGroup::get_current_path(conn, &block_group.id, None)?;
+    let path_length = path.length(conn, None)?;
+    resolve_target(
+        region,
+        RegionTarget {
+            kind: RegionTargetKind::BlockGroup,
+            block_group,
+            path: Some(path),
+            accession: None,
+            annotation: None,
+            anchor_start: 0,
+            anchor_end: path_length,
+            feature_length: path_length,
+        },
+    )
 }
 
 pub fn resolve_accession(
@@ -277,35 +325,6 @@ pub fn resolve_annotation(
         false,
     )?;
     resolve_target(region, target)
-}
-
-fn target_for_path(
-    conn: &GraphConnection,
-    path: Path,
-    block_group: BlockGroup,
-) -> Result<RegionTarget, GenRegionError> {
-    let path_length = path.length(conn, None)?;
-    Ok(RegionTarget {
-        kind: RegionTargetKind::Path,
-        block_group,
-        path: Some(path),
-        accession: None,
-        annotation: None,
-        anchor_start: 0,
-        anchor_end: path_length,
-        feature_length: path_length,
-    })
-}
-
-fn target_for_block_group(
-    conn: &GraphConnection,
-    block_group: BlockGroup,
-) -> Result<RegionTarget, GenRegionError> {
-    let path = BlockGroup::get_current_path(conn, &block_group.id, None)?;
-    target_for_path(conn, path, block_group).map(|mut target| {
-        target.kind = RegionTargetKind::BlockGroup;
-        target
-    })
 }
 
 fn resolve_target(
@@ -885,6 +904,13 @@ mod tests {
         .unwrap();
         let region = ResolvedGenRegion::from_accession(&conn, &accession, 2, 5).unwrap();
 
+        // absolute:          0 1 2 3 4 5 6 7 8 9 10
+        // test-t-node:       |-------------------|
+        // reverse accession:     |<----------|  abs [2,8)
+        // accession offsets:     6 5 4 3 2 1 0
+        // requested [2,5):         |-----|  abs [3,6)
+        // block-local:           0 1 2 3 4 5 6  (node abs [2,8))
+        // result [1,4):            |-----|
         let locus = region.graph_locus(&conn, test_workspace()).unwrap();
 
         assert_eq!(locus.slices.len(), 1);
