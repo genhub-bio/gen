@@ -32,222 +32,12 @@ pub struct ResolvedGenRegion {
     pub end: i64,
     pub start_anchors: Option<Vec<GraphNodePosition>>,
     pub end_anchors: Option<Vec<GraphNodePosition>>,
+    /// Source-provided cumulative intervals for an annotation selected outside the database.
+    ///
+    /// `None` retains the existing persisted path/accession lookup. When present, the same
+    /// `ResolvedGraph` and graph traversal machinery uses these already-translated intervals.
+    pub annotation_interval_tree: Option<IntervalTree<i64, NodeIntervalBlock>>,
     pub remove_ambiguous_positions: bool,
-}
-
-/// A source-neutral annotation with translated graph intervals.
-///
-/// Applications choose and open file sources before implementing this trait. The region resolver
-/// only consumes the selected annotation identity and its cumulative interval tree, so persisted,
-/// GFF, and BED annotations share one relative-coordinate and graph-traversal implementation.
-pub trait AnnotationSource {
-    type Error: std::error::Error + 'static;
-
-    /// Return the identity selected by the upstream source lookup.
-    fn annotation(&self) -> &Annotation;
-
-    /// Return cumulative feature intervals and their graph block group.
-    fn annotation_intervals(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<(IntervalTree<i64, NodeIntervalBlock>, HashId), Self::Error>;
-}
-
-/// Inputs for the shared graph-position walk used by path and annotation regions.
-///
-/// The interval tree uses zero-based, half-open coordinates. `start_coordinate` and
-/// `end_coordinate` identify the graph boundaries, while the distances allow a caller to
-/// continue outside those boundaries. Keeping this request source-neutral lets file-backed
-/// annotations use the same anchor and branch traversal as persisted regions.
-struct GraphPositionRequest<'a> {
-    /// Graph topology used for traversal and optional expansion.
-    graph: &'a mut gen_graph::GenGraph,
-    /// Source-neutral zero-based, half-open interval tree.
-    interval_tree: &'a IntervalTree<i64, NodeIntervalBlock>,
-    /// Block group whose persisted edges may be used by expansion.
-    block_group_id: HashId,
-    /// Tree coordinate at which the start walk begins.
-    start_coordinate: i64,
-    /// Tree coordinate at which the end walk begins.
-    end_coordinate: i64,
-    /// Distance from the start anchor.
-    start_distance: i64,
-    /// Distance from the end anchor.
-    end_distance: i64,
-}
-
-/// Inputs for resolving offsets relative to a translated annotation interval tree.
-struct AnnotationGraphPositionRequest<'a> {
-    /// Graph topology used for traversal and optional expansion.
-    graph: &'a mut gen_graph::GenGraph,
-    /// Cumulative annotation interval tree.
-    interval_tree: &'a IntervalTree<i64, NodeIntervalBlock>,
-    /// Block group whose persisted edges may be used by expansion.
-    block_group_id: HashId,
-    /// Uniform annotation strand.
-    strand: Strand,
-    /// Cumulative feature length in the interval tree.
-    feature_length: i64,
-    /// Normalized annotation-relative start offset.
-    start_offset: i64,
-    /// Normalized annotation-relative end offset.
-    end_offset: i64,
-}
-
-/// Resolved annotation-relative offsets and their graph anchors.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedAnnotationRegion {
-    /// Uniform source annotation strand.
-    pub strand: Strand,
-    /// Normalized annotation-relative start offset.
-    pub start_offset: i64,
-    /// Normalized annotation-relative end offset.
-    pub end_offset: i64,
-    /// All graph positions resolved at the start boundary.
-    pub start_anchors: Vec<GraphNodePosition>,
-    /// All graph positions resolved at the end boundary.
-    pub end_anchors: Vec<GraphNodePosition>,
-}
-
-/// Errors produced while resolving a source-backed annotation region.
-#[derive(Debug, Error)]
-pub enum AnnotationRegionError<E: std::error::Error + 'static> {
-    #[error("region name {region} does not match selected annotation {annotation}")]
-    NameMismatch { region: String, annotation: String },
-    #[error("annotation source error: {0}")]
-    Source(#[source] E),
-    #[error("annotation has no translated intervals")]
-    EmptyAnnotation,
-    #[error("annotation intervals have mixed strands")]
-    MixedStrands,
-    #[error("annotation strand is not directional")]
-    NonDirectionalStrand,
-    #[error("annotation region start {start} is greater than end {end}")]
-    InvalidRange { start: i64, end: i64 },
-    #[error(transparent)]
-    Parse(#[from] RegionParseError),
-    #[error(transparent)]
-    Graph(#[from] gen_graph::GraphError),
-}
-
-enum AnnotationShapeError {
-    Empty,
-    MixedStrands,
-    NonDirectionalStrand,
-}
-
-fn annotation_shape(
-    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
-) -> Result<(Strand, i64), AnnotationShapeError> {
-    let mut strand = None;
-    let mut feature_length = 0;
-    for item in interval_tree.iter() {
-        if is_terminal(item.value.node_id) {
-            continue;
-        }
-        if Strand::is_ambiguous(item.value.strand) {
-            return Err(AnnotationShapeError::NonDirectionalStrand);
-        }
-        match strand {
-            Some(previous) if previous != item.value.strand => {
-                return Err(AnnotationShapeError::MixedStrands);
-            }
-            None => strand = Some(item.value.strand),
-            Some(_) => {}
-        }
-        feature_length = feature_length.max(item.value.end);
-    }
-    let strand = strand.ok_or(AnnotationShapeError::Empty)?;
-    Ok((strand, feature_length))
-}
-
-impl AnnotationSource for Annotation {
-    type Error = AnnotationError;
-
-    fn annotation(&self) -> &Annotation {
-        self
-    }
-
-    fn annotation_intervals(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<(IntervalTree<i64, NodeIntervalBlock>, HashId), Self::Error> {
-        let accession = Accession::select(conn)
-            .id(self.accession_id)
-            .load()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                AnnotationError::AccessionError(AccessionError::MissingPath(self.accession_id))
-            })?;
-        Ok((accession.intervaltree(conn)?, accession.block_group_id))
-    }
-}
-
-/// Resolve an already-normalized region against any selected annotation source.
-///
-/// Call [`gen_core::region::normalize_user_search_region`] on raw user coordinates before calling
-/// this function. It intentionally performs no one-based conversion itself, so persisted and
-/// file-backed annotations cannot diverge or be normalized twice.
-pub fn resolve_annotation_region<S>(
-    normalized_region: &Region,
-    source: &S,
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    graph: &mut gen_graph::GenGraph,
-) -> Result<ResolvedAnnotationRegion, AnnotationRegionError<S::Error>>
-where
-    S: AnnotationSource,
-{
-    let annotation = source.annotation();
-    if !normalized_region
-        .name
-        .eq_ignore_ascii_case(annotation.name.as_str())
-    {
-        return Err(AnnotationRegionError::NameMismatch {
-            region: normalized_region.name.clone(),
-            annotation: annotation.name.clone(),
-        });
-    }
-    let (interval_tree, block_group_id) = source
-        .annotation_intervals(conn)
-        .map_err(AnnotationRegionError::Source)?;
-    let (strand, feature_length) =
-        annotation_shape(&interval_tree).map_err(|error| match error {
-            AnnotationShapeError::Empty => AnnotationRegionError::EmptyAnnotation,
-            AnnotationShapeError::MixedStrands => AnnotationRegionError::MixedStrands,
-            AnnotationShapeError::NonDirectionalStrand => {
-                AnnotationRegionError::NonDirectionalStrand
-            }
-        })?;
-    let (start_offset, end_offset) =
-        normalized_region.resolve_relative_bounds(0, feature_length)?;
-    if start_offset > end_offset {
-        return Err(AnnotationRegionError::InvalidRange {
-            start: start_offset,
-            end: end_offset,
-        });
-    }
-    let (start_anchors, end_anchors) = compute_annotation_graph_positions(
-        AnnotationGraphPositionRequest {
-            graph,
-            interval_tree: &interval_tree,
-            block_group_id,
-            strand,
-            feature_length,
-            start_offset,
-            end_offset,
-        },
-        conn,
-        workspace,
-    )?;
-    Ok(ResolvedAnnotationRegion {
-        strand,
-        start_offset,
-        end_offset,
-        start_anchors,
-        end_anchors,
-    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -504,6 +294,7 @@ fn resolve_target(
         end,
         start_anchors: None,
         end_anchors: None,
+        annotation_interval_tree: None,
         remove_ambiguous_positions: false,
     })
 }
@@ -538,255 +329,6 @@ fn target_from_accession(
     })
 }
 
-/// Compute graph positions from a source-neutral interval tree.
-fn compute_graph_positions(
-    request: GraphPositionRequest<'_>,
-    conn: &GraphConnection,
-    workspace: &Workspace,
-) -> Result<
-    (
-        Vec<gen_graph::GraphNodePosition>,
-        Vec<gen_graph::GraphNodePosition>,
-    ),
-    gen_graph::GraphError,
-> {
-    let block_group_id = request.block_group_id;
-    compute_graph_positions_with_expansion(request, conn, workspace, |graph, node_id| {
-        crate::graph::expand(conn, workspace, graph, &block_group_id, node_id)
-    })
-}
-
-/// Compute graph positions while leaving graph expansion under the caller's control.
-fn compute_graph_positions_with_expansion<F>(
-    request: GraphPositionRequest<'_>,
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    mut expand: F,
-) -> Result<
-    (
-        Vec<gen_graph::GraphNodePosition>,
-        Vec<gen_graph::GraphNodePosition>,
-    ),
-    gen_graph::GraphError,
->
-where
-    F: FnMut(&mut gen_graph::GenGraph, HashId) -> bool,
-{
-    let tree: IntervalTree<i64, NodeIntervalBlock> = request
-        .interval_tree
-        .iter()
-        .filter(|item| !is_terminal(item.value.node_id))
-        .map(|item| (item.range.clone(), item.value))
-        .collect();
-    let resolved = crate::graph::ResolvedGraph {
-        graph: request.graph.clone(),
-        interval_tree: tree,
-        block_group_id: request.block_group_id,
-    };
-    let start_anchor = resolved.resolve_anchor(request.start_coordinate, conn, workspace)?;
-    let start_positions = crate::graph::find_offset(
-        request.graph,
-        &start_anchor,
-        request.start_distance,
-        &mut expand,
-    )?;
-    let end_positions = if request.start_coordinate == request.end_coordinate
-        && request.start_distance == request.end_distance
-    {
-        start_positions.clone()
-    } else {
-        let end_anchor = resolved.resolve_anchor(request.end_coordinate, conn, workspace)?;
-        crate::graph::find_offset(
-            request.graph,
-            &end_anchor,
-            request.end_distance,
-            &mut expand,
-        )?
-    };
-    Ok((start_positions, end_positions))
-}
-
-/// Resolve annotation-relative positions using the database-backed graph expansion.
-fn compute_annotation_graph_positions(
-    request: AnnotationGraphPositionRequest<'_>,
-    conn: &GraphConnection,
-    workspace: &Workspace,
-) -> Result<
-    (
-        Vec<gen_graph::GraphNodePosition>,
-        Vec<gen_graph::GraphNodePosition>,
-    ),
-    gen_graph::GraphError,
-> {
-    let block_group_id = request.block_group_id;
-    compute_annotation_graph_positions_with_expansion(request, conn, workspace, |graph, node_id| {
-        crate::graph::expand(conn, workspace, graph, &block_group_id, node_id)
-    })
-}
-
-/// Resolve annotation-relative offsets through the shared graph walker.
-fn compute_annotation_graph_positions_with_expansion<F>(
-    request: AnnotationGraphPositionRequest<'_>,
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    mut expand: F,
-) -> Result<
-    (
-        Vec<gen_graph::GraphNodePosition>,
-        Vec<gen_graph::GraphNodePosition>,
-    ),
-    gen_graph::GraphError,
->
-where
-    F: FnMut(&mut gen_graph::GenGraph, HashId) -> bool,
-{
-    let (start_node_id, start_coordinate, start_distance) = annotation_endpoint(
-        request.interval_tree,
-        request.strand,
-        request.feature_length,
-        request.start_offset,
-    );
-    let (end_node_id, end_coordinate, end_distance) = annotation_endpoint(
-        request.interval_tree,
-        request.strand,
-        request.feature_length,
-        request.end_offset,
-    );
-    let start_graph_interval_tree =
-        start_node_id.map(|node_id| graph_coordinate_interval_tree(request.graph, node_id));
-    let end_graph_interval_tree =
-        end_node_id.map(|node_id| graph_coordinate_interval_tree(request.graph, node_id));
-    let start_interval_tree = start_graph_interval_tree
-        .as_ref()
-        .map_or(request.interval_tree, |tree| tree);
-    let end_interval_tree = end_graph_interval_tree
-        .as_ref()
-        .map_or(request.interval_tree, |tree| tree);
-    let start_positions = compute_graph_positions_with_expansion(
-        GraphPositionRequest {
-            graph: request.graph,
-            interval_tree: start_interval_tree,
-            block_group_id: request.block_group_id,
-            start_coordinate,
-            end_coordinate: start_coordinate,
-            start_distance,
-            end_distance: start_distance,
-        },
-        conn,
-        workspace,
-        &mut expand,
-    )?
-    .0;
-    let end_positions = if request.start_offset == request.end_offset {
-        start_positions.clone()
-    } else {
-        compute_graph_positions_with_expansion(
-            GraphPositionRequest {
-                graph: request.graph,
-                interval_tree: end_interval_tree,
-                block_group_id: request.block_group_id,
-                start_coordinate: end_coordinate,
-                end_coordinate,
-                start_distance: end_distance,
-                end_distance,
-            },
-            conn,
-            workspace,
-            &mut expand,
-        )?
-        .0
-    };
-    Ok((start_positions, end_positions))
-}
-
-fn graph_coordinate_interval_tree(
-    graph: &gen_graph::GenGraph,
-    node_id: HashId,
-) -> IntervalTree<i64, NodeIntervalBlock> {
-    graph
-        .nodes()
-        .filter(|node| {
-            node.node_id == node_id
-                && !is_terminal(node.node_id)
-                && node.sequence_start < node.sequence_end
-        })
-        .map(|node| {
-            let block = NodeIntervalBlock {
-                node_id: node.node_id,
-                start: node.sequence_start,
-                end: node.sequence_end,
-                sequence_start: node.sequence_start,
-                sequence_end: node.sequence_end,
-                strand: Strand::Forward,
-            };
-            (block.start..block.end, block)
-        })
-        .collect()
-}
-
-fn annotation_endpoint(
-    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
-    strand: Strand,
-    feature_length: i64,
-    offset: i64,
-) -> (Option<HashId>, i64, i64) {
-    match strand {
-        Strand::Forward => {
-            if offset < 0 {
-                let (node_id, coordinate) =
-                    annotation_boundary_coordinate(interval_tree, strand, true);
-                (Some(node_id), coordinate, offset)
-            } else if offset > feature_length {
-                let (node_id, coordinate) =
-                    annotation_boundary_coordinate(interval_tree, strand, false);
-                (Some(node_id), coordinate, offset - feature_length)
-            } else {
-                (None, offset, 0)
-            }
-        }
-        Strand::Reverse => {
-            if offset < 0 {
-                let (node_id, coordinate) =
-                    annotation_boundary_coordinate(interval_tree, strand, true);
-                (Some(node_id), coordinate, -offset)
-            } else if offset > feature_length {
-                let (node_id, coordinate) =
-                    annotation_boundary_coordinate(interval_tree, strand, false);
-                (Some(node_id), coordinate, -(offset - feature_length))
-            } else {
-                (None, feature_length - offset, 0)
-            }
-        }
-        Strand::Unknown | Strand::ImportantButUnknown => (None, 0, 0),
-    }
-}
-
-fn annotation_boundary_coordinate(
-    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
-    strand: Strand,
-    five_prime: bool,
-) -> (HashId, i64) {
-    let block = if (strand == Strand::Forward) == five_prime {
-        interval_tree
-            .iter()
-            .filter(|item| !is_terminal(item.value.node_id))
-            .min_by_key(|item| item.value.start)
-    } else {
-        interval_tree
-            .iter()
-            .filter(|item| !is_terminal(item.value.node_id))
-            .max_by_key(|item| item.value.end)
-    }
-    .expect("should have a non-terminal annotation interval")
-    .value;
-    let coordinate = if (strand == Strand::Forward) == five_prime {
-        block.sequence_start
-    } else {
-        block.sequence_end
-    };
-    (block.node_id, coordinate)
-}
-
 impl ResolvedGenRegion {
     pub fn from_path(
         conn: &GraphConnection,
@@ -810,6 +352,7 @@ impl ResolvedGenRegion {
             end,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: false,
         })
     }
@@ -835,6 +378,7 @@ impl ResolvedGenRegion {
             end,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: false,
         })
     }
@@ -861,6 +405,47 @@ impl ResolvedGenRegion {
             end,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
+            remove_ambiguous_positions: false,
+        })
+    }
+
+    /// Build an annotation region from translated, cumulative node intervals.
+    ///
+    /// File-backed annotations use this downstream of source selection and translation. The
+    /// supplied tree has the same shape as a persisted accession tree, so graph anchors and
+    /// branch traversal continue through [`ResolvedGenRegion::find_graph_positions`]. `start` and
+    /// `end` are coordinates in that cumulative tree; callers map user-relative coordinates to
+    /// the tree's orientation before constructing the region.
+    pub fn from_annotation_intervals(
+        conn: &GraphConnection,
+        annotation: &Annotation,
+        block_group_id: HashId,
+        interval_tree: IntervalTree<i64, NodeIntervalBlock>,
+        start: i64,
+        end: i64,
+    ) -> Result<Self, BlockGroupError> {
+        let block_group = BlockGroup::get_by_id(conn, &block_group_id, None)?;
+        let feature_length = interval_tree
+            .iter()
+            .filter(|item| !is_terminal(item.value.node_id))
+            .map(|item| item.value.end)
+            .max()
+            .unwrap_or_default();
+        Ok(Self {
+            block_group,
+            path: None,
+            accession: None,
+            annotation: Some(annotation.clone()),
+            kind: ResolvedRegionKind::Annotation,
+            anchor_start: 0,
+            anchor_end: feature_length,
+            feature_length,
+            start,
+            end,
+            start_anchors: None,
+            end_anchors: None,
+            annotation_interval_tree: Some(interval_tree),
             remove_ambiguous_positions: false,
         })
     }
@@ -873,12 +458,12 @@ impl ResolvedGenRegion {
                     .expect("should have path for Path region")
                     .id
             }
-            ResolvedRegionKind::Accession | ResolvedRegionKind::Annotation => {
-                self.accession
-                    .as_ref()
-                    .expect("should have accession for region")
-                    .id
-            }
+            ResolvedRegionKind::Accession | ResolvedRegionKind::Annotation => self
+                .accession
+                .as_ref()
+                .map(|accession| accession.id)
+                .or_else(|| self.annotation.as_ref().map(|annotation| annotation.id))
+                .expect("should have accession or annotation for region"),
             ResolvedRegionKind::BlockGroup => self.block_group.id,
         };
         (id, self.kind)
@@ -934,6 +519,9 @@ impl ResolvedGenRegion {
                 Ok(path.intervaltree(conn)?)
             }
             ResolvedRegionKind::Annotation => {
+                if let Some(interval_tree) = &self.annotation_interval_tree {
+                    return Ok(interval_tree.clone());
+                }
                 let accession = self.accession.as_ref().ok_or_else(|| {
                     GenRegionError::NotFound("No accession for annotation".to_string())
                 })?;
@@ -985,26 +573,34 @@ impl ResolvedGenRegion {
         let interval_tree = self
             .intervaltree(conn, workspace)
             .map_err(|_| gen_graph::GraphError::NoPath)?;
-        let filtered: Vec<(std::ops::Range<i64>, NodeIntervalBlock)> = interval_tree
+        let filtered: Vec<(std::ops::Range<i64>, gen_core::NodeIntervalBlock)> = interval_tree
             .iter()
-            .filter(|item| !is_terminal(item.value.node_id))
+            .filter(|item| !gen_core::is_terminal(item.value.node_id))
             .map(|item| (item.range.clone(), item.value))
             .collect();
-        let tree: IntervalTree<i64, NodeIntervalBlock> = filtered.into_iter().collect();
+        let tree: intervaltree::IntervalTree<i64, gen_core::NodeIntervalBlock> =
+            filtered.into_iter().collect();
+
         let mut graph = gen_graph::graph_from_interval_tree(&tree);
-        crate::region::compute_graph_positions(
-            GraphPositionRequest {
-                graph: &mut graph,
-                interval_tree: &tree,
-                block_group_id: self.block_group.id,
-                start_coordinate: self.start,
-                end_coordinate: self.end,
-                start_distance: start_offset,
-                end_distance: end_offset,
-            },
-            conn,
-            workspace,
-        )
+
+        let resolved = crate::graph::ResolvedGraph {
+            graph: graph.clone(),
+            interval_tree: tree,
+            block_group_id: self.block_group.id,
+        };
+        let start_anchor = resolved.resolve_anchor(self.start, conn, workspace)?;
+        let end_anchor = resolved.resolve_anchor(self.end, conn, workspace)?;
+
+        let start_positions =
+            crate::graph::find_offset(&mut graph, &start_anchor, start_offset, |g, nid| {
+                crate::graph::expand(conn, workspace, g, &self.block_group.id, nid)
+            })?;
+        let end_positions =
+            crate::graph::find_offset(&mut graph, &end_anchor, end_offset, |g, nid| {
+                crate::graph::expand(conn, workspace, g, &self.block_group.id, nid)
+            })?;
+
+        Ok((start_positions, end_positions))
     }
 
     #[cfg_attr(
@@ -1390,254 +986,6 @@ mod tests {
             .unwrap();
             assert_eq!((wrap.start, wrap.end), (15, 5));
         }
-
-        struct TestAnnotationSource {
-            annotation: Annotation,
-            interval_tree: IntervalTree<i64, NodeIntervalBlock>,
-            block_group_id: HashId,
-        }
-
-        impl AnnotationSource for TestAnnotationSource {
-            type Error = std::convert::Infallible;
-
-            fn annotation(&self) -> &Annotation {
-                &self.annotation
-            }
-
-            fn annotation_intervals(
-                &self,
-                _conn: &GraphConnection,
-            ) -> Result<(IntervalTree<i64, NodeIntervalBlock>, HashId), Self::Error> {
-                Ok((self.interval_tree.clone(), self.block_group_id))
-            }
-        }
-
-        fn annotation_source(
-            node_name: &str,
-            sequence_start: i64,
-            sequence_end: i64,
-            strand: Strand,
-        ) -> TestAnnotationSource {
-            let node_id = HashId::convert_str(node_name);
-            let block = NodeIntervalBlock {
-                node_id,
-                start: 0,
-                end: sequence_end - sequence_start,
-                sequence_start,
-                sequence_end,
-                strand,
-            };
-            let block_group_id = HashId::convert_str("block-group");
-            let annotation = Annotation {
-                id: Annotation::generate_id("gene", "test", &block_group_id),
-                name: "gene".to_string(),
-                group: "test".to_string(),
-                accession_id: block_group_id,
-                extra: None,
-            };
-            TestAnnotationSource {
-                annotation,
-                interval_tree: vec![(block.start..block.end, block)].into_iter().collect(),
-                block_group_id,
-            }
-        }
-
-        fn graph(node_name: &str, sequence_start: i64, sequence_end: i64) -> gen_graph::GenGraph {
-            let graph_node = GraphNode {
-                node_id: HashId::convert_str(node_name),
-                sequence_start,
-                sequence_end,
-            };
-            let mut graph = gen_graph::GenGraph::new();
-            graph.add_node(graph_node);
-            graph
-        }
-
-        fn normalized(region: &str) -> Region {
-            gen_core::region::normalize_user_search_region(&Region::parse(region).unwrap())
-        }
-
-        #[test]
-        fn test_annotation_source_resolves_zero_and_positive_offsets() {
-            let annotation = annotation_source("node", 4, 20, Strand::Forward);
-            let conn = get_connection(None).unwrap();
-            let mut graph = graph("node", 0, 34);
-
-            let zero = resolve_annotation_region(
-                &normalized("gene:0"),
-                &annotation,
-                &conn,
-                test_workspace(),
-                &mut graph,
-            )
-            .unwrap();
-            assert_eq!((zero.start_offset, zero.end_offset), (0, 0));
-            assert_eq!(zero.start_anchors, zero.end_anchors);
-            assert_eq!(zero.start_anchors[0].coordinate(), 4);
-
-            let positive = resolve_annotation_region(
-                &normalized("gene:5-8"),
-                &annotation,
-                &conn,
-                test_workspace(),
-                &mut graph,
-            )
-            .unwrap();
-            assert_eq!((positive.start_offset, positive.end_offset), (4, 8));
-            assert_eq!(positive.start_anchors[0].coordinate(), 8);
-            assert_eq!(positive.end_anchors[0].coordinate(), 12);
-        }
-
-        #[test]
-        fn test_annotation_source_resolves_forward_and_reverse_offsets() {
-            let conn = get_connection(None).unwrap();
-
-            let forward = annotation_source("node", 4, 20, Strand::Forward);
-            let mut forward_graph = graph("node", 0, 34);
-            let forward_region = resolve_annotation_region(
-                &normalized("gene:-3"),
-                &forward,
-                &conn,
-                test_workspace(),
-                &mut forward_graph,
-            )
-            .unwrap();
-            assert_eq!(forward_region.start_anchors[0].coordinate(), 1);
-
-            let reverse = annotation_source("node", 4, 20, Strand::Reverse);
-            let mut reverse_graph = graph("node", 0, 34);
-            let reverse_region = resolve_annotation_region(
-                &normalized("gene:-3"),
-                &reverse,
-                &conn,
-                test_workspace(),
-                &mut reverse_graph,
-            )
-            .unwrap();
-            assert_eq!(reverse_region.start_anchors[0].coordinate(), 23);
-
-            let reverse_after = resolve_annotation_region(
-                &normalized("gene:17"),
-                &reverse,
-                &conn,
-                test_workspace(),
-                &mut reverse_graph,
-            )
-            .unwrap();
-            assert_eq!(reverse_after.end_anchors[0].coordinate(), 3);
-        }
-
-        #[test]
-        fn test_annotation_source_resolves_preloaded_branch_boundaries() {
-            let annotation = annotation_source("first", 0, 4, Strand::Forward);
-            let first = GraphNode {
-                node_id: HashId::convert_str("first"),
-                sequence_start: 0,
-                sequence_end: 4,
-            };
-            let left = GraphNode {
-                node_id: HashId::convert_str("left"),
-                sequence_start: 0,
-                sequence_end: 6,
-            };
-            let right = GraphNode {
-                node_id: HashId::convert_str("right"),
-                sequence_start: 0,
-                sequence_end: 6,
-            };
-            let mut graph = gen_graph::GenGraph::new();
-            graph.add_edge(first, left, Vec::new());
-            graph.add_edge(first, right, Vec::new());
-            let conn = get_connection(None).unwrap();
-            let resolved = resolve_annotation_region(
-                &normalized("gene:5-8"),
-                &annotation,
-                &conn,
-                test_workspace(),
-                &mut graph,
-            )
-            .unwrap();
-            assert_eq!(resolved.end_anchors.len(), 2);
-            assert!(resolved.end_anchors.iter().any(|position| {
-                position.graph_node.node_id == left.node_id && position.offset == 4
-            }));
-            assert!(resolved.end_anchors.iter().any(|position| {
-                position.graph_node.node_id == right.node_id && position.offset == 4
-            }));
-        }
-
-        #[test]
-        fn test_annotation_source_resolves_discontinuous_slices_and_points() {
-            let first = NodeIntervalBlock {
-                node_id: HashId::convert_str("first-slice"),
-                start: 0,
-                end: 3,
-                sequence_start: 0,
-                sequence_end: 3,
-                strand: Strand::Forward,
-            };
-            let second = NodeIntervalBlock {
-                node_id: HashId::convert_str("second-slice"),
-                start: 3,
-                end: 6,
-                sequence_start: 10,
-                sequence_end: 13,
-                strand: Strand::Forward,
-            };
-            let block_group_id = HashId::convert_str("block-group");
-            let annotation = TestAnnotationSource {
-                annotation: Annotation {
-                    id: Annotation::generate_id("gene", "test", &block_group_id),
-                    name: "gene".to_string(),
-                    group: "test".to_string(),
-                    accession_id: block_group_id,
-                    extra: None,
-                },
-                interval_tree: vec![
-                    (first.start..first.end, first),
-                    (second.start..second.end, second),
-                ]
-                .into_iter()
-                .collect(),
-                block_group_id,
-            };
-            let mut graph = gen_graph::GenGraph::new();
-            graph.add_edge(
-                GraphNode {
-                    node_id: first.node_id,
-                    sequence_start: 0,
-                    sequence_end: 3,
-                },
-                GraphNode {
-                    node_id: second.node_id,
-                    sequence_start: 10,
-                    sequence_end: 13,
-                },
-                Vec::new(),
-            );
-            let conn = get_connection(None).unwrap();
-            let resolved = resolve_annotation_region(
-                &normalized("gene:2-5"),
-                &annotation,
-                &conn,
-                test_workspace(),
-                &mut graph,
-            )
-            .unwrap();
-            assert_eq!(resolved.start_anchors[0].coordinate(), 1);
-            assert_eq!(resolved.end_anchors[0].coordinate(), 12);
-
-            let point = resolve_annotation_region(
-                &Region::parse("gene:3").unwrap(),
-                &annotation,
-                &conn,
-                test_workspace(),
-                &mut graph,
-            )
-            .unwrap();
-            assert_eq!(point.start_anchors, point.end_anchors);
-            assert_eq!(point.start_anchors[0].coordinate(), 10);
-        }
     }
 
     mod find_graph_positions {
@@ -1848,6 +1196,7 @@ mod tests {
                 end,
                 start_anchors: None,
                 end_anchors: None,
+                annotation_interval_tree: None,
                 remove_ambiguous_positions: false,
             }
         }

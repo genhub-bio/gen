@@ -6,5 +6,8 @@ pub mod test_helpers;
 pub mod translate;
 
 pub use source::{
-    AnnotationTranslationContext, BedAnnotation, BedRecord, FileAnnotationError, GffAnnotation,
+    AnnotationTranslationContext, FileAnnotationError, parse_bed_annotation,
+    parse_bed_annotation_records, parse_gff_annotation, parse_gff_annotation_records,
+    translate_bed_annotation, translate_bed_annotation_records, translate_gff_annotation,
+    translate_gff_annotation_records,
 };

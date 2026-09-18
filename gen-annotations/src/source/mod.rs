@@ -1,17 +1,23 @@
 //! Source-specific annotation records and their translated graph intervals.
 //!
-//! The application chooses and opens an annotation asset. These types only receive the selected
-//! records (or a reader for the selected asset), match one identifier, and hand the matching
-//! records to the existing graph translators. A future attribute index can provide the same
-//! matched records without changing the downstream interval-tree or region-resolution layers.
+//! The application chooses and opens an annotation asset. These adapters only receive the
+//! selected records (or a reader for the selected asset), match one identifier, and hand the
+//! matching records to the existing graph translators. A future attribute index can provide the
+//! same matched records without changing the downstream interval-tree or region-resolution layers.
 
 mod bed;
 mod gff;
 
-pub use bed::{BedAnnotation, BedRecord};
-use gen_core::{HashId, Workspace};
-use gen_models::{annotations::Annotation, db::GraphConnection};
-pub use gff::GffAnnotation;
+pub use bed::{
+    parse_bed_annotation, parse_bed_annotation_records, translate_bed_annotation,
+    translate_bed_annotation_records,
+};
+use gen_core::Workspace;
+use gen_models::db::GraphConnection;
+pub use gff::{
+    parse_gff_annotation, parse_gff_annotation_records, translate_gff_annotation,
+    translate_gff_annotation_records,
+};
 use thiserror::Error;
 
 /// Context used while translating records selected by the application.
@@ -26,8 +32,6 @@ pub struct AnnotationTranslationContext<'a> {
     pub sample_name: &'a str,
     /// Optional history reference for graph lookup.
     pub history_ref: Option<&'a str>,
-    /// Selected block group receiving the annotation.
-    pub block_group_id: HashId,
 }
 
 /// Errors raised while building a file-backed annotation from matched records.
@@ -41,15 +45,4 @@ pub enum FileAnnotationError {
     Empty,
     #[error("translated annotation reference is not a node id: {0}")]
     InvalidNode(String),
-}
-
-pub(super) fn source_annotation(name: &str, group: &str) -> Annotation {
-    let id = HashId::convert_str(name);
-    Annotation {
-        id,
-        name: name.to_string(),
-        group: group.to_string(),
-        accession_id: id,
-        extra: None,
-    }
 }

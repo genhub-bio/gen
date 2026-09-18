@@ -1,181 +1,151 @@
-//! BED-backed annotation lookup and translation.
+//! BED parsing and translation adapters.
+//!
+//! Source selection remains with the caller. Reader functions perform only identifier matching;
+//! record-based functions accept records already selected by an upstream provider so an indexed
+//! lookup can replace a scan without changing annotation construction or translation.
 
 use std::io::{Cursor, Read};
 
 use gen_core::{HashId, NodeIntervalBlock, Strand, is_terminal};
-use gen_models::{annotations::Annotation, db::GraphConnection, region::AnnotationSource};
+use gen_models::annotations::{Annotation, AnnotationExtra, BedExtra};
 use intervaltree::IntervalTree;
 use noodles::bed;
 
-use super::{AnnotationTranslationContext, FileAnnotationError, source_annotation};
+use super::{AnnotationTranslationContext, FileAnnotationError};
 use crate::translate::bed::translate_bed;
 
-/// A BED record accepted by [`BedAnnotation::from_records`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BedRecord {
-    /// Reference sequence name used by the selected graph.
-    pub reference_sequence_name: String,
-    /// Zero-based inclusive feature start from the matched source record.
-    pub start: i64,
-    /// Zero-based exclusive feature end from the matched source record.
-    pub end: i64,
-    /// Optional identifier retained by the source record.
-    pub name: Option<String>,
-    /// Source record strand.
-    pub strand: Strand,
-}
-
-/// A BED annotation selected by name from a caller-provided source.
-#[derive(Clone, Debug)]
-pub struct BedAnnotation {
-    annotation: Annotation,
-    interval_tree: IntervalTree<i64, NodeIntervalBlock>,
-    block_group_id: HashId,
-}
-
-impl BedAnnotation {
-    /// Scan a selected BED reader for one name and translate only matching records.
-    pub fn from_reader<R>(
-        context: &AnnotationTranslationContext<'_>,
-        identifier: impl Into<String>,
-        reader: R,
-    ) -> Result<Self, FileAnnotationError>
-    where
-        R: Read,
-    {
-        let identifier = identifier.into();
-        let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
-        let mut record = bed::Record::<6>::default();
-        let mut records = Vec::new();
-        while bed_reader.read_record(&mut record)? != 0 {
-            let name = record
-                .name()
-                .and_then(|value| std::str::from_utf8(value.as_ref()).ok())
-                .map(str::to_string);
-            if name
-                .as_deref()
-                .is_some_and(|name| name.eq_ignore_ascii_case(&identifier))
-            {
-                let start = record
-                    .feature_start()
-                    .map_err(|error| FileAnnotationError::Translation(error.to_string()))?
-                    .get() as i64
-                    - 1;
-                let end = record
-                    .feature_end()
-                    .ok_or_else(|| {
-                        FileAnnotationError::Translation(
-                            "BED record has no feature end".to_string(),
-                        )
-                    })?
-                    .map_err(|error| FileAnnotationError::Translation(error.to_string()))?
-                    .get() as i64;
-                let strand = match record.strand() {
-                    Ok(Some(bed::feature::record::Strand::Forward)) => Strand::Forward,
-                    Ok(Some(bed::feature::record::Strand::Reverse)) => Strand::Reverse,
-                    Ok(None) | Err(_) => Strand::Unknown,
-                };
-                records.push(BedRecord {
-                    reference_sequence_name: String::from_utf8_lossy(
-                        record.reference_sequence_name().as_ref(),
-                    )
-                    .to_string(),
-                    start,
-                    end,
-                    name,
-                    strand,
-                });
-            }
+/// Parse one BED name's matching records into the existing annotation model.
+pub fn parse_bed_annotation<R>(
+    identifier: impl Into<String>,
+    reader: R,
+) -> Result<Annotation, FileAnnotationError>
+where
+    R: Read,
+{
+    let identifier = identifier.into();
+    let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
+    let mut record = bed::Record::<6>::default();
+    let mut records = Vec::new();
+    while bed_reader.read_record(&mut record)? != 0 {
+        if matching_bed_record(&record, &identifier) {
+            records.push(record.clone());
         }
-        Self::from_records(context, identifier, records)
     }
-
-    /// Build an annotation from records already matched by an upstream lookup provider.
-    pub fn from_records<I>(
-        context: &AnnotationTranslationContext<'_>,
-        identifier: impl Into<String>,
-        records: I,
-    ) -> Result<Self, FileAnnotationError>
-    where
-        I: IntoIterator<Item = BedRecord>,
-    {
-        let identifier = identifier.into();
-        let mut input = Vec::new();
-        {
-            let mut writer = bed::io::Writer::<6, _>::new(&mut input);
-            for record in records {
-                let start = record.start.max(0) as usize + 1;
-                let end = record.end.max(record.start) as usize;
-                let mut builder = bed::feature::RecordBuf::<6>::builder()
-                    .set_reference_sequence_name(record.reference_sequence_name)
-                    .set_feature_start(
-                        noodles::core::Position::try_from(start)
-                            .map_err(|error| FileAnnotationError::Translation(error.to_string()))?,
-                    )
-                    .set_feature_end(
-                        noodles::core::Position::try_from(end)
-                            .map_err(|error| FileAnnotationError::Translation(error.to_string()))?,
-                    );
-                if let Some(name) = record.name {
-                    builder = builder.set_name(name);
-                }
-                builder = match record.strand {
-                    Strand::Forward => builder.set_strand(bed::feature::record::Strand::Forward),
-                    Strand::Reverse => builder.set_strand(bed::feature::record::Strand::Reverse),
-                    Strand::Unknown | Strand::ImportantButUnknown => builder,
-                };
-                writer.write_feature_record(&builder.build())?;
-            }
-        }
-        let mut translated = Vec::new();
-        translate_bed(
-            context.conn,
-            context.workspace,
-            context.collection_name,
-            context.sample_name,
-            context.history_ref,
-            Cursor::new(input),
-            &mut translated,
-        )
-        .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
-        let interval_tree = translated_bed_interval_tree(&translated)?;
-        let annotation = source_annotation(&identifier, "bed");
-        Ok(Self {
-            annotation,
-            interval_tree,
-            block_group_id: context.block_group_id,
-        })
-    }
-
-    /// Identifier selected from the source records.
-    pub fn identifier(&self) -> &str {
-        &self.annotation.name
-    }
-
-    /// Return the selected source annotation identity.
-    pub fn annotation(&self) -> &Annotation {
-        &self.annotation
-    }
-
-    /// Consume the source wrapper and return its annotation identity.
-    pub fn into_annotation(self) -> Annotation {
-        self.annotation
-    }
+    parse_bed_annotation_records(identifier, records)
 }
 
-impl AnnotationSource for BedAnnotation {
-    type Error = std::convert::Infallible;
+/// Build a BED annotation from records already matched by an upstream lookup provider.
+pub fn parse_bed_annotation_records<I>(
+    identifier: impl Into<String>,
+    records: I,
+) -> Result<Annotation, FileAnnotationError>
+where
+    I: IntoIterator<Item = bed::Record<6>>,
+{
+    let identifier = identifier.into();
+    let records: Vec<_> = records.into_iter().collect();
+    let first = records.first().ok_or(FileAnnotationError::Empty)?;
+    let fields = bed_other_fields(first);
+    let bed = BedExtra {
+        score: Some(first.score()?.to_string()),
+        thick_start: fields.first().and_then(|value| value.parse().ok()),
+        thick_end: fields.get(1).and_then(|value| value.parse().ok()),
+        item_rgb: fields.get(2).cloned(),
+        block_count: fields.get(3).and_then(|value| value.parse().ok()),
+        block_sizes: fields
+            .get(4)
+            .map(|value| parse_bed_list(value))
+            .filter(|values| !values.is_empty()),
+        block_starts: fields
+            .get(5)
+            .map(|value| parse_bed_list(value))
+            .filter(|values| !values.is_empty()),
+        other_fields: fields.get(6..).unwrap_or_default().to_vec(),
+    };
+    let id = HashId::convert_str(&identifier);
+    Ok(Annotation {
+        id,
+        name: identifier,
+        group: "bed".to_string(),
+        accession_id: id,
+        extra: Some(AnnotationExtra {
+            bed: Some(bed),
+            ..AnnotationExtra::default()
+        }),
+    })
+}
 
-    fn annotation(&self) -> &Annotation {
-        &self.annotation
+/// Translate matching BED records from a selected reader into cumulative node intervals.
+pub fn translate_bed_annotation<R>(
+    context: &AnnotationTranslationContext<'_>,
+    identifier: impl Into<String>,
+    reader: R,
+) -> Result<IntervalTree<i64, NodeIntervalBlock>, FileAnnotationError>
+where
+    R: Read,
+{
+    let identifier = identifier.into();
+    let mut bed_reader = bed::io::reader::Builder::<6>.build_from_reader(reader);
+    let mut record = bed::Record::<6>::default();
+    let mut records = Vec::new();
+    while bed_reader.read_record(&mut record)? != 0 {
+        if matching_bed_record(&record, &identifier) {
+            records.push(record.clone());
+        }
     }
+    translate_bed_annotation_records(context, records)
+}
 
-    fn annotation_intervals(
-        &self,
-        _conn: &GraphConnection,
-    ) -> Result<(IntervalTree<i64, NodeIntervalBlock>, HashId), Self::Error> {
-        Ok((self.interval_tree.clone(), self.block_group_id))
+/// Translate BED records already selected by an upstream lookup provider.
+pub fn translate_bed_annotation_records<I>(
+    context: &AnnotationTranslationContext<'_>,
+    records: I,
+) -> Result<IntervalTree<i64, NodeIntervalBlock>, FileAnnotationError>
+where
+    I: IntoIterator<Item = bed::Record<6>>,
+{
+    let mut input = Vec::new();
+    {
+        let mut writer = bed::io::Writer::<6, _>::new(&mut input);
+        for record in records {
+            writer.write_record(&record)?;
+        }
     }
+    let mut translated = Vec::new();
+    translate_bed(
+        context.conn,
+        context.workspace,
+        context.collection_name,
+        context.sample_name,
+        context.history_ref,
+        Cursor::new(input),
+        &mut translated,
+    )
+    .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
+    translated_bed_interval_tree(&translated)
+}
+
+fn matching_bed_record(record: &bed::Record<6>, identifier: &str) -> bool {
+    record
+        .name()
+        .and_then(|name| std::str::from_utf8(name.as_ref()).ok())
+        .is_some_and(|name| name.eq_ignore_ascii_case(identifier))
+}
+
+fn bed_other_fields(record: &bed::Record<6>) -> Vec<String> {
+    record
+        .other_fields()
+        .iter()
+        .map(|value| String::from_utf8_lossy(value.as_ref()).into_owned())
+        .collect()
+}
+
+fn parse_bed_list(value: &str) -> Vec<i64> {
+    value
+        .split(',')
+        .filter(|item| !item.is_empty())
+        .filter_map(|item| item.parse().ok())
+        .collect()
 }
 
 fn translated_bed_interval_tree(
@@ -235,40 +205,52 @@ mod tests {
     use std::fs::File;
 
     use gen_core::HashId;
-    use gen_models::{region::AnnotationSource, sample::Sample};
+    use gen_models::sample::Sample;
 
-    use super::{AnnotationTranslationContext, BedAnnotation};
+    use super::{AnnotationTranslationContext, parse_bed_annotation, translate_bed_annotation};
 
     #[test]
-    fn test_bed_annotation_matches_identifier_and_builds_tree() {
+    fn test_bed_annotation_matches_identifier_and_preserves_metadata() {
         let conn = crate::test_helpers::get_connection();
         crate::test_helpers::setup_test_data(&conn);
-        let block_group = Sample::get_block_groups(&conn, "test", Sample::DEFAULT_NAME, None)
-            .into_iter()
-            .find(|block_group| block_group.name == "m123")
-            .expect("should find test block group");
         let context = AnnotationTranslationContext {
             conn: &conn,
             workspace: crate::test_helpers::test_workspace(),
             collection_name: "test",
             sample_name: Sample::DEFAULT_NAME,
             history_ref: None,
-            block_group_id: block_group.id,
         };
-        let annotation = BedAnnotation::from_reader(
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed");
+        let annotation = parse_bed_annotation(
+            "abc123.1",
+            File::open(path).expect("should open simple BED fixture"),
+        )
+        .expect("should parse the matching BED record");
+        assert_eq!(annotation.name, "abc123.1");
+        assert_eq!(annotation.id, HashId::convert_str("abc123.1"));
+        assert_eq!(annotation.accession_id, annotation.id);
+        assert_eq!(annotation.group, "bed");
+        let metadata = annotation
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.bed.as_ref())
+            .expect("should preserve BED metadata");
+        assert_eq!(metadata.score.as_deref(), Some("0"));
+        assert_eq!(metadata.block_count, Some(3));
+        assert_eq!(
+            metadata.block_sizes.as_deref(),
+            Some([102, 188, 129].as_slice())
+        );
+        assert_eq!(
+            metadata.block_starts.as_deref(),
+            Some([0, 3508, 4691].as_slice())
+        );
+        let tree = translate_bed_annotation(
             &context,
             "abc123.1",
-            File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed"))
-                .expect("should open simple BED fixture"),
+            File::open(path).expect("should reopen simple BED fixture"),
         )
         .expect("should translate the matching BED record");
-
-        assert_eq!(annotation.identifier(), "abc123.1");
-        assert_eq!(annotation.annotation().name, "abc123.1");
-        assert_eq!(annotation.annotation().id, HashId::convert_str("abc123.1"));
-        let (interval_tree, _) = annotation
-            .annotation_intervals(&conn)
-            .expect("should expose translated annotation intervals");
-        assert_eq!(interval_tree.iter().count(), 1);
+        assert_eq!(tree.iter().count(), 1);
     }
 }

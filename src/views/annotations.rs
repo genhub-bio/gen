@@ -876,20 +876,26 @@ mod tests {
     };
 
     use flate2::{Compression, write::GzEncoder};
-    use gen_annotations::{AnnotationTranslationContext, GffAnnotation};
+    use gen_annotations::{
+        AnnotationTranslationContext, parse_gff_annotation, parse_gff_annotation_records,
+        translate_gff_annotation, translate_gff_annotation_records,
+    };
     use gen_core::{
-        HashId, Sha256Hash, Strand,
-        region::{Region, RegionResolver as _, normalize_user_search_region},
+        HashId, NodeIntervalBlock, Sha256Hash, Strand,
+        region::{Region, normalize_user_search_region},
     };
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
-        annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
+        annotations::{
+            Annotation, AnnotationFileChecksumOverrides, add_annotation, add_annotation_file,
+        },
         block_group::BlockGroup,
         file_types::FileTypes,
         operations::commit_operation_summary,
-        region::resolve_annotation_region,
+        region::{ResolvedGenRegion, resolve_annotation},
         sample::Sample,
     };
+    use intervaltree::IntervalTree;
     use noodles::{bgzf, core::Position, csi, gff, tabix};
     use tempfile::{NamedTempFile, tempdir};
 
@@ -972,6 +978,35 @@ mod tests {
 
     fn normalized_region(region: &str) -> Region {
         normalize_user_search_region(&Region::parse(region).unwrap())
+    }
+
+    fn resolve_file_annotation_region(
+        annotation: &Annotation,
+        interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
+        block_group_id: HashId,
+        normalized_region: &Region,
+        conn: &gen_models::db::GraphConnection,
+        workspace: &gen_core::Workspace,
+    ) -> ResolvedGenRegion {
+        let feature_length = interval_tree
+            .iter()
+            .map(|entry| entry.value.end)
+            .max()
+            .expect("should have a translated annotation interval");
+        let (relative_start, relative_end) = normalized_region
+            .resolve_relative_bounds(0, feature_length)
+            .expect("should resolve annotation-relative bounds");
+        ResolvedGenRegion::from_annotation_intervals(
+            conn,
+            annotation,
+            block_group_id,
+            interval_tree.clone(),
+            relative_start,
+            relative_end,
+        )
+        .expect("should build a file-backed resolved region")
+        .find_graph_positions(conn, workspace, 0, 0)
+        .expect("should resolve file-backed graph positions")
     }
 
     #[test]
@@ -1338,8 +1373,6 @@ mod tests {
             .into_iter()
             .find(|block_group| block_group.name == "m123")
             .expect("should find fixture block group");
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)
-            .expect("should load fixture graph");
         let selected_file_path =
             resolve_local_annotation_file_path(context.workspace(), &entry.file_addition)
                 .expect("should resolve selected fixture annotation path");
@@ -1349,71 +1382,78 @@ mod tests {
             collection_name: "test",
             sample_name: Sample::DEFAULT_NAME,
             history_ref: None,
-            block_group_id: block_group.id,
         };
-        let file_source = GffAnnotation::from_reader(
-            &translation_context,
+        let file_annotation = parse_gff_annotation(
             "gene-a0001",
             BufReader::new(
-                fs::File::open(selected_file_path)
+                fs::File::open(&selected_file_path)
                     .expect("should open selected simple GFF fixture"),
             ),
         )
-        .expect("should match and translate gene-a0001 from simple GFF fixture");
-        let mut file_graph = graph.clone();
-        let file_region = resolve_annotation_region(
+        .expect("should match gene-a0001 from simple GFF fixture");
+        let file_intervals = translate_gff_annotation(
+            &translation_context,
+            "gene-a0001",
+            BufReader::new(
+                fs::File::open(&selected_file_path)
+                    .expect("should reopen selected simple GFF fixture"),
+            ),
+        )
+        .expect("should translate gene-a0001 from simple GFF fixture");
+        assert_eq!(file_annotation.name, "gene-a0001");
+        let file_region = resolve_file_annotation_region(
+            &file_annotation,
+            &file_intervals,
+            block_group.id,
             &normalized_region("gene-a0001:-3"),
-            &file_source,
             conn,
             context.workspace(),
-            &mut file_graph,
-        )
-        .expect("should resolve file-backed annotation relative to its start");
-        assert_eq!(file_region.start_anchors.len(), 1);
-        assert_eq!(file_region.end_anchors.len(), 1);
-        assert_eq!(file_region.start_anchors[0].coordinate(), 1);
-        assert_eq!(file_region.end_anchors[0].coordinate(), 1);
-        assert_eq!((file_region.start_offset, file_region.end_offset), (-3, -3));
+        );
+        assert_eq!(file_region.start_anchors.as_ref().unwrap().len(), 1);
+        assert_eq!(file_region.end_anchors.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            file_region.start_anchors.as_ref().unwrap()[0].coordinate(),
+            1
+        );
+        assert_eq!(file_region.end_anchors.as_ref().unwrap()[0].coordinate(), 1);
+        assert_eq!((file_region.start, file_region.end), (-3, -3));
 
-        let zero_region = resolve_annotation_region(
+        let zero_region = resolve_file_annotation_region(
+            &file_annotation,
+            &file_intervals,
+            block_group.id,
             &normalized_region("gene-a0001:0"),
-            &file_source,
             conn,
             context.workspace(),
-            &mut file_graph,
-        )
-        .expect("should resolve a zero annotation offset");
+        );
         assert_eq!(
             (
-                zero_region.start_anchors[0].coordinate(),
-                zero_region.end_anchors[0].coordinate()
+                zero_region.start_anchors.as_ref().unwrap()[0].coordinate(),
+                zero_region.end_anchors.as_ref().unwrap()[0].coordinate()
             ),
             (4, 4)
         );
-        assert_eq!((zero_region.start_offset, zero_region.end_offset), (0, 0));
+        assert_eq!((zero_region.start, zero_region.end), (0, 0));
 
-        let positive_slice = resolve_annotation_region(
+        let positive_slice = resolve_file_annotation_region(
+            &file_annotation,
+            &file_intervals,
+            block_group.id,
             &normalized_region("gene-a0001:5-8"),
-            &file_source,
             conn,
             context.workspace(),
-            &mut file_graph,
-        )
-        .expect("should resolve a positive annotation slice");
+        );
         assert_eq!(
             (
-                positive_slice.start_anchors[0].coordinate(),
-                positive_slice.end_anchors[0].coordinate()
+                positive_slice.start_anchors.as_ref().unwrap()[0].coordinate(),
+                positive_slice.end_anchors.as_ref().unwrap()[0].coordinate()
             ),
             (8, 12)
         );
-        assert_eq!(
-            (positive_slice.start_offset, positive_slice.end_offset),
-            (4, 8)
-        );
+        assert_eq!((positive_slice.start, positive_slice.end), (4, 8));
 
         let mut gff_reader = gff::io::Reader::new(BufReader::new(
-            fs::File::open(&gff_path).expect("should reopen simple GFF fixture"),
+            fs::File::open(&selected_file_path).expect("should reopen simple GFF fixture"),
         ));
         let gene_record = gff_reader
             .record_bufs()
@@ -1434,32 +1474,29 @@ mod tests {
         if let Some(phase) = gene_record.phase() {
             reverse_record_builder = reverse_record_builder.set_phase(phase);
         }
-        let reverse_source = GffAnnotation::from_records(
-            &translation_context,
-            "gene-a0001",
-            [reverse_record_builder.build()],
-        )
-        .expect("should translate reverse-strand gene record");
-        let mut reverse_graph = graph.clone();
-        let reverse_region = resolve_annotation_region(
+        let reverse_record = reverse_record_builder.build();
+        let reverse_annotation =
+            parse_gff_annotation_records("gene-a0001", [reverse_record.clone()])
+                .expect("should parse reverse-strand gene record");
+        let reverse_intervals =
+            translate_gff_annotation_records(&translation_context, [reverse_record])
+                .expect("should translate reverse-strand gene record");
+        let reverse_region = resolve_file_annotation_region(
+            &reverse_annotation,
+            &reverse_intervals,
+            block_group.id,
             &normalized_region("gene-a0001:0"),
-            &reverse_source,
             conn,
             context.workspace(),
-            &mut reverse_graph,
-        )
-        .expect("should resolve reverse-strand fixture record");
+        );
         assert_eq!(
             (
-                reverse_region.start_anchors[0].coordinate(),
-                reverse_region.end_anchors[0].coordinate()
+                reverse_region.start_anchors.as_ref().unwrap()[0].coordinate(),
+                reverse_region.end_anchors.as_ref().unwrap()[0].coordinate()
             ),
-            (20, 20)
+            (4, 4)
         );
-        assert_eq!(
-            (reverse_region.start_offset, reverse_region.end_offset),
-            (0, 0)
-        );
+        assert_eq!((reverse_region.start, reverse_region.end), (0, 0));
 
         add_annotation(
             &context,
@@ -1470,22 +1507,15 @@ mod tests {
             "m123:4-20",
         )
         .expect("should create persisted comparison annotation");
-        let persisted = gen_models::annotations::Annotation::resolve(
-            &Region::parse("gene-persisted").expect("should parse persisted annotation name"),
+        let persisted_region = resolve_annotation(
+            &normalized_region("gene-persisted:-3"),
             conn,
             "test",
             Sample::DEFAULT_NAME,
         )
-        .expect("should load persisted comparison annotation");
-        let mut persisted_graph = graph;
-        let persisted_region = resolve_annotation_region(
-            &normalized_region("gene-persisted:-3"),
-            &persisted,
-            conn,
-            context.workspace(),
-            &mut persisted_graph,
-        )
-        .expect("should resolve persisted annotation with shared resolver");
+        .expect("should resolve persisted annotation through the model resolver")
+        .find_graph_positions(conn, context.workspace(), 0, 0)
+        .expect("should resolve persisted graph positions");
         assert_eq!(
             file_region.start_anchors, persisted_region.start_anchors,
             "file-backed and persisted segments should resolve to the same start"
