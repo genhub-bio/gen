@@ -32,6 +32,11 @@ pub struct ResolvedGenRegion {
     pub end: i64,
     pub start_anchors: Option<Vec<GraphNodePosition>>,
     pub end_anchors: Option<Vec<GraphNodePosition>>,
+    /// Source-provided cumulative intervals for an annotation selected outside the database.
+    ///
+    /// `None` retains the existing persisted path/accession lookup. When present, the same
+    /// `ResolvedGraph` and graph traversal machinery uses these already-translated intervals.
+    pub annotation_interval_tree: Option<IntervalTree<i64, NodeIntervalBlock>>,
     pub remove_ambiguous_positions: bool,
 }
 
@@ -243,25 +248,16 @@ fn resolve_target(
     region: &Region,
     target: RegionTarget,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let (start, end) = match (region.start, region.end) {
-        (None, None) => (target.anchor_start, target.anchor_end),
-        (Some(start), None) => {
-            if target.kind == RegionTargetKind::Path || target.kind == RegionTargetKind::BlockGroup
-            {
-                (start, target.feature_length)
-            } else {
-                (target.anchor_start + start, target.anchor_end)
-            }
+    let (start, end) = match target.kind {
+        RegionTargetKind::Path | RegionTargetKind::BlockGroup => match (region.start, region.end) {
+            (None, None) => (target.anchor_start, target.anchor_end),
+            (Some(start), None) => (start, target.feature_length),
+            (Some(start), Some(end)) => (start, end),
+            (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
+        },
+        RegionTargetKind::Annotation | RegionTargetKind::Accession => {
+            region.resolve_relative_bounds(target.anchor_start, target.anchor_end)?
         }
-        (Some(start), Some(end)) => {
-            if target.kind == RegionTargetKind::Path || target.kind == RegionTargetKind::BlockGroup
-            {
-                (start, end)
-            } else {
-                (target.anchor_start + start, target.anchor_start + end)
-            }
-        }
-        (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
     };
 
     let out_of_bounds = match target.kind {
@@ -298,6 +294,7 @@ fn resolve_target(
         end,
         start_anchors: None,
         end_anchors: None,
+        annotation_interval_tree: None,
         remove_ambiguous_positions: false,
     })
 }
@@ -355,6 +352,7 @@ impl ResolvedGenRegion {
             end,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: false,
         })
     }
@@ -380,6 +378,7 @@ impl ResolvedGenRegion {
             end,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: false,
         })
     }
@@ -406,6 +405,47 @@ impl ResolvedGenRegion {
             end,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
+            remove_ambiguous_positions: false,
+        })
+    }
+
+    /// Build an annotation region from translated, cumulative node intervals.
+    ///
+    /// File-backed annotations use this downstream of source selection and translation. The
+    /// supplied tree has the same shape as a persisted accession tree, so graph anchors and
+    /// branch traversal continue through [`ResolvedGenRegion::find_graph_positions`]. `start` and
+    /// `end` are coordinates in that cumulative tree; callers map user-relative coordinates to
+    /// the tree's orientation before constructing the region.
+    pub fn from_annotation_intervals(
+        conn: &GraphConnection,
+        annotation: &Annotation,
+        block_group_id: HashId,
+        interval_tree: IntervalTree<i64, NodeIntervalBlock>,
+        start: i64,
+        end: i64,
+    ) -> Result<Self, BlockGroupError> {
+        let block_group = BlockGroup::get_by_id(conn, &block_group_id, None)?;
+        let feature_length = interval_tree
+            .iter()
+            .filter(|item| !is_terminal(item.value.node_id))
+            .map(|item| item.value.end)
+            .max()
+            .unwrap_or_default();
+        Ok(Self {
+            block_group,
+            path: None,
+            accession: None,
+            annotation: Some(annotation.clone()),
+            kind: ResolvedRegionKind::Annotation,
+            anchor_start: 0,
+            anchor_end: feature_length,
+            feature_length,
+            start,
+            end,
+            start_anchors: None,
+            end_anchors: None,
+            annotation_interval_tree: Some(interval_tree),
             remove_ambiguous_positions: false,
         })
     }
@@ -418,12 +458,12 @@ impl ResolvedGenRegion {
                     .expect("should have path for Path region")
                     .id
             }
-            ResolvedRegionKind::Accession | ResolvedRegionKind::Annotation => {
-                self.accession
-                    .as_ref()
-                    .expect("should have accession for region")
-                    .id
-            }
+            ResolvedRegionKind::Accession | ResolvedRegionKind::Annotation => self
+                .accession
+                .as_ref()
+                .map(|accession| accession.id)
+                .or_else(|| self.annotation.as_ref().map(|annotation| annotation.id))
+                .expect("should have accession or annotation for region"),
             ResolvedRegionKind::BlockGroup => self.block_group.id,
         };
         (id, self.kind)
@@ -479,6 +519,9 @@ impl ResolvedGenRegion {
                 Ok(path.intervaltree(conn)?)
             }
             ResolvedRegionKind::Annotation => {
+                if let Some(interval_tree) = &self.annotation_interval_tree {
+                    return Ok(interval_tree.clone());
+                }
                 let accession = self.accession.as_ref().ok_or_else(|| {
                     GenRegionError::NotFound("No accession for annotation".to_string())
                 })?;
@@ -1153,6 +1196,7 @@ mod tests {
                 end,
                 start_anchors: None,
                 end_anchors: None,
+                annotation_interval_tree: None,
                 remove_ambiguous_positions: false,
             }
         }

@@ -3353,6 +3353,7 @@ mod tests {
             end: 15,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: true,
         };
         let change = BlockGroupChange {
@@ -3590,6 +3591,7 @@ mod tests {
             end: 15,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: true,
         };
         let change = BlockGroupChange {
@@ -3658,6 +3660,7 @@ mod tests {
             end: 11,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: true,
         };
         let change = BlockGroupChange {
@@ -3735,6 +3738,7 @@ mod tests {
             end: 24,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: true,
         };
         let change = BlockGroupChange {
@@ -3810,6 +3814,7 @@ mod tests {
             end: 12,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: true,
         };
         let change = BlockGroupChange {
@@ -3885,6 +3890,7 @@ mod tests {
             end: 24,
             start_anchors: None,
             end_anchors: None,
+            annotation_interval_tree: None,
             remove_ambiguous_positions: true,
         };
         let change = BlockGroupChange {

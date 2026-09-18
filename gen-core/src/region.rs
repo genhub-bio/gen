@@ -50,6 +50,24 @@ pub trait RegionResolver: Sized {
 }
 
 impl Region {
+    /// Resolve this region against an existing feature's internal coordinate bounds.
+    ///
+    /// The returned pair is zero-based and half-open. A name-only region selects the complete
+    /// feature; a start-only region selects from its relative start through its end. Exact points
+    /// remain exact points so callers can preserve model-backed point semantics.
+    pub fn resolve_relative_bounds(
+        &self,
+        anchor_start: i64,
+        anchor_end: i64,
+    ) -> Result<(i64, i64), RegionParseError> {
+        match (self.start, self.end) {
+            (None, None) => Ok((anchor_start, anchor_end)),
+            (Some(start), None) => Ok((anchor_start + start, anchor_end)),
+            (Some(start), Some(end)) => Ok((anchor_start + start, anchor_start + end)),
+            (None, Some(_)) => Err(RegionParseError::InvalidSyntax),
+        }
+    }
+
     /// Parse a region string.
     ///
     /// Supported forms:
@@ -157,6 +175,20 @@ impl Region {
     }
 }
 
+/// Normalize a user-facing search region exactly once before internal resolution.
+///
+/// Positive starts are one-based and become zero-based. Ends, zero starts, and negative starts
+/// already use the relative search convention and are preserved unchanged.
+pub fn normalize_user_search_region(region: &Region) -> Region {
+    Region {
+        name: region.name.clone(),
+        start: region
+            .start
+            .map(|start| if start > 0 { start - 1 } else { start }),
+        end: region.end,
+    }
+}
+
 impl std::fmt::Display for Region {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.start, self.end) {
@@ -209,6 +241,50 @@ mod tests {
                 start: Some(100),
                 end: Some(100),
             })
+        );
+    }
+
+    #[test]
+    fn test_normalize_user_search_region_only_converts_positive_start() {
+        assert_eq!(
+            normalize_user_search_region(&Region::parse("gene:5-20").unwrap()),
+            Region::parse("gene:4-20").unwrap()
+        );
+        assert_eq!(
+            normalize_user_search_region(&Region::parse("gene:0-0").unwrap()),
+            Region::parse("gene:0-0").unwrap()
+        );
+        assert_eq!(
+            normalize_user_search_region(&Region::parse("gene:-3--1").unwrap()),
+            Region::parse("gene:-3--1").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_relative_bounds_preserves_point_and_open_start_semantics() {
+        assert_eq!(
+            Region::parse("gene")
+                .unwrap()
+                .resolve_relative_bounds(10, 20),
+            Ok((10, 20))
+        );
+        assert_eq!(
+            Region::parse("gene:0")
+                .unwrap()
+                .resolve_relative_bounds(10, 20),
+            Ok((10, 10))
+        );
+        assert_eq!(
+            Region::parse("gene:-3--1")
+                .unwrap()
+                .resolve_relative_bounds(10, 20),
+            Ok((7, 9))
+        );
+        assert_eq!(
+            Region::parse("gene:..5")
+                .unwrap()
+                .resolve_relative_bounds(10, 20),
+            Err(RegionParseError::InvalidSyntax)
         );
     }
 
