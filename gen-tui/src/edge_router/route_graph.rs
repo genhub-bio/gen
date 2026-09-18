@@ -421,10 +421,16 @@ pub fn make_rectilinear(
                 let combined_source_idx = *layer_node_to_combined_idx.get(&source_idx).unwrap();
                 let combined_target_idx = *layer_node_to_combined_idx.get(&target_idx).unwrap();
 
+                // Two distinct nodes in this layer's local graph can collapse onto the
+                // same combined-graph node when their adjusted positions coincide,
+                // which would turn a real edge into a self-loop. Skip it rather than
+                // add one.
+                //
                 // Check if edge already exists (it shouldn't due to position deduplication, but let's be safe)
-                if combined_graph
-                    .find_edge(combined_source_idx, combined_target_idx)
-                    .is_none()
+                if combined_source_idx != combined_target_idx
+                    && combined_graph
+                        .find_edge(combined_source_idx, combined_target_idx)
+                        .is_none()
                     && combined_graph
                         .find_edge(combined_target_idx, combined_source_idx)
                         .is_none()
