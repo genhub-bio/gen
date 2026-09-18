@@ -10,11 +10,9 @@ mod gff;
 
 pub use bed::{BedAnnotation, BedRecord};
 use gen_core::{HashId, Workspace};
-use gen_models::{annotations::Annotation, db::GraphConnection};
+use gen_models::{annotations::MaterializedAnnotationError, db::GraphConnection};
 pub use gff::GffAnnotation;
 use thiserror::Error;
-
-use crate::region::{AnnotationRegionData, AnnotationRegionSource};
 
 /// Context used while translating records selected by the application.
 pub struct AnnotationTranslationContext<'a> {
@@ -43,29 +41,6 @@ pub enum FileAnnotationError {
     Empty,
     #[error("translated annotation reference is not a node id: {0}")]
     InvalidNode(String),
-}
-
-impl AnnotationRegionSource for Annotation {
-    type Context = GraphConnection;
-    type Error = gen_models::annotations::AnnotationError;
-
-    fn annotation_region(
-        &self,
-        context: &Self::Context,
-    ) -> Result<AnnotationRegionData, Self::Error> {
-        let accession = gen_models::accession::Accession::select(context)
-            .id(self.accession_id)
-            .load()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                gen_models::annotations::AnnotationError::AccessionError(
-                    gen_models::accession::AccessionError::MissingPath(self.accession_id),
-                )
-            })?;
-        Ok(AnnotationRegionData {
-            interval_tree: self.intervaltree(context)?,
-            block_group_id: accession.block_group_id,
-        })
-    }
+    #[error(transparent)]
+    MaterializedAnnotation(#[from] MaterializedAnnotationError),
 }

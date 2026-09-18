@@ -3,14 +3,12 @@
 use std::io::{Cursor, Read};
 
 use gen_core::{HashId, NodeIntervalBlock, Strand, is_terminal};
+use gen_models::annotations::MaterializedAnnotation;
 use intervaltree::IntervalTree;
 use noodles::bed;
 
 use super::{AnnotationTranslationContext, FileAnnotationError};
-use crate::{
-    region::{AnnotationRegionData, AnnotationRegionSource},
-    translate::bed::translate_bed,
-};
+use crate::translate::bed::translate_bed;
 
 /// A BED record accepted by [`BedAnnotation::from_records`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,9 +28,7 @@ pub struct BedRecord {
 /// A BED annotation selected by name from a caller-provided source.
 #[derive(Clone, Debug)]
 pub struct BedAnnotation {
-    identifier: String,
-    interval_tree: IntervalTree<i64, NodeIntervalBlock>,
-    block_group_id: HashId,
+    materialized: MaterializedAnnotation,
 }
 
 impl BedAnnotation {
@@ -141,31 +137,24 @@ impl BedAnnotation {
         )
         .map_err(|error| FileAnnotationError::Translation(error.to_string()))?;
         let interval_tree = translated_bed_interval_tree(&translated)?;
-        Ok(Self {
-            identifier,
-            interval_tree,
-            block_group_id: context.block_group_id,
-        })
+        let materialized =
+            MaterializedAnnotation::new(identifier, context.block_group_id, interval_tree)?;
+        Ok(Self { materialized })
     }
 
     /// Identifier selected from the source records.
     pub fn identifier(&self) -> &str {
-        &self.identifier
+        self.materialized.name()
     }
-}
 
-impl AnnotationRegionSource for BedAnnotation {
-    type Context = ();
-    type Error = std::convert::Infallible;
+    /// Return the source-neutral translated annotation used by model resolution.
+    pub fn annotation(&self) -> &MaterializedAnnotation {
+        &self.materialized
+    }
 
-    fn annotation_region(
-        &self,
-        _context: &Self::Context,
-    ) -> Result<AnnotationRegionData, Self::Error> {
-        Ok(AnnotationRegionData {
-            interval_tree: self.interval_tree.clone(),
-            block_group_id: self.block_group_id,
-        })
+    /// Consume the source wrapper and return its translated annotation.
+    pub fn into_annotation(self) -> MaterializedAnnotation {
+        self.materialized
     }
 }
 
@@ -219,4 +208,42 @@ fn translated_bed_interval_tree(
         .into_iter()
         .map(|block| (block.start..block.end, block))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use gen_models::sample::Sample;
+
+    use super::{AnnotationTranslationContext, BedAnnotation};
+
+    #[test]
+    fn test_bed_annotation_matches_identifier_and_materializes_tree() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let block_group = Sample::get_block_groups(&conn, "test", Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should find test block group");
+        let context = AnnotationTranslationContext {
+            conn: &conn,
+            workspace: crate::test_helpers::test_workspace(),
+            collection_name: "test",
+            sample_name: Sample::DEFAULT_NAME,
+            history_ref: None,
+            block_group_id: block_group.id,
+        };
+        let annotation = BedAnnotation::from_reader(
+            &context,
+            "abc123.1",
+            File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed"))
+                .expect("should open simple BED fixture"),
+        )
+        .expect("should translate the matching BED record");
+
+        assert_eq!(annotation.identifier(), "abc123.1");
+        assert_eq!(annotation.annotation().name(), "abc123.1");
+        assert_eq!(annotation.annotation().interval_tree().iter().count(), 1);
+    }
 }
