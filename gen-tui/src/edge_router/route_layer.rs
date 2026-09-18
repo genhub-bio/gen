@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use itertools::Itertools;
 use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
 
-use super::{LayoutError, NodeData, route_channel::Router, temp_graph::TempGraph};
+use super::{
+    LayoutError, NodeData, layout_graph_process::simplify_graph, route_channel::Router,
+    temp_graph::TempGraph,
+};
 use crate::{
     geometry::{LocalPos, PartitionIndex},
     layout::{LayoutEdge, LayoutNode, NodeRole},
@@ -523,28 +526,85 @@ pub fn layout_layer(
     edges: &[(NodeIndex, NodeIndex)],
     edge_bundles: &HashMap<(NodeIndex, NodeIndex), Vec<(NodeIndex, NodeIndex)>>,
 ) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
-    // Try normal routing first
-    let result_normal =
+    let mut selected =
         layout_layer_internal(left_positions, right_positions, edges, edge_bundles, false)?;
-
-    if has_crossings(&result_normal) {
-        log::debug!("Detected crossings in normal routing, trying reversed order");
-
-        // Try with reversed vertical order
-        let result_reversed =
-            layout_layer_internal(left_positions, right_positions, edges, edge_bundles, true)?;
-
-        if total_edge_length(&result_reversed) < total_edge_length(&result_normal) {
-            log::debug!("Chose reversed routing (shorter total edge length)");
-            Ok(result_reversed)
+    // Remove collinear channel joins before scoring so node count measures
+    // routing complexity consistently across all four orientations.
+    simplify_graph(&mut selected)?;
+    let mut selected_score = (total_edge_length(&selected), selected.node_count());
+    for (swap_layers, reverse_order) in [(false, true), (true, false), (true, true)] {
+        let mut candidate = if swap_layers {
+            layout_layer_swapped(
+                left_positions,
+                right_positions,
+                edges,
+                edge_bundles,
+                reverse_order,
+            )?
         } else {
-            log::debug!("Normal routing has the shorter total edge length, keeping it");
-            Ok(result_normal)
+            layout_layer_internal(
+                left_positions,
+                right_positions,
+                edges,
+                edge_bundles,
+                reverse_order,
+            )?
+        };
+        simplify_graph(&mut candidate)?;
+        let score = (total_edge_length(&candidate), candidate.node_count());
+        if score < selected_score {
+            selected = candidate;
+            selected_score = score;
         }
-    } else {
-        log::debug!("No crossings detected, using normal routing");
-        Ok(result_normal)
     }
+    Ok(selected)
+}
+
+/// Route from the opposite layer in the requested vertical orientation.
+fn layout_layer_swapped(
+    left_positions: &[LayoutNode],
+    right_positions: &[LayoutNode],
+    edges: &[(NodeIndex, NodeIndex)],
+    edge_bundles: &HashMap<(NodeIndex, NodeIndex), Vec<(NodeIndex, NodeIndex)>>,
+    reverse_order: bool,
+) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
+    let reflect_positions = |positions: &[LayoutNode]| {
+        positions
+            .iter()
+            .map(|node| {
+                let mut reflected = node.clone();
+                reflected.pos.x = -node.pos.x;
+                reflected
+            })
+            .collect::<Vec<_>>()
+    };
+    let swapped_edges = edges
+        .iter()
+        .map(|&(left, right)| (right, left))
+        .collect::<Vec<_>>();
+    // Only the lookup keys use layer-local indices. Bundle contents identify
+    // original graph edges and must retain their original direction.
+    let swapped_bundles = edge_bundles
+        .iter()
+        .map(|(&(left, right), bundle)| ((right, left), bundle.clone()))
+        .collect();
+    let mut graph = layout_layer_internal(
+        &reflect_positions(right_positions),
+        &reflect_positions(left_positions),
+        &swapped_edges,
+        &swapped_bundles,
+        reverse_order,
+    )?;
+
+    // Routing chooses a new channel width. Restore the original left boundary,
+    // letting the original right layer move to accommodate that width.
+    if let Some(left_node) = left_positions.first() {
+        let routed_left = graph[NodeIndex::new(right_positions.len())].pos.x;
+        for node in graph.node_weights_mut() {
+            node.pos.x = left_node.pos.x + (routed_left - node.pos.x);
+        }
+    }
+    Ok(graph)
 }
 
 /// Sum of the Manhattan lengths of every edge segment in the layer graph. Every
@@ -560,60 +620,6 @@ fn total_edge_length(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) ->
             Some((source.pos.x - target.pos.x).abs() + (source.pos.y - target.pos.y).abs())
         })
         .sum()
-}
-
-/// Detect whether any two edges in the layer graph cross each other outside of
-/// a shared endpoint. Every edge is a single axis-aligned segment (horizontal
-/// or vertical), so this only needs to check axis-aligned segment intersection.
-fn has_crossings(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) -> bool {
-    let segments: Vec<((i64, i64), (i64, i64))> = graph
-        .edge_indices()
-        .filter_map(|edge_idx| {
-            let (source_idx, target_idx) = graph.edge_endpoints(edge_idx)?;
-            let source = graph.node_weight(source_idx)?;
-            let target = graph.node_weight(target_idx)?;
-            Some(((source.pos.x, source.pos.y), (target.pos.x, target.pos.y)))
-        })
-        .collect();
-
-    for i in 0..segments.len() {
-        for j in (i + 1)..segments.len() {
-            if segments_cross(segments[i], segments[j]) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Whether two axis-aligned segments cross at a point that isn't a shared
-/// endpoint. Overlapping collinear segments and touching endpoints don't count
-/// as crossings; only a genuine transversal intersection does.
-fn segments_cross(a: ((i64, i64), (i64, i64)), b: ((i64, i64), (i64, i64))) -> bool {
-    let ((ax1, _), (ax2, _)) = a;
-    let ((bx1, _), (bx2, _)) = b;
-
-    let a_is_vertical = ax1 == ax2;
-    let b_is_vertical = bx1 == bx2;
-
-    // Parallel segments (including collinear overlaps) never count as a crossing here.
-    if a_is_vertical == b_is_vertical {
-        return false;
-    }
-
-    let (vertical, horizontal) = if a_is_vertical { (a, b) } else { (b, a) };
-    let ((vx, vy1), (_, vy2)) = vertical;
-    let ((hx1, hy), (hx2, _)) = horizontal;
-
-    let (vy_min, vy_max) = (vy1.min(vy2), vy1.max(vy2));
-    let (hx_min, hx_max) = (hx1.min(hx2), hx1.max(hx2));
-
-    if vx <= hx_min || vx >= hx_max || hy <= vy_min || hy >= vy_max {
-        return false;
-    }
-
-    true
 }
 
 fn layout_layer_internal(
@@ -1139,9 +1145,21 @@ fn find_path_bfs(
 
 #[cfg(test)]
 mod tests {
-    use more_asserts::{assert_ge, assert_gt};
+    use std::collections::{HashMap, HashSet};
 
-    use super::*;
+    use itertools::Itertools;
+    use more_asserts::{assert_ge, assert_gt};
+    use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
+
+    use super::{
+        Pin, enumerate_bicliques, find_path_bfs, layout_layer, layout_layer_internal,
+        layout_layer_swapped, make_nets, make_pin_lists, make_terminals, total_edge_length,
+    };
+    use crate::{
+        edge_router::layout_graph_process::simplify_graph,
+        geometry::LocalPos,
+        layout::{LayoutEdge, LayoutNode, NodeRole},
+    };
 
     #[test]
     fn test_enumerate_bicliques() {
@@ -1374,5 +1392,144 @@ mod tests {
             println!("ERROR in test_route_layer_example_3: {:?}", e);
         }
         assert!(graph.is_ok());
+    }
+    #[test]
+    fn test_swapped_routing_preserves_nodes_and_bundles() {
+        let left = vec![LayoutNode::data(
+            NodeIndex::new(10),
+            LocalPos::new_xy(3, 7, -2),
+            (2, 1),
+            Some(0),
+        )];
+        let right = vec![
+            LayoutNode::data(
+                NodeIndex::new(20),
+                LocalPos::new_xy(3, 19, -5),
+                (4, 1),
+                Some(1),
+            ),
+            LayoutNode::data(
+                NodeIndex::new(30),
+                LocalPos::new_xy(3, 19, 4),
+                (6, 1),
+                Some(1),
+            ),
+        ];
+        let edges = vec![
+            (NodeIndex::new(0), NodeIndex::new(0)),
+            (NodeIndex::new(0), NodeIndex::new(1)),
+        ];
+        let bundles = HashMap::from([
+            (edges[0], vec![(NodeIndex::new(10), NodeIndex::new(20))]),
+            (edges[1], vec![(NodeIndex::new(10), NodeIndex::new(30))]),
+        ]);
+        for reverse_order in [false, true] {
+            let graph = layout_layer_swapped(&left, &right, &edges, &bundles, reverse_order)
+                .expect("should route swapped layers");
+            for original in left.iter().chain(&right) {
+                let restored = graph
+                    .node_weights()
+                    .find(|node| node.role == original.role)
+                    .expect("should preserve boundary nodes");
+                assert_eq!(restored.pos.y, original.pos.y);
+                assert_eq!(restored.partition_idx(), original.partition_idx());
+                assert_eq!(restored.size, original.size);
+                assert_eq!(restored.layer, original.layer);
+                if original.layer == Some(0) {
+                    assert_eq!(restored.pos.x, original.pos.x);
+                } else {
+                    assert!(restored.pos.x > left[0].pos.x);
+                }
+            }
+            for bundle in bundles.values() {
+                let (source, target) = bundle[0];
+                let source = graph
+                    .node_indices()
+                    .find(|&node| graph[node].role == NodeRole::Data(source))
+                    .expect("should retain source");
+                let target = graph
+                    .node_indices()
+                    .find(|&node| graph[node].role == NodeRole::Data(target))
+                    .expect("should retain target");
+                let path =
+                    find_path_bfs(&graph, source, target).expect("should retain connectivity");
+                for pair in path.windows(2) {
+                    let edge = graph
+                        .find_edge(pair[0], pair[1])
+                        .expect("should retain path edge");
+                    assert!(graph[edge].bundle.contains(&bundle[0]));
+                    assert!(
+                        graph[pair[0]].pos.x == graph[pair[1]].pos.x
+                            || graph[pair[0]].pos.y == graph[pair[1]].pos.y
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn test_selects_best_of_all_four_orientations() {
+        let left = [0, 4, 9]
+            .into_iter()
+            .enumerate()
+            .map(|(index, y)| {
+                LayoutNode::data(
+                    NodeIndex::new(index),
+                    LocalPos::new_xy(0, 0, y),
+                    (0, 0),
+                    Some(0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let right = [-2, 3, 7]
+            .into_iter()
+            .enumerate()
+            .map(|(index, y)| {
+                LayoutNode::data(
+                    NodeIndex::new(index + 3),
+                    LocalPos::new_xy(0, 10, y),
+                    (0, 0),
+                    Some(1),
+                )
+            })
+            .collect::<Vec<_>>();
+        let edges = [(0, 1), (0, 2), (1, 0), (2, 0)]
+            .map(|(left, right)| (NodeIndex::new(left), NodeIndex::new(right)));
+        let bundles = edges
+            .iter()
+            .map(|&edge| (edge, vec![(edge.0, NodeIndex::new(edge.1.index() + 3))]))
+            .collect();
+        let mut candidates = [
+            layout_layer_internal(&left, &right, &edges, &bundles, false),
+            layout_layer_internal(&left, &right, &edges, &bundles, true),
+            layout_layer_swapped(&left, &right, &edges, &bundles, false),
+            layout_layer_swapped(&left, &right, &edges, &bundles, true),
+        ]
+        .map(|result| result.expect("should route candidate"));
+        for candidate in &mut candidates {
+            simplify_graph(candidate).expect("should simplify candidate");
+        }
+        let expected = candidates
+            .iter()
+            .min_by_key(|candidate| (total_edge_length(candidate), candidate.node_count()))
+            .expect("should have four candidates");
+        let selected =
+            layout_layer(&left, &right, &edges, &bundles).expect("should select best orientation");
+        assert_eq!(selected.node_count(), expected.node_count());
+        assert_eq!(routing_segments(&selected), routing_segments(expected));
+    }
+
+    fn routing_segments(
+        graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>,
+    ) -> Vec<((i64, i64), (i64, i64))> {
+        graph
+            .edge_indices()
+            .map(|edge| {
+                let (source, target) = graph.edge_endpoints(edge).expect("should have endpoints");
+                let source = (graph[source].pos.x, graph[source].pos.y);
+                let target = (graph[target].pos.x, graph[target].pos.y);
+                (source.min(target), source.max(target))
+            })
+            .sorted()
+            .collect()
     }
 }
