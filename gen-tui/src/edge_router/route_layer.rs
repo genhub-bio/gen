@@ -527,122 +527,93 @@ pub fn layout_layer(
     let result_normal =
         layout_layer_internal(left_positions, right_positions, edges, edge_bundles, false)?;
 
-    // Check if there's backtracking by analyzing connected components
-    let has_backtracking = detect_backtracking(&result_normal);
-
-    if has_backtracking {
-        log::debug!("Detected backtracking in normal routing, trying reversed order");
+    if has_crossings(&result_normal) {
+        log::debug!("Detected crossings in normal routing, trying reversed order");
 
         // Try with reversed vertical order
         let result_reversed =
             layout_layer_internal(left_positions, right_positions, edges, edge_bundles, true)?;
-        let has_backtracking_reversed = detect_backtracking(&result_reversed);
 
-        if !has_backtracking_reversed || result_reversed.node_count() < result_normal.node_count() {
-            log::debug!("Chose reversed routing (less or no backtracking)");
+        if total_edge_length(&result_reversed) < total_edge_length(&result_normal) {
+            log::debug!("Chose reversed routing (shorter total edge length)");
             Ok(result_reversed)
         } else {
-            log::debug!("Reversed routing also has backtracking, keeping normal");
+            log::debug!("Normal routing has the shorter total edge length, keeping it");
             Ok(result_normal)
         }
     } else {
-        log::debug!("No backtracking detected, using normal routing");
+        log::debug!("No crossings detected, using normal routing");
         Ok(result_normal)
     }
 }
 
-/// Detect if routing has backtracking by checking if the component's Y range
-/// exceeds the envelope defined by its leftmost and rightmost nodes
-fn detect_backtracking(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) -> bool {
-    use std::collections::HashSet as StdHashSet;
+/// Sum of the Manhattan lengths of every edge segment in the layer graph. Every
+/// edge here is a single axis-aligned run (horizontal or vertical) between two
+/// adjacent layout nodes, so `|dx| + |dy|` is its exact length.
+fn total_edge_length(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) -> i64 {
+    graph
+        .edge_indices()
+        .filter_map(|edge_idx| {
+            let (source_idx, target_idx) = graph.edge_endpoints(edge_idx)?;
+            let source = graph.node_weight(source_idx)?;
+            let target = graph.node_weight(target_idx)?;
+            Some((source.pos.x - target.pos.x).abs() + (source.pos.y - target.pos.y).abs())
+        })
+        .sum()
+}
 
-    use petgraph::visit::Dfs;
+/// Detect whether any two edges in the layer graph cross each other outside of
+/// a shared endpoint. Every edge is a single axis-aligned segment (horizontal
+/// or vertical), so this only needs to check axis-aligned segment intersection.
+fn has_crossings(graph: &StableGraph<LayoutNode, LayoutEdge, Undirected>) -> bool {
+    let segments: Vec<((i64, i64), (i64, i64))> = graph
+        .edge_indices()
+        .filter_map(|edge_idx| {
+            let (source_idx, target_idx) = graph.edge_endpoints(edge_idx)?;
+            let source = graph.node_weight(source_idx)?;
+            let target = graph.node_weight(target_idx)?;
+            Some(((source.pos.x, source.pos.y), (target.pos.x, target.pos.y)))
+        })
+        .collect();
 
-    let mut visited = StdHashSet::new();
-
-    // For each connected component
-    for start_node in graph.node_indices() {
-        if visited.contains(&start_node) {
-            continue;
-        }
-
-        // Find all nodes in this connected component
-        let mut dfs = Dfs::new(&graph, start_node);
-        let mut component_nodes = Vec::new();
-        while let Some(node_idx) = dfs.next(&graph) {
-            visited.insert(node_idx);
-            component_nodes.push(node_idx);
-        }
-
-        if component_nodes.is_empty() {
-            continue;
-        }
-
-        // Get positions for all nodes in component
-        let positions: Vec<(i64, i64)> = component_nodes
-            .iter()
-            .filter_map(|&idx| {
-                let node = graph.node_weight(idx)?;
-                Some((node.pos.x, node.pos.y))
-            })
-            .collect();
-
-        if positions.is_empty() {
-            continue;
-        }
-
-        // Find leftmost and rightmost X positions
-        let min_x = positions.iter().map(|(x, _)| x).min().unwrap();
-        let max_x = positions.iter().map(|(x, _)| x).max().unwrap();
-
-        // Get Y range of leftmost nodes
-        let left_y_positions: Vec<i64> = positions
-            .iter()
-            .filter(|(x, _)| x == min_x)
-            .map(|(_, y)| *y)
-            .collect();
-
-        // Get Y range of rightmost nodes
-        let right_y_positions: Vec<i64> = positions
-            .iter()
-            .filter(|(x, _)| x == max_x)
-            .map(|(_, y)| *y)
-            .collect();
-
-        if left_y_positions.is_empty() || right_y_positions.is_empty() {
-            continue;
-        }
-
-        // Envelope is defined by the Y range of leftmost and rightmost nodes
-        let envelope_min_y = left_y_positions
-            .iter()
-            .min()
-            .unwrap()
-            .min(right_y_positions.iter().min().unwrap());
-        let envelope_max_y = left_y_positions
-            .iter()
-            .max()
-            .unwrap()
-            .max(right_y_positions.iter().max().unwrap());
-
-        // Get the overall Y range of the entire component
-        let component_min_y = positions.iter().map(|(_, y)| y).min().unwrap();
-        let component_max_y = positions.iter().map(|(_, y)| y).max().unwrap();
-
-        // If component extends beyond the envelope, we have backtracking
-        if component_min_y < envelope_min_y || component_max_y > envelope_max_y {
-            log::debug!(
-                "Backtracking detected: component Y range [{}, {}] exceeds envelope [{}, {}]",
-                component_min_y,
-                component_max_y,
-                envelope_min_y,
-                envelope_max_y
-            );
-            return true;
+    for i in 0..segments.len() {
+        for j in (i + 1)..segments.len() {
+            if segments_cross(segments[i], segments[j]) {
+                return true;
+            }
         }
     }
 
     false
+}
+
+/// Whether two axis-aligned segments cross at a point that isn't a shared
+/// endpoint. Overlapping collinear segments and touching endpoints don't count
+/// as crossings; only a genuine transversal intersection does.
+fn segments_cross(a: ((i64, i64), (i64, i64)), b: ((i64, i64), (i64, i64))) -> bool {
+    let ((ax1, _), (ax2, _)) = a;
+    let ((bx1, _), (bx2, _)) = b;
+
+    let a_is_vertical = ax1 == ax2;
+    let b_is_vertical = bx1 == bx2;
+
+    // Parallel segments (including collinear overlaps) never count as a crossing here.
+    if a_is_vertical == b_is_vertical {
+        return false;
+    }
+
+    let (vertical, horizontal) = if a_is_vertical { (a, b) } else { (b, a) };
+    let ((vx, vy1), (_, vy2)) = vertical;
+    let ((hx1, hy), (hx2, _)) = horizontal;
+
+    let (vy_min, vy_max) = (vy1.min(vy2), vy1.max(vy2));
+    let (hx_min, hx_max) = (hx1.min(hx2), hx1.max(hx2));
+
+    if vx <= hx_min || vx >= hx_max || hy <= vy_min || hy >= vy_max {
+        return false;
+    }
+
+    true
 }
 
 fn layout_layer_internal(
@@ -653,35 +624,28 @@ fn layout_layer_internal(
     reverse_order: bool,
 ) -> Result<StableGraph<LayoutNode, LayoutEdge, Undirected>, LayoutError> {
     // If reverse_order is true, flip the vertical positions of nodes within each layer.
-    // This mirrors the layer across a horizontal axis (top becomes bottom).
-    // After routing, we'll flip the result back.
+    // This mirrors the layer across the horizontal axis y=0 (top becomes bottom).
+    // A global negation is its own exact inverse regardless of either side's vertical
+    // extent, so after routing we can flip the result back the same way.
     let (left_positions_flipped, right_positions_flipped) = if reverse_order {
-        // Find the vertical extent of each layer
-        let left_min_y = left_positions.iter().map(|n| n.pos.y).min().unwrap_or(0);
-        let left_max_y = left_positions.iter().map(|n| n.pos.y).max().unwrap_or(0);
-        let right_min_y = right_positions.iter().map(|n| n.pos.y).min().unwrap_or(0);
-        let right_max_y = right_positions.iter().map(|n| n.pos.y).max().unwrap_or(0);
-
-        // Flip y-coordinates: y_new = max_y - (y_old - min_y) + min_y = max_y + min_y - y_old
-        let left_flipped: Vec<LayoutNode> = left_positions
-            .iter()
-            .map(|node| {
-                let mut flipped = node.clone();
-                flipped.pos.y = left_max_y + left_min_y - node.pos.y;
-                flipped
-            })
-            .collect();
-
-        let right_flipped: Vec<LayoutNode> = right_positions
-            .iter()
-            .map(|node| {
-                let mut flipped = node.clone();
-                flipped.pos.y = right_max_y + right_min_y - node.pos.y;
-                flipped
-            })
-            .collect();
-
-        (left_flipped, right_flipped)
+        (
+            left_positions
+                .iter()
+                .map(|node| {
+                    let mut flipped = node.clone();
+                    flipped.pos.y = -node.pos.y;
+                    flipped
+                })
+                .collect(),
+            right_positions
+                .iter()
+                .map(|node| {
+                    let mut flipped = node.clone();
+                    flipped.pos.y = -node.pos.y;
+                    flipped
+                })
+                .collect(),
+        )
     } else {
         (left_positions.to_vec(), right_positions.to_vec())
     };
@@ -1036,7 +1000,9 @@ fn layout_layer_internal(
                     // Get node2's data to find its position
                     if let Some(node2_data) = source_graph.get_node(node2_id) {
                         let node2_pos = node2_data.position;
-                        if let Some(&layer_node2_idx) = position_to_node_idx.get(&node2_pos) {
+                        if let Some(&layer_node2_idx) = position_to_node_idx.get(&node2_pos)
+                            && layer_node1_idx != layer_node2_idx
+                        {
                             // Check if edge already exists to avoid duplicates
                             if layer_graph
                                 .find_edge(layer_node1_idx, layer_node2_idx)
@@ -1102,26 +1068,25 @@ fn layout_layer_internal(
         }
     }
 
-    // If we flipped the positions for routing, flip the result back
+    // If we flipped the positions for routing, flip the result back. Negation
+    // about y=0 is its own exact inverse regardless of either side's vertical
+    // extent, so this always restores the original coordinates.
     if reverse_order {
-        // Find the vertical extent of the routed layer graph
-        let all_y: Vec<i64> = layer_graph
-            .node_indices()
-            .map(|idx| layer_graph.node_weight(idx).unwrap().pos.y)
-            .collect();
+        for node in layer_graph.node_weights_mut() {
+            node.pos.y = -node.pos.y;
+        }
 
-        if !all_y.is_empty() {
-            let min_y = *all_y.iter().min().unwrap();
-            let max_y = *all_y.iter().max().unwrap();
-
-            // Collect node indices first to avoid borrow checker issues
-            let node_indices: Vec<_> = layer_graph.node_indices().collect();
-
-            // Flip all node positions back: y_new = max_y + min_y - y_old
-            for node_idx in node_indices {
-                if let Some(node) = layer_graph.node_weight_mut(node_idx) {
-                    node.pos.y = max_y + min_y - node.pos.y;
-                }
+        for node_index in layer_graph.node_indices() {
+            let node = &layer_graph[node_index];
+            if matches!(node.role, NodeRole::Routing) {
+                let incident_bundles: Vec<_> = layer_graph
+                    .edges(node_index)
+                    .map(|edge| &edge.weight().bundle)
+                    .collect();
+                assert!(
+                    incident_bundles.len() != 2 || incident_bundles[0] == incident_bundles[1],
+                    "degree-two routing node {node_index:?} joins different bundles"
+                );
             }
         }
     }
