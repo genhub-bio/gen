@@ -12,6 +12,7 @@ gen-core = { path = "../gen-core", version = "0.2.2" }
 gen-graph = { path = "../gen-graph", version = "0.2.2" }
 gen-models = { path = "../gen-models", version = "0.2.2" }
 interavl = "0.3.0"
+intervaltree = "0.2.7"
 noodles = { version = "0.101.0", features = ["bed", "core", "gff"] }
 thiserror = "2.0.18"
 

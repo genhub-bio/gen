@@ -1,118 +1,189 @@
-//! Relative coordinate resolution for annotations selected by an application.
+//! Shared relative-coordinate resolution after annotation lookup.
 //!
-//! This module deliberately starts after annotation lookup and file loading. Callers provide the
-//! already selected annotation segments together with the graph in which those segments should be
-//! resolved. That keeps source-specific decisions (database annotations, GFF records, BED
-//! records, and so on) outside the resolver while giving every source the same coordinate and
-//! graph-traversal behavior.
+//! Applications choose the source and perform identifier lookup. The source then supplies a
+//! translated, accession-style interval tree through [`AnnotationRegionSource`]. Persisted,
+//! GFF, and BED annotations consequently use one graph-position implementation; this module
+//! does not know how a file was selected or opened.
 
-use gen_core::{
-    HashId, Strand,
-    region::{Region, RegionParseError},
-};
+use gen_core::{HashId, NodeIntervalBlock, Strand, Workspace, region::Region};
 use gen_graph::{GenGraph, GraphError, GraphNodePosition};
+use gen_models::{
+    db::GraphConnection,
+    region::{
+        AnnotationGraphPositionRequest, compute_annotation_graph_positions,
+        compute_annotation_graph_positions_with_expansion,
+    },
+};
+use intervaltree::IntervalTree;
 use thiserror::Error;
 
-use crate::projection::AnnotationSegment;
-
-/// Annotation-relative coordinate bounds and their graph boundary positions.
+/// Source-neutral translated annotation data.
 ///
-/// The resolver keeps every graph alternative found at a branch. Offsets are zero-based and
-/// relative to the annotation's 5-prime-to-3-prime orientation; reverse-strand annotations
-/// therefore walk the graph in the opposite direction.
+/// The interval tree is zero-based, half-open, and cumulative from `0` to the annotation's
+/// feature length, matching persisted accession interval trees. The values retain node sequence
+/// coordinates and strand metadata for graph anchor resolution. For reverse-strand annotations,
+/// relative offset zero is resolved from the rightmost interval in this source/path order.
+#[derive(Clone, Debug)]
+pub struct AnnotationRegionData {
+    /// Translated node-space coordinates concatenated from zero to feature length.
+    pub interval_tree: IntervalTree<i64, NodeIntervalBlock>,
+    /// Block group providing graph topology for the annotation.
+    pub block_group_id: HashId,
+}
+
+/// A lookup source that can provide one translated annotation after the application has selected
+/// its source. The associated context lets database-backed annotations use a connection while
+/// file-backed annotations can use the unit context after their selected records were translated.
+pub trait AnnotationRegionSource {
+    type Context;
+    type Error: std::error::Error + 'static;
+
+    fn annotation_region(
+        &self,
+        context: &Self::Context,
+    ) -> Result<AnnotationRegionData, Self::Error>;
+}
+
+/// Resolved annotation-relative offsets and graph anchors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedAnnotationRegion {
-    /// The uniform strand of the annotation segments.
+    /// Uniform source annotation strand.
     pub strand: Strand,
-    /// The annotation-relative start offset used for resolution.
+    /// Normalized annotation-relative start offset.
     pub start_offset: i64,
-    /// The annotation-relative end offset used for resolution.
+    /// Normalized annotation-relative end offset.
     pub end_offset: i64,
-    /// All graph positions at the requested start offset.
+    /// All graph positions resolved at the start boundary.
     pub start_anchors: Vec<GraphNodePosition>,
-    /// All graph positions at the requested end offset.
+    /// All graph positions resolved at the end boundary.
     pub end_anchors: Vec<GraphNodePosition>,
 }
 
-/// Errors produced while resolving a source-neutral annotation against a graph.
+/// Errors produced while resolving a translated annotation source.
 #[derive(Debug, Error)]
-pub enum AnnotationRegionError {
-    #[error("annotation has no segments")]
+pub enum AnnotationRegionError<E: std::error::Error + 'static> {
+    #[error("annotation source error: {0}")]
+    Source(#[source] E),
+    #[error("annotation has no translated intervals")]
     EmptyAnnotation,
-    #[error("annotation segments have mixed strands")]
+    #[error("annotation intervals have mixed strands")]
     MixedStrands,
     #[error("annotation strand is not directional")]
     NonDirectionalStrand,
-    #[error(transparent)]
-    Parse(#[from] RegionParseError),
     #[error("annotation region start {start} is greater than end {end}")]
     InvalidRange { start: i64, end: i64 },
-    #[error("annotation anchor node {node_id} is not present at coordinate {coordinate}")]
-    MissingAnchor { node_id: HashId, coordinate: i64 },
+    #[error(transparent)]
+    Parse(#[from] gen_core::region::RegionParseError),
     #[error(transparent)]
     Graph(#[from] GraphError),
 }
 
-/// Resolve an already-normalized annotation-relative region without graph expansion.
+/// Resolve an already-normalized region from a source-backed annotation.
 ///
-/// The caller must first apply [`gen_core::region::normalize_user_search_region`] to raw
-/// user-facing coordinates. This function preserves zero and negative exact points and should not
-/// be given raw positive user coordinates.
-pub fn resolve_annotation_region(
+/// Raw user-facing coordinates must first pass through
+/// [`gen_core::region::normalize_user_search_region`]. This function intentionally accepts only
+/// the normalized form so positive coordinates cannot be converted twice.
+pub fn resolve_annotation_region<S>(
     normalized_region: &Region,
-    segments: &[AnnotationSegment],
+    source: &S,
+    source_context: &S::Context,
+    conn: &GraphConnection,
+    workspace: &Workspace,
     graph: &mut GenGraph,
-) -> Result<ResolvedAnnotationRegion, AnnotationRegionError> {
-    resolve_annotation_region_with_expansion(normalized_region, segments, graph, |_, _| false)
+) -> Result<ResolvedAnnotationRegion, AnnotationRegionError<S::Error>>
+where
+    S: AnnotationRegionSource,
+{
+    let data = source
+        .annotation_region(source_context)
+        .map_err(AnnotationRegionError::Source)?;
+    resolve_annotation_region_data(
+        normalized_region,
+        data,
+        conn,
+        workspace,
+        graph,
+        compute_annotation_graph_positions,
+    )
 }
 
-/// Resolve an already-normalized annotation-relative region with graph expansion.
+/// Resolve an already-normalized region while delegating graph expansion to the caller.
 ///
-/// The caller must first apply [`gen_core::region::normalize_user_search_region`] to raw
-/// user-facing coordinates. This function preserves zero and negative exact points and should not
-/// be given raw positive user coordinates. The expansion callback remains owned by the caller,
-/// so source lookup and graph loading stay outside this shared resolver.
-pub fn resolve_annotation_region_with_expansion<F>(
+/// Raw user-facing coordinates must first pass through
+/// [`gen_core::region::normalize_user_search_region`]. Source lookup, file access, and expansion
+/// remain owned by the caller; the callback is passed through to the shared model graph walker.
+pub fn resolve_annotation_region_with_expansion<S, F>(
     normalized_region: &Region,
-    segments: &[AnnotationSegment],
+    source: &S,
+    source_context: &S::Context,
+    conn: &GraphConnection,
+    workspace: &Workspace,
     graph: &mut GenGraph,
     mut expand: F,
-) -> Result<ResolvedAnnotationRegion, AnnotationRegionError>
+) -> Result<ResolvedAnnotationRegion, AnnotationRegionError<S::Error>>
 where
+    S: AnnotationRegionSource,
     F: FnMut(&mut GenGraph, HashId) -> bool,
 {
-    let strand = annotation_strand(segments)?;
-    let ordered_segments = ordered_segments(segments, strand);
-    let total_length = annotation_length(&ordered_segments);
-    let (start_offset, end_offset) = normalized_region.resolve_relative_bounds(0, total_length)?;
+    let data = source
+        .annotation_region(source_context)
+        .map_err(AnnotationRegionError::Source)?;
+    resolve_annotation_region_data(
+        normalized_region,
+        data,
+        conn,
+        workspace,
+        graph,
+        |request, conn, workspace| {
+            compute_annotation_graph_positions_with_expansion(request, conn, workspace, &mut expand)
+        },
+    )
+}
+
+fn resolve_annotation_region_data<E, F>(
+    normalized_region: &Region,
+    data: AnnotationRegionData,
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    graph: &mut GenGraph,
+    resolve_positions: F,
+) -> Result<ResolvedAnnotationRegion, AnnotationRegionError<E>>
+where
+    E: std::error::Error + 'static,
+    F: FnOnce(
+        AnnotationGraphPositionRequest<'_>,
+        &GraphConnection,
+        &Workspace,
+    ) -> Result<(Vec<GraphNodePosition>, Vec<GraphNodePosition>), GraphError>,
+{
+    let (strand, feature_length) =
+        annotation_shape(&data.interval_tree).map_err(|error| match error {
+            AnnotationShapeError::Empty => AnnotationRegionError::EmptyAnnotation,
+            AnnotationShapeError::MixedStrands => AnnotationRegionError::MixedStrands,
+            AnnotationShapeError::NonDirectional => AnnotationRegionError::NonDirectionalStrand,
+        })?;
+    let (start_offset, end_offset) =
+        normalized_region.resolve_relative_bounds(0, feature_length)?;
     if start_offset > end_offset {
         return Err(AnnotationRegionError::InvalidRange {
             start: start_offset,
             end: end_offset,
         });
     }
-    let start_anchors = resolve_annotation_offset(
-        start_offset,
-        total_length,
-        &ordered_segments,
-        graph,
-        strand,
-        &mut expand,
-        true,
-    )?;
-    let end_anchors = if start_offset == end_offset {
-        start_anchors.clone()
-    } else {
-        resolve_annotation_offset(
-            end_offset,
-            total_length,
-            &ordered_segments,
+
+    let (start_anchors, end_anchors) = resolve_positions(
+        AnnotationGraphPositionRequest {
             graph,
+            interval_tree: &data.interval_tree,
+            block_group_id: data.block_group_id,
             strand,
-            &mut expand,
-            false,
-        )?
-    };
+            feature_length,
+            start_offset,
+            end_offset,
+        },
+        conn,
+        workspace,
+    )?;
 
     Ok(ResolvedAnnotationRegion {
         strand,
@@ -123,442 +194,221 @@ where
     })
 }
 
-fn annotation_strand(segments: &[AnnotationSegment]) -> Result<Strand, AnnotationRegionError> {
-    let first = segments
-        .first()
-        .ok_or(AnnotationRegionError::EmptyAnnotation)?;
-    let strand = first.strand;
-    if Strand::is_ambiguous(strand) {
-        return Err(AnnotationRegionError::NonDirectionalStrand);
-    }
-    if segments.iter().any(|segment| segment.strand != strand) {
-        return Err(AnnotationRegionError::MixedStrands);
-    }
-    Ok(strand)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnnotationShapeError {
+    Empty,
+    MixedStrands,
+    NonDirectional,
 }
 
-fn ordered_segments(segments: &[AnnotationSegment], strand: Strand) -> Vec<AnnotationSegment> {
-    // Segment order is the source/path order supplied by the caller. A reverse-strand feature's
-    // 5-prime end is its rightmost source segment, so reverse that order instead of comparing
-    // coordinates from unrelated node sequence spaces.
-    let mut ordered = segments.to_vec();
-    if strand == Strand::Reverse {
-        ordered.reverse();
-    }
-    ordered
-}
-
-fn annotation_length(segments: &[AnnotationSegment]) -> i64 {
-    segments
-        .iter()
-        .map(|segment| segment.range.end.saturating_sub(segment.range.start))
-        .fold(0, i64::saturating_add)
-}
-
-fn annotation_positions_at_boundary(
-    offset: i64,
-    segments: &[AnnotationSegment],
-    graph: &GenGraph,
-    strand: Strand,
-    start_boundary: bool,
-) -> Result<Vec<GraphNodePosition>, AnnotationRegionError> {
-    let total_length = annotation_length(segments);
-    let mut consumed: i64 = 0;
-    let mut selected = None;
-    for segment in segments {
-        let segment_length = segment.range.end.saturating_sub(segment.range.start);
-        let segment_end = consumed.saturating_add(segment_length);
-        let is_selected = if start_boundary {
-            offset < segment_end || (offset == segment_end && segment_end == total_length)
-        } else {
-            offset <= segment_end && (offset > consumed || offset == 0)
-        };
-        if is_selected {
-            selected = Some((segment, offset.saturating_sub(consumed), segment_length));
-            break;
+fn annotation_shape(
+    interval_tree: &IntervalTree<i64, NodeIntervalBlock>,
+) -> Result<(Strand, i64), AnnotationShapeError> {
+    let mut strand = None;
+    let mut feature_length = 0;
+    for item in interval_tree.iter() {
+        if gen_core::is_terminal(item.value.node_id) {
+            continue;
         }
-        consumed = segment_end;
-    }
-
-    let (segment, local_offset, segment_length) =
-        selected.ok_or(AnnotationRegionError::EmptyAnnotation)?;
-    let coordinate = match strand {
-        Strand::Forward => segment.range.start.saturating_add(local_offset),
-        Strand::Reverse => segment.range.end.saturating_sub(local_offset),
-        Strand::Unknown | Strand::ImportantButUnknown => {
-            return Err(AnnotationRegionError::NonDirectionalStrand);
+        if Strand::is_ambiguous(item.value.strand) {
+            return Err(AnnotationShapeError::NonDirectional);
         }
-    };
-    let prefer_end_boundary = match strand {
-        Strand::Forward if local_offset == 0 || local_offset == segment_length => {
-            local_offset == segment_length
-        }
-        Strand::Reverse if local_offset == 0 || local_offset == segment_length => local_offset == 0,
-        // For a coordinate boundary inside one annotation segment, find_offset's cursor is on
-        // the side reached from the annotation's 5-prime direction. Segment boundaries above
-        // use the source segment's own half-open side instead.
-        Strand::Forward => true,
-        Strand::Reverse => false,
-        Strand::Unknown | Strand::ImportantButUnknown => false,
-    };
-    let positions = graph
-        .nodes()
-        .filter(|node| {
-            node.node_id == segment.node_id
-                && node.sequence_start <= coordinate
-                && coordinate <= node.sequence_end
-        })
-        .map(|node| GraphNodePosition {
-            graph_node: node,
-            offset: coordinate - node.sequence_start,
-        })
-        .collect::<Vec<_>>();
-    if positions.is_empty() {
-        return Err(AnnotationRegionError::MissingAnchor {
-            node_id: segment.node_id,
-            coordinate,
-        });
-    }
-
-    let preferred_positions = positions
-        .iter()
-        .copied()
-        .filter(|position| {
-            if prefer_end_boundary {
-                position.offset == position.graph_node.length()
-            } else {
-                position.offset != position.graph_node.length()
+        match strand {
+            Some(previous) if previous != item.value.strand => {
+                return Err(AnnotationShapeError::MixedStrands);
             }
-        })
-        .collect::<Vec<_>>();
-    if preferred_positions.is_empty() {
-        Ok(positions)
-    } else {
-        Ok(preferred_positions)
+            None => strand = Some(item.value.strand),
+            Some(_) => {}
+        }
+        feature_length = feature_length.max(item.value.end);
     }
-}
-
-fn resolve_annotation_offset<F>(
-    offset: i64,
-    total_length: i64,
-    segments: &[AnnotationSegment],
-    graph: &mut GenGraph,
-    strand: Strand,
-    expand: &mut F,
-    start_boundary: bool,
-) -> Result<Vec<GraphNodePosition>, AnnotationRegionError>
-where
-    F: FnMut(&mut GenGraph, HashId) -> bool,
-{
-    if (0..=total_length).contains(&offset) {
-        return annotation_positions_at_boundary(offset, segments, graph, strand, start_boundary);
-    }
-
-    if offset < 0 {
-        let boundary_anchors = annotation_positions_at_boundary(0, segments, graph, strand, true)?;
-        return find_graph_positions_from_anchors(
-            &boundary_anchors,
-            graph,
-            graph_distance(offset, strand),
-            expand,
-        );
-    }
-
-    let boundary_anchors =
-        annotation_positions_at_boundary(total_length, segments, graph, strand, false)?;
-    find_graph_positions_from_anchors(
-        &boundary_anchors,
-        graph,
-        graph_distance(offset.saturating_sub(total_length), strand),
-        expand,
-    )
-}
-
-fn find_graph_positions_from_anchors<F>(
-    anchors: &[GraphNodePosition],
-    graph: &mut GenGraph,
-    distance: i64,
-    expand: &mut F,
-) -> Result<Vec<GraphNodePosition>, AnnotationRegionError>
-where
-    F: FnMut(&mut GenGraph, HashId) -> bool,
-{
-    let mut positions = Vec::new();
-    for anchor in anchors {
-        positions.extend(gen_models::graph::find_offset(
-            graph,
-            anchor,
-            distance,
-            &mut *expand,
-        )?);
-    }
-    positions.sort_unstable();
-    positions.dedup();
-    Ok(positions)
-}
-
-fn graph_distance(annotation_offset: i64, strand: Strand) -> i64 {
-    match strand {
-        Strand::Forward => annotation_offset,
-        Strand::Reverse => annotation_offset.saturating_neg(),
-        Strand::Unknown | Strand::ImportantButUnknown => 0,
-    }
+    let strand = strand.ok_or(AnnotationShapeError::Empty)?;
+    Ok((strand, feature_length))
 }
 
 #[cfg(test)]
 mod tests {
-    use gen_core::{
-        HashId, Strand,
-        range::Range,
-        region::{Region, RegionParseError},
-    };
+    use gen_core::{HashId, NodeIntervalBlock, Strand, region::normalize_user_search_region};
     use gen_graph::{GraphEdge, GraphNode};
 
-    use super::{resolve_annotation_region, resolve_annotation_region_with_expansion};
-    use crate::projection::AnnotationSegment;
+    use super::{
+        AnnotationRegionData, AnnotationRegionSource, resolve_annotation_region,
+        resolve_annotation_region_with_expansion,
+    };
+    use crate::source::{AnnotationTranslationContext, BedAnnotation, GffAnnotation};
 
-    fn normalized_region(region: &str) -> Region {
-        gen_core::region::normalize_user_search_region(&Region::parse(region).unwrap())
+    struct TestSource {
+        data: AnnotationRegionData,
     }
 
-    fn node(name: &str, start: i64, end: i64) -> GraphNode {
-        GraphNode {
-            node_id: HashId::convert_str(name),
-            sequence_start: start,
-            sequence_end: end,
+    impl AnnotationRegionSource for TestSource {
+        type Context = ();
+        type Error = std::convert::Infallible;
+
+        fn annotation_region(
+            &self,
+            _context: &Self::Context,
+        ) -> Result<AnnotationRegionData, Self::Error> {
+            Ok(self.data.clone())
         }
     }
 
-    fn graph_with_path(nodes: &[GraphNode]) -> gen_graph::GenGraph {
+    fn source(
+        node_name: &str,
+        sequence_start: i64,
+        sequence_end: i64,
+        strand: Strand,
+    ) -> TestSource {
+        let node_id = HashId::convert_str(node_name);
+        let block = NodeIntervalBlock {
+            node_id,
+            start: 0,
+            end: sequence_end - sequence_start,
+            sequence_start,
+            sequence_end,
+            strand,
+        };
+        TestSource {
+            data: AnnotationRegionData {
+                interval_tree: vec![(block.start..block.end, block)].into_iter().collect(),
+                block_group_id: HashId::convert_str("block-group"),
+            },
+        }
+    }
+
+    fn graph(node_name: &str, sequence_start: i64, sequence_end: i64) -> gen_graph::GenGraph {
+        let graph_node = GraphNode {
+            node_id: HashId::convert_str(node_name),
+            sequence_start,
+            sequence_end,
+        };
         let mut graph = gen_graph::GenGraph::new();
-        for window in nodes.windows(2) {
-            graph.add_edge(window[0], window[1], Vec::<GraphEdge>::new());
-        }
-        if let Some(last) = nodes.last() {
-            graph.add_node(*last);
-        }
+        graph.add_node(graph_node);
         graph
     }
 
-    fn segment(name: &str, start: i64, end: i64, strand: Strand) -> AnnotationSegment {
-        AnnotationSegment {
-            node_id: HashId::convert_str(name),
-            range: Range { start, end },
-            strand,
-        }
+    fn normalized(region: &str) -> gen_core::region::Region {
+        normalize_user_search_region(&gen_core::region::Region::parse(region).unwrap())
+    }
+
+    fn connection() -> gen_models::db::GraphConnection {
+        crate::test_helpers::get_connection()
     }
 
     #[test]
-    fn test_resolves_forward_negative_point_relative_to_annotation_start() {
-        let graph = &mut graph_with_path(&[node("m123", 0, 34)]);
-        let segments = [segment("m123", 4, 20, Strand::Forward)];
-
-        let resolved =
-            resolve_annotation_region(&normalized_region("gene-a0001:-3"), &segments, graph)
-                .unwrap();
-
-        assert_eq!((resolved.start_offset, resolved.end_offset), (-3, -3));
-        assert_eq!(resolved.start_anchors.len(), 1);
-        assert_eq!(
-            resolved.start_anchors[0].graph_node.node_id,
-            HashId::convert_str("m123")
-        );
-        assert_eq!(resolved.start_anchors[0].offset, 1);
-        assert_eq!(resolved.end_anchors[0].offset, 1);
-    }
-
-    #[test]
-    fn test_resolves_zero_points_unchanged_and_positive_points_normalized() {
-        let segments = [segment("m123", 4, 20, Strand::Forward)];
+    fn test_resolves_zero_and_positive_offsets_through_source_tree() {
+        let source = source("node", 4, 20, Strand::Forward);
+        let context = ();
+        let conn = connection();
+        let workspace = crate::test_helpers::test_workspace();
+        let mut graph = graph("node", 0, 34);
 
         let zero = resolve_annotation_region(
-            &normalized_region("gene:0"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
+            &normalized("gene:0"),
+            &source,
+            &context,
+            &conn,
+            workspace,
+            &mut graph,
         )
         .unwrap();
         assert_eq!((zero.start_offset, zero.end_offset), (0, 0));
-        assert_eq!(
-            (zero.start_anchors[0].offset, zero.end_anchors[0].offset),
-            (4, 4)
-        );
+        assert_eq!(zero.start_anchors, zero.end_anchors);
+        assert_eq!(zero.start_anchors[0].coordinate(), 4);
 
         let positive = resolve_annotation_region(
-            &normalized_region("gene:5"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
+            &normalized("gene:5-8"),
+            &source,
+            &context,
+            &conn,
+            workspace,
+            &mut graph,
         )
         .unwrap();
-        assert_eq!((positive.start_offset, positive.end_offset), (4, 5));
-        assert_eq!(
-            (
-                positive.start_anchors[0].offset,
-                positive.end_anchors[0].offset
-            ),
-            (8, 9)
-        );
+        assert_eq!((positive.start_offset, positive.end_offset), (4, 8));
+        assert_eq!(positive.start_anchors[0].coordinate(), 8);
+        assert_eq!(positive.end_anchors[0].coordinate(), 12);
     }
 
     #[test]
-    fn test_resolves_reverse_offsets_from_feature_five_prime_start() {
-        let segments = [segment("m123", 4, 20, Strand::Reverse)];
-        let resolved = resolve_annotation_region(
-            &normalized_region("gene:-3"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
+    fn test_resolves_forward_and_reverse_offsets_outside_feature() {
+        let conn = connection();
+        let workspace = crate::test_helpers::test_workspace();
+        let context = ();
+
+        let forward = source("node", 4, 20, Strand::Forward);
+        let mut forward_graph = graph("node", 0, 34);
+        let forward_region = resolve_annotation_region(
+            &normalized("gene:-3"),
+            &forward,
+            &context,
+            &conn,
+            workspace,
+            &mut forward_graph,
         )
         .unwrap();
+        assert_eq!(forward_region.start_anchors[0].coordinate(), 1);
 
-        assert_eq!((resolved.start_offset, resolved.end_offset), (-3, -3));
-        assert_eq!(
-            (
-                resolved.start_anchors[0].offset,
-                resolved.end_anchors[0].offset
-            ),
-            (23, 23)
-        );
+        let reverse = source("node", 4, 20, Strand::Reverse);
+        let mut reverse_graph = graph("node", 0, 34);
+        let reverse_region = resolve_annotation_region(
+            &normalized("gene:-3"),
+            &reverse,
+            &context,
+            &conn,
+            workspace,
+            &mut reverse_graph,
+        )
+        .unwrap();
+        assert_eq!(reverse_region.start_anchors[0].coordinate(), 23);
+
+        let reverse_after = resolve_annotation_region(
+            &normalized("gene:17"),
+            &reverse,
+            &context,
+            &conn,
+            workspace,
+            &mut reverse_graph,
+        )
+        .unwrap();
+        assert_eq!(reverse_after.end_anchors[0].coordinate(), 3);
     }
 
     #[test]
-    fn test_resolves_reverse_post_feature_points_from_three_prime_boundary() {
-        let segments = [segment("m123", 4, 20, Strand::Reverse)];
-        let resolved = resolve_annotation_region(
-            &normalized_region("gene:17"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-
-        assert_eq!((resolved.start_offset, resolved.end_offset), (16, 17));
-
-        let range = resolve_annotation_region(
-            &normalized_region("gene:17-19"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-        assert_eq!((range.start_offset, range.end_offset), (16, 19));
-        assert_eq!(range.start_anchors[0].offset, 4);
-        assert_eq!(range.end_anchors[0].offset, 1);
-    }
-
-    #[test]
-    fn test_resolves_forward_discontinuous_segments_without_graph_gap_traversal() {
-        let segments = [
-            segment("m123", 0, 3, Strand::Forward),
-            segment("m123", 10, 13, Strand::Forward),
-        ];
-        let resolved = resolve_annotation_region(
-            &normalized_region("gene:5"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-
-        assert_eq!(resolved.start_anchors.len(), 1);
-        assert_eq!(resolved.start_anchors[0].coordinate(), 11);
-        assert_eq!(resolved.end_anchors.len(), 1);
-        assert_eq!(resolved.end_anchors[0].coordinate(), 12);
-
-        let boundary = resolve_annotation_region(
-            &normalized_region("gene:4"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-        assert_eq!(boundary.start_anchors[0].coordinate(), 10);
-        assert_eq!(boundary.end_anchors[0].coordinate(), 11);
-
-        let first_segment = resolve_annotation_region(
-            &normalized_region("gene:1-3"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-        assert_eq!(first_segment.start_anchors[0].coordinate(), 0);
-        assert_eq!(first_segment.end_anchors[0].coordinate(), 3);
-
-        let point = resolve_annotation_region(
-            &Region::parse("gene:3").unwrap(),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-        assert_eq!((point.start_offset, point.end_offset), (3, 3));
-        assert_eq!(point.start_anchors, point.end_anchors);
-        assert_eq!(point.start_anchors[0].coordinate(), 10);
-    }
-
-    #[test]
-    fn test_resolves_reverse_discontinuous_segments_without_graph_gap_traversal() {
-        let segments = [
-            segment("m123", 0, 3, Strand::Reverse),
-            segment("m123", 10, 13, Strand::Reverse),
-        ];
-        let resolved = resolve_annotation_region(
-            &normalized_region("gene:5"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-
-        assert_eq!(resolved.start_anchors.len(), 1);
-        assert_eq!(resolved.start_anchors[0].coordinate(), 2);
-        assert_eq!(resolved.end_anchors.len(), 1);
-        assert_eq!(resolved.end_anchors[0].coordinate(), 1);
-
-        let boundary = resolve_annotation_region(
-            &normalized_region("gene:4"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-        assert_eq!(boundary.start_anchors[0].coordinate(), 3);
-        assert_eq!(boundary.end_anchors[0].coordinate(), 2);
-
-        let first_segment = resolve_annotation_region(
-            &normalized_region("gene:1-3"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-        assert_eq!(first_segment.start_anchors[0].coordinate(), 13);
-        assert_eq!(first_segment.end_anchors[0].coordinate(), 10);
-    }
-
-    #[test]
-    fn test_resolves_forward_discontinuous_post_feature_offsets_from_three_prime_boundary() {
-        let segments = [
-            segment("m123", 0, 3, Strand::Forward),
-            segment("m123", 10, 13, Strand::Forward),
-        ];
-        let resolved = resolve_annotation_region(
-            &normalized_region("gene:8"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-
-        assert_eq!((resolved.start_offset, resolved.end_offset), (7, 8));
-        assert_eq!(resolved.start_anchors[0].coordinate(), 14);
-        assert_eq!(resolved.end_anchors[0].coordinate(), 15);
-    }
-
-    #[test]
-    fn test_resolves_annotation_with_caller_graph_expansion_callback() {
-        let first = node("first", 0, 3);
-        let next = node("next", 0, 3);
-        let segments = [segment("first", 0, 3, Strand::Forward)];
-        let mut graph = graph_with_path(&[first]);
+    fn test_resolves_branch_boundaries_and_expansion_callback() {
+        let source = source("first", 0, 4, Strand::Forward);
+        let context = ();
+        let conn = connection();
+        let workspace = crate::test_helpers::test_workspace();
+        let first = GraphNode {
+            node_id: HashId::convert_str("first"),
+            sequence_start: 0,
+            sequence_end: 4,
+        };
+        let left = GraphNode {
+            node_id: HashId::convert_str("left"),
+            sequence_start: 0,
+            sequence_end: 6,
+        };
+        let right = GraphNode {
+            node_id: HashId::convert_str("right"),
+            sequence_start: 0,
+            sequence_end: 6,
+        };
+        let mut graph = gen_graph::GenGraph::new();
+        graph.add_node(first);
         let mut expanded = false;
-
         let resolved = resolve_annotation_region_with_expansion(
-            &normalized_region("gene:5"),
-            &segments,
+            &normalized("gene:5-8"),
+            &source,
+            &context,
+            &conn,
+            workspace,
             &mut graph,
             |graph, node_id| {
-                if node_id == first.node_id && !expanded {
-                    graph.add_edge(first, next, Vec::<GraphEdge>::new());
+                if !expanded && node_id == first.node_id {
+                    graph.add_edge(first, left, Vec::<GraphEdge>::new());
+                    graph.add_edge(first, right, Vec::<GraphEdge>::new());
                     expanded = true;
                     true
                 } else {
@@ -567,171 +417,185 @@ mod tests {
             },
         )
         .unwrap();
-
         assert!(expanded);
-        assert_eq!(resolved.start_anchors[0].graph_node.node_id, next.node_id);
-        assert_eq!(resolved.start_anchors[0].coordinate(), 1);
-        assert_eq!(resolved.end_anchors[0].coordinate(), 2);
+        assert_eq!(resolved.end_anchors.len(), 2);
+        assert!(resolved.end_anchors.iter().any(|position| {
+            position.graph_node.node_id == left.node_id && position.offset == 4
+        }));
+        assert!(resolved.end_anchors.iter().any(|position| {
+            position.graph_node.node_id == right.node_id && position.offset == 4
+        }));
     }
 
     #[test]
-    fn test_resolves_reverse_discontinuous_post_feature_offsets_from_three_prime_boundary() {
-        let segments = [
-            segment("m123", 5, 8, Strand::Reverse),
-            segment("m123", 15, 18, Strand::Reverse),
-        ];
-        let resolved = resolve_annotation_region(
-            &normalized_region("gene:8"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
-        )
-        .unwrap();
-
-        assert_eq!((resolved.start_offset, resolved.end_offset), (7, 8));
-        assert_eq!(resolved.start_anchors[0].coordinate(), 4);
-        assert_eq!(resolved.end_anchors[0].coordinate(), 3);
-    }
-
-    #[test]
-    fn test_resolves_reverse_segments_in_input_order_from_rightmost_five_prime_segment() {
-        let left = node("left", 0, 3);
-        let right = node("right", 0, 3);
-        let mut graph = gen_graph::GenGraph::new();
-        graph.add_edge(left, right, Vec::new());
-        let segments = [
-            segment("left", 0, 3, Strand::Reverse),
-            segment("right", 0, 3, Strand::Reverse),
-        ];
-
-        let resolved =
-            resolve_annotation_region(&normalized_region("gene:0"), &segments, &mut graph).unwrap();
-
-        assert_eq!(resolved.start_anchors.len(), 1);
-        assert_eq!(resolved.start_anchors[0].graph_node.node_id, right.node_id);
-        assert_eq!(resolved.start_anchors[0].offset, 3);
-        assert_eq!(resolved.end_anchors, resolved.start_anchors);
-    }
-
-    #[test]
-    fn test_resolves_post_feature_offset_from_three_prime_boundary() {
-        let first = node("first", 0, 3);
-        let second = node("second", 3, 6);
-        let mut graph = gen_graph::GenGraph::new();
-        graph.add_edge(first, second, Vec::new());
-        let segments = [segment("first", 0, 3, Strand::Forward)];
-
-        let resolved =
-            resolve_annotation_region(&normalized_region("gene:4-5"), &segments, &mut graph)
-                .unwrap();
-
-        assert_eq!((resolved.start_offset, resolved.end_offset), (3, 5));
-        assert_eq!(resolved.start_anchors[0].graph_node, first);
-        assert_eq!(resolved.start_anchors[0].offset, 3);
-        assert_eq!(resolved.end_anchors[0].graph_node, second);
-        assert_eq!(resolved.end_anchors[0].offset, 2);
-    }
-
-    #[test]
-    fn test_resolves_ranges_across_graph_node_slices() {
-        let node_id = HashId::convert_str("split");
+    fn test_resolves_preloaded_branch_from_annotation_boundary_node() {
+        let source = source("first", 0, 4, Strand::Forward);
+        let context = ();
+        let conn = connection();
+        let workspace = crate::test_helpers::test_workspace();
         let first = GraphNode {
-            node_id,
+            node_id: HashId::convert_str("first"),
             sequence_start: 0,
-            sequence_end: 3,
+            sequence_end: 4,
         };
-        let second = GraphNode {
-            node_id,
-            sequence_start: 3,
+        let left = GraphNode {
+            node_id: HashId::convert_str("left"),
+            sequence_start: 0,
+            sequence_end: 6,
+        };
+        let right = GraphNode {
+            node_id: HashId::convert_str("right"),
+            sequence_start: 0,
             sequence_end: 6,
         };
         let mut graph = gen_graph::GenGraph::new();
-        graph.add_edge(first, second, Vec::new());
-        let segments = [AnnotationSegment {
-            node_id,
-            range: Range { start: 0, end: 6 },
-            strand: Strand::Forward,
-        }];
+        graph.add_edge(first, left, Vec::<GraphEdge>::new());
+        graph.add_edge(first, right, Vec::<GraphEdge>::new());
 
-        let resolved =
-            resolve_annotation_region(&normalized_region("gene:4-6"), &segments, &mut graph)
-                .unwrap();
-
-        assert_eq!(resolved.start_anchors.len(), 1);
-        assert_eq!(resolved.start_anchors[0].graph_node, first);
-        assert_eq!(resolved.start_anchors[0].offset, 3);
-        assert_eq!(resolved.end_anchors.len(), 1);
-        assert_eq!(resolved.end_anchors[0].graph_node, second);
-        assert_eq!(resolved.end_anchors[0].offset, 3);
-    }
-
-    #[test]
-    fn test_resolves_ranges_across_graph_nodes_and_branch_boundaries() {
-        let first = node("first", 0, 4);
-        let left = node("left", 0, 3);
-        let right = node("right", 0, 5);
-        let tail = node("tail", 0, 4);
-        let mut graph = gen_graph::GenGraph::new();
-        graph.add_edge(first, left, Vec::new());
-        graph.add_edge(first, right, Vec::new());
-        graph.add_edge(left, tail, Vec::new());
-        graph.add_edge(right, tail, Vec::new());
-        let segments = [segment("first", 0, 4, Strand::Forward)];
-
-        let resolved = resolve_annotation_region_with_expansion(
-            &normalized_region("gene:5-9"),
-            &segments,
+        let resolved = resolve_annotation_region(
+            &normalized("gene:5-8"),
+            &source,
+            &context,
+            &conn,
+            workspace,
             &mut graph,
-            |_, _| false,
         )
         .unwrap();
-
-        assert_eq!(resolved.start_anchors.len(), 1);
-        assert_eq!(
-            resolved.start_anchors[0].graph_node.node_id,
-            HashId::convert_str("first")
-        );
-        assert_eq!(resolved.start_anchors[0].offset, 4);
         assert_eq!(resolved.end_anchors.len(), 2);
-        assert!(
-            resolved
-                .end_anchors
-                .iter()
-                .any(|position| position.graph_node.node_id == HashId::convert_str("tail"))
-        );
-
-        let branch_segments = [segment("tail", 0, 4, Strand::Forward)];
-        let branch_region = resolve_annotation_region(
-            &normalized_region("gene:-3--1"),
-            &branch_segments,
-            &mut graph,
-        )
-        .unwrap();
-        assert_eq!(branch_region.start_anchors.len(), 2);
-        assert!(branch_region.start_anchors.iter().any(|position| {
-            position.graph_node.node_id == HashId::convert_str("left") && position.offset == 0
+        assert!(resolved.end_anchors.iter().any(|position| {
+            position.graph_node.node_id == left.node_id && position.offset == 4
         }));
-        assert!(branch_region.start_anchors.iter().any(|position| {
-            position.graph_node.node_id == HashId::convert_str("right") && position.offset == 2
+        assert!(resolved.end_anchors.iter().any(|position| {
+            position.graph_node.node_id == right.node_id && position.offset == 4
         }));
-        assert_eq!(
-            (branch_region.start_offset, branch_region.end_offset),
-            (-3, -1)
-        );
     }
 
     #[test]
-    fn test_rejects_open_start_annotation_region() {
-        let segments = [segment("m123", 4, 20, Strand::Forward)];
-        let error = resolve_annotation_region(
-            &normalized_region("gene:..5"),
-            &segments,
-            &mut graph_with_path(&[node("m123", 0, 34)]),
+    fn test_resolves_ranges_across_discontinuous_node_slices() {
+        let first = NodeIntervalBlock {
+            node_id: HashId::convert_str("first-slice"),
+            start: 0,
+            end: 3,
+            sequence_start: 0,
+            sequence_end: 3,
+            strand: Strand::Forward,
+        };
+        let second = NodeIntervalBlock {
+            node_id: HashId::convert_str("second-slice"),
+            start: 3,
+            end: 6,
+            sequence_start: 10,
+            sequence_end: 13,
+            strand: Strand::Forward,
+        };
+        let source = TestSource {
+            data: AnnotationRegionData {
+                interval_tree: vec![
+                    (first.start..first.end, first),
+                    (second.start..second.end, second),
+                ]
+                .into_iter()
+                .collect(),
+                block_group_id: HashId::convert_str("block-group"),
+            },
+        };
+        let mut graph = gen_graph::GenGraph::new();
+        let first_node = GraphNode {
+            node_id: first.node_id,
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        let second_node = GraphNode {
+            node_id: second.node_id,
+            sequence_start: 10,
+            sequence_end: 13,
+        };
+        graph.add_edge(first_node, second_node, Vec::<GraphEdge>::new());
+        let conn = connection();
+        let workspace = crate::test_helpers::test_workspace();
+        let context = ();
+        let resolved = resolve_annotation_region(
+            &normalized("gene:2-5"),
+            &source,
+            &context,
+            &conn,
+            workspace,
+            &mut graph,
         )
-        .expect_err("open-start annotation regions should match model syntax");
+        .unwrap();
+        assert_eq!(resolved.start_anchors[0].coordinate(), 1);
+        assert_eq!(resolved.end_anchors[0].coordinate(), 12);
 
-        assert!(matches!(
-            error,
-            super::AnnotationRegionError::Parse(RegionParseError::InvalidSyntax)
-        ));
+        let point = resolve_annotation_region(
+            &gen_core::region::Region::parse("gene:3").unwrap(),
+            &source,
+            &context,
+            &conn,
+            workspace,
+            &mut graph,
+        )
+        .unwrap();
+        assert_eq!(point.start_anchors, point.end_anchors);
+        assert_eq!(point.start_anchors[0].coordinate(), 10);
+    }
+
+    #[test]
+    fn test_gff_and_bed_annotations_match_identifiers_before_translation() {
+        let conn = crate::test_helpers::get_connection();
+        crate::test_helpers::setup_test_data(&conn);
+        let block_group = gen_models::sample::Sample::get_block_groups(
+            &conn,
+            "test",
+            gen_models::sample::Sample::DEFAULT_NAME,
+            None,
+        )
+        .into_iter()
+        .find(|block_group| block_group.name == "m123")
+        .unwrap();
+        let context = AnnotationTranslationContext {
+            conn: &conn,
+            workspace: crate::test_helpers::test_workspace(),
+            collection_name: "test",
+            sample_name: gen_models::sample::Sample::DEFAULT_NAME,
+            history_ref: None,
+            block_group_id: block_group.id,
+        };
+        let gff = GffAnnotation::from_reader(
+            &context,
+            "gene-a0001",
+            std::io::BufReader::new(
+                std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.gff"))
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        let bed = BedAnnotation::from_reader(
+            &context,
+            "abc123.1",
+            std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/simple.bed"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(gff.identifier(), "gene-a0001");
+        assert_eq!(bed.identifier(), "abc123.1");
+        let gff_data = gff.annotation_region(&()).unwrap();
+        let bed_data = bed.annotation_region(&()).unwrap();
+        assert_eq!(gff_data.interval_tree.iter().count(), 2);
+        assert_eq!(bed_data.interval_tree.iter().count(), 1);
+
+        let mut bed_graph = gen_graph::graph_from_interval_tree(&bed_data.interval_tree);
+        let resolved_bed = resolve_annotation_region(
+            &normalized("abc123.1:2-3"),
+            &bed,
+            &(),
+            &conn,
+            context.workspace,
+            &mut bed_graph,
+        )
+        .unwrap();
+        assert_eq!(resolved_bed.strand, Strand::Reverse);
+        assert_eq!((resolved_bed.start_offset, resolved_bed.end_offset), (1, 3));
+        assert!(!resolved_bed.start_anchors.is_empty());
+        assert!(!resolved_bed.end_anchors.is_empty());
     }
 }

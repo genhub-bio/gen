@@ -1861,6 +1861,7 @@ dependencies = [
  "gen-graph",
  "gen-models",
  "interavl",
+ "intervaltree",
  "noodles",
  "rusqdoltlite",
  "tempfile",

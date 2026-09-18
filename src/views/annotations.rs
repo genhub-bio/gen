@@ -868,7 +868,7 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         fs,
-        io::{Cursor, Read as _, Write as _},
+        io::{BufReader, Cursor, Read as _, Write as _},
         net::TcpListener,
         path::PathBuf,
         thread,
@@ -876,10 +876,11 @@ mod tests {
     };
 
     use flate2::{Compression, write::GzEncoder};
-    use gen_annotations::projection as annotation_projection;
+    use gen_annotations::{
+        AnnotationTranslationContext, GffAnnotation, region::resolve_annotation_region,
+    };
     use gen_core::{
         HashId, Sha256Hash, Strand,
-        range::Range,
         region::{Region, RegionResolver as _, normalize_user_search_region},
     };
     use gen_graph::{GenGraph, GraphNode};
@@ -890,14 +891,14 @@ mod tests {
         operations::commit_operation_summary,
         sample::Sample,
     };
-    use noodles::{bgzf, core::Position, csi, tabix};
+    use noodles::{bgzf, core::Position, csi, gff, tabix};
     use tempfile::{NamedTempFile, tempdir};
 
     use super::{
         AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
         annotation_index_is_tabix, load_annotation_file_track, load_annotations_for_group,
         load_indexed_annotation_bytes, parse_translated_bed, remote_annotation_cache_path,
-        spans_whole_block_group,
+        resolve_local_annotation_file_path, spans_whole_block_group,
     };
     use crate::{
         graphs::combinatorial_library::parse_library,
@@ -1340,44 +1341,34 @@ mod tests {
             .expect("should find fixture block group");
         let graph = BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None)
             .expect("should load fixture graph");
-        let node_filter = graph
-            .nodes()
-            .map(|node| node.node_id)
-            .collect::<HashSet<_>>();
-        let loaded = load_annotation_file_track(&AnnotationFileTrackRequest {
+        let selected_file_path =
+            resolve_local_annotation_file_path(context.workspace(), &entry.file_addition)
+                .expect("should resolve selected fixture annotation path");
+        let translation_context = AnnotationTranslationContext {
             conn,
-            history_ref: None,
             workspace: context.workspace(),
             collection_name: "test",
             sample_name: Sample::DEFAULT_NAME,
-            block_group_name: Some("m123"),
-            query_window: Some((0, 34)),
-            node_filter: &node_filter,
-            entry: &entry,
-        })
-        .expect("should load simple GFF fixture through the file track path");
-        let file_span = loaded
-            .track
-            .annotations
-            .iter()
-            .find(|annotation| annotation.name == "gene-a0001")
-            .expect("should load gene-a0001 from simple GFF fixture");
-        let file_segments = file_span
-            .segments
-            .iter()
-            .map(|segment| annotation_projection::AnnotationSegment {
-                node_id: segment.node_id,
-                range: Range {
-                    start: segment.start,
-                    end: segment.end,
-                },
-                strand: segment.strand,
-            })
-            .collect::<Vec<_>>();
+            history_ref: None,
+            block_group_id: block_group.id,
+        };
+        let file_source = GffAnnotation::from_reader(
+            &translation_context,
+            "gene-a0001",
+            BufReader::new(
+                fs::File::open(selected_file_path)
+                    .expect("should open selected simple GFF fixture"),
+            ),
+        )
+        .expect("should match and translate gene-a0001 from simple GFF fixture");
+        let source_context = ();
         let mut file_graph = graph.clone();
-        let file_region = gen_annotations::region::resolve_annotation_region(
+        let file_region = resolve_annotation_region(
             &normalized_region("gene-a0001:-3"),
-            &file_segments,
+            &file_source,
+            &source_context,
+            conn,
+            context.workspace(),
             &mut file_graph,
         )
         .expect("should resolve file-backed annotation relative to its start");
@@ -1387,9 +1378,12 @@ mod tests {
         assert_eq!(file_region.end_anchors[0].coordinate(), 1);
         assert_eq!((file_region.start_offset, file_region.end_offset), (-3, -3));
 
-        let zero_region = gen_annotations::region::resolve_annotation_region(
+        let zero_region = resolve_annotation_region(
             &normalized_region("gene-a0001:0"),
-            &file_segments,
+            &file_source,
+            &source_context,
+            conn,
+            context.workspace(),
             &mut file_graph,
         )
         .expect("should resolve a zero annotation offset");
@@ -1402,9 +1396,12 @@ mod tests {
         );
         assert_eq!((zero_region.start_offset, zero_region.end_offset), (0, 0));
 
-        let positive_slice = gen_annotations::region::resolve_annotation_region(
+        let positive_slice = resolve_annotation_region(
             &normalized_region("gene-a0001:5-8"),
-            &file_segments,
+            &file_source,
+            &source_context,
+            conn,
+            context.workspace(),
             &mut file_graph,
         )
         .expect("should resolve a positive annotation slice");
@@ -1420,19 +1417,44 @@ mod tests {
             (4, 8)
         );
 
-        let reverse_segments = file_segments
-            .iter()
-            .map(|segment| annotation_projection::AnnotationSegment {
-                strand: Strand::Reverse,
-                ..segment.clone()
-            })
-            .collect::<Vec<_>>();
-        let reverse_region = gen_annotations::region::resolve_annotation_region(
-            &normalized_region("gene-a0001:0"),
-            &reverse_segments,
-            &mut file_graph,
+        let mut gff_reader = gff::io::Reader::new(BufReader::new(
+            fs::File::open(&gff_path).expect("should reopen simple GFF fixture"),
+        ));
+        let gene_record = gff_reader
+            .record_bufs()
+            .map(|result| result.expect("should read simple GFF record"))
+            .find(|record| record.ty() == "Gene")
+            .expect("should find gene-a0001 GFF record");
+        let mut reverse_record_builder = gff::feature::RecordBuf::builder()
+            .set_reference_sequence_name(gene_record.reference_sequence_name().to_string())
+            .set_source(gene_record.source().to_string())
+            .set_type(gene_record.ty().to_string())
+            .set_start(gene_record.start())
+            .set_end(gene_record.end())
+            .set_strand(gff::feature::record::Strand::Reverse)
+            .set_attributes(gene_record.attributes().clone());
+        if let Some(score) = gene_record.score() {
+            reverse_record_builder = reverse_record_builder.set_score(score);
+        }
+        if let Some(phase) = gene_record.phase() {
+            reverse_record_builder = reverse_record_builder.set_phase(phase);
+        }
+        let reverse_source = GffAnnotation::from_records(
+            &translation_context,
+            "gene-a0001",
+            [reverse_record_builder.build()],
         )
-        .expect("should resolve a reverse annotation offset");
+        .expect("should translate reverse-strand gene record");
+        let mut reverse_graph = graph.clone();
+        let reverse_region = resolve_annotation_region(
+            &normalized_region("gene-a0001:0"),
+            &reverse_source,
+            &source_context,
+            conn,
+            context.workspace(),
+            &mut reverse_graph,
+        )
+        .expect("should resolve reverse-strand fixture record");
         assert_eq!(
             (
                 reverse_region.start_anchors[0].coordinate(),
@@ -1461,11 +1483,13 @@ mod tests {
             Sample::DEFAULT_NAME,
         )
         .expect("should load persisted comparison annotation");
-        let persisted_segments = annotation_projection::annotation_segments(conn, &persisted, None);
         let mut persisted_graph = graph;
-        let persisted_region = gen_annotations::region::resolve_annotation_region(
+        let persisted_region = resolve_annotation_region(
             &normalized_region("gene-persisted:-3"),
-            &persisted_segments,
+            &persisted,
+            conn,
+            conn,
+            context.workspace(),
             &mut persisted_graph,
         )
         .expect("should resolve persisted annotation with shared resolver");
