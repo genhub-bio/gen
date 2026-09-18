@@ -272,32 +272,21 @@ impl Edge {
         let edge_ids = edges.iter().map(|edge| edge.id_hash()).collect::<Vec<_>>();
         let batch_size = max_rows_per_batch(conn, 7);
 
-        let query = Edge::select(conn)
-            .query_by_ids(edge_ids.iter().copied())
-            .expect("should load existing edges by id");
-        let existing_edges = query.iter().map(|edge| &edge.id).collect::<HashSet<_>>();
-
-        let mut edges_to_insert = IndexSet::new();
-        for (index, edge) in edge_ids.iter().enumerate() {
-            if !existing_edges.contains(edge) {
-                edges_to_insert.insert(&edges[index]);
-            }
-        }
-
-        for chunk in &edges_to_insert.iter().chunks(batch_size) {
-            let chunk = chunk.collect::<Vec<_>>();
+        for (edge_chunk, id_chunk) in edges.chunks(batch_size).zip(edge_ids.chunks(batch_size)) {
             let mut sql = String::from(
                 "INSERT INTO edges (id, source_node_id, source_coordinate, source_strand, target_node_id, target_coordinate, target_strand) VALUES ",
             );
-            for row_index in 0..chunk.len() {
+            for row_index in 0..edge_chunk.len() {
                 if row_index > 0 {
                     sql.push(',');
                 }
                 sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
             }
-            let mut params = Vec::with_capacity(chunk.len() * 7);
-            for edge in chunk {
-                params.push(Value::from(edge.id_hash()));
+            sql.push_str(" ON CONFLICT(id) DO NOTHING;");
+
+            let mut params = Vec::with_capacity(edge_chunk.len() * 7);
+            for (edge, edge_id) in edge_chunk.iter().zip(id_chunk) {
+                params.push(Value::from(*edge_id));
                 params.push(Value::from(edge.source_node_id));
                 params.push(Value::from(edge.source_coordinate));
                 params.push(Value::from(edge.source_strand));
@@ -305,7 +294,6 @@ impl Edge {
                 params.push(Value::from(edge.target_coordinate));
                 params.push(Value::from(edge.target_strand));
             }
-            sql.push(';');
             let mut statement = conn.prepare_cached(&sql).unwrap();
             statement
                 .execute(rusqlite::params_from_iter(params))
@@ -1310,6 +1298,59 @@ mod tests {
                 .expect("should find edge");
             assert_eq!(EdgeData::from(&edge), edges[index]);
         }
+    }
+
+    #[test]
+    fn test_bulk_create_preserves_duplicate_input_order() {
+        let conn = &mut get_connection(None).expect("should create graph connection");
+        Collection::create(conn, "duplicate edge collection").expect("should create collection");
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("ATCG")
+            .save(conn)
+            .expect("should create sequence");
+        let node_id = Node::create(
+            conn,
+            &sequence.hash,
+            &HashId::convert_str("duplicate-edge-node"),
+        )
+        .expect("should create node");
+        let first_edge = EdgeData {
+            source_node_id: PATH_START_NODE_ID,
+            source_coordinate: 0,
+            source_strand: Strand::Forward,
+            target_node_id: node_id,
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+        let second_edge = EdgeData {
+            source_node_id: node_id,
+            source_coordinate: 4,
+            source_strand: Strand::Forward,
+            target_node_id: PATH_END_NODE_ID,
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+
+        let edge_ids = Edge::bulk_create(conn, &[first_edge, second_edge, first_edge]);
+
+        assert_eq!(
+            edge_ids,
+            vec![
+                first_edge.id_hash(),
+                second_edge.id_hash(),
+                first_edge.id_hash()
+            ],
+            "returned IDs should preserve duplicate input positions"
+        );
+        assert_eq!(
+            Edge::select(conn)
+                .query_by_ids(edge_ids)
+                .expect("should query created edges")
+                .len(),
+            2,
+            "duplicate input should create one row per unique edge"
+        );
     }
 
     #[test]
