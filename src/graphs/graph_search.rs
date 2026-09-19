@@ -6,9 +6,10 @@ use std::{
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
-    db::GraphConnection, locus::GraphLocus, node::Node, sequence::reverse_complement,
+    block_group::BlockGroup, db::GraphConnection, locus::GraphLocus, node::Node,
+    sequence::reverse_complement,
 };
-use petgraph::Direction;
+use petgraph::{Direction, visit::IntoEdgeReferences as _};
 use serde::{Deserialize, Serialize};
 
 /// A position in the graph: a GraphNode (aka Block) plus a local byte offset
@@ -139,6 +140,7 @@ fn degenerate_matches(query_byte: u8, graph_byte: u8) -> bool {
 pub struct GenGraphMatcher {
     graph: GenGraph,
     sequence_kind: SequenceKind,
+    latest_edge_created_on: i64,
     /// Pre-fetched GraphNode sequence bytes, keyed by `GraphNode::node_id`.
     node_sequences: HashMap<HashId, Vec<u8>>,
 }
@@ -170,6 +172,8 @@ impl GenGraphMatcher {
 
     /// Build a matcher from a database connection, graph, and sequence kind.
     ///
+    /// The graph is pruned to the current reachable graph before matching.
+    ///
     /// Batch-loads all full node sequences up front. No further database access
     /// occurs during matching.
     pub fn new_with_sequence_kind(
@@ -178,6 +182,15 @@ impl GenGraphMatcher {
         graph: GenGraph,
         sequence_kind: SequenceKind,
     ) -> Self {
+        let latest_edge_created_on = graph
+            .edge_references()
+            .flat_map(|(_, _, edges)| edges.iter())
+            .map(|edge| edge.created_on)
+            .max()
+            .unwrap_or_default();
+        let mut graph = graph;
+        BlockGroup::prune_graph(&mut graph);
+
         let node_ids: Vec<HashId> = {
             let mut ids: Vec<HashId> = graph.nodes().map(|n| n.node_id).collect();
             ids.sort_unstable();
@@ -205,6 +218,7 @@ impl GenGraphMatcher {
         Self {
             graph,
             sequence_kind,
+            latest_edge_created_on,
             node_sequences,
         }
     }
@@ -215,6 +229,11 @@ impl GenGraphMatcher {
 
     pub fn set_sequence_kind(&mut self, sequence_kind: SequenceKind) {
         self.sequence_kind = sequence_kind;
+    }
+
+    /// Return the creation timestamp of the newest edge in the source graph.
+    pub fn latest_edge_created_on(&self) -> i64 {
+        self.latest_edge_created_on
     }
 
     /// Returns `true` if `query` occurs anywhere in the graph using this
@@ -332,7 +351,9 @@ impl GenGraphMatcher {
 
         let mut out = Vec::new();
         for &pos in positions {
-            self.collect_matches_from(pos, query, matcher, &mut out, strand);
+            if self.graph.contains_node(pos.block) {
+                self.collect_matches_from(pos, query, matcher, &mut out, strand);
+            }
         }
         out
     }
@@ -558,11 +579,12 @@ impl GenGraphMatcher {
 pub struct SeedIndex {
     pub k: usize,
     pub normalized: bool,
+    pub latest_edge_created_on: i64,
     pub table: HashMap<Vec<u8>, Vec<GraphPos>>,
 }
 
 /// Bumped whenever the index format or indexing behavior changes incompatibly.
-const SEED_INDEX_VERSION: u32 = 2;
+const SEED_INDEX_VERSION: u32 = 3;
 
 /// File header written before the `SeedIndex` payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,8 +640,14 @@ impl SeedIndex {
         Self {
             k,
             normalized,
+            latest_edge_created_on: matcher.latest_edge_created_on(),
             table,
         }
+    }
+
+    /// Return whether this index was built for the matcher's current graph state.
+    pub fn is_valid_for(&self, matcher: &GenGraphMatcher) -> bool {
+        self.latest_edge_created_on == matcher.latest_edge_created_on()
     }
 
     /// Serialize `self` to bytes: 4-byte little-endian header length, header, payload.
@@ -772,10 +800,16 @@ fn validate_seed_index_header_version(header: &SeedIndexHeader) -> Result<(), Se
 
 #[cfg(test)]
 mod tests {
-    use gen_models::{block_group::BlockGroup, collection::Collection};
+    use std::path::PathBuf;
+
+    use gen_models::{block_group::BlockGroup, collection::Collection, sample::Sample};
 
     use super::*;
-    use crate::test_helpers::{setup_block_group, setup_gen};
+    use crate::{
+        imports::fasta::import_fasta,
+        test_helpers::{get_sample_bg, setup_block_group, setup_gen},
+        updates::{sequence::update_with_sequence, vcf::update_with_vcf},
+    };
 
     // The test graph is a single linear path built by setup_block_group:
     //   AAAAAAAAAA → TTTTTTTTTT → CCCCCCCCCC → GGGGGGGGGG  (40 bp total)
@@ -1164,6 +1198,129 @@ mod tests {
         assert_eq!(loaded.k, index.k);
         assert_eq!(loaded.normalized, index.normalized);
         assert_eq!(loaded.table.len(), index.table.len());
+    }
+
+    #[test]
+    fn test_search_finds_only_current_zygosity_alleles() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_path = fixture_dir.join("simple.fa").to_str().unwrap().to_string();
+        let vcf_path = fixture_dir
+            .join("simple_zygosity.vcf")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let collection = "test";
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &vcf_path,
+            collection,
+            String::new(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let block_group = get_sample_bg(conn, collection, "SAMPLE1");
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let matcher = GenGraphMatcher::new_with_sequence_kind(
+            conn,
+            context.workspace(),
+            graph,
+            SequenceKind::Exact,
+        );
+
+        // Each query includes the edited allele and enough surrounding sequence
+        // to disambiguate the fixture's repeated ATCG motif. A superseded
+        // reference allele must not be reachable at homozygous sites.
+        for (allele, query) in [
+            (
+                "first homozygous reference allele",
+                b"ATCGATCGATCG" as &[u8],
+            ),
+            ("second homozygous reference allele", b"GATCGATCG"),
+            ("third homozygous reference allele", b"TCGGGAAC"),
+        ] {
+            assert!(
+                matcher.find_all(query).is_empty(),
+                "should not find {allele}"
+            );
+        }
+
+        for (allele, query) in [
+            ("first homozygous alternate allele", b"ATTGATCGATC" as &[u8]),
+            ("second homozygous alternate allele", b"GATCATCG"),
+            ("third homozygous alternate allele", b"TCGGGTTTAAC"),
+            ("first heterozygous reference allele", b"GATCGAT"),
+            ("first heterozygous alternate allele", b"GATAGAT"),
+            ("second heterozygous reference allele", b"TCGATCG"),
+            ("second heterozygous alternate allele", b"TCGTCG"),
+            ("third heterozygous reference allele", b"CACACAG"),
+            ("third heterozygous alternate allele", b"CACGCAG"),
+        ] {
+            assert!(!matcher.find_all(query).is_empty(), "should find {allele}");
+        }
+    }
+
+    #[test]
+    fn test_seed_index_is_invalid_after_in_place_sequence_update() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        let block_group = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let matcher = GenGraphMatcher::new(conn, context.workspace(), graph);
+        let index = SeedIndex::build(&matcher, 4, true);
+        let stored_index =
+            SeedIndex::from_bytes_with_header(&index.to_bytes_with_header().unwrap(), 4).unwrap();
+
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            Sample::DEFAULT_NAME,
+            "m123:1-4",
+            "GGGG",
+            false,
+        )
+        .unwrap();
+
+        let updated_block_group = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let updated_graph =
+            BlockGroup::get_graph(conn, context.workspace(), &updated_block_group.id, None)
+                .unwrap();
+        let updated_matcher = GenGraphMatcher::new(conn, context.workspace(), updated_graph);
+
+        assert!(!stored_index.is_valid_for(&updated_matcher));
     }
 
     // --- Case sensitivity tests ---

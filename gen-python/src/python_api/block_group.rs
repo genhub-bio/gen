@@ -244,7 +244,8 @@ impl PySequenceGraph {
             .join(format!("{}.bin", self.id));
         let index = fs::read(&index_path)
             .ok()
-            .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok());
+            .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok())
+            .filter(|index| index.is_valid_for(&matcher));
 
         let query_bytes = query.as_bytes();
         let matches = match index {
