@@ -88,6 +88,11 @@ pub trait HistoryStore {
     ) -> SqlResult<()>;
     fn delete_branch(&self, branch_name: &BranchName) -> SqlResult<()>;
     fn merge_base(&self, source: &CommitRef, target: &CommitRef) -> SqlResult<DoltHashId>;
+    /// Merges a reference into the current branch.
+    ///
+    /// Callers must invoke this method inside [`GraphConnection::with_transaction`] for the
+    /// supported merge workflow: the transaction both rolls back failed merges and keeps
+    /// DoltLite conflict state available while conflicts are inspected and resolved.
     fn merge(&self, reference: &CommitRef) -> SqlResult<DoltHashId>;
     fn cherry_pick(&self, commit_hash: &DoltHashId) -> SqlResult<()>;
     fn reset_hard(&self, target: &CommitRef) -> SqlResult<()>;

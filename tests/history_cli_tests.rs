@@ -12,7 +12,7 @@ use r#gen::{
         graph::DiffChangeKind,
         operations::{DiffRange, collect_operation_diff},
     },
-    get_connection,
+    get_connection, get_connection_for_branch,
     history::operations_history_entries,
     patch::load_patches,
 };
@@ -25,6 +25,7 @@ use gen_models::{
         dolt::{DoltHistoryStore, status_rows},
     },
     node::Node,
+    sample::Sample,
     sample_lineage::SampleLineage,
 };
 use rusqlite::params;
@@ -1952,8 +1953,9 @@ mod revision_views {
 
 mod branch_history {
     use super::{
-        Path, PathBuf, assert_success, commit_hash_for_summary, fs, get_connection,
-        operations_stdout, params, run_gen, status_rows, tempdir,
+        AssetRef, HashSet, Path, PathBuf, Sample, Workspace, assert_success,
+        commit_hash_for_summary, fs, get_connection, get_connection_for_branch, operations_stdout,
+        params, run_gen, status_rows, tempdir,
     };
 
     fn graph_status(repo_root: &Path) -> String {
@@ -1961,6 +1963,29 @@ mod branch_history {
         let connection = get_connection(graph_path).expect("should reopen graph database");
         let status_rows = status_rows(&connection).expect("should query Dolt status");
         format!("{status_rows:?}")
+    }
+
+    fn sample_sequences(repo_root: &Path, branch_name: &str, sample_name: &str) -> HashSet<String> {
+        let graph_path = repo_root.join(".gen/default.db");
+        let connection = get_connection_for_branch(graph_path, Some(branch_name))
+            .expect("should reopen the requested branch graph database");
+        let workspace = Workspace::new(repo_root);
+        Sample::get_all_sequences(
+            &connection,
+            &workspace,
+            "test-collection",
+            sample_name,
+            false,
+            None,
+        )
+        .expect("should load all sequences for the sample")
+    }
+
+    fn branch_asset_refs(repo_root: &Path, branch_name: &str) -> Vec<AssetRef> {
+        let graph_path = repo_root.join(".gen/default.db");
+        let connection = get_connection_for_branch(graph_path, Some(branch_name))
+            .expect("should open the requested branch graph database");
+        AssetRef::all(&connection).expect("should load branch asset references")
     }
 
     fn dirty_graph_with_uncommitted_log(repo_root: &Path) {
@@ -2053,6 +2078,258 @@ mod branch_history {
         assert!(
             main_stdout.contains("feature-sample"),
             "merged main branch should expose the feature sample: {main_stdout}"
+        );
+    }
+
+    #[test]
+    fn test_merge_identical_vcf_updates_from_sibling_branches() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_path = fixtures_dir.join("simple.fa");
+        let vcf_path = fixtures_dir.join("simple.vcf");
+        let fasta_path = fasta_path.to_str().expect("should encode fasta path");
+        let vcf_path = vcf_path.to_str().expect("should encode VCF path");
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["init"]),
+            "gen init should succeed",
+        );
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &[
+                    "import",
+                    "fasta",
+                    fasta_path,
+                    "--name",
+                    "default",
+                    "--reference",
+                    "default",
+                ],
+            ),
+            "fasta reference import should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["branch", "--create", "feature-1"]),
+            "first feature branch create should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["branch", "--create", "feature-2"]),
+            "second feature branch create should succeed",
+        );
+
+        let update_args = [
+            "update",
+            "vcf",
+            vcf_path,
+            "--name",
+            "default",
+            "--parent-samples",
+            "default",
+        ];
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "--branch", "feature-1"]),
+            "first feature checkout should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &update_args),
+            "first feature VCF update should succeed",
+        );
+        let feature_one_assets = branch_asset_refs(repo_dir.path(), "feature-1");
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "main"]),
+            "checkout main before second feature should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "--branch", "feature-2"]),
+            "second feature checkout should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &update_args),
+            "second feature VCF update should succeed",
+        );
+        let feature_two_assets = branch_asset_refs(repo_dir.path(), "feature-2");
+
+        let feature_one_vcf = feature_one_assets
+            .iter()
+            .find(|asset_ref| asset_ref.file_type == "vcf")
+            .expect("first feature should record the VCF asset");
+        let feature_two_vcf = feature_two_assets
+            .iter()
+            .find(|asset_ref| asset_ref.file_type == "vcf")
+            .expect("second feature should record the VCF asset");
+        assert_ne!(
+            feature_one_vcf.created_on, feature_two_vcf.created_on,
+            "sibling VCF updates should create the same asset at different times"
+        );
+        let mut feature_one_vcf_without_created_on: AssetRef = feature_one_vcf.clone();
+        let mut feature_two_vcf_without_created_on: AssetRef = feature_two_vcf.clone();
+        feature_one_vcf_without_created_on.created_on = 0;
+        feature_two_vcf_without_created_on.created_on = 0;
+        assert_eq!(
+            feature_one_vcf_without_created_on, feature_two_vcf_without_created_on,
+            "sibling VCF updates should differ in the known asset table only by created_on"
+        );
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "main"]),
+            "checkout main before merges should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["merge", "feature-1"]),
+            "first sibling merge should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["merge", "feature-2"]),
+            "second sibling merge should succeed without a created_on conflict",
+        );
+
+        assert_eq!(
+            graph_status(repo_dir.path()),
+            "[]",
+            "merged main branch should have a clean graph status"
+        );
+        let samples = run_gen(repo_dir.path(), &["list-samples"]);
+        assert_success(&samples, "list-samples after sibling merges should succeed");
+        let samples_stdout = String::from_utf8_lossy(&samples.stdout);
+        for sample_name in ["unknown", "G1", "foo"] {
+            assert!(
+                samples_stdout.contains(sample_name),
+                "merged main branch should expose VCF sample {sample_name}: {samples_stdout}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_divergent_fasta_updates_for_same_sample_succeeds() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_path = fixtures_dir.join("simple.fa");
+        let feature_update_path = repo_dir.path().join("feature-conflict.fa");
+        let main_update_path = repo_dir.path().join("main-conflict.fa");
+
+        fs::write(&feature_update_path, ">m123\nTTTT\n")
+            .expect("should write feature update fasta fixture");
+        fs::write(&main_update_path, ">m123\nGGGG\n")
+            .expect("should write main update fasta fixture");
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["init"]),
+            "gen init should succeed",
+        );
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &[
+                    "import",
+                    "fasta",
+                    fasta_path.to_str().expect("should encode fasta path"),
+                    "--name",
+                    "test-collection",
+                    "--sample",
+                    "test-sample",
+                ],
+            ),
+            "fasta import should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["branch", "--create", "feature"]),
+            "branch create should succeed",
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "--branch", "feature"]),
+            "checkout feature should succeed",
+        );
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &[
+                    "update",
+                    "fasta",
+                    feature_update_path
+                        .to_str()
+                        .expect("should encode feature update fasta path"),
+                    "--name",
+                    "test-collection",
+                    "--sample",
+                    "test-sample",
+                    "--new-sample",
+                    "edited-sample",
+                    "--region-name",
+                    "m123:1-5",
+                ],
+            ),
+            "feature branch update should succeed",
+        );
+        assert_eq!(
+            sample_sequences(repo_dir.path(), "feature", "edited-sample"),
+            HashSet::from([
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATTTTTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            ]),
+            "feature branch should contain the original and TTTT sequences"
+        );
+        assert_success(
+            &run_gen(repo_dir.path(), &["checkout", "main"]),
+            "checkout main should succeed",
+        );
+        assert_success(
+            &run_gen(
+                repo_dir.path(),
+                &[
+                    "update",
+                    "fasta",
+                    main_update_path
+                        .to_str()
+                        .expect("should encode main update fasta path"),
+                    "--name",
+                    "test-collection",
+                    "--sample",
+                    "test-sample",
+                    "--new-sample",
+                    "edited-sample",
+                    "--region-name",
+                    "m123:1-5",
+                ],
+            ),
+            "main branch update should succeed",
+        );
+        assert_eq!(
+            sample_sequences(repo_dir.path(), "main", "edited-sample"),
+            HashSet::from([
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "AGGGGTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            ]),
+            "main branch should contain the original and GGGG sequences"
+        );
+
+        let merge_output = run_gen(repo_dir.path(), &["merge", "feature"]);
+        assert_success(
+            &merge_output,
+            "divergent FASTA updates for the same sample should merge successfully",
+        );
+        assert_eq!(
+            graph_status(repo_dir.path()),
+            "[]",
+            "merged main branch should have a clean graph status"
+        );
+        assert_eq!(
+            sample_sequences(repo_dir.path(), "main", "edited-sample"),
+            HashSet::from([
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "ATTTTTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+                "AGGGGTCGATCGATCGATCGGGAACACACAGAGA".to_string(),
+            ]),
+            "merged main should contain the original, TTTT, and GGGG sequences"
+        );
+        let samples = run_gen(repo_dir.path(), &["list-samples"]);
+        assert_success(&samples, "list-samples after FASTA merge should succeed");
+        let samples_stdout = String::from_utf8_lossy(&samples.stdout);
+        assert!(
+            samples_stdout.contains("edited-sample"),
+            "merged main branch should expose edited-sample: {samples_stdout}"
         );
     }
 
@@ -2354,107 +2631,6 @@ mod branch_history {
                 "{action} should explain that Dolt status is dirty: {stderr}"
             );
         }
-    }
-
-    #[test]
-    fn test_merge_conflict_is_reported_as_a_gen_error() {
-        let repo_dir = tempdir().expect("should create temp repo directory");
-        let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
-        let fasta_path = fixtures_dir.join("simple.fa");
-        let feature_update_path = repo_dir.path().join("feature-conflict.fa");
-        let main_update_path = repo_dir.path().join("main-conflict.fa");
-
-        fs::write(&feature_update_path, ">m123\nTTTT\n")
-            .expect("should write feature update fasta fixture");
-        fs::write(&main_update_path, ">m123\nGGGG\n")
-            .expect("should write main update fasta fixture");
-
-        assert_success(
-            &run_gen(repo_dir.path(), &["init"]),
-            "gen init should succeed",
-        );
-        assert_success(
-            &run_gen(
-                repo_dir.path(),
-                &[
-                    "import",
-                    "fasta",
-                    fasta_path.to_str().expect("should encode fasta path"),
-                    "--name",
-                    "test-collection",
-                    "--sample",
-                    "test-sample",
-                ],
-            ),
-            "fasta import should succeed",
-        );
-        assert_success(
-            &run_gen(repo_dir.path(), &["branch", "--create", "feature"]),
-            "branch create should succeed",
-        );
-        assert_success(
-            &run_gen(repo_dir.path(), &["checkout", "--branch", "feature"]),
-            "checkout feature should succeed",
-        );
-        assert_success(
-            &run_gen(
-                repo_dir.path(),
-                &[
-                    "update",
-                    "fasta",
-                    feature_update_path
-                        .to_str()
-                        .expect("should encode feature update fasta path"),
-                    "--name",
-                    "test-collection",
-                    "--sample",
-                    "test-sample",
-                    "--new-sample",
-                    "edited-sample",
-                    "--region-name",
-                    "m123:1-5",
-                ],
-            ),
-            "feature branch update should succeed",
-        );
-        assert_success(
-            &run_gen(repo_dir.path(), &["checkout", "main"]),
-            "checkout main should succeed",
-        );
-        assert_success(
-            &run_gen(
-                repo_dir.path(),
-                &[
-                    "update",
-                    "fasta",
-                    main_update_path
-                        .to_str()
-                        .expect("should encode main update fasta path"),
-                    "--name",
-                    "test-collection",
-                    "--sample",
-                    "test-sample",
-                    "--new-sample",
-                    "edited-sample",
-                    "--region-name",
-                    "m123:1-5",
-                ],
-            ),
-            "main branch update should succeed",
-        );
-
-        let merge_output = run_gen(repo_dir.path(), &["merge", "feature"]);
-        assert!(
-            !merge_output.status.success(),
-            "merge should fail when Dolt reports a conflict: stdout={} stderr={}",
-            String::from_utf8_lossy(&merge_output.stdout),
-            String::from_utf8_lossy(&merge_output.stderr)
-        );
-        let stderr = String::from_utf8_lossy(&merge_output.stderr);
-        assert!(
-            stderr.contains("Merge failed with Dolt conflicts."),
-            "merge conflict should be reported as a Gen-level conflict error: {stderr}"
-        );
     }
 }
 
