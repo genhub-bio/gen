@@ -378,27 +378,34 @@ mod tests {
     }
 
     #[test]
-    fn test_with_transaction_rolls_back_failed_operation() {
+    fn test_with_transaction_rolls_back_sql_error() {
         let conn = test_graph_connection(None).expect("should create graph database");
         conn.execute("CREATE TABLE transaction_rows (value TEXT NOT NULL)", [])
             .expect("should create transaction fixture table");
 
-        let error: rusqlite::Result<()> = conn.with_transaction(|| {
+        let error = conn.with_transaction(|| {
             conn.execute(
                 "INSERT INTO transaction_rows (value) VALUES ('rolled back')",
                 [],
             )?;
-            Err(rusqlite::Error::InvalidParameterName(
-                "expected transaction failure".to_string(),
-            ))
+            conn.execute("INSERT INTO transaction_rows (value) VALUES (NULL)", [])?;
+            Ok(())
         });
-        assert!(error.is_err(), "failed operation should return its error");
+        let sqlite_error = error.expect_err("constraint violation should fail transaction");
+        assert!(
+            matches!(
+                sqlite_error,
+                rusqlite::Error::SqliteFailure(error, _)
+                    if error.code == rusqlite::ErrorCode::ConstraintViolation
+            ),
+            "transaction should return the SQL constraint violation"
+        );
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM transaction_rows", [], |row| row
                 .get::<_, i64>(0))
                 .expect("should query rolled-back transaction rows"),
             0,
-            "failed transaction should roll back its inserted row"
+            "SQL-error transaction should roll back its valid inserted row"
         );
     }
 

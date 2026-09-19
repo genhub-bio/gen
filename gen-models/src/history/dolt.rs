@@ -442,7 +442,7 @@ fn resolve_created_on_conflicts(
     conflicts: &[HistoryConflict],
 ) -> SqlResult<()> {
     // This handles known conflict cases automatically. The cases are:
-    // Created_on dates between otherwise identical can differ. Automatically use the older created_on date for a conflict
+    // Created_on dates between otherwise identical objects can differ. Automatically use the target branch created_on date for a conflict
     for conflict in conflicts {
         if conflict.num_conflicts == 0 {
             continue;
@@ -531,10 +531,18 @@ fn merge_commit(conn: &GraphConnection, message: &str) -> SqlResult<DoltHashId> 
 /// | `Integer(0)` | Clean non-fast-forward working set; requires `dolt_commit`. |
 /// | `SQLITE_ERROR` with data conflicts | Conflict rows materialized for selective resolution before commit. |
 ///
-/// Callers must invoke this operation inside [`GraphConnection::with_transaction`] for the
-/// supported merge workflow: the transaction both rolls back failed merges and keeps DoltLite
-/// conflict state available while conflicts are inspected and resolved.
+/// An active SQL transaction is required. Callers must invoke this operation inside
+/// [`GraphConnection::with_transaction`] (or another explicit transaction) for the supported
+/// workflow: the transaction both rolls back failed merges and keeps DoltLite conflict state
+/// available while conflicts are inspected and resolved.
 pub fn merge(conn: &GraphConnection, reference: &str) -> SqlResult<DoltHashId> {
+    if conn.is_autocommit() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISUSE),
+            Some("merge requires an active transaction".to_string()),
+        ));
+    }
+
     let target_branch = active_branch(conn)?;
     let merge_message = format!("Merge branch '{reference}' into {target_branch}");
 
@@ -1118,10 +1126,10 @@ mod tests {
     use super::{
         DoltHistoryStore, active_branch, add_remote, branch_exists, branch_hash, branch_rows,
         branches_exist, checkout, commit_all, commit_exists, commit_parents, commit_staged_all,
-        connect_branch, create_branch, delete_branch_force, diff_row_count, hash_of, is_ancestor,
-        is_current_branch_dirty, log_entries, log_entries_for_hashes, log_entries_for_revision,
-        merge, merge_base, remote_rows, remove_remote, reset_hard, search_branch_names,
-        set_commit_author_email, set_commit_author_name, status_rows,
+        conflict_rows, connect_branch, create_branch, delete_branch_force, diff_row_count, hash_of,
+        is_ancestor, is_current_branch_dirty, log_entries, log_entries_for_hashes,
+        log_entries_for_revision, merge, merge_base, remote_rows, remove_remote, reset_hard,
+        search_branch_names, set_commit_author_email, set_commit_author_name, status_rows,
     };
     use crate::{
         annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
@@ -1509,6 +1517,104 @@ mod tests {
                 .expect("should merge an already included source"),
             source_hash,
             "an already included source should be a successful no-op returning the current target"
+        );
+    }
+
+    #[test]
+    fn test_merge_requires_active_transaction_for_clean_non_fast_forward() {
+        let conn = get_connection(None).expect("should create graph database");
+
+        Collection::create(&conn, "base-collection").expect("should create base collection");
+        commit_all(&conn, "base").expect("should commit base state");
+        create_branch(&conn, "feature").expect("should create feature branch");
+
+        checkout(&conn, "feature").expect("should checkout feature branch");
+        Collection::create(&conn, "feature-only-collection")
+            .expect("should create feature collection");
+        let source_hash = commit_all(&conn, "feature").expect("should commit feature state");
+
+        checkout(&conn, "main").expect("should checkout main branch");
+        Collection::create(&conn, "target-only-collection")
+            .expect("should create target collection");
+        let target_hash = commit_all(&conn, "target").expect("should commit target state");
+        assert_ne!(
+            source_hash, target_hash,
+            "feature and target must be distinct tips for a non-fast-forward merge"
+        );
+
+        let status_before = status_rows(&conn).expect("should read target status before merge");
+        assert!(
+            status_before.is_empty(),
+            "target history should be clean before rejected merge"
+        );
+        let conflicts_before = conflict_rows(&conn).expect("should read conflicts before merge");
+        assert!(
+            conflicts_before.is_empty(),
+            "target history should have no conflicts before rejected merge"
+        );
+        let merge_status_before: i64 = conn
+            .query_row("SELECT is_merging FROM dolt_merge_status", [], |row| {
+                row.get(0)
+            })
+            .expect("should read merge status before merge");
+        assert_eq!(
+            merge_status_before, 0,
+            "target history should not be merging before rejected merge"
+        );
+        let target_hash_before = hash_of(&conn, "main").expect("should read target hash");
+        assert!(
+            Collection::exists(&conn, "target-only-collection"),
+            "target data should exist before rejected merge"
+        );
+        assert!(
+            !Collection::exists(&conn, "feature-only-collection"),
+            "feature-only data should be absent from target before rejected merge"
+        );
+
+        let merge_error =
+            merge(&conn, "feature").expect_err("merge should require an active transaction");
+        assert!(
+            matches!(
+                merge_error,
+                rusqlite::Error::SqliteFailure(error, Some(message))
+                    if error.extended_code == rusqlite::ffi::SQLITE_MISUSE
+                        && message == "merge requires an active transaction"
+            ),
+            "merge should report its active-transaction precondition"
+        );
+        assert_eq!(
+            hash_of(&conn, "main").expect("should read target hash after rejected merge"),
+            target_hash_before,
+            "rejected merge must not advance the target branch"
+        );
+        assert!(
+            Collection::exists(&conn, "target-only-collection"),
+            "rejected merge must preserve target data"
+        );
+        assert!(
+            !Collection::exists(&conn, "feature-only-collection"),
+            "rejected merge must not add feature-only data"
+        );
+        assert_eq!(
+            status_rows(&conn).expect("should read target status after rejected merge"),
+            status_before,
+            "rejected merge must preserve clean working-set status"
+        );
+        assert_eq!(
+            conflict_rows(&conn).expect("should read conflicts after rejected merge"),
+            conflicts_before,
+            "rejected merge must not leave conflict rows behind"
+        );
+        assert_eq!(
+            conn.query_row("SELECT is_merging FROM dolt_merge_status", [], |row| row
+                .get::<_, i64>(0))
+                .expect("should read merge status after rejected merge"),
+            0,
+            "rejected merge must not leave merge state behind"
+        );
+        assert!(
+            conn.is_autocommit(),
+            "a rejected merge must not open a transaction"
         );
     }
 
