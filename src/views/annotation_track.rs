@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use gen_core::{HashId, Strand};
+use gen_core::{HashId, Strand, Workspace};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
-use gen_models::locus::GraphLocus;
+use gen_models::{db::GraphConnection, locus::GraphLocus, region::ResolvedGenRegion};
 use petgraph::visit::IntoNodeIdentifiers;
 
 #[derive(Clone, Debug)]
@@ -36,21 +36,42 @@ impl AnnotationTrack {
 }
 
 pub fn annotation_span_from_graph_locus(locus: &GraphLocus, name: &str) -> AnnotationSpan {
-    let segments = locus
-        .slices
-        .iter()
-        .map(|s| AnnotationSegment {
-            node_id: s.block.node_id,
-            start: s.block.sequence_start + s.start as i64,
-            end: s.block.sequence_start + s.end as i64,
-            strand: s.strand,
-        })
-        .collect();
+    let segments = annotation_segments_from_graph_locus(locus);
     AnnotationSpan {
         id: HashId::convert_str(name),
         name: name.to_string(),
         segments,
     }
+}
+
+/// Convert a resolved database region into the span representation used by graph overlays.
+pub fn annotation_span_from_resolved_region(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    region: &ResolvedGenRegion,
+) -> Result<AnnotationSpan, String> {
+    let locus = region
+        .graph_locus(conn, workspace)
+        .map_err(|error| format!("failed to project region onto graph: {error}"))?;
+    let mut span = annotation_span_from_graph_locus(&locus, "");
+    span.id = HashId::convert_str(&format!(
+        "region-search:{:?}:{}-{}",
+        region.kind, region.start, region.end
+    ));
+    Ok(span)
+}
+
+fn annotation_segments_from_graph_locus(locus: &GraphLocus) -> Vec<AnnotationSegment> {
+    locus
+        .slices
+        .iter()
+        .map(|slice| AnnotationSegment {
+            node_id: slice.block.node_id,
+            start: slice.block.sequence_start + slice.start as i64,
+            end: slice.block.sequence_start + slice.end as i64,
+            strand: slice.strand,
+        })
+        .collect()
 }
 
 /// Map `span`'s per-node segments onto the current graph.

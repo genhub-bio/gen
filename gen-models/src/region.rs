@@ -3,7 +3,7 @@ use gen_core::{
     HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_terminal,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
-use gen_graph::{GraphNode, GraphNodePosition};
+use gen_graph::{GraphNode, GraphNodePosition, GraphNodeSlice};
 use intervaltree::IntervalTree;
 use thiserror::Error;
 
@@ -15,6 +15,7 @@ use crate::{
     db::GraphConnection,
     edge::EdgeData,
     errors::PathError,
+    locus::GraphLocus,
     path::Path,
 };
 
@@ -117,6 +118,93 @@ pub fn resolve(
     }
 
     resolve_accession(region, conn, collection_name, sample_name)
+}
+
+pub fn resolve_all(
+    region: &Region,
+    conn: &GraphConnection,
+    collection_name: &str,
+    sample_name: &str,
+) -> Result<Vec<ResolvedGenRegion>, GenRegionError> {
+    let mut resolved_regions = Vec::new();
+
+    for block_group in BlockGroup::resolve_candidates(region, conn, collection_name, sample_name)? {
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None)?;
+        let path_length = path.length(conn, None)?;
+        resolved_regions.push(resolve_target(
+            region,
+            RegionTarget {
+                kind: RegionTargetKind::BlockGroup,
+                block_group,
+                path: Some(path),
+                accession: None,
+                annotation: None,
+                anchor_start: 0,
+                anchor_end: path_length,
+                feature_length: path_length,
+            },
+        )?);
+    }
+
+    for (path, block_group) in Path::resolve_candidates(region, conn, collection_name, sample_name)?
+    {
+        let path_length = path.length(conn, None)?;
+        resolved_regions.push(resolve_target(
+            region,
+            RegionTarget {
+                kind: RegionTargetKind::Path,
+                block_group,
+                path: Some(path),
+                accession: None,
+                annotation: None,
+                anchor_start: 0,
+                anchor_end: path_length,
+                feature_length: path_length,
+            },
+        )?);
+    }
+
+    for annotation in Annotation::resolve_candidates(region, conn, collection_name, sample_name)? {
+        let accession = Accession::select(conn)
+            .get_by_id(annotation.accession_id)
+            .map_err(AccessionError::from)?
+            .ok_or_else(|| GenRegionError::Unmappable(region.name.clone()))?;
+        resolved_regions.push(resolve_target(
+            region,
+            target_from_accession(
+                region,
+                conn,
+                collection_name,
+                sample_name,
+                RegionTargetKind::Annotation,
+                accession,
+                Some(annotation),
+                false,
+            )?,
+        )?);
+    }
+
+    for accession in Accession::resolve_candidates(region, conn, collection_name, sample_name)? {
+        resolved_regions.push(resolve_target(
+            region,
+            target_from_accession(
+                region,
+                conn,
+                collection_name,
+                sample_name,
+                RegionTargetKind::Accession,
+                accession,
+                None,
+                true,
+            )?,
+        )?);
+    }
+
+    if resolved_regions.is_empty() {
+        Err(GenRegionError::NotFound(region.name.clone()))
+    } else {
+        Ok(resolved_regions)
+    }
 }
 
 pub fn resolve_path(
@@ -499,6 +587,58 @@ impl ResolvedGenRegion {
         }
     }
 
+    pub fn graph_locus(
+        &self,
+        conn: &GraphConnection,
+        workspace: &Workspace,
+    ) -> Result<GraphLocus, GenRegionError> {
+        let interval_tree = self.intervaltree(conn, workspace)?;
+        let mut slices = interval_tree
+            .iter()
+            .filter_map(|entry| {
+                let block = entry.value;
+                if is_terminal(block.node_id) {
+                    return None;
+                }
+                let clipped_start = self.start.max(block.start);
+                let clipped_end = self.end.min(block.end);
+                if clipped_start >= clipped_end {
+                    return None;
+                }
+                let local_start = clipped_start - block.start;
+                let local_end = clipped_end - block.start;
+                let (sequence_start, sequence_end) = if block.strand == Strand::Reverse {
+                    (
+                        block.sequence_end - local_end,
+                        block.sequence_end - local_start,
+                    )
+                } else {
+                    (
+                        block.sequence_start + local_start,
+                        block.sequence_start + local_end,
+                    )
+                };
+                Some((
+                    clipped_start,
+                    GraphNodeSlice {
+                        block: GraphNode {
+                            node_id: block.node_id,
+                            sequence_start: block.sequence_start,
+                            sequence_end: block.sequence_end,
+                        },
+                        start: (sequence_start - block.sequence_start) as usize,
+                        end: (sequence_end - block.sequence_start) as usize,
+                        strand: block.strand,
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        slices.sort_by_key(|(coordinate, _)| *coordinate);
+        Ok(GraphLocus {
+            slices: slices.into_iter().map(|(_, slice)| slice).collect(),
+        })
+    }
+
     pub fn find_graph_positions(
         &self,
         conn: &GraphConnection,
@@ -716,8 +856,11 @@ impl IntervalTreeSource for ResolvedGenRegion {
 
 #[cfg(test)]
 mod tests {
+    use gen_core::range::Range;
+
     use super::*;
     use crate::{
+        accession::{AccessionSpan, NewAccession},
         annotations::Annotation,
         block_group::{BlockGroup, PathCache},
         test_helpers::{get_connection, setup_block_group, test_workspace},
@@ -741,8 +884,80 @@ mod tests {
         (conn, block_group, path, accession, annotation)
     }
 
+    #[test]
+    fn test_graph_locus_preserves_reverse_absolute_coordinates() {
+        let conn = get_connection(None).unwrap();
+        let (block_group_id, _path) = setup_block_group(&conn);
+        let accession = Accession::create(
+            &conn,
+            &NewAccession {
+                name: "reverse-feature".to_string(),
+                block_group_id,
+                parent_accession_id: None,
+                spans: vec![AccessionSpan {
+                    node_id: HashId::convert_str("test-t-node"),
+                    range: Range { start: 2, end: 8 },
+                    strand: Strand::Reverse,
+                }],
+            },
+        )
+        .unwrap();
+        let region = ResolvedGenRegion::from_accession(&conn, &accession, 2, 5).unwrap();
+
+        // absolute:          0 1 2 3 4 5 6 7 8 9 10
+        // test-t-node:       |-------------------|
+        // reverse accession:     |<----------|  abs [2,8)
+        // accession offsets:     6 5 4 3 2 1 0
+        // requested [2,5):         |-----|  abs [3,6)
+        // block-local:           0 1 2 3 4 5 6  (node abs [2,8))
+        // result [1,4):            |-----|
+        let locus = region.graph_locus(&conn, test_workspace()).unwrap();
+
+        assert_eq!(locus.slices.len(), 1);
+        let slice = &locus.slices[0];
+        assert_eq!(slice.block.node_id, HashId::convert_str("test-t-node"));
+        assert_eq!(
+            (slice.block.sequence_start, slice.block.sequence_end),
+            (2, 8)
+        );
+        assert_eq!((slice.start, slice.end), (1, 4));
+        assert_eq!(slice.strand, Strand::Reverse);
+    }
+
     mod region_resolver {
         use super::*;
+
+        #[test]
+        fn test_resolve_all_returns_candidates_in_precedence_order() {
+            let (conn, _block_group, path, accession, _annotation) = setup_targets();
+
+            let path_matches =
+                resolve_all(&Region::parse("chr1").unwrap(), &conn, "test", "test").unwrap();
+            assert_eq!(path_matches.len(), 2);
+            assert_eq!(path_matches[0].kind, ResolvedRegionKind::BlockGroup);
+            assert_eq!(path_matches[0].path.as_ref().unwrap().id, path.id);
+            assert_eq!(path_matches[1].kind, ResolvedRegionKind::Path);
+            assert_eq!(path_matches[1].path.as_ref().unwrap().id, path.id);
+
+            let annotation_matches =
+                resolve_all(&Region::parse("gene-mreB").unwrap(), &conn, "test", "test").unwrap();
+            assert_eq!(annotation_matches.len(), 1);
+            assert_eq!(annotation_matches[0].kind, ResolvedRegionKind::Annotation);
+            assert_eq!(
+                annotation_matches[0].accession.as_ref().unwrap().id,
+                accession.id
+            );
+
+            let accession_matches =
+                resolve_all(&Region::parse("mreB").unwrap(), &conn, "test", "test").unwrap();
+            assert_eq!(accession_matches.len(), 1);
+            assert_eq!(accession_matches[0].kind, ResolvedRegionKind::Accession);
+            assert_eq!(
+                accession_matches[0].accession.as_ref().unwrap().id,
+                accession.id
+            );
+            assert!(accession_matches[0].annotation.is_none());
+        }
 
         #[test]
         fn test_resolves_path_ranges() {

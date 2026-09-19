@@ -509,31 +509,13 @@ impl Annotation {
         )?)
     }
 
-    pub fn intervaltree(
-        &self,
-        conn: &GraphConnection,
-    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AnnotationError> {
-        let accession = Accession::select(conn)
-            .id(self.accession_id)
-            .load()?
-            .into_iter()
-            .next()
-            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        accession.intervaltree(conn).map_err(Into::into)
-    }
-}
-
-impl RegionResolver for Annotation {
-    type Connection = GraphConnection;
-    type Error = AnnotationError;
-
-    fn resolve(
+    pub(crate) fn resolve_candidates(
         region: &Region,
-        conn: &Self::Connection,
+        conn: &GraphConnection,
         collection_name: &str,
         sample_name: &str,
-    ) -> Result<Self, RegionResolutionError<Self::Error>> {
-        let matches = query_models::<Annotation, _>(
+    ) -> Result<Vec<Self>, AnnotationError> {
+        query_models::<Annotation, _>(
             conn,
             "WITH RECURSIVE visible_samples(name, depth, path) AS (
                  SELECT ?2, 0, ',' || ?2 || ','
@@ -565,7 +547,34 @@ impl RegionResolver for Annotation {
              WHERE depth = (SELECT min(depth) FROM matching_annotations)",
             params![collection_name, sample_name, region.name],
         )
-        .map_err(AnnotationError::from)?;
+        .map_err(AnnotationError::from)
+    }
+
+    pub fn intervaltree(
+        &self,
+        conn: &GraphConnection,
+    ) -> Result<IntervalTree<i64, NodeIntervalBlock>, AnnotationError> {
+        let accession = Accession::select(conn)
+            .id(self.accession_id)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        accession.intervaltree(conn).map_err(Into::into)
+    }
+}
+
+impl RegionResolver for Annotation {
+    type Connection = GraphConnection;
+    type Error = AnnotationError;
+
+    fn resolve(
+        region: &Region,
+        conn: &Self::Connection,
+        collection_name: &str,
+        sample_name: &str,
+    ) -> Result<Self, RegionResolutionError<Self::Error>> {
+        let matches = Self::resolve_candidates(region, conn, collection_name, sample_name)?;
 
         match matches.len() {
             0 => Err(RegionResolutionError::NotFound(region.name.clone())),

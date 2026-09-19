@@ -65,19 +65,20 @@ pub fn project_path_overlay_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -
 /// How a `GraphOverlay` was added, and the name/key it's addressable by (if any).
 ///
 /// Shared by the full-screen viewer, the inline viewer, and the Jupyter widget so all
-/// three manage overlay display through the same vocabulary. The TUI viewers only
-/// ever construct `Track` overlays (one per loaded annotation file or annotation group)
-/// plus the single `Path` overlay; `Annotation` and `Adhoc` exist for the Jupyter
-/// widget's per-annotation `add_annotation`/`highlight_match` API, which the TUI viewers
-/// don't expose.
+/// three manage overlay display through the same vocabulary. TUI viewers construct
+/// `Track` overlays for loaded annotation files/groups, the single `Path` overlay, and
+/// `Search` overlays for explicit region-search highlights. `Adhoc` remains available
+/// for Jupyter highlights, while `Annotation` is that widget's keyed annotation API.
 #[derive(Clone)]
 pub enum OverlaySource {
     /// Loaded as a member of a named track: an annotation file or annotation group.
     Track(String),
     /// One annotation added on its own, keyed by its own name (Jupyter widget only).
     Annotation(String),
-    /// A highlight with no track/annotation identity (Jupyter widget only).
+    /// A highlight with no track/annotation identity, such as a Jupyter ad-hoc annotation.
     Adhoc,
+    /// The currently selected TUI region-search highlight.
+    Search,
     /// The current path highlight. At most one path overlay is present at a time.
     Path,
 }
