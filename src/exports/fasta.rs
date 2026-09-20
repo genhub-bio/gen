@@ -28,6 +28,7 @@ pub fn export_fasta(
     sample_name: Option<&str>,
     filename: &PathBuf,
     history_ref: Option<&str>,
+    all_sequences: bool,
 ) -> Result<(), FastaExportError> {
     let block_groups = if let Some(sample_name) = sample_name {
         Sample::get_block_groups(conn, collection_name, sample_name, history_ref)
@@ -39,15 +40,32 @@ pub fn export_fasta(
     let mut writer = fasta::io::Writer::new(file);
 
     for block_group in block_groups {
-        let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
+        if all_sequences {
+            for (index, sequence) in
+                BlockGroup::sequences_iter(conn, workspace, &block_group.id, history_ref)?
+                    .enumerate()
+            {
+                let definition = fasta::record::Definition::new(
+                    format!("{}.{}", block_group.name, index + 1),
+                    None,
+                );
+                let record = fasta::Record::new(
+                    definition,
+                    fasta::record::Sequence::from(sequence.into_bytes()),
+                );
+                writer.write_record(&record)?;
+            }
+        } else {
+            let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
 
-        let definition = fasta::record::Definition::new(block_group.name, None);
-        let sequence = fasta::record::Sequence::from(
-            path.sequence(conn, workspace, history_ref)?.into_bytes(),
-        );
-        let record = fasta::Record::new(definition, sequence);
+            let definition = fasta::record::Definition::new(block_group.name, None);
+            let sequence = fasta::record::Sequence::from(
+                path.sequence(conn, workspace, history_ref)?.into_bytes(),
+            );
+            let record = fasta::Record::new(definition, sequence);
 
-        writer.write_record(&record)?;
+            writer.write_record(&record)?;
+        }
     }
 
     println!("Exported to file {}", filename.display());
@@ -95,6 +113,7 @@ mod tests {
             None,
             &filename,
             None,
+            false,
         )
         .unwrap();
 
@@ -160,11 +179,12 @@ mod tests {
             Some("child sample"),
             &filename,
             None,
+            false,
         )
         .unwrap();
 
         let mut fasta_reader = fasta::io::reader::Builder
-            .build_from_path(filename)
+            .build_from_path(&filename)
             .unwrap();
         let record = fasta_reader
             .records()
@@ -179,5 +199,37 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(sequence, "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA");
+
+        export_fasta(
+            conn,
+            context.workspace(),
+            &collection,
+            Some("child sample"),
+            &filename,
+            None,
+            true,
+        )
+        .expect("should export all sequences");
+        let mut reader = fasta::io::reader::Builder
+            .build_from_path(&filename)
+            .expect("should open exported FASTA");
+        let records = reader
+            .records()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("should read exported records");
+        assert_eq!(records.len(), 2);
+        let mut sequences = records
+            .iter()
+            .map(|record| record.sequence().as_ref().to_vec())
+            .collect::<Vec<_>>();
+        sequences.sort();
+        let mut expected = vec![
+            b"ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_vec(),
+            sequence.into_bytes(),
+        ];
+        expected.sort();
+        assert_eq!(sequences, expected);
+        assert_eq!(records[0].name(), b"m123.1");
+        assert_eq!(records[1].name(), b"m123.2");
     }
 }
