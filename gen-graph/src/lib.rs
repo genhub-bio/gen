@@ -174,6 +174,59 @@ pub enum GraphError {
 //     }
 // }
 
+/// Iterates over simple paths without retaining a borrow of the graph.
+pub struct PathIterator<N> {
+    to: N,
+    visited: Vec<N>,
+    stack: Vec<std::vec::IntoIter<N>>,
+}
+
+impl<N> PathIterator<N>
+where
+    N: Eq + Clone,
+{
+    pub fn new<G>(graph: G, from: N, to: N) -> Self
+    where
+        G: IntoNeighborsDirected<NodeId = N>,
+    {
+        let neighbors: Vec<N> = graph
+            .neighbors_directed(from.clone(), Direction::Outgoing)
+            .collect();
+        PathIterator {
+            to,
+            visited: vec![from],
+            stack: vec![neighbors.into_iter()],
+        }
+    }
+
+    /// Returns the next path, or `None` if all paths have been visited.
+    /// The graph must be the same one passed to [`Self::new`].
+    pub fn next_path<G>(&mut self, graph: G) -> Option<Vec<N>>
+    where
+        G: IntoNeighborsDirected<NodeId = N>,
+    {
+        while let Some(children) = self.stack.last_mut() {
+            if let Some(child) = children.next() {
+                if child == self.to {
+                    let mut path = self.visited.clone();
+                    path.push(child);
+                    return Some(path);
+                } else if !self.visited.contains(&child) {
+                    self.visited.push(child.clone());
+                    let neighbors: Vec<N> = graph
+                        .neighbors_directed(child, Direction::Outgoing)
+                        .collect();
+                    self.stack.push(neighbors.into_iter());
+                }
+            } else {
+                self.stack.pop();
+                self.visited.pop();
+            }
+        }
+        None
+    }
+}
+
 // hacked from https://docs.rs/petgraph/latest/src/petgraph/algo/simple_paths.rs.html#36-102 to support digraphmap
 
 pub fn all_simple_paths<G>(
@@ -682,6 +735,28 @@ mod tests {
     use petgraph::graphmap::DiGraphMap;
 
     use super::*;
+
+    #[test]
+    fn test_path_iterator_handles_cycles_and_exhaustion() {
+        let graph =
+            DiGraphMap::<i64, ()>::from_edges([(1, 2), (1, 3), (2, 3), (3, 2), (2, 4), (3, 4)]);
+        let mut paths = PathIterator::new(&graph, 1, 4);
+        let mut actual = Vec::new();
+        while let Some(path) = paths.next_path(&graph) {
+            actual.push(path);
+        }
+        actual.sort();
+        assert_eq!(
+            actual,
+            vec![
+                vec![1, 2, 3, 4],
+                vec![1, 2, 4],
+                vec![1, 3, 2, 4],
+                vec![1, 3, 4]
+            ]
+        );
+        assert_eq!(paths.next_path(&graph), None);
+    }
 
     #[test]
     fn test_path_graph() {
