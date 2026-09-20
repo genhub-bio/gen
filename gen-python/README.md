@@ -82,6 +82,13 @@ is not set, the extension falls back to the same login process the CLI uses. See
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
 
+## Enumerating sequences
+
+Exporting a graph to FASTA yields one linear sequence by default: the path that
+currently serves as its coordinate reference. Use `all_sequences=True` when
+exporting, or iterate over `SequenceGraph.all_sequences()`, to get all possible
+paths.
+
 ## Architecture
 
 The package is built from three layers:

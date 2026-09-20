@@ -43,6 +43,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         Some(cmd.sample.as_str()),
         &PathBuf::from(cmd.path),
         cli_context.history_ref,
+        false,
     )?;
 
     conn.execute("END TRANSACTION", [])?;

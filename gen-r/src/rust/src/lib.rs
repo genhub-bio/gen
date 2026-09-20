@@ -1792,6 +1792,7 @@ impl Repository {
             nullable_string_to_option(sample).as_deref(),
             &PathBuf::from(&filename),
             None,
+            false,
         )
         .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))?;
         Ok(filename)
@@ -2331,6 +2332,7 @@ impl SequenceGraph {
             Some(&self.sample_name),
             &PathBuf::from(&filename),
             None,
+            false,
         )
         .map_err(|e| Error::Other(format!("FASTA export failed: {e}")))
     }
