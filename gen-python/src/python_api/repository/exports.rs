@@ -8,12 +8,16 @@ use super::PyRepository;
 
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (filename, sample=None, collection=None))]
+    /// Export current paths as FASTA, optionally restricted by sample and collection.
+    /// Set `all_sequences=True` to export all graph paths with 1-based
+    /// ``"{sequence_graph_name}.{index}"`` record names.
+    #[pyo3(signature = (filename, sample=None, collection=None, all_sequences=false))]
     fn export_fasta(
         &self,
         filename: String,
         sample: Option<String>,
         collection: Option<String>,
+        all_sequences: bool,
     ) -> PyResult<()> {
         let conn = self.context.graph().conn();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
@@ -24,6 +28,7 @@ impl PyRepository {
             sample.as_deref(),
             &PathBuf::from(&filename),
             None,
+            all_sequences,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
     }

@@ -12,8 +12,8 @@ use gen_core::{
     traits::Capnp,
 };
 use gen_graph::{
-    GenGraph, GraphNode, all_intermediate_edges, all_reachable_nodes, all_simple_paths,
-    flatten_to_interval_tree,
+    GenGraph, GraphNode, PathIterator, all_intermediate_edges, all_reachable_nodes,
+    all_simple_paths, flatten_to_interval_tree,
 };
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
@@ -247,6 +247,50 @@ impl<'a> PathCache<'a> {
         path_cache.intervaltree_cache.get(path).ok_or_else(|| {
             PathError::Missing(format!("Missing interval tree for path {}", path.id))
         })
+    }
+}
+
+/// Lazily yields one sequence per graph, does not deduplicate (unlike get_all_sequences).
+pub struct SequenceIterator {
+    graph: GenGraph,
+    blocks_by_node: HashMap<GraphNode, GroupBlock>,
+    start_node: Option<GraphNode>,
+    end_node: Option<GraphNode>,
+    walk: Option<PathIterator<GraphNode>>,
+}
+
+impl Iterator for SequenceIterator {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        loop {
+            if let Some(walk) = self.walk.as_mut() {
+                match walk.next_path(&self.graph) {
+                    Some(path) => {
+                        let sequence = path
+                            .iter()
+                            .map(|node| self.blocks_by_node.get(node).unwrap().sequence())
+                            .collect::<String>();
+                        return Some(sequence);
+                    }
+                    None => self.walk = None,
+                }
+                continue;
+            }
+
+            let start = self.start_node.take()?;
+            let end = self.end_node?;
+
+            if start == end {
+                let block = self.blocks_by_node.get(&start).unwrap();
+                if block.node_id != PATH_START_NODE_ID && block.node_id != PATH_END_NODE_ID {
+                    return Some(block.sequence());
+                }
+                continue;
+            }
+
+            self.walk = Some(PathIterator::new(&self.graph, start, end));
+        }
     }
 }
 
@@ -713,6 +757,106 @@ impl BlockGroup {
         }
 
         Ok(sequences)
+    }
+
+    /// Replaces each zero-width routing block by direct edges between the blocks it joins.
+    ///
+    /// Routing blocks consume no bases, so a route that crosses one spells what the same route
+    /// spells without it. Several routes through a coordinate can differ only in which routing
+    /// blocks they cross, which would list one sequence once per crossing; contracting them leaves
+    /// one edge per pair of blocks that read into each other. A cycle of routing blocks is crossed
+    /// once, and a block that would read into itself gains no edge, so simple-path enumeration
+    /// still ends.
+    pub fn contract_zero_width_blocks(graph: &mut GenGraph) {
+        let routing = graph
+            .nodes()
+            .filter(|node| !is_terminal(node.node_id) && node.length() == 0)
+            .collect::<HashSet<_>>();
+        if routing.is_empty() {
+            return;
+        }
+        let mut contracted = Vec::new();
+        for source in graph.nodes().filter(|node| !routing.contains(node)) {
+            let mut crossed = HashSet::new();
+            let mut pending = Vec::new();
+            for (_, target, weights) in graph.edges(source) {
+                if routing.contains(&target) {
+                    if crossed.insert(target) {
+                        pending.push(target);
+                    }
+                } else if !graph.contains_edge(source, target) {
+                    contracted.push((source, target, weights.clone()));
+                }
+            }
+            while let Some(current) = pending.pop() {
+                for (_, target, weights) in graph.edges(current) {
+                    if routing.contains(&target) {
+                        if crossed.insert(target) {
+                            pending.push(target);
+                        }
+                    } else if target != source && !graph.contains_edge(source, target) {
+                        contracted.push((source, target, weights.clone()));
+                    }
+                }
+            }
+        }
+        for (source, target, weights) in contracted {
+            if !graph.contains_edge(source, target) {
+                graph.add_edge(source, target, weights);
+            }
+        }
+        for node in routing {
+            graph.remove_node(node);
+        }
+    }
+
+    /// Builds a [`SequenceIterator`] over this block group's pruned graph.
+    pub fn sequences_iter(
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        block_group_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Result<SequenceIterator, BlockGroupError> {
+        let edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, history_ref)
+            .into_iter()
+            .filter(|edge| edge.chromosome_index != PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
+            .collect::<Vec<_>>();
+        let blocks = Edge::blocks_from_edges(conn, workspace, block_group_id, &edges, history_ref)?;
+
+        let (mut graph, _) = Edge::build_graph(&edges, &blocks);
+        BlockGroup::prune_graph(&mut graph);
+        BlockGroup::contract_zero_width_blocks(&mut graph);
+
+        let mut start_nodes = vec![];
+        let mut end_nodes = vec![];
+        for node in graph.nodes() {
+            if is_start_node(node.node_id) {
+                start_nodes.push(node);
+            } else if is_end_node(node.node_id) {
+                end_nodes.push(node);
+            }
+        }
+        let blocks_by_node = blocks
+            .into_iter()
+            .map(|block| {
+                (
+                    GraphNode {
+                        node_id: block.node_id,
+                        sequence_start: block.start,
+                        sequence_end: block.end,
+                    },
+                    block,
+                )
+            })
+            .collect::<HashMap<GraphNode, GroupBlock>>();
+
+        Ok(SequenceIterator {
+            graph,
+            blocks_by_node,
+            start_node: start_nodes.into_iter().next(),
+            end_node: end_nodes.into_iter().next(),
+            walk: None,
+        })
     }
 
     pub fn add_accession(
@@ -1398,6 +1542,101 @@ mod tests {
         let sequences =
             BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
         assert_eq!(sequences.len(), 4);
+    }
+
+    #[test]
+    fn test_contracting_routing_blocks_leaves_one_route_per_pair_of_sequence_blocks() {
+        let node = |name: &str, start: i64, end: i64| GraphNode {
+            node_id: HashId::convert_str(name),
+            sequence_start: start,
+            sequence_end: end,
+        };
+        let edge = GraphEdge {
+            edge_id: HashId::convert_str("edge"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+            phased: 0,
+            created_on: 0,
+        };
+        let start = node("start", 0, 0);
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            ..start
+        };
+        let end = GraphNode {
+            node_id: PATH_END_NODE_ID,
+            ..node("end", 0, 0)
+        };
+        let (left, right) = (node("sequence", 0, 5), node("sequence", 5, 10));
+        let (first, second) = (node("sequence", 5, 5), node("other", 0, 0));
+        let mut graph = GenGraph::new();
+        // The left block reaches the right one directly and through a cycle of routing blocks,
+        // and a routing block reads back into the left block.
+        for (source, target) in [
+            (start, left),
+            (left, right),
+            (left, first),
+            (first, right),
+            (first, second),
+            (second, first),
+            (first, left),
+            (right, end),
+        ] {
+            graph.add_edge(source, target, vec![edge]);
+        }
+
+        BlockGroup::contract_zero_width_blocks(&mut graph);
+
+        let mut edges = graph
+            .all_edges()
+            .map(|(source, target, _)| (source, target))
+            .collect::<Vec<_>>();
+        edges.sort_unstable();
+        let mut expected = vec![(start, left), (left, right), (right, end)];
+        expected.sort_unstable();
+        assert_eq!(edges, expected);
+        assert_eq!(graph.node_count(), 4);
+    }
+
+    #[test]
+    fn test_sequence_iterator_preserves_identical_sequences_from_distinct_paths() {
+        let conn = get_connection(None).expect("should create test database");
+        let mut graph = GenGraph::new();
+        let mut blocks_by_node = HashMap::new();
+        let mut nodes = Vec::new();
+        for (index, text) in ["", "AT", "G", "A", "TG", ""].into_iter().enumerate() {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(text)
+                .save(&conn)
+                .expect("should save sequence");
+            let node_id = HashId::convert_str(&format!("iterator-node-{index}"));
+            let node = GraphNode {
+                node_id,
+                sequence_start: 0,
+                sequence_end: text.len() as i64,
+            };
+            blocks_by_node.insert(
+                node,
+                GroupBlock::new(index as i64, node_id, &sequence, 0, text.len() as i64),
+            );
+            nodes.push(node);
+        }
+        for (source, target) in [(0, 1), (1, 2), (2, 5), (0, 3), (3, 4), (4, 5)] {
+            graph.add_edge(nodes[source], nodes[target], Default::default());
+        }
+        let mut sequences = SequenceIterator {
+            graph,
+            blocks_by_node,
+            start_node: Some(nodes[0]),
+            end_node: Some(nodes[5]),
+            walk: None,
+        };
+        assert_eq!(sequences.next().as_deref(), Some("ATG"));
+        assert_eq!(sequences.next().as_deref(), Some("ATG"));
+        assert_eq!(sequences.next(), None);
+        assert_eq!(sequences.next(), None);
     }
 
     mod region_resolver {
