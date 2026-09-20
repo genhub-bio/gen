@@ -6,11 +6,6 @@ import unittest
 
 import gen
 
-try:
-    import networkx
-except ImportError:
-    networkx = None
-
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 
 
@@ -23,29 +18,6 @@ def read_fasta(path):
         line.strip()
         for line in Path(path).read_text().splitlines()
         if not line.startswith(">")
-    )
-
-
-def all_routes(graph):
-    """Every sequence a route from the start to the end of the graph reads."""
-    routes = graph.to_networkx()
-    starts = [node for node in routes if routes.in_degree(node) == 0]
-    ends = [node for node in routes if routes.out_degree(node) == 0]
-    # An edit retires the edges it replaces by marking them with chromosome index -2.
-    routes.remove_edges_from(
-        [
-            (source, target)
-            for source, target, data in routes.edges(data=True)
-            if any(weight["chromosome_index"] == -2 for weight in data["attr_dict"])
-        ]
-    )
-    return sorted(
-        {
-            "".join(graph.get_node_sequence(node) for node in route)
-            for start in starts
-            for end in ends
-            for route in networkx.all_simple_paths(routes, start, end)
-        }
     )
 
 
@@ -604,7 +576,6 @@ class LibraryGraphEditingTests(EditingTestCase):
         self.assertTrue(self.is_editable(self.graph, self.alternative))
 
 
-@unittest.skipIf(networkx is None, "networkx is not installed")
 class GfaMotifEditingTests(EditingTestCase):
     """``B`` reads into ``D`` and ``E``, but ``C`` reads only into ``E``: not a combinatorial
     layer, so one side of an insertion reaches only the routes that really meet there."""
@@ -618,7 +589,7 @@ class GfaMotifEditingTests(EditingTestCase):
         }
 
     def sequences(self):
-        return all_routes(self.graph)
+        return sorted({str(sequence) for sequence in self.graph.all_sequences()})
 
     def test_the_motif_has_every_route(self):
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDIJKL", "ABEFIJKL"])
@@ -635,7 +606,6 @@ class GfaMotifEditingTests(EditingTestCase):
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDxJKL", "ABEFxJKL"])
 
 
-@unittest.skipIf(networkx is None, "networkx is not installed")
 class GfaMotifDuplicatedNodeTests(EditingTestCase):
     """The motif with ``E`` duplicated per route into it (``Eb`` after ``B``, ``Ec`` after ``C``),
     which scopes an edit to one route by giving each route its own node and ports."""
@@ -645,7 +615,7 @@ class GfaMotifDuplicatedNodeTests(EditingTestCase):
         return graph
 
     def sequences(self, graph):
-        return all_routes(graph)
+        return sorted({str(sequence) for sequence in graph.all_sequences()})
 
     def after(self, graph, locus):
         """The ``IJ`` node that reads directly after ``locus``."""
