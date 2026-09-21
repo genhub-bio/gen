@@ -30,6 +30,9 @@ cargo install gen
 pip install gen[jupyter]
 ```
 
+Without the extra, Python plot calls fall back to a readable textual graph
+rendering and explain how to install the widget.
+
 **R package**: Install on macOS (Apple silicon) using the `remotes` package:
 ```r
 install.packages("remotes")

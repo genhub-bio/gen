@@ -5,7 +5,8 @@ Python bindings to the Gen version control system for genetic sequences.
 The package installs the `gen` command-line client and exposes the full Gen data
 model — repositories, sequence graphs, import/export pipelines — from Python and
 Jupyter notebooks. An optional Jupyter widget provides interactive graph
-visualization.
+visualization. Plotting falls back to a readable textual rendering without the
+extra or outside a live Jupyter kernel, including terminal and AI REPL sessions.
 
 ## Quick start
 
@@ -167,9 +168,10 @@ cd gen-python && make test           # all three
 
 ## For AI agents
 
-`Sample.plot()` / `SequenceGraph.plot()` return a `GraphWidget` you can drive and
-inspect from plain Python — no browser or JS required to verify behavior; use
-`repr(widget)` to see the current state as ASCII.
+`Sample.plot()` / `SequenceGraph.plot()` return a `TextGraphWidget` in plain
+Python, including AI REPLs, even when `gen[jupyter]` is installed. Drive and
+inspect it without a browser or JS; use `repr(widget)` to see the current state
+as ASCII.
 
 - A widget from `sample.plot()` pages through every sequence graph in the
   sample; one from `sg.plot()` shows just that one graph (one page).

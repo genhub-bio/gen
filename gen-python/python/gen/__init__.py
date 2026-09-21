@@ -29,11 +29,19 @@ from .gen import (
     clone,
 )
 
-# Jupyter widget — only available with `pip install gen[jupyter]`
-try:
-    from .jupyter_widget import GraphWidget, freeze_all_widgets
-except ImportError:
-    GraphWidget = None
+# Only a live Jupyter kernel can display the browser canvas. Route terminals,
+# scripts, and AI REPLs to the text widget even when the optional dependencies
+# happen to be installed.
+from .text_widget import TextGraphWidget, _in_jupyter_kernel
+
+if _in_jupyter_kernel():
+    try:
+        from .jupyter_widget import GraphWidget, freeze_all_widgets
+    except ImportError:
+        GraphWidget = TextGraphWidget
+        freeze_all_widgets = None
+else:
+    GraphWidget = TextGraphWidget
     freeze_all_widgets = None
 
 __all__ = [
