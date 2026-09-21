@@ -1,6 +1,6 @@
 ---
 source: src/views/gen_graph_widget.rs
-expression: terminal.backend().to_string()
+expression: snapshot
 ---
 "                                                                                                                                    "
 "                                                                                                                                    "
@@ -22,10 +22,10 @@ expression: terminal.backend().to_string()
 "                                                                                                                                    "
 "                                                                                                                                    "
 "                                                                                                                                    "
-"        ╭─T─╮     ╭─A─╮      ╭╌G╌╮      ╭─A─╮       ╭─TTT─╮       ╭─A─╮                                                             "
-"  ╟──AT─╯   ╰─GAT─┤   ├─GATC─╮   ╭─ATCG─┤   ├─TCGGG─╯     ╰─AACAC─┤   ├─CAGAGA──╢                                                   "
-"        ╰╌C╌╯     ╰─C─╯      ╰───╯      ╰───╯       ╰╌╌╌╌╌╯       ╰─G─╯                                                             "
 "                                                                                                                                    "
+"  ╟─┬─TTT──GGG──ACT──CTA──AAA──CCC─┬─╢                                                                                              "
+"   ╭╯                              ╰╮                                                                                               "
+"   ╰───────────────◀───────────────◀╯                                                                                               "
 "                                                                                                                                    "
 "                                                                                                                                    "
 "                                                                                                                                    "
