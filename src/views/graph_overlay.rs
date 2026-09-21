@@ -67,15 +67,14 @@ pub fn project_path_overlay_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -
 /// Shared by the full-screen viewer, the inline viewer, and the Jupyter widget so all
 /// three manage overlay display through the same vocabulary. TUI viewers construct
 /// `Track` overlays for loaded annotation files/groups, the single `Path` overlay, and
-/// `Search` overlays for explicit region-search highlights. `Adhoc` remains available
-/// for Jupyter highlights, while `Annotation` is that widget's keyed annotation API.
+/// `Search` overlays for explicit region-search highlights. `Adhoc` is the Jupyter widget's
+/// ephemeral highlight, produced by its `show()` entry point for both named and anonymous
+/// (`Locus`/`Position`) targets; the TUI viewers don't expose an equivalent.
 #[derive(Clone)]
 pub enum OverlaySource {
     /// Loaded as a member of a named track: an annotation file or annotation group.
     Track(String),
-    /// One annotation added on its own, keyed by its own name (Jupyter widget only).
-    Annotation(String),
-    /// A highlight with no track/annotation identity, such as a Jupyter ad-hoc annotation.
+    /// A highlight with no track/annotation identity (Jupyter widget only).
     Adhoc,
     /// The currently selected TUI region-search highlight.
     Search,

@@ -8,8 +8,7 @@ use super::graph_search::PyGraphLocus;
 
 /// A named genomic annotation.
 ///
-/// **From a database** — obtain via ``SequenceGraph.list_annotations()``
-/// or ``GraphWidget.list_annotations()``.
+/// **From a database** — obtain via ``SequenceGraph.annotations``.
 ///
 /// **From a search result** — create with ``Annotation(locus, name)``
 /// where *locus* is a ``Locus`` returned by ``SequenceGraph.search()``.
@@ -67,7 +66,7 @@ impl PyAnnotation {
     /// The graph-space locus covered by this annotation.
     ///
     /// Only available for annotations created with ``Annotation(locus, name)``.
-    /// Returns ``None`` for database annotations from ``list_annotations()``.
+    /// Returns ``None`` for database annotations from ``SequenceGraph.annotations``.
     #[getter]
     fn locus(&self) -> Option<PyGraphLocus> {
         self.locus
@@ -115,7 +114,7 @@ impl PyAnnotation {
     /// Example
     /// ::
     ///
-    ///     for ann in widget.list_annotations():
+    ///     for ann in sequence_graph.annotations:
     ///         print(ann.metadata)
     ///         # GenBank CDS:  {"kind": "CDS", "qualifiers": [...]}
     #[getter]

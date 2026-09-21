@@ -189,7 +189,7 @@ class GraphWidget(anywidget.AnyWidget):
             return
 
         color_fn = self._build_color_fn(colors)
-        annotations = self._controller.list_annotations()
+        annotations = self._controller.annotations
         color_map = {ann.id: color_fn(ann) for ann in annotations}
         self._controller.load_annotation_groups_with_colors(color_map)
 
@@ -400,7 +400,7 @@ class GraphWidget(anywidget.AnyWidget):
         target:
             A ``Position`` (from ``locus.start()`` / ``locus.end()``),
             a ``Locus`` (from ``repo.search()``), or
-            an ``Annotation`` object (e.g. from ``widget.list_annotations()``).
+            an ``Annotation`` object (e.g. from ``sequence_graph.annotations``).
         center:
             When ``True``, center the target in the viewport instead of the
             default snap-left placement.
@@ -414,7 +414,7 @@ class GraphWidget(anywidget.AnyWidget):
             widget.go_to(matches[0])
             widget.go_to(matches[0], center=True)
 
-            records = widget.list_annotations()
+            records = sequence_graph.annotations
             widget.go_to(records[0])
         """
         if self._frozen:
@@ -436,7 +436,7 @@ class GraphWidget(anywidget.AnyWidget):
         ----------
         target:
             A ``Locus`` returned by ``repo.search()``, or an ``Annotation``
-            object (e.g. from ``widget.list_annotations()``).
+            object (e.g. from ``sequence_graph.annotations``).
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -453,7 +453,7 @@ class GraphWidget(anywidget.AnyWidget):
             matches = repo.search(bg, "ACGT...")
             widget.show(matches[0])
 
-            records = widget.list_annotations()
+            records = sequence_graph.annotations
             widget.show(records[0])
         """
         if self._frozen:
@@ -468,35 +468,12 @@ class GraphWidget(anywidget.AnyWidget):
             self._controller.highlight_match(target, color)
         self._render()
 
-    def highlight_match(self, locus, color: str | None = None) -> None:
-        """Highlight the nodes covered by a graph locus.
-
-        Parameters
-        ----------
-        locus:
-            A ``Locus`` returned by ``repo.search()``.
-        color:
-            Optional colour for the highlight.  Accepts named colours
-            (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
-            (``"#ff8800"``).  When omitted the next unused theme accent
-            colour is chosen automatically, so multiple ``highlight_match``
-            calls without an explicit colour each get a distinct colour.
-
-        Example
-        -------
-        ::
-
-            matches = repo.search(bg, "ACGT...")
-            widget.go_to(matches[0].start())
-            widget.highlight_match(matches[0])
-        """
-        if self._frozen:
-            return
-        self._controller.highlight_match(locus, color)
-        self._render()
-
     def clear_highlights(self) -> None:
-        """Remove all highlights from the graph."""
+        """Remove the ephemeral highlights added via :meth:`show`.
+
+        Persistent tracks (from :meth:`load_track`/:meth:`show_track`) and
+        the path highlight from :meth:`show_path` are left untouched.
+        """
         if self._frozen:
             return
         self._controller.clear_highlights()
@@ -512,13 +489,20 @@ class GraphWidget(anywidget.AnyWidget):
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
             (``"#ff4444"``).  When omitted the next unused theme accent
             colour is chosen automatically.
+
+        Raises
+        ------
+        RuntimeError
+            If the current path runs through nodes this widget has pruned
+            from display, which happens by default. Replot with
+            ``SequenceGraph.plot(show_history=True)`` to include them.
         """
         self._controller.show_path(color)
         self._render()
 
-    def clear_path(self) -> None:
+    def hide_path(self) -> None:
         """Remove path highlighting applied by :meth:`show_path`."""
-        self._controller.clear_path()
+        self._controller.hide_path()
         self._render()
 
     def refresh(self) -> None:
@@ -527,60 +511,38 @@ class GraphWidget(anywidget.AnyWidget):
             return
         self._render()
 
-    # ── Annotation API ────────────────────────────────────────────────────
+    # ── Track API ─────────────────────────────────────────────────────────
 
-    def add_annotation_track(
+    def load_track(
         self,
-        annotations=None,
+        file: str,
         *,
-        file: str | None = None,
-        group: str | None = None,
         name: str | None = None,
         from_sample: str | None = None,
         filter=None,
     ) -> None:
-        """Add annotations as inline graph highlights with floating labels.
-
-        Exactly one of *annotations*, *file*, or *group* must be supplied.
+        """Load a GFF3 or BED file as a persistent annotation track.
 
         Parameters
         ----------
-        annotations : list[Annotation], optional
-            Annotations built with ``Annotation(locus, name)``.  *name* is
-            required when using this form.
-        file : str, optional
+        file : str
             Path to a GFF3 or BED annotation file.  Both standard files
             (chromosome/contig names as reference) and pre-translated files
             (node hash-IDs as reference) are accepted; standard files are
             translated automatically.  *name* defaults to the file path.
-        group : str, optional
-            Annotation group name stored in the repository.
         name : str, optional
-            Display label for this annotation track.  Required when *annotations* is supplied.
+            Display label for this annotation track.
         from_sample : str, optional
-            Sample whose coordinate space the file uses (file tracks only).
-            Defaults to ``"reference"``.
+            Sample whose coordinate space the file uses.  Defaults to
+            ``"reference"``.
         filter : callable, optional
-            ``(row: str) -> bool`` predicate applied to each non-header line
-            (file tracks only).
+            ``(row: str) -> bool`` predicate applied to each non-header line.
         """
         if self._frozen:
             return
-        given = sum(x is not None for x in (annotations, file, group))
-        if given != 1:
-            raise ValueError(
-                "exactly one of annotations, file, or group must be supplied"
-            )
-        if annotations is not None:
-            if name is None:
-                raise ValueError("name is required when annotations is supplied")
-            self._controller.add_track_annotations(annotations, name)
-        elif file is not None:
-            if filter is not None:
-                file = self._apply_row_filter(file, filter)
-            self._controller.add_track_file(file, name, from_sample)
-        else:
-            self._controller.add_track_group(group)
+        if filter is not None:
+            file = self._apply_row_filter(file, filter)
+        self._controller.add_track_file(file, name, from_sample)
         self._render()
 
     @staticmethod
@@ -605,67 +567,43 @@ class GraphWidget(anywidget.AnyWidget):
         tmp.close()
         return tmp.name
 
-    def annotation_tracks(self) -> list:
-        """Return list of annotation track names currently loaded."""
-        return json.loads(self._controller.get_track_names())
+    def show_track(self, name: str) -> None:
+        """Load and display a DB-stored annotation group by name.
 
-    def remove_annotation_track(self, name: str) -> None:
-        """Remove an annotation track by name."""
+        See :attr:`tracks` for the full list of group names available to
+        this widget's sequence graph.
+        """
+        if self._frozen:
+            return
+        self._controller.add_track_group(name)
+        self._render()
+
+    def hide_track(self, name: str) -> None:
+        """Remove a displayed track, however it was shown (:meth:`load_track` or :meth:`show_track`)."""
         if self._frozen:
             return
         self._controller.remove_track(name)
         self._render()
 
-    def clear_all_annotations(self) -> None:
-        """Clear all annotations from the graph."""
+    @property
+    def tracks(self) -> list:
+        """Every annotation-group name visible to this widget's sequence graph.
+
+        This is the full menu of names that can be passed to
+        :meth:`show_track` — its own group plus any inherited from ancestor
+        samples — independent of which tracks are currently displayed.
+        """
+        return self._controller.track_names
+
+    def hide_all_tracks(self) -> None:
+        """Suppress every displayed track.
+
+        This also suppresses annotations that auto-load from the database
+        on first plot, giving a blank canvas to build tracks up from.
+        """
         if self._frozen:
             return
         self._controller.clear_all_annotations()
-        self._render()
-
-    def add_annotation(self, annotation) -> None:
-        """Render an annotation inline on the graph canvas.
-
-        The annotation is tinted with an accent colour and its name is placed
-        below its bounding box.  Labels avoid each other but give up rather
-        than overwrite existing graph content.
-
-        Parameters
-        ----------
-        annotation : Annotation
-            A named annotation built with ``Annotation(locus, name)``.
-        """
-        if self._frozen:
-            return
-        self._controller.add_annotation([annotation], annotation.name)
-        self._render()
-
-    def annotations(self) -> list:
-        """Return list of annotation names currently displayed."""
-        return json.loads(self._controller.get_annotation_names())
-
-    def list_annotations(self) -> list:
-        """Return all annotations loaded into the widget as ``Annotation`` objects.
-
-        Example
-        -------
-        ::
-
-            records = widget.list_annotations()
-            mcs = next(r for r in records if r.name == "MCS")
-            widget.go_to(mcs)
-        """
-        return self._controller.list_annotations()
-
-    def remove_annotation(self, name: str) -> None:
-        """Remove all annotations with the given name.
-
-        If ``add_annotation`` was called more than once with annotations
-        sharing the same name, every copy is removed.
-        """
-        if self._frozen:
-            return
-        self._controller.remove_annotation(name)
         self._render()
 
 

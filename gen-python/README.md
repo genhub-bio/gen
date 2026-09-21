@@ -21,7 +21,7 @@ repo = gen.Repository("path/to/.gen")
 
 sample = repo.import_fasta("path/to.fa")     # -> Sample
 sg = sample[0]                               # -> SequenceGraph
-samples = repo.get_samples()                 # -> list[Sample]
+samples = repo.samples                       # -> list[Sample]
 graphs = repo.get_sequence_graphs()          # -> list[SequenceGraph]
 
 sample.plot()  # or sg.plot()
@@ -125,8 +125,9 @@ an [anywidget](https://anywidget.dev) subclass that:
 - forwards mouse and drag events from the frontend to Rust,
 - exposes `zoom_in()`/`zoom_out()`, `scroll_left()`/`scroll_right()`/`scroll_up()`/
   `scroll_down()`, `next_page()`/`prev_page()`, and `refresh()` for programmatic
-  control, plus higher-level helpers like `go_to()`, `show()`, `highlight_match()`,
-  and annotation-track management.
+  control, plus higher-level helpers like `go_to()`, `show()`, `clear_highlights()`,
+  and track management (`load_track()`, `show_track()`, `hide_track()`, `tracks`,
+  `hide_all_tracks()`).
 
 The Python layer does no rendering or layout logic itself; it is a bridge.
 
@@ -189,7 +190,7 @@ as ASCII.
 import gen
 
 repo = gen.Repository("path/to/.gen")
-sample = repo.import_fasta("path/to.fa")  # or repo.get_samples()[0], etc.
+sample = repo.import_fasta("path/to.fa")  # or repo.samples[0], etc.
 
 widget = sample.plot()       # GraphWidget; pages through the sample's sequence graphs
 print(repr(widget))          # plain-text fallback, e.g. "[1/20] <name> ..."

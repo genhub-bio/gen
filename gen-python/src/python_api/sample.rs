@@ -18,43 +18,49 @@ pub struct PySample {
     #[pyo3(get)]
     pub sample_name: String,
     #[pyo3(get)]
-    pub block_groups: Vec<PySequenceGraph>,
+    pub sequence_graphs: Vec<PySequenceGraph>,
 }
 
 impl PySample {
     pub fn new(
         collection_name: String,
         sample_name: String,
-        block_groups: Vec<PySequenceGraph>,
+        sequence_graphs: Vec<PySequenceGraph>,
     ) -> Self {
         PySample {
             collection_name,
             sample_name,
-            block_groups,
+            sequence_graphs,
         }
     }
 }
 
 #[pymethods]
 impl PySample {
+    /// All sequence graphs held by this sample.
+    #[getter]
+    fn sequence_graphs(&self) -> Vec<PySequenceGraph> {
+        self.sequence_graphs.clone()
+    }
+
     fn __len__(&self) -> usize {
-        self.block_groups.len()
+        self.sequence_graphs.len()
     }
 
     fn __getitem__(&self, index: isize) -> PyResult<PySequenceGraph> {
-        let len = self.block_groups.len() as isize;
+        let len = self.sequence_graphs.len() as isize;
         let i = if index < 0 { index + len } else { index };
         if i < 0 || i >= len {
             return Err(PyIndexError::new_err("Sample index out of range"));
         }
-        Ok(self.block_groups[i as usize].clone())
+        Ok(self.sequence_graphs[i as usize].clone())
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<PySampleIter>> {
         Py::new(
             slf.py(),
             PySampleIter {
-                block_groups: slf.block_groups.clone(),
+                block_groups: slf.sequence_graphs.clone(),
                 index: 0,
             },
         )
@@ -88,7 +94,7 @@ impl PySample {
         show_history: bool,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let ctrl = PyGraphController::for_sample(&slf.borrow().block_groups, show_history)?;
+        let ctrl = PyGraphController::for_sample(&slf.borrow().sequence_graphs, show_history)?;
         let ctrl = Py::new(py, ctrl)?;
         build_widget(py, ctrl, rows, cols, colors)
     }
@@ -106,15 +112,15 @@ impl PySample {
             "Sample({:?}, collection={:?}, {} sequence graph{}):",
             self.sample_name,
             self.collection_name,
-            self.block_groups.len(),
-            if self.block_groups.len() == 1 {
+            self.sequence_graphs.len(),
+            if self.sequence_graphs.len() == 1 {
                 ""
             } else {
                 "s"
             }
         )];
-        for (i, bg) in self.block_groups.iter().enumerate() {
-            lines.push(format!("  {}: {}", i, bg.name));
+        for (i, sequence_graph) in self.sequence_graphs.iter().enumerate() {
+            lines.push(format!("  {}: {}", i, sequence_graph.name));
         }
         lines.join("\n")
     }

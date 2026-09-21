@@ -64,18 +64,14 @@ def _text_fallback_hint() -> str:
 _GRAPHWIDGET_ONLY_METHODS = frozenset(
     {
         "handle_click",
-        "highlight_match",
         "clear_highlights",
         "show_path",
-        "clear_path",
-        "add_annotation_track",
-        "annotation_tracks",
-        "remove_annotation_track",
-        "clear_all_annotations",
-        "add_annotation",
-        "annotations",
-        "list_annotations",
-        "remove_annotation",
+        "hide_path",
+        "load_track",
+        "show_track",
+        "hide_track",
+        "tracks",
+        "hide_all_tracks",
     }
 )
 
@@ -134,7 +130,7 @@ class TextGraphWidget:
 
         color_map = {
             annotation.id: color_fn(annotation)
-            for annotation in self._controller.list_annotations()
+            for annotation in self._controller.annotations
         }
         self._controller.load_annotation_groups_with_colors(color_map)
 
@@ -181,7 +177,7 @@ class TextGraphWidget:
         target:
             A ``Position`` (from ``locus.start()`` / ``locus.end()``),
             a ``Locus`` (from ``repo.search()``), or
-            an ``Annotation`` object (e.g. from ``widget.list_annotations()``).
+            an ``Annotation`` object (e.g. from ``sequence_graph.annotations``).
         center:
             When ``True``, center the target in the viewport instead of the
             default snap-left placement.
@@ -203,7 +199,7 @@ class TextGraphWidget:
         ----------
         target:
             A ``Locus`` returned by ``repo.search()``, or an ``Annotation``
-            object (e.g. from ``widget.list_annotations()``).
+            object (e.g. from ``sequence_graph.annotations``).
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
@@ -241,8 +237,8 @@ class TextGraphWidget:
         """Point a call to a GraphWidget-only method at the install fix.
 
         Only names that actually exist on GraphWidget (handle_click,
-        highlight_match, clear_highlights, show_path, clear_path, and the
-        annotation-track methods) get the install hint; anything else falls
+        clear_highlights, show_path, hide_path, and the track methods) get the
+        install hint; anything else falls
         through to Python's normal AttributeError so a typo still reads as a
         typo.
         """

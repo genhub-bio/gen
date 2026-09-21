@@ -565,12 +565,13 @@ impl PySequenceGraph {
         })
     }
 
-    /// Return all gene annotations associated with this sequence graph.
+    /// All gene annotations associated with this sequence graph.
     ///
     /// Returns
     /// list[GeneAnnotation]
-    fn list_annotations(&self) -> PyResult<Vec<PyAnnotation>> {
-        let ctx = self.require_context("list_annotations()")?;
+    #[getter]
+    fn annotations(&self) -> PyResult<Vec<PyAnnotation>> {
+        let ctx = self.require_context("annotations")?;
         let conn = ctx.graph().conn();
         let bg_id = self.id;
         let annotations = Annotation::query_with_lineage(
@@ -603,7 +604,7 @@ impl PySequenceGraph {
     /// region : str or Annotation, optional
     ///     - ``str``: a path name or annotation name scoped to this sequence
     ///       graph. Path names take priority over annotation names.
-    ///     - ``Annotation``: an object returned by ``list_annotations()``.
+    ///     - ``Annotation``: an object returned by ``annotations``.
     ///       Identified by database id, so unambiguous.
     ///     - omitted: translates the entire sequence graph.
     /// start : int, optional

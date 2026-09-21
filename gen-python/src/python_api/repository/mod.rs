@@ -297,7 +297,8 @@ impl PyRepository {
     }
 
     /// All samples in the repository, each holding its sequence graphs.
-    fn get_samples(&self) -> PyResult<Vec<PySample>> {
+    #[getter]
+    fn samples(&self) -> PyResult<Vec<PySample>> {
         let conn = self.context.graph().conn();
         let mut samples: Vec<PySample> = Vec::new();
         for bg in BlockGroup::select(conn)
@@ -309,7 +310,7 @@ impl PyRepository {
                 sample.collection_name == py_bg.collection_name
                     && sample.sample_name == py_bg.sample_name
             }) {
-                Some(sample) => sample.block_groups.push(py_bg),
+                Some(sample) => sample.sequence_graphs.push(py_bg),
                 None => samples.push(PySample::new(
                     py_bg.collection_name.clone(),
                     py_bg.sample_name.clone(),

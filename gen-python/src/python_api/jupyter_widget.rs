@@ -275,7 +275,7 @@ struct GraphPage {
     pub(crate) block_group_id: Option<HashId>,
     controller: GraphController<GenGraph, GenGraphNodeSizer>,
     /// Annotation and path overlays. The path (added by `show_path`, removed by
-    /// `clear_path`/`clear_highlights`) is just another overlay, so it survives
+    /// `hide_path`/`clear_highlights`) is just another overlay, so it survives
     /// zoom/detail changes the same way the annotation overlays do.
     overlays: Vec<GraphOverlay>,
     annotation_colors: AnnotationColorCache,
@@ -420,9 +420,8 @@ impl GraphPage {
     }
 
     /// Starting offset into the accent palette for a newly loaded track: the count of
-    /// already-loaded themed overlays (tracks and single annotations), so added annotations
-    /// continue the colour cycle rather than restarting it. Ad hoc and path overlays don't
-    /// occupy an accent slot.
+    /// already-loaded track overlays, so a newly added track continues the colour cycle
+    /// rather than restarting it. Ad hoc and path overlays don't occupy an accent slot.
     fn track_accent_base(&self) -> usize {
         self.overlays
             .iter()
@@ -730,10 +729,17 @@ impl GraphPage {
         Ok(())
     }
 
-    /// Remove all highlights from the graph, including any path shown by `show_path`.
+    /// Remove ephemeral highlights added via `show()` (`highlight_match`/
+    /// `highlight_annotation_obj`), leaving persistent tracks and the path
+    /// highlight from `show_path` untouched.
     fn clear_highlights(&mut self) {
-        self.overlays.clear();
-        self.controller.clear_all_highlights();
+        self.overlays.retain(|overlay| {
+            matches!(
+                overlay.source,
+                OverlaySource::Track(_) | OverlaySource::Path
+            )
+        });
+        self.reapply();
     }
 
     /// Highlight the most recent path associated with this sequence graph.
@@ -747,8 +753,9 @@ impl GraphPage {
     ///
     /// Raises
     /// RuntimeError
-    ///     If no sequence graph is associated with this widget, or if no path
-    ///     exists for the sequence graph.
+    ///     If no sequence graph is associated with this widget, or if the current path
+    ///     runs through nodes this widget has pruned from display (the default,
+    ///     unless the widget was created with ``show_history=True``).
     /// ValueError
     ///     If ``color`` is not a recognised colour name or CSS hex string.
     pub fn show_path(&mut self, color: Option<&str>) -> PyResult<()> {
@@ -768,7 +775,8 @@ impl GraphPage {
 
         if path_nodes.is_empty() {
             return Err(PyRuntimeError::new_err(
-                "Path nodes not found in current graph state",
+                "the current path runs through nodes this widget has pruned from display; \
+                 replot with SequenceGraph.plot(show_history=True) to include them",
             ));
         }
 
@@ -782,7 +790,7 @@ impl GraphPage {
     }
 
     /// Clear path highlighting previously applied by `show_path`.
-    pub fn clear_path(&mut self) {
+    pub fn hide_path(&mut self) {
         remove_path_overlay(&mut self.overlays);
         self.reapply();
     }
@@ -796,16 +804,6 @@ impl GraphPage {
         self.push_track_as_overlays(track);
         self.reapply();
         Ok(())
-    }
-
-    /// Add a list of `Annotation` objects as inline graph overlays grouped under `name`.
-    pub fn add_track_annotations(&mut self, annotations: Vec<PyRef<PyAnnotation>>, name: &str) {
-        let spans: Vec<AnnotationSpan> = annotations
-            .iter()
-            .map(|annotation| annotation_to_span(annotation))
-            .collect();
-        self.push_track_as_overlays(AnnotationTrack::new(name, spans));
-        self.reapply();
     }
 
     /// Load annotations from a GFF3 or BED file and render them as
@@ -949,10 +947,10 @@ impl GraphPage {
     /// translate one, pass it to
     /// ``SequenceGraph.translate_annotation(region=ann)``, which resolves the
     /// annotation through its own context.
-    pub fn list_annotations(&self) -> PyResult<Vec<PyAnnotation>> {
+    pub fn annotations(&self) -> PyResult<Vec<PyAnnotation>> {
         let bg_id = self.block_group_id.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
-                "list_annotations() requires a sequence graph; \
+                "annotations requires a sequence graph; \
                  create the widget via SequenceGraph.plot()",
             )
         })?;
@@ -978,23 +976,18 @@ impl GraphPage {
             .collect())
     }
 
-    /// Return a JSON list of track names currently loaded (from `add_track_group`,
-    /// `add_track_file`, or auto-loaded annotation groups).
-    pub fn get_track_names(&self) -> PyResult<String> {
-        let mut seen = std::collections::HashSet::new();
-        let names: Vec<&str> = self
-            .overlays
-            .iter()
-            .filter_map(|o| match &o.source {
-                OverlaySource::Track(name) => Some(name.as_str()),
-                OverlaySource::Annotation(_)
-                | OverlaySource::Adhoc
-                | OverlaySource::Search
-                | OverlaySource::Path => None,
-            })
-            .filter(|n| seen.insert(*n))
-            .collect();
-        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    /// Every annotation-group name visible from this sequence graph — the full menu
+    /// `add_track_group` accepts, independent of which tracks are currently displayed.
+    pub fn track_names(&self) -> PyResult<Vec<String>> {
+        let block_group_id = self.block_group_id.ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "track_names requires a sequence graph; create the widget via SequenceGraph.plot()",
+            )
+        })?;
+        let conn = self.open_conn()?;
+        let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(annotation_group_names(&conn, &block_group, None))
     }
 
     /// Remove all overlays belonging to the track `name` (loaded via
@@ -1015,64 +1008,6 @@ impl GraphPage {
                 OverlaySource::Adhoc | OverlaySource::Search | OverlaySource::Path
             )
         });
-        self.reapply();
-    }
-
-    /// Add annotations rendered directly on the graph canvas.
-    /// Annotations are tinted with an accent colour and labelled below their span.
-    pub fn add_annotation(
-        &mut self,
-        annotations: Vec<PyRef<PyAnnotation>>,
-        track_name: Option<String>,
-    ) {
-        let existing_color = track_name.as_deref().and_then(|name| {
-            self.overlays
-                .iter()
-                .find_map(|overlay| match &overlay.source {
-                    OverlaySource::Annotation(existing) if existing == name => {
-                        Some(overlay.style.color)
-                    }
-                    _ => None,
-                })
-        });
-        let color = existing_color.unwrap_or_else(|| self.controller.next_accent_color());
-        let style = PathStyle::new(color)
-            .with_line_style(LineStyle::Bold)
-            .with_merge_glyphs(true);
-        let source = match &track_name {
-            Some(name) => OverlaySource::Annotation(name.clone()),
-            None => OverlaySource::Adhoc,
-        };
-        for annotation in &annotations {
-            self.overlays.push(GraphOverlay {
-                content: OverlayContent::Span(annotation_to_span(annotation)),
-                source: source.clone(),
-                style,
-            });
-        }
-        self.reapply();
-    }
-
-    /// Return a JSON list of annotation names currently loaded (from
-    /// `add_annotation`; annotations loaded as part of a track keep their own
-    /// name here too, separately from the track's name).
-    pub fn get_annotation_names(&self) -> PyResult<String> {
-        let mut seen = std::collections::HashSet::new();
-        let names: Vec<&str> = self
-            .overlays
-            .iter()
-            .filter_map(|o| o.span().map(|s| s.name.as_str()))
-            .filter(|n| !n.is_empty() && seen.insert(*n))
-            .collect();
-        serde_json::to_string(&names).map_err(|e| PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Remove all overlays whose annotation name matches `name`, regardless of
-    /// which track (if any) they belong to. If the same name was added more
-    /// than once, every copy is removed.
-    pub fn remove_annotation(&mut self, name: &str) {
-        self.overlays
-            .retain(|overlay| overlay.span().is_none_or(|span| span.name != name));
         self.reapply();
     }
 }
@@ -1389,7 +1324,8 @@ impl PyGraphController {
         self.active()?.highlight_match(locus, color)
     }
 
-    /// Remove all highlights from the graph, including any path shown by `show_path`.
+    /// Remove ephemeral highlights added via `show()`, leaving persistent
+    /// tracks and the path highlight from `show_path` untouched.
     fn clear_highlights(&mut self) -> PyResult<()> {
         self.active()?.clear_highlights();
         Ok(())
@@ -1406,8 +1342,9 @@ impl PyGraphController {
     ///
     /// Raises
     /// RuntimeError
-    ///     If no sequence graph is associated with this widget, or if no path
-    ///     exists for the sequence graph.
+    ///     If no sequence graph is associated with this widget, or if the current path
+    ///     runs through nodes this widget has pruned from display (the default,
+    ///     unless the widget was created with ``show_history=True``).
     /// ValueError
     ///     If ``color`` is not a recognised colour name or CSS hex string.
     #[pyo3(signature = (color=None))]
@@ -1416,8 +1353,8 @@ impl PyGraphController {
     }
 
     /// Clear path highlighting previously applied by `show_path`.
-    pub fn clear_path(&mut self) -> PyResult<()> {
-        self.active()?.clear_path();
+    pub fn hide_path(&mut self) -> PyResult<()> {
+        self.active()?.hide_path();
         Ok(())
     }
 
@@ -1425,17 +1362,6 @@ impl PyGraphController {
     /// horizontal track panel below the graph.
     pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
         self.active()?.add_track_group(group)
-    }
-
-    /// Build a track panel from a list of `Annotation` objects.
-    /// Each `Annotation` becomes one span; all are grouped under `name`.
-    pub fn add_track_annotations(
-        &mut self,
-        annotations: Vec<PyRef<PyAnnotation>>,
-        name: &str,
-    ) -> PyResult<()> {
-        self.active()?.add_track_annotations(annotations, name);
-        Ok(())
     }
 
     /// Load annotations from a GFF3 or BED file and add them as a
@@ -1494,13 +1420,16 @@ impl PyGraphController {
     /// translate one, pass it to
     /// ``SequenceGraph.translate_annotation(region=ann)``, which resolves the
     /// annotation through its own context.
-    pub fn list_annotations(&mut self) -> PyResult<Vec<PyAnnotation>> {
-        self.active()?.list_annotations()
+    #[getter]
+    pub fn annotations(&mut self) -> PyResult<Vec<PyAnnotation>> {
+        self.active()?.annotations()
     }
 
-    /// Return a JSON list of track-panel annotation names currently loaded.
-    pub fn get_track_names(&mut self) -> PyResult<String> {
-        self.active()?.get_track_names()
+    /// Every annotation-group name visible from this sequence graph — the full menu
+    /// `add_track_group` accepts, independent of which tracks are currently displayed.
+    #[getter]
+    pub fn track_names(&mut self) -> PyResult<Vec<String>> {
+        self.active()?.track_names()
     }
 
     /// Remove a track-panel annotation by name.
@@ -1512,29 +1441,6 @@ impl PyGraphController {
     /// Clear all track-panel annotations.
     pub fn clear_all_annotations(&mut self) -> PyResult<()> {
         self.active()?.clear_all_annotations();
-        Ok(())
-    }
-
-    /// Add annotations rendered directly on the graph canvas.
-    /// Annotations are tinted with an accent colour and labelled below their span.
-    pub fn add_annotation(
-        &mut self,
-        annotations: Vec<PyRef<PyAnnotation>>,
-        track_name: Option<String>,
-    ) -> PyResult<()> {
-        self.active()?.add_annotation(annotations, track_name);
-        Ok(())
-    }
-
-    /// Return a JSON list of annotation names currently loaded.
-    pub fn get_annotation_names(&mut self) -> PyResult<String> {
-        self.active()?.get_annotation_names()
-    }
-
-    /// Remove all annotations whose track name matches `name`.
-    /// If the same name was added more than once, all copies are removed.
-    pub fn remove_annotation(&mut self, name: &str) -> PyResult<()> {
-        self.active()?.remove_annotation(name);
         Ok(())
     }
 
@@ -1613,10 +1519,10 @@ mod tests {
             .expect("should return to main");
 
         graph_controller
-            .list_annotations()
+            .annotations()
             .expect("should find the plotted graph on its original branch");
         sample_controller
-            .list_annotations()
+            .annotations()
             .expect("should load a pending page from its original branch");
         assert_eq!(
             active_branch(context.graph().conn()).expect("should read repository branch"),
