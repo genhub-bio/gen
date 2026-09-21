@@ -104,6 +104,12 @@ with `.on(sg)`. A superposition containing multiple positions cannot be stepped.
 `widget.go_to()` and `widget.show()` accept loci, annotations, positions, and
 superpositions (navigating to the first position of a superposition).
 
+## Copying samples
+
+`child = sample.copy("child", message="Create a child sample")` copies the sample's
+sequence graphs and records their lineage in one operation. The name must be new
+and nonempty. If recording the operation fails, the sample creation rolls back.
+
 ## Architecture
 
 The package is built from three layers:
