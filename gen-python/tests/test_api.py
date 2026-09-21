@@ -17,7 +17,6 @@ FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 class RepositoryTestCase(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
         self.repository = gen.Repository(str(self.root / "repository"))
 
