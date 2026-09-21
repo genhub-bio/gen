@@ -14,7 +14,7 @@ use r#gen::{
 use gen_models::{errors::OperationError, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
-use super::{PyRepository, run_operation_write};
+use super::{PyRepository, run_context_operation_write};
 use crate::python_api::{sample::PySample, sequence_part::PySequencePart};
 
 #[pymethods]
@@ -29,8 +29,8 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = update_with_fasta(
                     ctx,
@@ -75,8 +75,8 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary =
                     update_with_gfa(ctx, &collection, &sample, &new_sample, &filename).map_err(
@@ -106,8 +106,8 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = update_with_gaf(
                     ctx,
@@ -152,8 +152,8 @@ impl PyRepository {
             }
         };
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let (operation_summary, output_samples) = update_with_vcf(
                     ctx,
@@ -200,8 +200,8 @@ impl PyRepository {
     ) -> PyResult<PySample> {
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let file = File::open(&filename).map_err(|e| {
                     PyRuntimeError::new_err(format!("Failed to open '{}': {e}", filename))
@@ -245,8 +245,8 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = update_with_sequence(
                     ctx,
@@ -291,8 +291,8 @@ impl PyRepository {
                     .collect()
             })
             .collect();
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = update_with_library(
                     ctx,
@@ -327,8 +327,8 @@ impl PyRepository {
         let parts_list = parse_library(&parts, &library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = update_with_library(
                     ctx,
