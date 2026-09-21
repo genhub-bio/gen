@@ -3,9 +3,12 @@ use pyo3::{Bound, prelude::*, types::PyModule};
 pub mod annotation;
 pub mod block_group;
 pub mod graph_node;
+pub(crate) mod graph_read;
 pub mod graph_search;
 pub mod hash_id;
 pub mod jupyter_widget;
+pub mod locus;
+pub mod position;
 pub mod repository;
 pub mod sample;
 pub mod sequence_part;
@@ -16,9 +19,10 @@ use crate::python_api::{
     annotation::PyAnnotation,
     block_group::PySequenceGraph,
     graph_node::{PyGraphNode, PyGraphNodeSlice},
-    graph_search::{PyGraphLocus, PyGraphPos},
+    graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::PyGraphController,
+    position::{PyPosition, PySuperPosition},
     repository::{
         PyRepository, clone_repository,
         history::{PyAsset, PyBranch, PyOperation},
@@ -43,8 +47,9 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHashId>()?;
     m.add_class::<PyGraphNode>()?;
     m.add_class::<PyGraphNodeSlice>()?;
-    m.add_class::<PyGraphPos>()?;
+    m.add_class::<PyPosition>()?;
     m.add_class::<PyGraphLocus>()?;
+    m.add_class::<PySuperPosition>()?;
     m.add_class::<PySequencePart>()?;
     m.add_class::<PyGraphController>()?;
     m.add_class::<PySample>()?;
