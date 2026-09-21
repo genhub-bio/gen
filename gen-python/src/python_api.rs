@@ -2,6 +2,7 @@ use pyo3::{Bound, prelude::*, types::PyModule};
 
 pub mod annotation;
 pub mod block_group;
+pub mod editing;
 pub mod graph_node;
 pub(crate) mod graph_read;
 pub mod graph_search;

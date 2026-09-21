@@ -24,18 +24,20 @@ use gen_models::{
     sample::Sample,
 };
 use pyo3::{
-    exceptions::{PyRuntimeError, PyValueError},
+    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
     prelude::*,
     types::PyDict,
 };
 
 use super::{
     annotation::PyAnnotation,
+    editing::{EditKind, EditRequest, InsertSite, edit_sequence_graph, insert_at_positions},
     graph_node::PyGraphNode,
     graph_read::{current_graph, locus_from_region},
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
+    position::positions_of,
     translation::build_translation_params,
     utils::block_group_err_to_pyerr,
 };
@@ -859,6 +861,156 @@ impl PySequenceGraph {
                 .map(|bg| self.to_py_block_group(bg))
                 .collect(),
         )
+    }
+}
+
+#[pymethods]
+impl PySequenceGraph {
+    /// Replace the sequence covered by ``target`` with ``sequence``.
+    ///
+    /// The target may be a region string, a ``Locus`` from ``search()``, or an
+    /// ``Annotation`` from ``annotations``. On a reverse-strand target the
+    /// sequence is read on that strand. The edit is recorded as its own operation,
+    /// using ``message`` as the operation's commit message when given, or a
+    /// generated description otherwise. Returns the ``Locus`` of the replacement
+    /// sequence.
+    ///
+    /// Parameters
+    /// stack : bool, optional
+    ///     Add this replacement as a sibling option at the target instead of
+    ///     superseding what's there, so the original sequence is left standing
+    ///     alongside it (default ``False``). A stacked replacement never
+    ///     becomes the reference route: the sequence graph's current Path is
+    ///     left exactly as it was, even when the target lies on it.
+    #[pyo3(signature = (target, sequence, message=None, stack=false))]
+    fn replace(
+        &self,
+        target: &Bound<'_, PyAny>,
+        sequence: &str,
+        message: Option<&str>,
+        stack: bool,
+    ) -> PyResult<PyGraphLocus> {
+        let request = EditRequest {
+            kind: EditKind::Replace,
+            sequence,
+            message,
+            stack,
+        };
+        edit_sequence_graph(self, target, &request).map(|locus| {
+            PyGraphLocus::with_context(
+                locus.expect("should return the replacement locus"),
+                self.context.clone(),
+            )
+            .attached_to(Some(self.clone()))
+        })
+    }
+
+    /// Delete the sequence covered by ``target``.
+    ///
+    /// The target may be a region string, a ``Locus`` from ``search()``, or an
+    /// ``Annotation`` from ``annotations``. The edit is recorded as its own
+    /// operation, using ``message`` as the operation's commit message when given,
+    /// or a generated description otherwise::
+    ///
+    ///     for annotation in sg.annotations:
+    ///         sg.delete(annotation.locus)
+    ///
+    /// Parameters
+    /// stack : bool, optional
+    ///     Add the deletion as a sibling option at the target instead of
+    ///     removing the only route through it, so the original sequence stays
+    ///     reachable alongside the shortcut around them (default ``False``).
+    ///     A stacked deletion never becomes the reference route: the
+    ///     sequence graph's current Path is left exactly as it was, even
+    ///     when the target lies on it.
+    #[pyo3(signature = (target, message=None, stack=false))]
+    fn delete(
+        &self,
+        target: &Bound<'_, PyAny>,
+        message: Option<&str>,
+        stack: bool,
+    ) -> PyResult<()> {
+        let request = EditRequest {
+            kind: EditKind::Delete,
+            sequence: "",
+            message,
+            stack,
+        };
+        edit_sequence_graph(self, target, &request).map(|_| ())
+    }
+
+    /// Insert ``sequence`` next to a position, or on the junction between two.
+    ///
+    /// ``after`` and ``before`` are each a ``Position`` or a ``SuperPosition`` and say where the
+    /// new sequence connects: ``after=a`` reads ``a`` then the new sequence, and ``before=b`` reads
+    /// the new sequence then ``b``. At least one is required::
+    ///
+    ///     sg.insert("ACGT", after=locus.end())
+    ///     sg.insert("ACGT", before=locus.start())
+    ///     sg.insert("ACGT", after=promoter.end(), before=cds1.start())
+    ///
+    /// Given only one, the other side is whatever reads next to it. Where ``a`` forks into ``b``
+    /// and ``c``, ``after=a.end()`` wires ``a`` to the new sequence and the new sequence to both
+    /// ``b`` and ``c``, while ``before=b.start()`` goes only between ``a`` and ``b`` and leaves the
+    /// connection from ``a`` into ``c`` as it was.
+    ///
+    /// Given both, the new sequence goes only on the connections that run directly from an
+    /// ``after`` position into a ``before`` position. Each ``after`` position must read directly
+    /// into a ``before`` position and each ``before`` position must be read directly after an
+    /// ``after`` position; ``insert`` never removes sequence, so use ``replace()`` to swap the
+    /// sequence between two positions. Both sides matter in a combinatorial layer, where every
+    /// part of one column reads into every part of the next. With ``a1``, ``a2`` and ``a3`` each
+    /// reading into ``b1``, ``b2`` and ``b3``::
+    ///
+    ///     sg.insert("ACGT", after=a1.end())                     # a1 -> new -> b1, b2, b3
+    ///     sg.insert("ACGT", after=a1.end(), before=b1.start())  # a1 -> new -> b1 only
+    ///     sg.insert("ACGT", after=SuperPosition(a1.end(), a2.end()))  # a1, a2 -> new -> b1-b3
+    ///
+    /// Every other connection of the layer stays as it was, so ``a3`` still reads straight into
+    /// ``b1``, ``b2`` and ``b3`` after the last call. A superposition covering every part of one
+    /// column sends every route through the new sequence, and covering every part of the other
+    /// column does the same.
+    ///
+    /// One call inserts one piece of sequence, connected to everything its sides name. To keep
+    /// routes apart, insert once per route. Where ``a`` reads into ``b`` and, separately, ``c``
+    /// reads into ``d``, ``after=SuperPosition(a.end(), c.end())`` would also let ``a`` read
+    /// through the new sequence into ``d``, and ``c`` into ``b``. Two calls add the new sequence
+    /// to each chain and nothing else::
+    ///
+    ///     for left in (a.end(), c.end()):
+    ///         sg.insert("ACGT", after=left)
+    ///
+    /// On the reverse strand, "after" is toward the start of the node and the sequence is read on
+    /// that strand. Returns the ``Locus`` of the inserted sequence.
+    ///
+    /// Parameters
+    /// stack : bool, optional
+    ///     Add the insertion alongside the existing routes instead of retiring the connections
+    ///     it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
+    #[pyo3(signature = (sequence, *, before=None, after=None, message=None, stack=false))]
+    fn insert(
+        &self,
+        sequence: &str,
+        before: Option<&Bound<'_, PyAny>>,
+        after: Option<&Bound<'_, PyAny>>,
+        message: Option<&str>,
+        stack: bool,
+    ) -> PyResult<PyGraphLocus> {
+        let before = before.map(positions_of).transpose()?;
+        let after = after.map(positions_of).transpose()?;
+        let site = match (&after, &before) {
+            (Some(after), Some(before)) => InsertSite::Junction { after, before },
+            (Some(after), None) => InsertSite::After(after),
+            (None, Some(before)) => InsertSite::Before(before),
+            (None, None) => {
+                return Err(PyTypeError::new_err(
+                    "insert() needs a position: pass after=, before=, or both",
+                ));
+            }
+        };
+        insert_at_positions(self, &site, sequence, message, stack).map(|locus| {
+            PyGraphLocus::with_context(locus, self.context.clone()).attached_to(Some(self.clone()))
+        })
     }
 }
 

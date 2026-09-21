@@ -83,32 +83,124 @@ is not set, the extension falls back to the same login process the CLI uses. See
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
 
-## Sequence inspection and navigation
+## Sequence editing
 
-`sg.region("chr1:100-110")` resolves a region without editing. Search results and
-annotation loci expose `.sequence`, reading-order indexing (`locus[i]` returns a
-`Position`), and slicing (`locus[start:end]` returns a `Locus`). Negative indices
-and clipped slice bounds follow Python conventions; only step `1` is supported,
-and empty slices raise `IndexError`. The explicit `.slice(start, end)` method
-uses strict bounds. `reverse_complement()` reverses reading order and strand.
+`SequenceGraph.replace(target, sequence)` and `delete(target)` edit the sequence
+a target covers. Targets accept region strings, search-result `Locus` objects,
+and `Annotation` objects. Replacement and deletion remove the target from the
+active path; later edits using those removed positions raise `ValueError`.
 
-`locus.start()` and `locus.end()` identify its first and last base, respectively;
-`end()` no longer denotes the exclusive boundary after the locus. Saved loci and
-positions retain their identities when graph blocks are split. Nodes expose
-their underlying `.id` and node-sequence bounds `.sequence_start`/`.sequence_end`.
+Insertions are addressed by a `Position`, such as `locus.start()` or
+`locus.end()`, the first and last position of a locus in reading order.
 
-Positions retain the sequence graph they came from. `position + 1` steps in its
-reading direction; `position - 1` steps backwards. At a fork the result becomes
-a `SuperPosition`. Combine positions with `|`, or attach them to another graph
-with `.on(sg)`. A superposition containing multiple positions cannot be stepped.
-`widget.go_to()` and `widget.show()` accept loci, annotations, positions, and
-superpositions (navigating to the first position of a superposition).
+Index or slice a search-result locus in sequence-reading order, across node boundaries:
 
-## Copying samples
+```python
+locus[100]       # Position
+locus[100:150]   # Locus, half-open interval [100, 150)
+locus[-1]        # final Position, equivalent to locus.end()
+locus[:]        # a Locus covering the same span
+```
 
-`child = sample.copy("child", message="Create a child sample")` copies the sample's
-sequence graphs and records their lineage in one operation. The name must be new
-and nonempty. If recording the operation fails, the sample creation rolls back.
+Use Python slice syntax `locus[100:150]`; `locus[100-150]` evaluates to `locus[-50]`.
+Offsets are relative to the locus, not to a graph node. `locus[0]` equals
+`locus.start()`. Negative indices count from the end; omitted and negative slice
+bounds follow Python conventions, and slice bounds are clipped to the locus.
+Out-of-range indices (including all indices on an empty locus) and empty or
+inverted slices raise `IndexError`. Keys must be integers (including objects
+implementing `__index__`) or slices; other keys raise `TypeError`. As with sample
+indexing, `False` and `True` act as `0` and `1`. Only slice step `1` is supported;
+other steps raise `ValueError`. The explicit `.slice(start, end)` method retains
+its strict bounds checking.
+
+For `bar = foo.reverse_complement()`, `bar[i]` addresses the same physical base
+as `foo[len(foo) - 1 - i]`, with the opposite strand. Thus `foo[0] != bar[-1]`,
+even though they refer to the same base. A Position's `offset` is relative to its
+displayed node. Later edits can split nodes without changing the location a saved
+Position refers to. Strand is part of Position identity and controls the reading
+direction of `insert(after=...)` and `insert(before=...)`.
+
+Loci compare equal and have the same hash when they cover the same positions in
+the same reading order and strands, even if intervening edits split nodes.
+You can use them directly as dictionary keys or set members; no manual normalization
+is needed. Saved loci also work with `Annotation(locus, name)`, widget `show()`
+and `go_to()`, and annotation tracks after unrelated edits.
+
+Indexed positions can be passed to `sg.insert("ACGT", after=locus[100])` or
+`sg.insert("ACGT", before=locus[100])`. Sliced loci can be passed to
+`sg.replace(locus[100:150], "ACGT")` and `sg.delete(locus[100:150])`.
+
+`insert(sequence, after=position)` adds the sequence right after that position
+and `insert(sequence, before=position)` right before it. Given only one side,
+the insertion attaches to whatever reads next to it, so inserting after the last
+position before a fork puts the new sequence on every branch. Pass both,
+`insert(sequence, after=left, before=right)`, to insert on the one junction
+where `left` reads directly into `right` and leave the other branches as they
+were. The two positions must flank a junction; `insert` never removes sequence,
+so use `replace` to swap out what lies between two positions. A position keeps
+naming the same point of its node when later edits split that node.
+
+To insert at several places at once, combine positions with `|`:
+`position_a | position_b` gives a `SuperPosition`, and `|` also joins a
+superposition with a position or with another superposition. `after` and
+`before` each accept a `Position` or a `SuperPosition`, and a superposition
+attaches the inserted sequence to every position it covers.
+
+Positions and superpositions know the sequence graph their locus came from, so
+they can walk it: `position + 1` is the next position on its strand, and
+`position - 1` the one before. The result stays a `Position` while the step lands
+on a single point and becomes a `SuperPosition` once it lands at a fork, one
+position per branch. A superposition that covers several positions does not
+step. Use `position.on(sg)` to attach a position to a different sequence graph
+that shares its nodes, such as a copy of the sample.
+
+Both sides matter most in a combinatorial layer, where every part of one column
+reads into every part of the next. With parts `a1`, `a2`, `a3` each reading into
+`b1`, `b2`, `b3`, `after=a1.end()` puts the new sequence between `a1` and all of
+`b1`, `b2`, `b3`, and adding `before=b1.start()` narrows it to `a1` into `b1`.
+`after=SuperPosition(a1.end(), a2.end())` routes `a1` and `a2` through the new
+sequence and leaves `a3` reading straight into the next column. One call inserts
+one piece of sequence connected to everything its sides name, so to keep
+separate routes apart, insert once per route:
+
+```python
+# a reads into b, and separately c reads into d. A single insert after
+# SuperPosition(a.end(), c.end()) would also let a read on into d and c into b.
+for left in (a.end(), c.end()):
+    sg.insert("ACGT", after=left)
+```
+
+Each call runs one transaction and records one operation. Failures roll back
+both the edit and its operation record. Every editing method accepts an
+optional `message` used as the operation's commit message; when omitted, a
+description of the edit is generated instead. `stack=True` adds the edit as an
+alternative next to what is already there and leaves the active path unchanged.
+
+At a join or fork, `delete` and `replace` reconnect every route at the target's
+boundary. This also applies immediately downstream of a heterozygous call;
+shared edits use alternative routes rather than a single chromosome copy.
+See [Delete and replace near junctions](examples/editing_junctions.ipynb) for
+examples with follow-up insertions and stacking.
+
+```python
+for annotation in sg.annotations:
+    sg.delete(annotation.locus)
+
+inserted = sg.replace("chr1:100-110", "ACGT")
+sg.insert("TT", after=inserted.end())
+sg.delete(inserted.slice(1, 3))
+```
+
+`replace` and `insert` return the `Locus` of the new sequence.
+Saved loci remain valid when unrelated edits shift or carve the
+graph. Use `Sample.copy()` to create a complete child sample before editing its sequence graphs. The
+destination name must be new; copying an existing sample raises an error.
+
+```python
+child = sample.copy("edited")
+sequence = child[0]
+inserted = sequence.replace(annotation, "ACGT")
+```
 
 ## Architecture
 

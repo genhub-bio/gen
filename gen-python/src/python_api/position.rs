@@ -147,6 +147,23 @@ pub(crate) fn neighbors(
     Ok(found)
 }
 
+/// Whether `target` can be reached from `source` along at least one edge.
+pub(crate) fn reaches(graph: &GenGraph, source: GraphNode, target: GraphNode) -> bool {
+    let mut pending = vec![source];
+    let mut visited = HashSet::new();
+    while let Some(current) = pending.pop() {
+        for successor in graph.neighbors_directed(current, Outgoing) {
+            if successor == target {
+                return true;
+            }
+            if visited.insert(successor) {
+                pending.push(successor);
+            }
+        }
+    }
+    false
+}
+
 /// Moves one position a step along its strand, toward the reading end when `forward`, splitting
 /// into one position per route at a fork.
 ///
@@ -394,6 +411,23 @@ fn position_hash(hash: isize, position: &Position) -> isize {
         .wrapping_add(position.coordinate as isize);
     hash.wrapping_mul(31)
         .wrapping_add(isize::from(position.is_reverse()))
+}
+
+/// The positions an insert method is given, from a ``Position`` or a ``SuperPosition``.
+pub(crate) fn positions_of(value: &Bound<'_, PyAny>) -> PyResult<Vec<Position>> {
+    if let Ok(position) = value.extract::<PyRef<PyPosition>>() {
+        Ok(vec![position.position])
+    } else if let Ok(superposition) = value.extract::<PyRef<PySuperPosition>>() {
+        Ok(superposition
+            .positions
+            .iter()
+            .map(|position| position.position)
+            .collect())
+    } else {
+        Err(PyTypeError::new_err(
+            "expected a Position or a SuperPosition",
+        ))
+    }
 }
 
 fn canonical_positions(mut positions: Vec<PyPosition>) -> Vec<PyPosition> {
