@@ -210,9 +210,9 @@ jobs:
           gen --version
 
   trigger-pypi-publish:
-    needs: build-wheels
+    needs: [build-wheels, test-newer-python]
     runs-on: ubuntu-latest
-    if: ${{ needs.build-wheels.result == 'success' }}
+    if: ${{ needs.build-wheels.result == 'success' && needs.test-newer-python.result == 'success' }}
     permissions:
       actions: write
       contents: read
