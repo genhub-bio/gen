@@ -398,9 +398,10 @@ class GraphWidget(anywidget.AnyWidget):
         Parameters
         ----------
         target:
-            A ``Position`` (from ``locus.start()`` / ``locus.end()``),
-            a ``Locus`` (from ``repo.search()``), or
-            an ``Annotation`` object (e.g. from ``sequence_graph.annotations``).
+            A ``Position`` (from ``locus.start()`` / ``locus.end()``), a
+            ``SuperPosition`` (centers on its first position), a ``Locus``
+            (from ``repo.search()``), or an ``Annotation`` object (e.g. from
+            ``sequence_graph.annotations``).
         center:
             When ``True``, center the target in the viewport instead of the
             default snap-left placement.
@@ -419,12 +420,14 @@ class GraphWidget(anywidget.AnyWidget):
         """
         if self._frozen:
             return
-        from gen import Annotation, Locus  # noqa: PLC0415
+        from gen import Annotation, Locus, SuperPosition  # noqa: PLC0415
 
         if isinstance(target, Annotation):
             self._controller.go_to_annotation_obj(target, center)
         elif isinstance(target, Locus):
             self._controller.go_to_locus(target, center)
+        elif isinstance(target, SuperPosition):
+            self._controller.go_to_pos(target.positions[0], center)
         else:
             self._controller.go_to_pos(target, center)
         self._render()
@@ -435,13 +438,18 @@ class GraphWidget(anywidget.AnyWidget):
         Parameters
         ----------
         target:
-            A ``Locus`` returned by ``repo.search()``, or an ``Annotation``
-            object (e.g. from ``sequence_graph.annotations``).
+            A ``Locus`` returned by ``repo.search()``, an ``Annotation``
+            object (e.g. from ``sequence_graph.annotations``), or a
+            ``Position``/``SuperPosition`` (centers on the position, or the
+            first position of a superposition; a position is a single point,
+            so nothing is highlighted).
         color:
             Optional highlight colour.  Accepts named colours
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
             (``"#ff8800"``).  When omitted the next unused theme accent
-            colour is chosen automatically.
+            colour is chosen automatically.  Ignored for a
+            ``Position``/``SuperPosition`` target, which has nothing to
+            highlight.
         center:
             When ``True``, center the target in the viewport instead of the
             default snap-left placement.
@@ -455,16 +463,22 @@ class GraphWidget(anywidget.AnyWidget):
 
             records = sequence_graph.annotations
             widget.show(records[0])
+
+            widget.show(matches[0].start())
         """
         if self._frozen:
             return
-        from gen import Annotation  # noqa: PLC0415
+        from gen import Annotation, Position, SuperPosition  # noqa: PLC0415
 
         if isinstance(target, Annotation):
             self._controller.go_to_annotation_obj(target, center)
             self._controller.highlight_annotation_obj(target, color)
+        elif isinstance(target, SuperPosition):
+            self._controller.go_to_pos(target.positions[0], center)
+        elif isinstance(target, Position):
+            self._controller.go_to_pos(target, center)
         else:
-            self._controller.go_to_pos(target.start(), center)
+            self._controller.go_to_locus(target, center)
             self._controller.highlight_match(target, color)
         self._render()
 

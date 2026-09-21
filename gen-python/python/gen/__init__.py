@@ -26,6 +26,7 @@ from .gen import (
     Sample,
     SequenceGraph,
     SequencePart,
+    SuperPosition,
     clone,
 )
 
@@ -61,5 +62,6 @@ __all__ = [
     "Sample",
     "SequenceGraph",
     "SequencePart",
+    "SuperPosition",
     "clone",
 ]

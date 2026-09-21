@@ -83,6 +83,27 @@ is not set, the extension falls back to the same login process the CLI uses. See
 the [branches, remotes, and authentication notebook](examples/branches_and_remotes.ipynb)
 for a complete walkthrough.
 
+## Sequence inspection and navigation
+
+`sg.region("chr1:100-110")` resolves a region without editing. Search results and
+annotation loci expose `.sequence`, reading-order indexing (`locus[i]` returns a
+`Position`), and slicing (`locus[start:end]` returns a `Locus`). Negative indices
+and clipped slice bounds follow Python conventions; only step `1` is supported,
+and empty slices raise `IndexError`. The explicit `.slice(start, end)` method
+uses strict bounds. `reverse_complement()` reverses reading order and strand.
+
+`locus.start()` and `locus.end()` identify its first and last base, respectively;
+`end()` no longer denotes the exclusive boundary after the locus. Saved loci and
+positions retain their identities when graph blocks are split. Nodes expose
+their underlying `.id` and node-sequence bounds `.sequence_start`/`.sequence_end`.
+
+Positions retain the sequence graph they came from. `position + 1` steps in its
+reading direction; `position - 1` steps backwards. At a fork the result becomes
+a `SuperPosition`. Combine positions with `|`, or attach them to another graph
+with `.on(sg)`. A superposition containing multiple positions cannot be stepped.
+`widget.go_to()` and `widget.show()` accept loci, annotations, positions, and
+superpositions (navigating to the first position of a superposition).
+
 ## Architecture
 
 The package is built from three layers:

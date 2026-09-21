@@ -3,13 +3,19 @@ use gen_core::Strand;
 use gen_graph::GraphNodeSlice;
 use pyo3::prelude::*;
 
+use super::hash_id::PyHashId;
+
 /// An opaque handle to a graph node, usable as a dict key in Python.
 /// Used to ensure consistent hashing when used as dictionary keys in Python.
 #[pyclass(name = "Node")] // pyclass includes  #[derive(IntoPyObject)]
 #[derive(Clone, Copy)]
 pub struct PyGraphNode {
     pub node_id: HashId,
+    /// Inclusive start of this block in the underlying node's sequence.
+    #[pyo3(get)]
     pub sequence_start: i64,
+    /// Exclusive end of this block in the underlying node's sequence.
+    #[pyo3(get)]
     pub sequence_end: i64,
 }
 
@@ -25,6 +31,12 @@ impl PyGraphNode {
 
 #[pymethods]
 impl PyGraphNode {
+    /// Stable ID of the underlying sequence node, independent of block boundaries.
+    #[getter]
+    fn id(&self) -> PyHashId {
+        PyHashId::new(self.node_id)
+    }
+
     fn __repr__(&self) -> PyResult<String> {
         let h = format!("{}", self.node_id);
         let hash8 = &h[..8.min(h.len())];

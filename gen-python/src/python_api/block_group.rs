@@ -23,11 +23,17 @@ use gen_models::{
     operations::{OperationInfo, OperationSummary, commit_operation_summary},
     sample::Sample,
 };
-use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
+use pyo3::{
+    exceptions::{PyRuntimeError, PyValueError},
+    prelude::*,
+    types::PyDict,
+};
 
 use super::{
     annotation::PyAnnotation,
     graph_node::PyGraphNode,
+    graph_read::{current_graph, locus_from_region},
+    graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
     translation::build_translation_params,
@@ -215,8 +221,9 @@ impl PySequenceGraph {
     /// Search for exact occurrences of `query` in this sequence graph.
     ///
     /// Returns a list of `Locus` objects. Each locus exposes:
-    ///   - `.start()` / `.end()` → `Position` (node + byte offset)
+    ///   - `.start()` / `.end()` → `Position` (first and last position)
     ///   - `.slices` → `list[NodeSlice]`
+    ///   - `.sequence` → `str` (the bases it covers, read fresh from the database)
     ///
     /// Parameters
     /// query : str
@@ -238,8 +245,8 @@ impl PySequenceGraph {
             )
         })?;
         let conn = context.graph().conn();
-        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
-            .map_err(block_group_err_to_pyerr)?;
+        // Search the routes the sequence graph reads, so every hit is a target an edit accepts.
+        let graph = current_graph(context, &self.id)?;
         let matcher =
             GenGraphMatcher::new_with_sequence_kind(conn, context.workspace(), graph, kind);
 
@@ -262,8 +269,37 @@ impl PySequenceGraph {
 
         Ok(matches
             .into_iter()
-            .map(crate::python_api::graph_search::PyGraphLocus::from_locus)
+            .map(|locus| {
+                crate::python_api::graph_search::PyGraphLocus::with_context(
+                    locus,
+                    Some(context.clone()),
+                )
+                .attached_to(Some(self.clone()))
+            })
             .collect())
+    }
+
+    /// Resolve a region string (e.g. ``"chr1:100-110"``) to a ``Locus`` in this sequence graph.
+    ///
+    /// Unlike passing a region string to ``replace()``, ``delete()``, or ``insert()``, this
+    /// performs no edit — it only looks up the coordinates, for inspection (``.sequence``,
+    /// ``.slices``) or as an argument to a widget's ``go_to()``. Raises ``ValueError`` if the
+    /// region cannot be resolved in this sequence graph.
+    pub fn region(&self, region: &str) -> PyResult<PyGraphLocus> {
+        let context = self.require_context("region()")?;
+        let target = locus_from_region(context, region, &self.collection_name, &self.sample_name)?;
+        if let Some(block_group_id) = target.block_group_id
+            && block_group_id != self.id
+        {
+            return Err(PyValueError::new_err(format!(
+                "region resolves outside sequence graph '{}'",
+                self.name
+            )));
+        }
+        Ok(
+            PyGraphLocus::with_context(target.locus, Some(context.clone()))
+                .attached_to(Some(self.clone())),
+        )
     }
 
     /// IPython display hook — called when a cell ends with a SequenceGraph.
@@ -589,6 +625,7 @@ impl PySequenceGraph {
                 context: Some(ctx.clone()),
                 source_block_group_id: Some(bg_id),
                 locus: None,
+                sequence_graph: Some(self.clone()),
             })
             .collect())
     }
@@ -718,7 +755,7 @@ impl PySequenceGraph {
 }
 
 impl PySequenceGraph {
-    fn require_context(&self, method: &str) -> PyResult<&DbContext> {
+    pub(crate) fn require_context(&self, method: &str) -> PyResult<&DbContext> {
         self.context.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(format!(
                 "{method} requires a Repository context; obtain SequenceGraph via Repository"
@@ -822,5 +859,130 @@ impl PySequenceGraph {
                 .map(|bg| self.to_py_block_group(bg))
                 .collect(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use r#gen::test_helpers::{create_bg, setup_block_group, setup_gen_on_disk};
+    use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use gen_models::{
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        db::DbContext,
+        edge::Edge,
+        node::Node,
+        path::Path,
+        sequence::Sequence,
+    };
+
+    use super::PySequenceGraph;
+    use crate::python_api::locus::GraphLocusExt as _;
+
+    /// Wraps `block_group_id` as the `PySequenceGraph` a `Repository` would hand back.
+    fn sequence_graph(context: &DbContext, block_group_id: HashId, name: &str) -> PySequenceGraph {
+        PySequenceGraph {
+            id: block_group_id,
+            collection_name: "test".to_string(),
+            sample_name: "test".to_string(),
+            name: name.to_string(),
+            context: Some(context.clone()),
+        }
+    }
+
+    /// A second, unrelated sequence graph named "chr2" with a single-node path.
+    fn second_sequence_graph(context: &DbContext) -> HashId {
+        let conn = context.graph().conn();
+        let block_group = create_bg(conn, "test", "test", "chr2");
+        let sequence = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("GGGGG")
+            .save(conn)
+            .expect("should save sequence");
+        let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str("chr2-node"))
+            .expect("should create node");
+        let edge0 = Edge::create(
+            conn,
+            PATH_START_NODE_ID,
+            0,
+            Strand::Forward,
+            node_id,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create edge");
+        let edge1 = Edge::create(
+            conn,
+            node_id,
+            5,
+            Strand::Forward,
+            PATH_END_NODE_ID,
+            0,
+            Strand::Forward,
+        )
+        .expect("should create edge");
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[
+                BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: edge0.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                },
+                BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: edge1.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                },
+            ],
+        );
+        Path::create(conn, "chr2", &block_group.id, &[edge0.id, edge1.id])
+            .expect("should create current path");
+        block_group.id
+    }
+
+    #[test]
+    fn test_region_resolves_locus_read_only() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let (block_group_id, _path) = setup_block_group(conn);
+        let graph = sequence_graph(&context, block_group_id, "chr1");
+
+        // The fixture path reads "AAAAAAAAAA" then "TTTTTTTTTT", so 8-13 covers the
+        // last two bases of the first node and the first three of the second.
+        let locus = graph.region("chr1:8-13").expect("should resolve region");
+        let graph_locus = locus.graph_locus();
+        assert_eq!(graph_locus.length(), 5);
+        assert_eq!(graph_locus.sequence(conn, context.workspace()), b"AATTT");
+
+        // Resolving is read-only: the current path is untouched.
+        assert_eq!(
+            gen_models::block_group::BlockGroup::get_current_path(conn, &block_group_id, None)
+                .expect("should still have a current path")
+                .sequence(conn, context.workspace(), None)
+                .expect("should read the current path"),
+            "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG"
+        );
+    }
+
+    #[test]
+    fn test_region_outside_sequence_graph_is_a_value_error() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let (block_group_id, _path) = setup_block_group(conn);
+        second_sequence_graph(&context);
+        let graph = sequence_graph(&context, block_group_id, "chr1");
+
+        let error = match graph.region("chr2:0-5") {
+            Ok(_) => panic!("region in a different sequence graph should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("resolves outside sequence graph 'chr1'"),
+            "unexpected error message: {error}"
+        );
     }
 }

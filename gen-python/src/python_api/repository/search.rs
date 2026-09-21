@@ -129,10 +129,14 @@ impl PyRepository {
             };
 
             if !matches.is_empty() {
-                results.push((
-                    bg,
-                    matches.into_iter().map(PyGraphLocus::from_locus).collect(),
-                ));
+                let loci = matches
+                    .into_iter()
+                    .map(|locus| {
+                        PyGraphLocus::with_context(locus, Some(self.context.clone()))
+                            .attached_to(Some(bg.clone()))
+                    })
+                    .collect();
+                results.push((bg, loci));
             }
         }
 
