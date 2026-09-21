@@ -71,7 +71,7 @@ impl PyRepository {
     /// Returns a list of `(SequenceGraph, list[Locus])` tuples — one entry per
     ///   - graph that contains at least one match
     ///   - `matches` is a list of `GraphLocus` objects. Each locus exposes:
-    ///       - `.start()` / `.end()` → `GraphPos` (node + byte offset) — pass
+    ///       - `.start()` / `.end()` → `Position` — pass
     ///         directly to `widget.go_to()`
     ///       - `.slices` → `list[NodeSlice]`
     ///
@@ -101,9 +101,10 @@ impl PyRepository {
 
         let query_bytes = query.as_bytes();
         let mut results = Vec::new();
-        for bg in bgs {
-            let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg.id, None)
-                .map_err(block_group_err_to_pyerr)?;
+        for block_group in bgs {
+            let graph =
+                BlockGroup::get_graph(conn, self.context.workspace(), &block_group.id, None)
+                    .map_err(block_group_err_to_pyerr)?;
             let matcher = GenGraphMatcher::new_with_sequence_kind(
                 conn,
                 self.context.workspace(),
@@ -111,11 +112,10 @@ impl PyRepository {
                 kind,
             );
 
-            let index_path = self
-                .context
-                .workspace()
-                .find_gen_dir()
-                .map(|d| d.join("search_index").join(format!("{}.bin", bg.id)));
+            let index_path = self.context.workspace().find_gen_dir().map(|d| {
+                d.join("search_index")
+                    .join(format!("{}.bin", block_group.id))
+            });
             let index = index_path
                 .and_then(|p| fs::read(p).ok())
                 .and_then(|bytes| SeedIndex::from_bytes_with_header(&bytes, 16).ok())
@@ -129,10 +129,14 @@ impl PyRepository {
             };
 
             if !matches.is_empty() {
-                results.push((
-                    bg,
-                    matches.into_iter().map(PyGraphLocus::from_locus).collect(),
-                ));
+                let loci = matches
+                    .into_iter()
+                    .map(|locus| {
+                        PyGraphLocus::with_context(locus, Some(self.context.clone()))
+                            .attached_to(Some(block_group.clone()))
+                    })
+                    .collect();
+                results.push((block_group, loci));
             }
         }
 
