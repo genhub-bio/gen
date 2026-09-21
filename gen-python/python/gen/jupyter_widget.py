@@ -512,6 +512,13 @@ class GraphWidget(anywidget.AnyWidget):
             (``"yellow"``, ``"cyan"``, ``"red"``, …) or a CSS hex string
             (``"#ff4444"``).  When omitted the next unused theme accent
             colour is chosen automatically.
+
+        Raises
+        ------
+        RuntimeError
+            If the path cannot be traced through the plotted graph.  A path
+            copied before later edits runs through nodes that the default
+            view prunes; plot with ``show_history=True`` to keep them.
         """
         self._controller.show_path(color)
         self._render()

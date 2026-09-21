@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_core::{
-    INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
-    Workspace, is_end_node, is_start_node,
+use gen_core::{Workspace, is_end_node, is_start_node};
+use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
+use gen_models::{
+    block_group::BlockGroup, db::GraphConnection, locus::GraphLocus, node::Node,
+    sequence::SequenceError,
 };
-use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
-use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
     ViewportState,
     geometry::{WorldPos, WorldRect},
@@ -256,81 +256,32 @@ pub fn create_gen_graph_widget<'a>(
     GraphWidget::with_renderer(renderer)
 }
 
-/// Compute which edges would be removed by `BlockGroup::prune_graph`.
+/// Compute lowlights from the normal pruning result when a canonical start exists.
 ///
-/// Mirrors the per-source-node, per-chromosome_index deduplication logic: for each
-/// chromosome_index appearing on outgoing edges of a node, the edge with the highest
-/// `created_on` is kept; all others are dimmed. Edges with
-/// `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` are always dimmed; edges with
-/// `NO_CHROMOSOME_INDEX` or `INDETERMINATE_CHROMOSOME_INDEX` are never dimmed.
-fn compute_pruned_edges(graph: &GenGraph) -> HashSet<(GraphNode, GraphNode)> {
-    let mut pruned: HashSet<(GraphNode, GraphNode)> = HashSet::new();
-
-    for node in graph.nodes() {
-        // chromosome_index -> (source, target, best_created_on)
-        let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
-
-        for (source_node, target_node, edge_weights) in graph.edges(node) {
-            for edge_weight in edge_weights {
-                let GraphEdge {
-                    chromosome_index,
-                    created_on,
-                    ..
-                } = *edge_weight;
-
-                if chromosome_index == NO_CHROMOSOME_INDEX
-                    || chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
-                {
-                    continue;
-                }
-                if chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
-                    pruned.insert((source_node, target_node));
-                    continue;
-                }
-                edges_by_ci
-                    .entry(chromosome_index)
-                    .and_modify(|(best_src, best_tgt, best_ts)| {
-                        if created_on > *best_ts {
-                            pruned.insert((*best_src, *best_tgt));
-                            *best_src = source_node;
-                            *best_tgt = target_node;
-                            *best_ts = created_on;
-                        } else {
-                            pruned.insert((source_node, target_node));
-                        }
-                    })
-                    .or_insert((source_node, target_node, created_on));
-            }
-        }
-    }
-
-    pruned
-}
-
-/// Find nodes that become inaccessible when all pruned edges are removed.
-///
-/// BFS from all start nodes following only non-pruned edges. Any node not reached
-/// is only reachable through pruned (lowlighted) edges and should be dimmed.
-fn compute_inaccessible_nodes(
+/// The visual graph retains every element so it can be dimmed rather than removed.
+/// Comparing it with a cloned, normally pruned graph keeps its lowlights exactly in
+/// sync with `BlockGroup::prune_graph`.
+fn compute_normal_pruning_lowlights(
     graph: &GenGraph,
-    pruned: &HashSet<(GraphNode, GraphNode)>,
-) -> Vec<GraphNode> {
-    let mut reachable: HashSet<GraphNode> = HashSet::new();
-    let mut queue: VecDeque<GraphNode> =
-        graph.nodes().filter(|n| is_start_node(n.node_id)).collect();
-    for &node in &queue {
-        reachable.insert(node);
-    }
+) -> (HashSet<(GraphNode, GraphNode)>, HashSet<GraphNode>) {
+    let mut pruned_graph = graph.clone();
+    BlockGroup::prune_graph(&mut pruned_graph);
 
-    while let Some(node) = queue.pop_front() {
-        for (src, tgt, _) in graph.edges(node) {
-            if !pruned.contains(&(src, tgt)) && reachable.insert(tgt) {
-                queue.push_back(tgt);
-            }
-        }
-    }
+    let dimmed_edges = graph
+        .all_edges()
+        .filter_map(|(source_node, target_node, _)| {
+            pruned_graph
+                .edge_weight(source_node, target_node)
+                .is_none()
+                .then_some((source_node, target_node))
+        })
+        .collect();
+    let dimmed_nodes = graph
+        .nodes()
+        .filter(|node| !pruned_graph.contains_node(*node))
+        .collect();
 
-    graph.nodes().filter(|n| !reachable.contains(n)).collect()
+    (dimmed_edges, dimmed_nodes)
 }
 
 /// Create a configured GraphController for a GenGraph with the standard theme and settings.
@@ -347,14 +298,31 @@ fn compute_inaccessible_nodes(
 pub fn create_gen_graph_controller(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
-    let pruned = compute_pruned_edges(&graph);
-    let inaccessible = compute_inaccessible_nodes(&graph, &pruned);
+    let (dimmed_edges, dimmed_nodes) = compute_normal_pruning_lowlights(&graph);
+    create_gen_graph_controller_with_lowlights(graph, dimmed_edges, dimmed_nodes)
+}
+
+/// Create a configured controller for graphs whose edges must remain fully visible.
+///
+/// Diff views already remove persistence-only edit-site marker edges and retain
+/// historical context, so applying current-path pruning would obscure changes.
+pub fn create_gen_graph_controller_without_dimming(
+    graph: GenGraph,
+) -> GraphController<GenGraph, GenGraphNodeSizer> {
+    create_gen_graph_controller_with_lowlights(graph, HashSet::new(), HashSet::new())
+}
+
+fn create_gen_graph_controller_with_lowlights(
+    graph: GenGraph,
+    dimmed_edges: HashSet<(GraphNode, GraphNode)>,
+    dimmed_nodes: HashSet<GraphNode>,
+) -> GraphController<GenGraph, GenGraphNodeSizer> {
     let node_sizer = GenGraphNodeSizer;
     let mut controller = GraphController::new(graph, node_sizer);
-    for edge in pruned {
+    for edge in dimmed_edges {
         controller.dim_edge(edge);
     }
-    for node in inaccessible {
+    for node in dimmed_nodes {
         controller.dim_node(node);
     }
     controller.set_detail_level(VisualDetail::Truncated);
@@ -834,7 +802,11 @@ pub fn locus_midpoint(locus: &GraphLocus) -> Option<(GraphNodeSlice, usize)> {
 mod tests {
     use std::path::PathBuf;
 
-    use gen_core::{HashId, PATH_START_NODE_ID, Strand};
+    use gen_core::{
+        HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
+        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand,
+    };
+    use gen_graph::GraphEdge;
     use gen_models::sample::Sample;
     use gen_tui::{
         geometry::WorldPos,
@@ -932,6 +904,110 @@ mod tests {
         let s = "hello world";
         let truncated = inner_truncation(s, 3);
         assert_eq!(truncated, NODE_GLYPH.to_string());
+    }
+
+    #[test]
+    fn test_pruned_edit_site_dims_inaccessible_nodes_and_edges() {
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let upstream = GraphNode {
+            node_id: HashId::convert_str("upstream"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let inaccessible = GraphNode {
+            node_id: HashId::convert_str("inaccessible"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let downstream = GraphNode {
+            node_id: HashId::convert_str("downstream"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let end = GraphNode {
+            node_id: PATH_END_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let edge = |chromosome_index| {
+            vec![GraphEdge {
+                edge_id: HashId::convert_str(&format!("edge-{chromosome_index}")),
+                source_strand: Strand::Forward,
+                target_strand: Strand::Forward,
+                chromosome_index,
+                phased: 0,
+                created_on: 0,
+            }]
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(start, upstream, edge(NO_CHROMOSOME_INDEX));
+        graph.add_edge(
+            upstream,
+            inaccessible,
+            edge(PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+        );
+        graph.add_edge(inaccessible, downstream, edge(NO_CHROMOSOME_INDEX));
+        graph.add_edge(downstream, end, edge(NO_CHROMOSOME_INDEX));
+
+        let controller = create_gen_graph_controller(graph);
+        let dimmed_edges: HashSet<(GraphNode, GraphNode)> =
+            controller.get_lowlights().iter().copied().collect();
+        let dimmed_nodes: HashSet<GraphNode> =
+            controller.get_node_lowlights().iter().copied().collect();
+
+        assert_eq!(
+            dimmed_edges,
+            HashSet::from([
+                (upstream, inaccessible),
+                (inaccessible, downstream),
+                (downstream, end),
+            ]),
+            "edges that require the -2 edge from the start should be dimmed"
+        );
+        assert_eq!(
+            dimmed_nodes,
+            HashSet::from([inaccessible, downstream, end]),
+            "nodes that require the -2 edge from the start should be dimmed"
+        );
+    }
+
+    #[test]
+    fn test_undimmed_controller_retains_pruned_graph_elements() {
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let target = GraphNode {
+            node_id: HashId::convert_str("diff-target"),
+            sequence_start: 0,
+            sequence_end: 1,
+        };
+        let edge = vec![GraphEdge {
+            edge_id: HashId::convert_str("diff-edit-site-edge"),
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
+            phased: 0,
+            created_on: 0,
+        }];
+        let mut graph = GenGraph::new();
+        graph.add_edge(start, target, edge);
+
+        let controller = create_gen_graph_controller_without_dimming(graph);
+
+        assert!(
+            controller.get_lowlights().is_empty(),
+            "undimmed controllers should retain diff context"
+        );
+        assert!(
+            controller.get_node_lowlights().is_empty(),
+            "undimmed controllers should not dim diff nodes"
+        );
     }
 
     #[test]

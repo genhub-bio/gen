@@ -75,15 +75,20 @@ impl PySample {
     /// colors : callable | dict | list, optional
     ///     Controls how annotation group entries are coloured when they are
     ///     auto-loaded from the repository. See ``Repository.plot`` for details.
-    #[pyo3(signature = (rows=None, cols=None, colors=None))]
+    /// show_history : bool, optional
+    ///     Keep retired edit-site and pruned edges in the graph, dimmed,
+    ///     instead of removing them along with the nodes only they reach.
+    ///     Defaults to ``False``.
+    #[pyo3(signature = (rows=None, cols=None, colors=None, show_history=false))]
     fn plot(
         slf: &Bound<'_, PySample>,
         rows: Option<u32>,
         cols: Option<u32>,
         colors: Option<PyObject>,
+        show_history: bool,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let ctrl = PyGraphController::for_sample(&slf.borrow().block_groups)?;
+        let ctrl = PyGraphController::for_sample(&slf.borrow().block_groups, show_history)?;
         let ctrl = Py::new(py, ctrl)?;
         build_widget(py, ctrl, rows, cols, colors)
     }
