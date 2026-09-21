@@ -742,8 +742,11 @@ impl GraphPage {
     ///
     /// Raises
     /// RuntimeError
-    ///     If no sequence graph is associated with this widget, or if no path
-    ///     exists for the sequence graph.
+    ///     If no sequence graph is associated with this widget, if no path
+    ///     exists for the sequence graph, or if the path cannot be traced
+    ///     through the plotted graph. A path copied before later edits runs
+    ///     through nodes the default view prunes; plot with
+    ///     ``show_history=True`` to keep them.
     /// ValueError
     ///     If ``color`` is not a recognised colour name or CSS hex string.
     pub fn show_path(&mut self, color: Option<&str>) -> PyResult<()> {
@@ -1394,8 +1397,11 @@ impl PyGraphController {
     ///
     /// Raises
     /// RuntimeError
-    ///     If no sequence graph is associated with this widget, or if no path
-    ///     exists for the sequence graph.
+    ///     If no sequence graph is associated with this widget, if no path
+    ///     exists for the sequence graph, or if the path cannot be traced
+    ///     through the plotted graph. A path copied before later edits runs
+    ///     through nodes the default view prunes; plot with
+    ///     ``show_history=True`` to keep them.
     /// ValueError
     ///     If ``color`` is not a recognised colour name or CSS hex string.
     #[pyo3(signature = (color=None))]
