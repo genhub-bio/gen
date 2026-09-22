@@ -1,7 +1,7 @@
 [package]
 name = "gen-models"
 description = "Models for the gen sequence graph and version control system."
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 repository = "https://github.com/genhub-bio/gen"
 homepage = "https://genhub.bio"
@@ -16,10 +16,10 @@ profiling = ["dep:tracing"]
 rand = "0.10.1"
 
 [dependencies]
-gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.3.0" }
-gen-core = { path = "../gen-core", version = "0.3.0" }
-gen-graph = { path = "../gen-graph", version = "0.3.0" }
-gen-models-macros = { path = "../gen-models-macros", version = "0.3.0" }
+gen-capnp-schemas = { path = "../gen-capnp-schemas", version = "0.3.1" }
+gen-core = { path = "../gen-core", version = "0.3.1" }
+gen-graph = { path = "../gen-graph", version = "0.3.1" }
+gen-models-macros = { path = "../gen-models-macros", version = "0.3.1" }
 cached = "0.55.1"
 capnp = { version = "0.24" }
 include_dir = "0.7.4"
