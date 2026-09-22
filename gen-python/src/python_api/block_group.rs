@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{collections::HashMap, fs};
 
 use r#gen::{
     commands::graph_operations::{
@@ -31,7 +31,7 @@ use super::{
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
     translation::build_translation_params,
-    utils::block_group_err_to_pyerr,
+    utils::{block_group_err_to_pyerr, resolve_user_path},
 };
 
 pub(crate) fn parse_sequence_kind(s: &str) -> PyResult<SequenceKind> {
@@ -505,6 +505,7 @@ impl PySequenceGraph {
     /// filename : str
     ///     Output file path.
     fn export_fasta(&self, filename: String) -> PyResult<()> {
+        let resolved_filename = resolve_user_path(&filename)?;
         let ctx = self.require_context("export_fasta()")?;
         let conn = ctx.graph().conn();
         export_fasta(
@@ -512,7 +513,7 @@ impl PySequenceGraph {
             ctx.workspace(),
             &self.collection_name,
             Some(&self.sample_name),
-            &PathBuf::from(&filename),
+            &resolved_filename,
             None,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export FASTA '{}': {e}", filename)))
@@ -527,13 +528,14 @@ impl PySequenceGraph {
     ///     Maximum node sequence length before splitting.
     #[pyo3(signature = (filename, node_max=None))]
     fn export_gfa(&self, filename: String, node_max: Option<i64>) -> PyResult<()> {
+        let resolved_filename = resolve_user_path(&filename)?;
         let ctx = self.require_context("export_gfa()")?;
         let conn = ctx.graph().conn();
         export_gfa(
             conn,
             ctx.workspace(),
             &self.collection_name,
-            &PathBuf::from(&filename),
+            &resolved_filename,
             &self.sample_name,
             node_max,
             None,
@@ -547,9 +549,10 @@ impl PySequenceGraph {
     /// filename : str
     ///     Output file path.
     fn export_genbank(&self, filename: String) -> PyResult<()> {
+        let resolved_filename = resolve_user_path(&filename)?;
         let ctx = self.require_context("export_genbank()")?;
         let conn = ctx.graph().conn();
-        let writer = fs::File::create(&filename).map_err(|e| {
+        let writer = fs::File::create(&resolved_filename).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create '{}': {e}", filename))
         })?;
         export_genbank(

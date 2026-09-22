@@ -1,10 +1,11 @@
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use r#gen::exports::{fasta::export_fasta, genbank::export_genbank, gfa::export_gfa};
 use gen_models::sample::Sample;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::PyRepository;
+use crate::python_api::utils::resolve_user_path;
 
 #[pymethods]
 impl PyRepository {
@@ -15,6 +16,7 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<()> {
+        let resolved_filename = resolve_user_path(&filename)?;
         let conn = self.context.graph().conn();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         export_fasta(
@@ -22,7 +24,7 @@ impl PyRepository {
             self.context.workspace(),
             &collection,
             sample.as_deref(),
-            &PathBuf::from(&filename),
+            &resolved_filename,
             None,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
@@ -36,6 +38,7 @@ impl PyRepository {
         node_max: Option<i64>,
         collection: Option<String>,
     ) -> PyResult<()> {
+        let resolved_filename = resolve_user_path(&filename)?;
         let conn = self.context.graph().conn();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
@@ -43,7 +46,7 @@ impl PyRepository {
             conn,
             self.context.workspace(),
             &collection,
-            &PathBuf::from(&filename),
+            &resolved_filename,
             &sample,
             node_max,
             None,
@@ -58,10 +61,11 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<()> {
+        let resolved_filename = resolve_user_path(&filename)?;
         let conn = self.context.graph().conn();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        let writer = fs::File::create(&filename).map_err(|e| {
+        let writer = fs::File::create(&resolved_filename).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create '{}': {e}", filename))
         })?;
         export_genbank(

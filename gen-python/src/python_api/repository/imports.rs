@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use r#gen::{
     fasta::FastaError,
     graphs::combinatorial_library::{SequencePart, parse_library},
@@ -19,6 +17,7 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use super::{PyRepository, run_operation_write};
 use crate::python_api::{
     block_group::PySequenceGraph, sample::PySample, sequence_part::PySequencePart,
+    utils::resolve_user_path,
 };
 
 #[pymethods]
@@ -31,25 +30,27 @@ impl PyRepository {
         shallow: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let resolved_filename = resolve_user_path(&filename)?;
+        let resolved_filename = resolved_filename.to_string_lossy().into_owned();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_operation_write(
             self,
             |ctx| {
-                let operation_summary = import_fasta(
-                    ctx,
-                    &filename,
-                    &collection,
-                    &sample,
-                    shallow,
-                    &[],
-                )
-                .map_err(|e| match e {
-                    FastaError::OperationError(OperationError::NoChanges) => {
-                        PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
-                    }
-                    _ => PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename)),
-                })?;
+                let operation_summary =
+                    import_fasta(ctx, &resolved_filename, &collection, &sample, shallow, &[])
+                        .map_err(|e| match e {
+                            FastaError::OperationError(OperationError::NoChanges) => {
+                                PyRuntimeError::new_err(format!(
+                                    "'{}': contents already exist",
+                                    filename
+                                ))
+                            }
+                            _ => PyRuntimeError::new_err(format!(
+                                "Failed to import '{}': {e}",
+                                filename
+                            )),
+                        })?;
                 Ok((
                     self.block_groups_in_sample(&collection, &sample),
                     operation_summary,
@@ -72,6 +73,8 @@ impl PyRepository {
         shallow: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let resolved_filename = resolve_user_path(&filename)?;
+        let resolved_filename = resolved_filename.to_string_lossy().into_owned();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
@@ -88,7 +91,7 @@ impl PyRepository {
                 })?;
                 let operation_summary = import_fasta(
                     ctx,
-                    &filename,
+                    &resolved_filename,
                     &collection,
                     &reference,
                     shallow,
@@ -121,18 +124,14 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
+        let resolved_filename = resolve_user_path(&filename)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_operation_write(
             self,
             |ctx| {
-                let operation_summary = import_gfa(
-                    ctx,
-                    &PathBuf::from(&filename),
-                    &collection,
-                    &sample,
-                )
-                .map_err(|e| match e {
+                let operation_summary = import_gfa(ctx, &resolved_filename, &collection, &sample)
+                    .map_err(|e| match e {
                     GFAImportError::OperationError(OperationError::NoChanges) => {
                         PyRuntimeError::new_err(format!("'{}': already exists", filename))
                     }
@@ -160,18 +159,20 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         use std::fs::File;
+        let resolved_filename = resolve_user_path(&filename)?;
+        let resolved_filename = resolved_filename.to_string_lossy().into_owned();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_operation_write(
             self,
             |ctx| {
                 let mut reader: Box<dyn std::io::Read> = if filename.ends_with(".gz") {
-                    let file = File::open(&filename).map_err(|e| {
+                    let file = File::open(&resolved_filename).map_err(|e| {
                         PyRuntimeError::new_err(format!("Failed to open '{}': {e}", filename))
                     })?;
                     Box::new(flate2::read::GzDecoder::new(file))
                 } else {
-                    Box::new(File::open(&filename).map_err(|e| {
+                    Box::new(File::open(&resolved_filename).map_err(|e| {
                         PyRuntimeError::new_err(format!("Failed to open '{}': {e}", filename))
                     })?)
                 };
@@ -182,8 +183,9 @@ impl PyRepository {
                     &sample,
                     gen_models::operations::OperationInfo {
                         files: vec![{
-                            let mut f =
-                                gen_models::operations::OperationFile::new(filename.clone());
+                            let mut f = gen_models::operations::OperationFile::new(
+                                resolved_filename.clone(),
+                            );
                             f.file_type = gen_models::file_types::FileTypes::GenBank;
                             f
                         }],
@@ -276,7 +278,11 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
-        let parts_list = parse_library(&parts, &library)
+        let resolved_parts = resolve_user_path(&parts)?;
+        let resolved_parts = resolved_parts.to_string_lossy().into_owned();
+        let resolved_library = resolve_user_path(&library)?;
+        let resolved_library = resolved_library.to_string_lossy().into_owned();
+        let parts_list = parse_library(&resolved_parts, &resolved_library)
             .map_err(|e| PyRuntimeError::new_err(format!("Problem parsing library files: {e}")))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
@@ -289,8 +295,8 @@ impl PyRepository {
                     &sample,
                     &library_name,
                     parts_list.clone(),
-                    Some(&parts),
-                    Some(&library),
+                    Some(&resolved_parts),
+                    Some(&resolved_library),
                 )
                 .map_err(|e| match e {
                     LibraryImportError::OperationError(OperationError::NoChanges) => {

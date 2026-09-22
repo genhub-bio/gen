@@ -1,8 +1,23 @@
-use std::{path::Path, str};
+use std::{
+    path::{Path, PathBuf},
+    str,
+};
+
+/// Resolve a user-supplied path relative to the process working directory.
+pub fn resolve_user_path(path: impl AsRef<Path>) -> PyResult<PathBuf> {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    std::env::current_dir()
+        .map(|current_directory| current_directory.join(path))
+        .map_err(|error| PyRuntimeError::new_err(format!("Failed to resolve path: {error}")))
+}
 
 use gen_models::block_group::BlockGroupError;
 use pyo3::{
-    exceptions::PyValueError,
+    exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
     types::{PyBytes, PyModule},
 };

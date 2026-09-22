@@ -15,7 +15,9 @@ use gen_models::{errors::OperationError, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
 use super::{PyRepository, run_operation_write};
-use crate::python_api::{sample::PySample, sequence_part::PySequencePart};
+use crate::python_api::{
+    sample::PySample, sequence_part::PySequencePart, utils::resolve_user_path,
+};
 
 #[pymethods]
 impl PyRepository {
@@ -28,6 +30,8 @@ impl PyRepository {
         region_name: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let resolved_filename = resolve_user_path(&filename)?;
+        let resolved_filename = resolved_filename.to_string_lossy().into_owned();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
@@ -38,7 +42,7 @@ impl PyRepository {
                     &sample,
                     &new_sample,
                     &region_name,
-                    &filename,
+                    &resolved_filename,
                     false,
                 )
                 .map_err(|e| match e {
@@ -74,19 +78,20 @@ impl PyRepository {
         new_sample: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let resolved_filename = resolve_user_path(&filename)?;
+        let resolved_filename = resolved_filename.to_string_lossy().into_owned();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
             |ctx| {
                 let operation_summary =
-                    update_with_gfa(ctx, &collection, &sample, &new_sample, &filename).map_err(
-                        |e| {
+                    update_with_gfa(ctx, &collection, &sample, &new_sample, &resolved_filename)
+                        .map_err(|e| {
                             PyRuntimeError::new_err(format!(
                                 "Failed to update from '{}': {e}",
                                 filename
                             ))
-                        },
-                    )?;
+                        })?;
                 Ok((
                     self.block_groups_in_sample(&collection, &new_sample),
                     operation_summary,
@@ -105,14 +110,18 @@ impl PyRepository {
         parent_sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let resolved_filename = resolve_user_path(&filename)?;
+        let resolved_filename = resolved_filename.to_string_lossy().into_owned();
+        let resolved_csv = resolve_user_path(&csv)?;
+        let resolved_csv = resolved_csv.to_string_lossy().into_owned();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
             |ctx| {
                 let operation_summary = update_with_gaf(
                     ctx,
-                    &filename,
-                    &csv,
+                    &resolved_filename,
+                    &resolved_csv,
                     &collection,
                     &sample,
                     parent_sample.as_deref(),
@@ -139,6 +148,8 @@ impl PyRepository {
         in_place: bool,
         collection: Option<String>,
     ) -> PyResult<Vec<PySample>> {
+        let resolved_filename = resolve_user_path(&filename)?;
+        let resolved_filename = resolved_filename.to_string_lossy().into_owned();
         let parent_samples = match reference {
             None => vec![],
             Some(ref obj) => {
@@ -157,7 +168,7 @@ impl PyRepository {
             |ctx| {
                 let (operation_summary, output_samples) = update_with_vcf(
                     ctx,
-                    &filename,
+                    &resolved_filename,
                     &collection,
                     genotype.clone().unwrap_or_default(),
                     sample.as_deref(),
@@ -199,11 +210,13 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         use std::fs::File;
+        let resolved_filename = resolve_user_path(&filename)?;
+        let resolved_filename = resolved_filename.to_string_lossy().into_owned();
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
             self,
             |ctx| {
-                let file = File::open(&filename).map_err(|e| {
+                let file = File::open(&resolved_filename).map_err(|e| {
                     PyRuntimeError::new_err(format!("Failed to open '{}': {e}", filename))
                 })?;
                 let operation_summary = update_with_genbank(
@@ -214,8 +227,9 @@ impl PyRepository {
                     create_missing,
                     &gen_models::operations::OperationInfo {
                         files: vec![{
-                            let mut f =
-                                gen_models::operations::OperationFile::new(filename.clone());
+                            let mut f = gen_models::operations::OperationFile::new(
+                                resolved_filename.clone(),
+                            );
                             f.file_type = gen_models::file_types::FileTypes::GenBank;
                             f
                         }],
@@ -324,7 +338,11 @@ impl PyRepository {
         parts: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
-        let parts_list = parse_library(&parts, &library)
+        let resolved_parts = resolve_user_path(&parts)?;
+        let resolved_parts = resolved_parts.to_string_lossy().into_owned();
+        let resolved_library = resolve_user_path(&library)?;
+        let resolved_library = resolved_library.to_string_lossy().into_owned();
+        let parts_list = parse_library(&resolved_parts, &resolved_library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_operation_write(
@@ -337,8 +355,8 @@ impl PyRepository {
                     &new_sample,
                     &path_name,
                     parts_list.clone(),
-                    Some(&parts),
-                    Some(&library),
+                    Some(&resolved_parts),
+                    Some(&resolved_library),
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
                 Ok((
