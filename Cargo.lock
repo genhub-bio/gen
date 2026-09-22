@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "gen"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "gen-annotations"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "gen-core",
  "gen-graph",
@@ -1869,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "gen-capnp-schemas"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "capnp",
  "capnpc",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "gen-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "capnp",
  "gen-capnp-schemas",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "gen-diff"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "gen-core",
  "gen-graph",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "gen-graph"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "gen-core",
  "interavl",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "gen-models"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cached",
@@ -1960,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "gen-models-macros"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1979,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "gen-sugiyama"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "log",
  "more-asserts",
@@ -1988,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "gen-tui"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "crossterm",
  "env_logger 0.10.2",
