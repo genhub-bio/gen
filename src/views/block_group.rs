@@ -7,7 +7,7 @@ use std::{
 use crossterm::event::{self, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use gen_core::{HashId, PATH_START_NODE_ID, Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, traits::Query};
+use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
     LineStyle,
     graph_view::{GraphView, GraphViewState},
@@ -23,7 +23,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Padding, Paragraph, Wrap},
 };
-use rusqlite::params;
 
 use crate::{
     progress_bar::{get_handler, get_time_elapsed_bar},
@@ -72,20 +71,14 @@ fn get_empty_graph() -> GenGraph {
 /// Get the most recent path for a block group and map it to GraphNodes in the current graph
 fn get_block_group_path_nodes(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: &gen_core::HashId,
     graph: &GenGraph,
 ) -> Result<Vec<gen_graph::GraphNode>, String> {
-    use gen_models::path::Path;
+    let path = BlockGroup::get_current_path(conn, block_group_id, None)
+        .map_err(|error| format!("Failed to query path: {error}"))?;
 
-    // Query the database for the most recent path for this block group
-    let path = Path::get(
-        conn,
-        "SELECT * FROM paths WHERE block_group_id = ?1 ORDER BY created_on DESC LIMIT 1",
-        rusqlite::params![block_group_id],
-    )
-    .map_err(|e| format!("Failed to query path: {}", e))?;
-
-    crate::views::helpers::project_path_nodes(conn, &path, graph)
+    crate::views::helpers::project_path_nodes(conn, workspace, &path, graph)
 }
 
 /// Node IDs in the currently active crawled neighborhood (excluding terminal start/end
@@ -128,8 +121,13 @@ pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     (window.0.saturating_sub(span), window.1.saturating_add(span))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps the neighborhood loader's database and view state explicit"
+)]
 fn load_annotation_groups_for_neighborhood(
     conn: &GraphConnection,
+    workspace: &Workspace,
     history_ref: Option<&str>,
     block_group: &BlockGroup,
     node_ids: &HashSet<HashId>,
@@ -140,6 +138,7 @@ fn load_annotation_groups_for_neighborhood(
     for entry in load_annotation_group_entries(conn, block_group, history_ref) {
         let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
+            workspace,
             history_ref,
             current_block_group: block_group,
             entry: &entry,
@@ -249,6 +248,7 @@ fn handle_annotation_toggle_requests(
                 let spans = match entry.map(|entry| {
                     load_annotations_for_group(&AnnotationGroupTrackRequest {
                         conn: ctx.conn,
+                        workspace: ctx.workspace,
                         history_ref: ctx.history_ref,
                         current_block_group: block_group,
                         entry,
@@ -283,6 +283,7 @@ fn handle_annotation_toggle_requests(
 /// overlay is now enabled.
 fn toggle_path_highlight(
     conn: &GraphConnection,
+    workspace: &Workspace,
     engine: &LayoutEngine<GenGraph>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
@@ -295,7 +296,8 @@ fn toggle_path_highlight(
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        let path_nodes = get_block_group_path_nodes(conn, block_group_id, engine.graph())?;
+        let path_nodes =
+            get_block_group_path_nodes(conn, workspace, block_group_id, engine.graph())?;
         set_path_overlay(overlays, style, path_nodes);
         Ok(true)
     }
@@ -417,24 +419,16 @@ pub fn view_block_group(
     }
 
     if let (Some(name), Some(sample_name)) = (name, sample_name.as_ref()) {
-        let block_group = BlockGroup::get(
-            conn,
-            "select * from block_groups where collection_name = ?1 AND sample_name = ?2 AND name = ?3",
-            params![collection_name, sample_name, name],
-        );
-
-        if block_group.is_err() {
-            panic!(
-                "No block group found with name {:?} and sample {:?} in collection {} ",
-                name,
-                sample_name.clone(),
-                collection_name
-            );
-        }
-
-        let block_group = block_group.unwrap();
+        let block_group =
+            BlockGroup::get_by_name(conn, collection_name, sample_name, &name, history_ref)
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "No block group found with name {:?} and sample {:?} in collection {} ",
+                        name, sample_name, collection_name
+                    )
+                });
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, &block_group.id, history_ref)?;
+        block_graph = BlockGroup::get_graph(conn, workspace, &block_group.id, history_ref)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
@@ -612,6 +606,7 @@ pub fn view_block_group(
                                 {
                                     match toggle_path_highlight(
                                         conn,
+                                        workspace,
                                         &graph_engine,
                                         block_group_id,
                                         Color::Red,
@@ -1221,6 +1216,7 @@ pub fn view_block_group(
                 explorer_state.active_annotation_groups.clear();
                 load_annotation_groups_for_neighborhood(
                     conn,
+                    workspace,
                     history_ref,
                     block_group,
                     &node_ids,
@@ -1239,7 +1235,7 @@ pub fn view_block_group(
         // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
             // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, new_block_group_id, history_ref)?;
+            block_graph = BlockGroup::get_graph(conn, workspace, new_block_group_id, history_ref)?;
             // Update the graph engine
             (graph_engine, graph_zoom_levels, graph_view_state) = create_annotated_gen_graph_engine(
                 block_graph.clone(),

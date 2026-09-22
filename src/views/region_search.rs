@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 
 use gen_core::{HashId, Strand, Workspace, region::Region};
-use gen_graph::GenGraph;
+use gen_graph::{GenGraph, GraphNode};
 #[cfg(test)]
 use gen_models::db::DbContext;
 #[cfg(test)]
@@ -17,8 +17,7 @@ use gen_models::{
     locus::GraphLocus,
     region::{GenRegionError, ResolvedGenRegion, ResolvedRegionKind},
 };
-use gen_tui::{LineStyle, graph_controller::GraphController, plotter::PathStyle};
-use petgraph::{graph::NodeIndex, visit::NodeIndexable};
+use gen_tui::{LineStyle, graph_view::GraphViewState, plotter::PathStyle};
 use ratatui::style::Color;
 
 use crate::views::{
@@ -26,7 +25,7 @@ use crate::views::{
         AnnotationSegment, AnnotationSpan, annotation_span_from_resolved_region,
         graph_locus_from_annotation_span,
     },
-    gen_graph_widget::{GenGraphNodeSizer, locus_midpoint},
+    gen_graph_widget::locus_midpoint,
     graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
 };
 #[cfg(test)]
@@ -157,7 +156,8 @@ fn fallback_locus_for_empty_span(
 }
 
 pub(super) fn activate_search_match(
-    graph_controller: &mut GraphController<GenGraph, GenGraphNodeSizer>,
+    view_state: &mut GraphViewState<GraphNode>,
+    graph: &GenGraph,
     overlays: &mut Vec<GraphOverlay>,
     search_match: &RegionSearchMatch,
     conn: &GraphConnection,
@@ -165,29 +165,20 @@ pub(super) fn activate_search_match(
 ) -> Result<(), String> {
     let span = annotation_span_from_resolved_region(conn, workspace, &search_match.region)?;
     let locus = if span.segments.is_empty() {
-        fallback_locus_for_empty_span(
-            &search_match.region,
-            conn,
-            workspace,
-            graph_controller.graph(),
-        )?
+        fallback_locus_for_empty_span(&search_match.region, conn, workspace, graph)?
     } else {
-        graph_locus_from_annotation_span(&span, graph_controller.graph())
+        graph_locus_from_annotation_span(&span, graph)
             .ok_or_else(|| "region did not map to a graph position".to_string())?
     };
     let (midpoint_slice, midpoint_offset) = locus_midpoint(&locus)
         .ok_or_else(|| "region did not map to a graph position".to_string())?;
-    let node_index = NodeIndex::new(<GenGraph as NodeIndexable>::to_index(
-        graph_controller.graph(),
-        midpoint_slice.block,
-    ));
     let node_length = midpoint_slice.block.length();
     let fraction = if node_length == 0 {
         0.5
     } else {
         (midpoint_offset as f64 / node_length as f64).clamp(0.0, 1.0)
     };
-    graph_controller.go_to_node(node_index, (fraction, 0.5));
+    view_state.go_to_node(midpoint_slice.block, (fraction, 0.5));
     replace_search_overlay(overlays, span);
     Ok(())
 }
@@ -264,9 +255,7 @@ pub(super) fn search_request_fixture() -> RegionSearchFixture {
 #[cfg(test)]
 mod tests {
     use gen_core::region::Region;
-    use gen_graph::GenGraph;
-    use gen_tui::plotter::PathStyle;
-    use petgraph::visit::NodeIndexable;
+    use gen_tui::{graph_view::GraphViewState, plotter::PathStyle};
     use ratatui::style::Color;
 
     use super::{
@@ -275,7 +264,6 @@ mod tests {
     };
     use crate::views::{
         annotation_track::{AnnotationSpan, annotation_span_from_resolved_region},
-        gen_graph_widget::create_gen_graph_controller,
         graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
     };
 
@@ -310,24 +298,23 @@ mod tests {
         assert_eq!(path_span.segments[0].start, 19);
         assert_eq!(path_span.segments[0].end, 30);
 
-        let mut controller = create_gen_graph_controller(request.graph.clone());
+        let mut view_state = GraphViewState::default();
         let mut overlays = Vec::new();
         activate_search_match(
-            &mut controller,
+            &mut view_state,
+            &request.graph,
             &mut overlays,
             &path_match,
             request.context.graph().conn(),
             request.workspace(),
         )
         .expect("should select and center the path match");
-        let selected_index = controller
+        let selected_node = view_state
             .cursor
-            .node_idx()
+            .node
             .expect("should select the resolved graph node");
-        let selected_node =
-            <&GenGraph as NodeIndexable>::from_index(&controller.graph(), selected_index.index());
         assert_eq!(selected_node.sequence_start, 0);
-        let (selected_fraction, _) = controller.cursor.fractional_pos();
+        let selected_fraction = view_state.cursor.fractional.0;
         assert!((selected_fraction - (24.0 / 34.0)).abs() < f64::EPSILON);
         assert_eq!(overlays.len(), 1);
         assert!(matches!(overlays[0].source, OverlaySource::Search));
@@ -379,18 +366,19 @@ mod tests {
     fn test_region_search_activates_zero_and_negative_points() {
         let request = search_request_fixture();
         let zero_match = match_for_query(&request, "chr1:0");
-        let mut zero_controller = create_gen_graph_controller(request.graph.clone());
+        let mut zero_view_state = GraphViewState::default();
         let mut zero_overlays = Vec::new();
 
         activate_search_match(
-            &mut zero_controller,
+            &mut zero_view_state,
+            &request.graph,
             &mut zero_overlays,
             &zero_match,
             request.context.graph().conn(),
             request.workspace(),
         )
         .expect("zero coordinate should navigate to the graph boundary");
-        assert!(zero_controller.cursor.node_idx().is_some());
+        assert!(zero_view_state.cursor.node.is_some());
         assert_eq!(zero_overlays.len(), 1);
         assert!(matches!(
             &zero_overlays[0].content,
@@ -398,17 +386,18 @@ mod tests {
         ));
 
         let negative_match = match_for_query(&request, "model-gene:-3");
-        let mut negative_controller = create_gen_graph_controller(request.graph.clone());
+        let mut negative_view_state = GraphViewState::default();
         let mut negative_overlays = Vec::new();
         activate_search_match(
-            &mut negative_controller,
+            &mut negative_view_state,
+            &request.graph,
             &mut negative_overlays,
             &negative_match,
             request.context.graph().conn(),
             request.workspace(),
         )
         .expect("negative model annotation coordinate should navigate upstream");
-        assert!(negative_controller.cursor.node_idx().is_some());
+        assert!(negative_view_state.cursor.node.is_some());
         assert_eq!(negative_overlays.len(), 1);
         assert!(matches!(
             &negative_overlays[0].content,

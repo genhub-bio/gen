@@ -6,7 +6,7 @@ use std::{
 
 use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_end_node, is_start_node,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_end_node, is_start_node,
 };
 use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
@@ -37,7 +37,7 @@ use ratatui::{
 use crate::views::{
     annotation_track::{
         AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
-        span_should_hide_in_truncated,
+        span_should_show_in_truncated,
     },
     graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
     inline_label_placement::draw_label_near_pos,
@@ -277,7 +277,33 @@ impl SequenceSource for &GraphConnection {
         start: i64,
         end: i64,
     ) -> Result<String, SequenceError> {
-        let sequences = Node::get_sequences_by_node_ids(self, &[node_id], None);
+        let database_path = self
+            .path()
+            .map(PathBuf::from)
+            .ok_or_else(|| SequenceError::Io("graph database has no file path".to_string()))?;
+        let workspace_path = database_path
+            .parent()
+            .and_then(|path| path.parent())
+            .ok_or_else(|| {
+                SequenceError::Io("graph database is not inside a workspace".to_string())
+            })?;
+        let workspace = Workspace::new(workspace_path);
+        let sequences = Node::get_sequences_by_node_ids(self, &workspace, &[node_id], None);
+        match sequences.get(&node_id) {
+            Some(seq) => seq.get_sequence(start, end),
+            None => Ok("?".repeat((end - start).max(0) as usize)),
+        }
+    }
+}
+
+impl<'a> SequenceSource for (&'a GraphConnection, &'a Workspace) {
+    fn get_node_sequence(
+        &self,
+        node_id: HashId,
+        start: i64,
+        end: i64,
+    ) -> Result<String, SequenceError> {
+        let sequences = Node::get_sequences_by_node_ids(self.0, self.1, &[node_id], None);
         match sequences.get(&node_id) {
             Some(seq) => seq.get_sequence(start, end),
             None => Ok("?".repeat((end - start).max(0) as usize)),
@@ -1632,7 +1658,7 @@ pub fn reapply_overlays<R>(
                 })
                 .filter(|span| {
                     detail_level != VisualDetail::Truncated
-                        || !span_should_hide_in_truncated(span, graph)
+                        || span_should_show_in_truncated(span, graph)
                 })
                 .map(|_| idx)
         })
@@ -1762,7 +1788,7 @@ pub fn draw_annotation_labels<R>(
             any_hidden = true;
             continue;
         }
-        if detail_level == VisualDetail::Truncated && span_should_hide_in_truncated(span, graph) {
+        if detail_level == VisualDetail::Truncated && !span_should_show_in_truncated(span, graph) {
             any_hidden = true;
             continue;
         }
@@ -1941,8 +1967,10 @@ mod tests {
         import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME).unwrap();
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
-        let (mut engine, _visual, _view_state) = create_gen_graph_engine(graph, conn);
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group_id, None).unwrap();
+        let (mut engine, _visual, _view_state) =
+            create_gen_graph_engine(graph, (conn, context.workspace()));
         let anchor = engine
             .default_anchor()
             .expect("circular genome graph should have nodes");
@@ -1963,8 +1991,10 @@ mod tests {
         import_gfa(&context, &gfa_path, &collection_name, Sample::DEFAULT_NAME).unwrap();
 
         let block_group_id = BlockGroup::get_id(&collection_name, Sample::DEFAULT_NAME, "", None);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
-        let (mut engine, _visual, _view_state) = create_gen_graph_engine(graph, conn);
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group_id, None).unwrap();
+        let (mut engine, _visual, _view_state) =
+            create_gen_graph_engine(graph, (conn, context.workspace()));
         let anchor = engine
             .default_anchor()
             .expect("multiple-cycle graph should have nodes");
@@ -2128,6 +2158,7 @@ mod tests {
             collection,
             Sample::DEFAULT_NAME,
             false,
+            &[],
         )
         .unwrap();
         update_with_vcf(
@@ -2141,8 +2172,10 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(conn, collection, "SAMPLE1", None).unwrap();
-        let (mut engine, zoom_levels, mut view_state) = create_gen_graph_engine(gen_graph, conn);
+        let gen_graph =
+            Sample::get_graph(conn, context.workspace(), collection, "SAMPLE1", None).unwrap();
+        let (mut engine, zoom_levels, mut view_state) =
+            create_gen_graph_engine(gen_graph, (conn, context.workspace()));
         let visual = &zoom_levels[view_state.zoom_index].1;
 
         let mut terminal = create_test_terminal(132, 43);
@@ -2172,8 +2205,10 @@ mod tests {
         import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME).unwrap();
 
         let block_group_id = BlockGroup::get_id(collection_name, Sample::DEFAULT_NAME, "", None);
-        let graph = BlockGroup::get_graph(conn, &block_group_id, None).unwrap();
-        let (mut engine, zoom_levels, mut view_state) = create_gen_graph_engine(graph, conn);
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group_id, None).unwrap();
+        let (mut engine, zoom_levels, mut view_state) =
+            create_gen_graph_engine(graph, (conn, context.workspace()));
         let visual = &zoom_levels[view_state.zoom_index].1;
 
         let mut terminal = create_test_terminal(132, 43);
