@@ -173,6 +173,22 @@ class RemoteTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             gen.clone(remote_url, path=42)
 
+    @unittest.skipIf(
+        os.name == "nt", "native file remote workflows are currently tested on Unix"
+    )
+    def test_clone_records_the_given_committer(self):
+        self.import_sequence(self.repository, "base")
+        cloned = gen.clone(
+            (self.root / "local").as_uri(),
+            path=str(self.root / "identified-clone"),
+            committer="Ada Lovelace",
+            email="ada@example.com",
+        )
+        self.import_sequence(cloned, "extra")
+        operation = cloned.get_operations()[0]
+        self.assertEqual(operation.committer, "Ada Lovelace")
+        self.assertEqual(operation.email, "ada@example.com")
+
     def test_checkout_creates_branch_and_accepts_names_and_objects(self):
         self.import_sequence(self.repository, "base")
         original_head = self.repository.current_branch.head
