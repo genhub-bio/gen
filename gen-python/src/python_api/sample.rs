@@ -88,7 +88,7 @@ impl PySample {
         show_history: bool,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let ctrl = PyGraphController::for_sample(&slf.borrow().block_groups, show_history)?;
+        let ctrl = PyGraphController::for_sample(&slf.borrow().block_groups)?;
         let ctrl = Py::new(py, ctrl)?;
         build_widget(py, ctrl, rows, cols, colors)
     }

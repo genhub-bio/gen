@@ -1,4 +1,4 @@
-use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Workspace};
 use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_models::{db::GraphConnection, path::Path};
 use ratatui::{
@@ -10,11 +10,12 @@ use ratatui::{
 /// `GraphNode`s (the start/end sentinel nodes are never real path content).
 pub fn project_path_nodes(
     conn: &GraphConnection,
+    workspace: &Workspace,
     path: &Path,
     graph: &GenGraph,
 ) -> Result<Vec<GraphNode>, String> {
     let path_blocks = path
-        .blocks(conn, None)
+        .blocks(conn, workspace, None)
         .map_err(|err| format!("Failed to load path blocks: {err}"))?;
 
     let projected_path = project_path(graph, &path_blocks);

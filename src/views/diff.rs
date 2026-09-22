@@ -4,6 +4,7 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyCode};
+use gen_core::Workspace;
 use gen_diff::{
     graph::DiffGenGraph,
     operations::{BlockGroupChangeKind, BlockGroupDiff, OperationDiff},
@@ -68,7 +69,11 @@ enum DiffPanel {
     Graph,
 }
 
-pub fn view_diff(conn: &GraphConnection, diff: &OperationDiff) -> Result<(), io::Error> {
+pub fn view_diff(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    diff: &OperationDiff,
+) -> Result<(), io::Error> {
     let samples = collect_samples(&diff.diff_graph);
 
     if samples.is_empty() {
@@ -92,7 +97,7 @@ pub fn view_diff(conn: &GraphConnection, diff: &OperationDiff) -> Result<(), io:
     let panel_styles = PanelStyles::default();
 
     let (mut graph_engine, mut graph_zoom_levels, mut graph_view_state) =
-        create_gen_graph_engine(current_component.render.graph.clone(), conn);
+        create_gen_graph_engine(current_component.render.graph.clone(), (conn, workspace));
     apply_diff_highlights(&mut graph_view_state, &current_component.render);
 
     loop {
@@ -103,7 +108,7 @@ pub fn view_diff(conn: &GraphConnection, diff: &OperationDiff) -> Result<(), io:
         {
             current_component = selected_component;
             (graph_engine, graph_zoom_levels, graph_view_state) =
-                create_gen_graph_engine(current_component.render.graph.clone(), conn);
+                create_gen_graph_engine(current_component.render.graph.clone(), (conn, workspace));
             apply_diff_highlights(&mut graph_view_state, &current_component.render);
         }
 
@@ -228,6 +233,53 @@ pub fn view_diff(conn: &GraphConnection, diff: &OperationDiff) -> Result<(), io:
         }
     }
 
+    Ok(())
+}
+
+/// Display one annotated graph diff using the current graph-view API.
+pub fn view_diff_graph(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    diff_graph: &DiffGenGraph,
+    title: String,
+) -> Result<(), io::Error> {
+    let component = build_diff_graph_component(diff_graph, title);
+    let (mut graph_engine, zoom_levels, mut view_state) =
+        create_gen_graph_engine(component.graph.clone(), (conn, workspace));
+    apply_diff_highlights(&mut view_state, &component);
+    let mut session = TuiSession::enter()?;
+    let terminal = session.terminal_mut();
+
+    loop {
+        terminal.draw(|frame| {
+            let areas = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(frame.area());
+            let block = panel_block(
+                component.title.clone(),
+                &PanelFocus::new(DiffPanel::Graph),
+                DiffPanel::Graph,
+                PanelStyles::default(),
+            );
+            let canvas = block.inner(areas[0]);
+            frame.render_widget(block, areas[0]);
+            let renderer = &zoom_levels[view_state.zoom_index].1;
+            let view = GraphView::new(&mut graph_engine, renderer)
+                .style(Style::default().bg(current_theme()[0x00]));
+            frame.render_stateful_widget(view, canvas, &mut view_state);
+            render_status_bar(frame, areas[1], "*←→↑↓* pan | *+/-* zoom | *q/esc* quit");
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                break;
+            }
+            let _ = view_state.handle_key_event(key);
+        }
+    }
     Ok(())
 }
 
