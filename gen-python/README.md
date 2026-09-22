@@ -46,6 +46,11 @@ including `pathlib.Path`. The destination must be new or an empty directory.
 Omitting `path` creates a directory named after the remote beneath the current
 directory.
 
+`gen.Repository(path, committer=None, email=None)` and `gen.clone(...)` take optional `committer`
+and `email` arguments, applied once at construction or clone time. Both must be non-empty when
+given. They appear as `committer` and `email` on the operations recorded from then on; without them
+operations are recorded as `gen`.
+
 `checkout(branch)` accepts a branch name or a `Branch` object. Use
 `checkout("experiment", create=True)` to create a branch at the current HEAD and
 switch to it in one call; it raises an error if that branch already exists.
