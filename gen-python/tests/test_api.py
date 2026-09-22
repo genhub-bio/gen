@@ -25,6 +25,29 @@ class RepositoryTestCase(unittest.TestCase):
 
 
 class GeneralApiTests(RepositoryTestCase):
+    def test_repository_records_the_given_committer(self):
+        repository = gen.Repository(
+            str(self.root / "identified"),
+            committer="Ada Lovelace",
+            email="ada@example.com",
+        )
+        repository.import_fasta(str(FIXTURES / "simple.fa"))
+        operation = repository.get_operations()[0]
+        self.assertEqual(operation.committer, "Ada Lovelace")
+        self.assertEqual(operation.email, "ada@example.com")
+
+    def test_repository_committer_defaults_without_arguments(self):
+        self.repository.import_fasta(str(FIXTURES / "simple.fa"))
+        operation = self.repository.get_operations()[0]
+        self.assertEqual(operation.committer, "gen")
+        self.assertEqual(operation.email, "gen@genhub.bio")
+
+    def test_repository_rejects_empty_committer(self):
+        with self.assertRaises(ValueError):
+            gen.Repository(str(self.root / "empty-name"), committer="")
+        with self.assertRaises(ValueError):
+            gen.Repository(str(self.root / "empty-email"), email="")
+
     def test_sample_properties_keep_indexing_and_iteration(self):
         sample = self.repository.import_fasta(str(FIXTURES / "simple.fa"))
         self.assertEqual(

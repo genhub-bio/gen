@@ -321,8 +321,9 @@ mod tests {
             let local_parent = tempdir().expect("should create local parent directory");
             let local_path = local_parent.path().join("local");
             let remote_url = format!("file://{}", remote_dir.path().display());
-            let mut local_repository = clone_repository(python, &remote_url, Some(local_path))
-                .expect("should clone remote repository");
+            let mut local_repository =
+                clone_repository(python, &remote_url, Some(local_path), None, None)
+                    .expect("should clone remote repository");
 
             commit_collection(&local_repository, "pushed");
             let remote = local_repository
