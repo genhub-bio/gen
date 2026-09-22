@@ -4,7 +4,7 @@ use std::{
 };
 
 use crossterm::event::{self, KeyCode};
-use gen_core::PATH_START_NODE_ID;
+use gen_core::{PATH_START_NODE_ID, Workspace};
 use gen_diff::operations::{
     BlockGroupChangeKind, BlockGroupDiff, DiffRange, collect_operation_diff,
 };
@@ -182,6 +182,7 @@ fn build_graph_view<'a>(
     selected_entry: usize,
     empty_graph: &GenGraph,
     conn: &'a gen_models::db::GraphConnection,
+    workspace: &'a Workspace,
 ) -> (
     LayoutEngine<GenGraph>,
     ZoomLevels<'a>,
@@ -189,11 +190,11 @@ fn build_graph_view<'a>(
 ) {
     if let Some(component) = resolve_current_component(samples, entries, selected_entry) {
         let (engine, zoom_levels, mut view_state) =
-            create_gen_graph_engine(component.render.graph.clone(), conn);
+            create_gen_graph_engine(component.render.graph.clone(), (conn, workspace));
         apply_diff_highlights(&mut view_state, &component.render);
         (engine, zoom_levels, view_state)
     } else {
-        create_gen_graph_engine(empty_graph.clone(), conn)
+        create_gen_graph_engine(empty_graph.clone(), (conn, workspace))
     }
 }
 
@@ -313,7 +314,7 @@ pub fn view_operations(
     let mut entries: Vec<ExplorerEntry> = Vec::new();
     let mut selected_entry = 0usize;
     let (mut graph_engine, mut graph_zoom_levels, mut graph_view_state) =
-        create_gen_graph_engine(empty_graph.clone(), conn);
+        create_gen_graph_engine(empty_graph.clone(), (conn, context.workspace()));
 
     let mut view_graph = false;
     let mut graph_view_focus = GraphViewFocus::List;
@@ -555,6 +556,7 @@ pub fn view_operations(
                                         selected_entry,
                                         &empty_graph,
                                         conn,
+                                        context.workspace(),
                                     );
                             }
                         }
@@ -580,6 +582,7 @@ pub fn view_operations(
                                         selected_entry,
                                         &empty_graph,
                                         conn,
+                                        context.workspace(),
                                     );
                             }
                         }
@@ -604,6 +607,7 @@ pub fn view_operations(
                                 selected_entry,
                                 &empty_graph,
                                 conn,
+                                context.workspace(),
                             );
                         }
                         _ => {}
@@ -629,6 +633,7 @@ pub fn view_operations(
                                                 selected_entry,
                                                 &empty_graph,
                                                 conn,
+                                                context.workspace(),
                                             );
                                     }
                                 }
@@ -644,6 +649,7 @@ pub fn view_operations(
                                                 selected_entry,
                                                 &empty_graph,
                                                 conn,
+                                                context.workspace(),
                                             );
                                     }
                                 }
@@ -665,6 +671,7 @@ pub fn view_operations(
                                                 selected_entry,
                                                 &empty_graph,
                                                 conn,
+                                                context.workspace(),
                                             );
                                     }
                                 }
@@ -687,6 +694,7 @@ pub fn view_operations(
                                                 selected_entry,
                                                 &empty_graph,
                                                 conn,
+                                                context.workspace(),
                                             );
                                     }
                                 }
@@ -864,8 +872,8 @@ mod tests {
         let main_commit = history
             .commit_all("main")
             .expect("should commit main state");
-        history
-            .merge(&CommitRef("feature".to_string()))
+        graph
+            .with_transaction(|| history.merge(&CommitRef("feature".to_string())))
             .expect("should merge feature branch");
         let merge_commit = history
             .current_head()

@@ -6,7 +6,7 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use gen_core::HashId;
+use gen_core::{HashId, Workspace};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
@@ -39,10 +39,11 @@ use crate::views::{
 /// Get path nodes for a path and map it to GraphNodes in the current graph
 fn get_path_nodes(
     conn: &GraphConnection,
+    workspace: &Workspace,
     path: &Path,
     graph: &GenGraph,
 ) -> std::io::Result<Vec<gen_graph::GraphNode>> {
-    crate::views::helpers::project_path_nodes(conn, path, graph).map_err(Error::other)
+    crate::views::helpers::project_path_nodes(conn, workspace, path, graph).map_err(Error::other)
 }
 
 #[derive(Debug)]
@@ -82,6 +83,7 @@ pub struct InlineGenGraphState<'a> {
     view_state: GraphViewState<GraphNode>,
     paths: Vec<Vec<gen_graph::GraphNode>>,
     conn: &'a GraphConnection,
+    workspace: &'a Workspace,
     block_group_id: Option<HashId>,
     history_ref: Option<&'a str>,
     /// Annotation and path overlays currently loaded, ready for highlight + label rendering.
@@ -98,10 +100,11 @@ impl<'a> InlineGenGraphState<'a> {
     pub fn new(
         graph: &GenGraph,
         conn: &'a GraphConnection,
+        workspace: &'a Workspace,
         block_group_id: Option<HashId>,
         history_ref: Option<&'a str>,
     ) -> Self {
-        let zoom_levels = build_zoom_levels(conn);
+        let zoom_levels = build_zoom_levels((conn, workspace));
         let engine = LayoutEngine::new(graph.clone());
         let mut view_state = GraphViewState::default();
         gen_graph_widget::apply_zoom_level(&mut view_state, DEFAULT_ZOOM_LEVEL, &zoom_levels);
@@ -113,6 +116,7 @@ impl<'a> InlineGenGraphState<'a> {
             view_state,
             paths,
             conn,
+            workspace,
             block_group_id,
             history_ref,
             overlays: Vec::new(),
@@ -124,7 +128,7 @@ impl<'a> InlineGenGraphState<'a> {
 
     /// Add a path to the widget, starting from a Path object
     pub fn add_path(&mut self, path: &Path, conn: &'a GraphConnection) -> Result<()> {
-        let path_nodes = get_path_nodes(conn, path, self.engine.graph())?;
+        let path_nodes = get_path_nodes(conn, self.workspace, path, self.engine.graph())?;
         self.paths.push(path_nodes);
         Ok(())
     }
@@ -142,6 +146,7 @@ impl<'a> InlineGenGraphState<'a> {
         for entry in load_annotation_group_entries(conn, &block_group, self.history_ref) {
             let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
                 conn,
+                workspace: self.workspace,
                 history_ref: self.history_ref,
                 current_block_group: &block_group,
                 entry: &entry,
@@ -198,11 +203,12 @@ fn maybe_reload_annotation_groups(state: &mut InlineGenGraphState) -> bool {
 ///
 pub fn show_inline_gen_graph_widget(
     conn: &GraphConnection,
+    workspace: &Workspace,
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
 ) -> Result<bool> {
-    show_inline_widget(conn, graph, paths, height, None, None)
+    show_inline_widget(conn, workspace, graph, paths, height, None, None)
 }
 
 /// Display an inline widget for a `BlockGroup`'s graph, with annotations loaded.
@@ -210,14 +216,17 @@ pub fn show_inline_gen_graph_widget(
 /// See [`show_inline_gen_graph_widget`] for controls and return value.
 pub fn show_inline_block_group_widget(
     conn: &GraphConnection,
+    workspace: &Workspace,
     block_group_id: HashId,
     paths: Vec<Path>,
     height: u16,
     history_ref: Option<&str>,
 ) -> Result<bool> {
-    let graph = BlockGroup::get_graph(conn, &block_group_id, history_ref).map_err(Error::other)?;
+    let graph = BlockGroup::get_graph(conn, workspace, &block_group_id, history_ref)
+        .map_err(Error::other)?;
     show_inline_widget(
         conn,
+        workspace,
         &graph,
         paths,
         height,
@@ -228,6 +237,7 @@ pub fn show_inline_block_group_widget(
 
 fn show_inline_widget(
     conn: &GraphConnection,
+    workspace: &Workspace,
     graph: &GenGraph,
     paths: Vec<Path>,
     height: u16,
@@ -242,7 +252,8 @@ fn show_inline_widget(
 
     match terminal_result {
         Ok(mut terminal) => {
-            let mut state = InlineGenGraphState::new(graph, conn, block_group_id, history_ref);
+            let mut state =
+                InlineGenGraphState::new(graph, conn, workspace, block_group_id, history_ref);
             for path in paths {
                 state.add_path(&path, conn)?;
             }
@@ -482,7 +493,8 @@ mod tests {
         };
         graph.add_node(node);
 
-        let state = InlineGenGraphState::new(&graph, &conn, None, None);
+        let workspace = gen_core::Workspace::from_current_dir();
+        let state = InlineGenGraphState::new(&graph, &conn, &workspace, None, None);
         assert_eq!(state.view_state.zoom_index, DEFAULT_ZOOM_LEVEL);
     }
 }
