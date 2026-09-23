@@ -75,6 +75,67 @@ impl<NodeId> ExternalEdge<NodeId> {
     }
 }
 
+/// Grows a domain graph `G` on demand as a crawl reaches a node whose neighbours aren't yet
+/// loaded. This is the one seam through which a crawl ever touches whatever backs `G` -
+/// gen-tui itself never needs to know how (or whether) a node's edges get fetched.
+pub trait GraphSource<G: GraphBase> {
+    /// Ensure `node`'s full neighbourhood (both directions) is present in `graph`, mutating it
+    /// in place. Idempotent - a no-op once `node` is already loaded. Returns whether the call
+    /// added anything.
+    fn ensure_loaded(&mut self, graph: &mut G, node: G::NodeId) -> bool;
+}
+
+/// A source for a graph that is already fully loaded in memory, so a crawl never needs to grow
+/// `G` - a permanent no-op. The default source for [`crate::layout_engine::LayoutEngine`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EagerSource;
+
+impl<G: GraphBase> GraphSource<G> for EagerSource {
+    fn ensure_loaded(&mut self, _graph: &mut G, _node: G::NodeId) -> bool {
+        false
+    }
+}
+
+/// Any `FnMut(&mut G, G::NodeId) -> bool` works as a source too, for callers who would rather
+/// pass a closure than name a type.
+impl<G, F> GraphSource<G> for F
+where
+    G: GraphBase,
+    F: FnMut(&mut G, G::NodeId) -> bool,
+{
+    fn ensure_loaded(&mut self, graph: &mut G, node: G::NodeId) -> bool {
+        self(graph, node)
+    }
+}
+
+/// The domain graph paired with its lazy-loading source for the duration of a crawl - bundled
+/// so the crawl functions below take one "the graph, however it gets loaded" parameter instead
+/// of two.
+pub struct GraphCursor<'a, G, S> {
+    graph: &'a mut G,
+    source: &'a mut S,
+}
+
+impl<'a, G, S> GraphCursor<'a, G, S>
+where
+    G: GraphBase,
+    S: GraphSource<G>,
+{
+    pub fn new(graph: &'a mut G, source: &'a mut S) -> Self {
+        Self { graph, source }
+    }
+
+    /// Borrow the underlying domain graph for reads that don't need to trigger loading.
+    pub fn graph(&self) -> &G {
+        self.graph
+    }
+
+    /// Ensure `node`'s full neighbourhood is loaded. See [`GraphSource::ensure_loaded`].
+    fn ensure_loaded(&mut self, node: G::NodeId) -> bool {
+        self.source.ensure_loaded(self.graph, node)
+    }
+}
+
 /// A size-independent window selected by [`neighborhood`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuralSubgraph<NodeId> {
@@ -91,21 +152,26 @@ pub struct StructuralSubgraph<NodeId> {
 }
 
 /// Select up to `node_budget` nodes around `anchor`, including internal and boundary edges.
-pub fn neighborhood<G>(
+/// `cursor` is consulted (via [`GraphSource::ensure_loaded`]) whenever the crawl needs a node's
+/// neighbours; pass an [`EagerSource`]-backed cursor for a graph that is already fully loaded.
+pub fn neighborhood<G, S>(
     anchor: G::NodeId,
     node_budget: usize,
-    original_graph: &G,
+    cursor: &mut GraphCursor<G, S>,
     forced_include: Option<G::NodeId>,
     wormhole_targets: &WormholeTargets<G::NodeId>,
     preferred_doors: &PreferredWormholeDoors<G::NodeId>,
 ) -> Result<StructuralSubgraph<G::NodeId>, String>
 where
-    G: GraphBase + NodeIndexable,
+    G: GraphBase,
     G::NodeId: Copy + Eq + Hash + Ord,
     for<'b> &'b G:
         IntoNodeIdentifiers<NodeId = G::NodeId> + IntoNeighborsDirected<NodeId = G::NodeId>,
+    S: GraphSource<G>,
 {
-    if !original_graph
+    cursor.ensure_loaded(anchor);
+    if !cursor
+        .graph()
         .node_identifiers()
         .any(|node_id| node_id == anchor)
     {
@@ -115,13 +181,25 @@ where
     let selected = crawl_neighborhood(
         anchor,
         node_budget,
-        original_graph,
+        cursor,
         forced_include,
         wormhole_targets,
     );
+    // Every selected node's neighbours are read below to find in-window edges and boundary
+    // doors; make sure they are loaded regardless of exactly which nodes `crawl_neighborhood`
+    // itself happened to expand along the way (e.g. a zero-budget crawl never touches its own
+    // seed's neighbours).
+    for &node_id in &selected {
+        cursor.ensure_loaded(node_id);
+    }
+    let graph = cursor.graph();
 
+    // Sorted by the domain node's own identity, not by wherever it landed in the underlying
+    // graph structure - so window order is reproducible regardless of insertion order, which
+    // a lazily-loaded graph never guarantees (and even an eagerly-loaded one only guaranteed
+    // by an explicit whole-graph re-sort this crate no longer performs).
     let mut nodes: Vec<G::NodeId> = selected.iter().copied().collect();
-    nodes.sort_by_key(|&node_id| NodeIndexable::to_index(original_graph, node_id));
+    nodes.sort();
 
     // Domain edges with both endpoints inside the window. Walking the outgoing neighbours of
     // the selected nodes keeps this bounded by the window rather than the whole graph.
@@ -129,18 +207,13 @@ where
     // endpoints being in the window is enough to include them.
     let mut edges: Vec<(G::NodeId, G::NodeId)> = Vec::new();
     for &node_id in &selected {
-        for successor in original_graph.neighbors_directed(node_id, Direction::Outgoing) {
+        for successor in graph.neighbors_directed(node_id, Direction::Outgoing) {
             if selected.contains(&successor) {
                 edges.push((node_id, successor));
             }
         }
     }
-    edges.sort_by_key(|&(source, target)| {
-        (
-            NodeIndexable::to_index(original_graph, source),
-            NodeIndexable::to_index(original_graph, target),
-        )
-    });
+    edges.sort();
     edges.dedup();
 
     // Collapse each side of a boundary node to one door. Reuse a valid preferred target;
@@ -150,7 +223,7 @@ where
         for (direction, exits_toward_successor) in
             [(Direction::Outgoing, true), (Direction::Incoming, false)]
         {
-            let mut candidates: Vec<G::NodeId> = original_graph
+            let mut candidates: Vec<G::NodeId> = graph
                 .neighbors_directed(node_id, direction)
                 .filter(|neighbor| !selected.contains(neighbor))
                 .collect::<HashSet<_>>()
@@ -159,7 +232,7 @@ where
             if candidates.is_empty() {
                 continue;
             }
-            candidates.sort_by_key(|&neighbor| NodeIndexable::to_index(original_graph, neighbor));
+            candidates.sort();
 
             let preferred = preferred_doors
                 .get(&(node_id, exits_toward_successor))
@@ -181,12 +254,7 @@ where
             });
         }
     }
-    external_edges.sort_by_key(|edge| {
-        (
-            NodeIndexable::to_index(original_graph, edge.boundary),
-            NodeIndexable::to_index(original_graph, edge.target),
-        )
-    });
+    external_edges.sort_by_key(|edge| (edge.boundary, edge.target));
 
     Ok(StructuralSubgraph {
         anchor,
@@ -338,20 +406,22 @@ where
 ///
 /// Incoming passes start from the full forward reach so they can discover reconverging branches.
 /// `forced_include` is added outside the budget, while known wormhole targets remain boundaries.
-fn crawl_neighborhood<G>(
+fn crawl_neighborhood<G, S>(
     anchor: G::NodeId,
     node_budget: usize,
-    original_graph: &G,
+    cursor: &mut GraphCursor<G, S>,
     forced_include: Option<G::NodeId>,
     wormhole_targets: &WormholeTargets<G::NodeId>,
 ) -> HashSet<G::NodeId>
 where
-    G: GraphBase + NodeIndexable,
+    G: GraphBase,
     for<'b> &'b G: IntoNeighborsDirected<NodeId = G::NodeId>,
-    G::NodeId: Copy + Eq + Hash,
+    G::NodeId: Copy + Eq + Hash + Ord,
+    S: GraphSource<G>,
 {
     let mut visited: HashSet<G::NodeId> = HashSet::from([anchor]);
     if let Some(forced) = forced_include {
+        cursor.ensure_loaded(forced);
         visited.insert(forced);
     }
 
@@ -365,14 +435,14 @@ where
 
         let forward_seed: Vec<G::NodeId> = {
             let mut nodes: Vec<G::NodeId> = visited.iter().copied().collect();
-            nodes.sort_by_key(|&node_id| NodeIndexable::to_index(original_graph, node_id));
+            nodes.sort();
             nodes
         };
         directional_bfs(
             &mut visited,
             forward_seed,
             &mut forward_budget,
-            original_graph,
+            cursor,
             Direction::Outgoing,
             wormhole_targets,
             anchor,
@@ -383,14 +453,14 @@ where
         // Seed from the full reach to find predecessors and reconverging branches.
         let backward_seed: Vec<G::NodeId> = {
             let mut nodes: Vec<G::NodeId> = visited.iter().copied().collect();
-            nodes.sort_by_key(|&node_id| NodeIndexable::to_index(original_graph, node_id));
+            nodes.sort();
             nodes
         };
         directional_bfs(
             &mut visited,
             backward_seed,
             &mut backward_budget,
-            original_graph,
+            cursor,
             Direction::Incoming,
             wormhole_targets,
             anchor,
@@ -407,23 +477,28 @@ where
 }
 
 /// Crawl breadth-first in one direction, decrementing `budget` for each new node.
-fn directional_bfs<G>(
+fn directional_bfs<G, S>(
     visited: &mut HashSet<G::NodeId>,
     mut current_shell: Vec<G::NodeId>,
     budget: &mut usize,
-    original_graph: &G,
+    cursor: &mut GraphCursor<G, S>,
     direction: Direction,
     wormhole_targets: &WormholeTargets<G::NodeId>,
     anchor: G::NodeId,
 ) where
-    G: GraphBase + NodeIndexable,
+    G: GraphBase,
     for<'b> &'b G: IntoNeighborsDirected<NodeId = G::NodeId>,
-    G::NodeId: Copy + Eq + Hash,
+    G::NodeId: Copy + Eq + Hash + Ord,
+    S: GraphSource<G>,
 {
     while !current_shell.is_empty() && *budget > 0 {
+        for &node_id in &current_shell {
+            cursor.ensure_loaded(node_id);
+        }
+        let graph = cursor.graph();
         let mut candidates: Vec<G::NodeId> = current_shell
             .iter()
-            .flat_map(|&node_id| original_graph.neighbors_directed(node_id, direction))
+            .flat_map(|&node_id| graph.neighbors_directed(node_id, direction))
             .filter(|neighbor| {
                 !visited.contains(neighbor)
                     && (*neighbor == anchor || !wormhole_targets.contains_key(neighbor))
@@ -432,8 +507,9 @@ fn directional_bfs<G>(
             .into_iter()
             .collect();
         // No rank bias - just a deterministic tie-break so repeat crawls of the same window
-        // are stable.
-        candidates.sort_by_key(|&node_id| NodeIndexable::to_index(original_graph, node_id));
+        // are stable, using the domain node's own identity rather than wherever it landed in
+        // the underlying graph structure.
+        candidates.sort();
 
         let mut next_shell = Vec::with_capacity(candidates.len());
         for node_id in candidates {
@@ -473,7 +549,7 @@ mod tests {
         // Linear chain 0 -> 1 -> 2 -> 3 with a backward edge 3 -> 0 closing the loop,
         // exercised with an explicit backward-edge list (mirrors the GFA-import path).
         let edges = vec![(0, 1), (1, 2), (2, 3)];
-        let graph = make_test_graph(edges);
+        let mut graph = make_test_graph(edges);
         let backward_edges: HashSet<(TestNode, TestNode)> =
             HashSet::from([(TestNode(3), TestNode(0))]);
 
@@ -481,7 +557,7 @@ mod tests {
         let subgraph = neighborhood(
             TestNode(0),
             10,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -549,14 +625,14 @@ mod tests {
         // ordinary edge 0->1 - this test's graph has no actual 3->0 edge, only a
         // caller-declared `explicit_backward_edges` label) becomes a real wormhole node.
         let edges = vec![(0, 1), (1, 2), (2, 3)];
-        let graph = make_test_graph(edges);
+        let mut graph = make_test_graph(edges);
         let backward_edges: HashSet<(TestNode, TestNode)> =
             HashSet::from([(TestNode(3), TestNode(0))]);
 
         let subgraph = neighborhood(
             TestNode(0),
             1,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -609,12 +685,12 @@ mod tests {
         // this is the auto-detect path, which must find and pin the loop purely from the
         // window's own crawled nodes/edges (no whole-graph pass involved).
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
-        let graph = make_test_graph(edges);
+        let mut graph = make_test_graph(edges);
 
         let subgraph = neighborhood(
             TestNode(0),
             10,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -647,12 +723,12 @@ mod tests {
     fn neighborhood_forward_then_backward_crawls_a_chain() {
         // 0 -> 1 -> 2 -> 3 -> 4, anchor 2, budget 3: only the anchor's own budget slot is
         // guaranteed: 1 more forward (finds 3), 1 more backward seeded from {2,3} (finds 1).
-        let graph = make_test_graph(vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+        let mut graph = make_test_graph(vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
 
         let subgraph = neighborhood(
             TestNode(2),
             3,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -684,12 +760,12 @@ mod tests {
     fn neighborhood_captures_whole_graph_when_budget_is_generous() {
         // Fork/join: 1 and 2 share a layer. Budget covers the entire (tiny) graph, so every
         // node's full neighbourhood is captured and no boundary doors are needed at all.
-        let graph = make_test_graph(vec![(0, 1), (0, 2), (1, 3), (2, 3)]);
+        let mut graph = make_test_graph(vec![(0, 1), (0, 2), (1, 3), (2, 3)]);
 
         let subgraph = neighborhood(
             TestNode(0),
             10,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -709,12 +785,12 @@ mod tests {
 
     #[test]
     fn neighborhood_unknown_anchor_errors() {
-        let graph = make_test_graph(vec![(0, 1)]);
+        let mut graph = make_test_graph(vec![(0, 1)]);
         assert!(
             neighborhood(
                 TestNode(99),
                 1,
-                &graph,
+                &mut GraphCursor::new(&mut graph, &mut EagerSource),
                 None,
                 &HashMap::new(),
                 &HashMap::new()
@@ -726,12 +802,12 @@ mod tests {
     #[test]
     fn neighborhood_shared_successor_stays_real_with_one_boundary_door() {
         // A1 and A2 converge on B; C falls outside the three-node budget.
-        let graph = make_test_graph(vec![(0, 1), (2, 1), (1, 3)]);
+        let mut graph = make_test_graph(vec![(0, 1), (2, 1), (1, 3)]);
 
         let subgraph = neighborhood(
             TestNode(0),
             3,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -768,12 +844,12 @@ mod tests {
         // the wormhole-door guarantee `LayoutEngine::activate_world_at`'s `forced_include`
         // relies on when re-entering a window through a door other than the one it was built
         // from.
-        let graph = make_test_graph(vec![(0, 1), (1, 2), (2, 3)]);
+        let mut graph = make_test_graph(vec![(0, 1), (1, 2), (2, 3)]);
 
         let subgraph = neighborhood(
             TestNode(3),
             1,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             Some(TestNode(2)),
             &HashMap::new(),
             &HashMap::new(),
@@ -797,12 +873,12 @@ mod tests {
     #[test]
     fn neighborhood_hub_collapses_many_missing_neighbours_into_one_door() {
         // Collapse five off-window successors into one deterministic door.
-        let graph = make_test_graph(vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
+        let mut graph = make_test_graph(vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
 
         let subgraph = neighborhood(
             TestNode(0),
             1,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -835,13 +911,13 @@ mod tests {
         // door that was actually traveled through in an earlier build (see
         // `LayoutEngine::remember_wormhole_choice`). The collapsed door should keep pointing at
         // 4 instead of falling back to the lowest index.
-        let graph = make_test_graph(vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
+        let mut graph = make_test_graph(vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
         let preferred_doors = HashMap::from([((TestNode(0), true), TestNode(4))]);
 
         let subgraph = neighborhood(
             TestNode(0),
             1,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &preferred_doors,
@@ -868,13 +944,13 @@ mod tests {
     #[test]
     fn neighborhood_never_disconnects_a_downstream_branch() {
         // R -> M -> {P, Q}; the budget reaches R, M, and P but not Q.
-        let graph = make_test_graph(vec![(3, 0), (0, 1), (0, 2)]);
+        let mut graph = make_test_graph(vec![(3, 0), (0, 1), (0, 2)]);
         // Anchor 0 (M); backward reaches R (3), forward reaches P (1) but budget runs out
         // before Q (2).
         let subgraph = neighborhood(
             TestNode(0),
             3,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -914,12 +990,12 @@ mod tests {
         // Diamond: 0 -> {1, 2} -> 3. Treated as undirected, 3 is reachable from both 1 and 2 in
         // the same shell - it must be selected once, not duplicated or re-queued (which would
         // either double-count it or, on a graph with an actual longer cycle, loop forever).
-        let graph = make_test_graph(vec![(0, 1), (0, 2), (1, 3), (2, 3)]);
+        let mut graph = make_test_graph(vec![(0, 1), (0, 2), (1, 3), (2, 3)]);
 
         let subgraph = neighborhood(
             TestNode(0),
             10,
-            &graph,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),

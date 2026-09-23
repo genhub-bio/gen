@@ -20,6 +20,7 @@ use ratatui::{
 use crate::navigator::Navigator;
 use crate::{
     assembly::AssembledLayout,
+    crawl::{EagerSource, GraphSource},
     distribute_nodes::GapSizes,
     frame_index::FrameIndex,
     graph_painter::{Camera, GraphPainter, HighlightKind, Highlights, snap_camera},
@@ -620,22 +621,22 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
 /// `GraphView` for each render call.
 type OverlayFn<'a, NodeId> = Box<dyn FnOnce(&mut Buffer, &FrameIndex<NodeId>) + 'a>;
 
-pub struct GraphView<'a, G, V>
+pub struct GraphView<'a, G, V, S = EagerSource>
 where
     G: GraphBase,
 {
-    engine: &'a mut LayoutEngine<G>,
+    engine: &'a mut LayoutEngine<G, S>,
     visual: &'a V,
     block: Option<Block<'a>>,
     style: Style,
     overlay_fn: Option<OverlayFn<'a, G::NodeId>>,
 }
 
-impl<'a, G, V> GraphView<'a, G, V>
+impl<'a, G, V, S> GraphView<'a, G, V, S>
 where
     G: GraphBase,
 {
-    pub fn new(engine: &'a mut LayoutEngine<G>, visual: &'a V) -> Self {
+    pub fn new(engine: &'a mut LayoutEngine<G, S>, visual: &'a V) -> Self {
         Self {
             engine,
             visual,
@@ -665,7 +666,7 @@ where
     }
 }
 
-impl<G, V> StatefulWidget for GraphView<'_, G, V>
+impl<G, V, S> StatefulWidget for GraphView<'_, G, V, S>
 where
     G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord + 'static,
@@ -677,6 +678,7 @@ where
     for<'b> &'b G::NodeId: Hash + Ord,
     for<'b> &'b G::EdgeId: Clone,
     V: NodeRenderer<G>,
+    S: GraphSource<G>,
 {
     type State = GraphViewState<G::NodeId>;
 

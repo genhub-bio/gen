@@ -13,6 +13,7 @@ pub mod graph_overlay;
 pub mod helpers;
 pub mod inline_label_placement;
 pub(crate) mod junction_projection;
+pub mod lazy_graph_source;
 pub mod messages;
 pub mod operations;
 pub mod panels;

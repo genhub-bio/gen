@@ -15,7 +15,8 @@ use petgraph::{
 use crate::{
     assembly::{AssembledLayout, assemble_window},
     crawl::{
-        ExternalEdge, PreferredWormholeDoors, WormholeTargets, build_window_graph, neighborhood,
+        EagerSource, ExternalEdge, GraphCursor, GraphSource, PreferredWormholeDoors,
+        WormholeTargets, build_window_graph, neighborhood,
     },
     layout::NodeRole,
 };
@@ -94,12 +95,25 @@ pub(crate) struct StructuralBuildCounts {
 
 /// Owns the domain graph, one explicit active structural world, and a small LRU of previously
 /// visited worlds. Multiple views consume the same active world without structural rebuilding.
+///
+/// `S` is how the engine grows `graph` on demand when a crawl reaches an unloaded node - see
+/// [`crate::crawl::GraphSource`]. It defaults to [`EagerSource`], a no-op, for the common case
+/// of an already-fully-loaded graph; a lazily-loaded graph plugs in its own source via
+/// [`LayoutEngine::new_with_source`] instead. Either way there is exactly one crawl
+/// implementation (`crawl::neighborhood`) underneath.
 #[derive(Clone)]
-pub struct LayoutEngine<G>
+pub struct LayoutEngine<G, S = EagerSource>
 where
     G: GraphBase,
 {
     graph: G,
+    source: S,
+    /// Anchor `ensure_initial_world` should open on instead of [`Self::default_anchor`]'s
+    /// structural "index 0" guess - set by [`Self::set_preferred_initial_anchor`]. gen-tui has
+    /// no notion of a domain-meaningful "start" (that's caller-specific, e.g. a sequence
+    /// graph's `PATH_START` sentinel), so a caller that knows one sets it explicitly instead of
+    /// this crate reordering the graph to fake a structural index for it.
+    preferred_initial_anchor: Option<G::NodeId>,
     /// The caller's own already-known backward (cycle-closing) domain edges, if any (e.g.
     /// from GFA import's circular-genome/reverse-complement preprocessing). When `None`, each
     /// window detects its own backward edges by running cycle detection on just its own
@@ -122,7 +136,9 @@ where
     build_counts: StructuralBuildCounts,
 }
 
-impl<G> LayoutEngine<G>
+/// Constructors for the common case: `graph` is already fully loaded, so the engine never
+/// needs to grow it and uses the no-op [`EagerSource`].
+impl<G> LayoutEngine<G, EagerSource>
 where
     G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
     G::NodeId: Copy + Eq + Hash + Ord + 'static,
@@ -134,11 +150,43 @@ where
     for<'b> &'b G::NodeId: Hash + Ord,
     for<'b> &'b G::EdgeId: Clone,
 {
-    /// Create a new LayoutEngine starting from a graph. Backward (cycle-closing) edges, if
-    /// any, are auto-detected per window as it is built - see `explicit_backward_edges`.
+    /// Create a new LayoutEngine starting from an already-loaded graph. Backward
+    /// (cycle-closing) edges, if any, are auto-detected per window as it is built - see
+    /// `explicit_backward_edges`.
     pub fn new(graph: G) -> Self {
+        Self::new_with_source(graph, EagerSource)
+    }
+
+    /// Create a new LayoutEngine, rewiring each backward edge `(source, target)` in
+    /// `backward_edges` onto a pair of pin nodes within whichever window(s) it lands in
+    /// fully, so it renders as a loop instead of crashing the (DAG-only) layout pipeline.
+    pub fn new_with_backward_edges(graph: G, backward_edges: &[(G::NodeId, G::NodeId)]) -> Self {
+        Self::new_with_source_and_backward_edges(graph, EagerSource, backward_edges)
+    }
+}
+
+impl<G, S> LayoutEngine<G, S>
+where
+    G: GraphBase + EdgeIndexable + NodeIndexable + NodeCount + Visitable,
+    G::NodeId: Copy + Eq + Hash + Ord + 'static,
+    G::EdgeId: Clone,
+    for<'b> &'b G: GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNodeIdentifiers<NodeId = G::NodeId>
+        + IntoEdgeReferences<NodeId = G::NodeId, EdgeId = G::EdgeId>
+        + IntoNeighborsDirected<NodeId = G::NodeId>,
+    for<'b> &'b G::NodeId: Hash + Ord,
+    for<'b> &'b G::EdgeId: Clone,
+    S: GraphSource<G>,
+{
+    /// Create a new LayoutEngine that lazily grows `graph` via `source` whenever a crawl
+    /// reaches a node it hasn't loaded yet - see [`crate::crawl::GraphSource`]. Backward
+    /// (cycle-closing) edges, if any, are auto-detected per window - see
+    /// `explicit_backward_edges`.
+    pub fn new_with_source(graph: G, source: S) -> Self {
         Self {
             graph,
+            source,
+            preferred_initial_anchor: None,
             explicit_backward_edges: None,
             world_cache: Vec::new(),
             active_world: None,
@@ -150,12 +198,17 @@ where
         }
     }
 
-    /// Create a new LayoutEngine, rewiring each backward edge `(source, target)` in
-    /// `backward_edges` onto a pair of pin nodes within whichever window(s) it lands in
-    /// fully, so it renders as a loop instead of crashing the (DAG-only) layout pipeline.
-    pub fn new_with_backward_edges(graph: G, backward_edges: &[(G::NodeId, G::NodeId)]) -> Self {
+    /// [`Self::new_with_source`], additionally rewiring known backward edges - see
+    /// [`Self::new_with_backward_edges`].
+    pub fn new_with_source_and_backward_edges(
+        graph: G,
+        source: S,
+        backward_edges: &[(G::NodeId, G::NodeId)],
+    ) -> Self {
         Self {
             graph,
+            source,
+            preferred_initial_anchor: None,
             explicit_backward_edges: Some(backward_edges.iter().copied().collect()),
             world_cache: Vec::new(),
             active_world: None,
@@ -188,8 +241,17 @@ where
         Some(<G as NodeIndexable>::from_index(&self.graph, 0))
     }
 
-    /// Ensure the graph has an active world, choosing the default anchor and a budget fixed
-    /// from `viewport_width` only when no world has been loaded yet.
+    /// Record the anchor `ensure_initial_world` should open on, overriding
+    /// [`Self::default_anchor`]'s structural guess. Callers that know a domain-meaningful
+    /// starting point (e.g. a sequence graph's start sentinel) set it once after construction
+    /// instead of gen-tui reordering the graph to fake a matching structural index.
+    pub fn set_preferred_initial_anchor(&mut self, anchor: G::NodeId) {
+        self.preferred_initial_anchor = Some(anchor);
+    }
+
+    /// Ensure the graph has an active world, choosing an anchor and a budget fixed from
+    /// `viewport_width` only when no world has been loaded yet. Prefers
+    /// [`Self::set_preferred_initial_anchor`]'s choice, falling back to [`Self::default_anchor`].
     pub fn ensure_initial_world(
         &mut self,
         viewport_width: usize,
@@ -197,7 +259,10 @@ where
         if let Some(key) = self.active_world {
             return Ok(Some(key));
         }
-        let Some(anchor) = self.default_anchor() else {
+        let Some(anchor) = self
+            .preferred_initial_anchor
+            .or_else(|| self.default_anchor())
+        else {
             return Ok(None);
         };
         let budget = self.neighborhood_node_budget(viewport_width);
@@ -234,7 +299,7 @@ where
         let subgraph = neighborhood(
             key.anchor,
             key.node_budget,
-            &self.graph,
+            &mut GraphCursor::new(&mut self.graph, &mut self.source),
             key.forced_include,
             &self.wormhole_targets,
             &self.preferred_wormhole_doors,
