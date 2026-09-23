@@ -11,7 +11,7 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
-    cycle_removal::remove_cycles,
+    crawl::GraphSource,
     distribute_nodes::GapSizes,
     frame_index::FrameIndex,
     geometry::{WorldPos, WorldRect, floor_half},
@@ -22,11 +22,6 @@ use gen_tui::{
     plotter::{NodeRenderer, PathStyle},
     theme::current_theme,
     viewport_state::WorldBuffer,
-};
-use itertools::Itertools as _;
-use petgraph::{
-    Direction,
-    visit::{DfsEvent, depth_first_search},
 };
 use ratatui::{
     buffer::Buffer,
@@ -756,9 +751,9 @@ impl NodeAnnotationLayer {
 /// the direction cap is only drawn on the segment that is the feature's true end, which is
 /// what `continues_left`/`continues_right` record. Returns the overlays whose name found no
 /// room under their node, for the caller to hand to [`draw_annotation_labels`].
-pub fn update_node_annotations(
+pub fn update_node_annotations<S: GraphSource<GenGraph>>(
     layer: &NodeAnnotationLayer,
-    engine: &LayoutEngine<GenGraph>,
+    engine: &LayoutEngine<GenGraph, S>,
     overlays: &[GraphOverlay],
 ) -> Vec<GraphOverlay> {
     let theme = current_theme();
@@ -1206,80 +1201,6 @@ fn compute_inaccessible_nodes(
     graph.nodes().filter(|n| !reachable.contains(n)).collect()
 }
 
-/// Collapse redundant reverse-complement representations of the same bidirected GFA link.
-///
-/// GFA producers commonly emit both `A+ -> B+` and its equivalent reverse-complement
-/// `B- -> A-`. `GenGraph` has unoriented nodes, so retaining both makes that one adjacency
-/// look like a directed two-node cycle. Keep the direction selected by the cycle ordering
-/// and remove only backward edges whose strand metadata proves that the opposite edge is
-/// the same bidirected link.
-fn collapse_reverse_complement_edges(graph: &mut GenGraph) {
-    let backward_edges = remove_cycles(&*graph, None, None).backward_edges;
-    let redundant_edges: Vec<(GraphNode, GraphNode)> = backward_edges
-        .into_iter()
-        .filter(|(source, target)| source != target)
-        .filter(|(source, target)| {
-            let Some(source_edges) = graph.edge_weight(*source, *target) else {
-                return false;
-            };
-            let Some(target_edges) = graph.edge_weight(*target, *source) else {
-                return false;
-            };
-            source_edges.iter().all(|source_edge| {
-                target_edges.iter().any(|target_edge| {
-                    source_edge.source_strand == target_edge.target_strand.complement()
-                        && source_edge.target_strand == target_edge.source_strand.complement()
-                })
-            })
-        })
-        .collect();
-
-    for (source, target) in redundant_edges {
-        graph.remove_edge(source, target);
-    }
-}
-
-/// Extract enough backward edges to make the layout input acyclic.
-///
-/// When GFA import supplied the synthetic `PATH_END -> PATH_START` marker, preserve that
-/// marker as the rendered circular-genome loop and discard the equivalent raw closure.
-/// Then scan for any additional cycles instead of assuming the synthetic marker was the
-/// graph's only cycle.
-fn extract_backward_edges(graph: &mut GenGraph) -> Vec<(GraphNode, GraphNode)> {
-    let end_node = graph.nodes().find(|node| is_end_node(node.node_id));
-    let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
-    let synthetic_edge = if let (Some(end_node), Some(start_node)) = (end_node, start_node)
-        && graph.contains_edge(end_node, start_node)
-    {
-        let predecessors: Vec<GraphNode> = graph
-            .neighbors_directed(end_node, Direction::Incoming)
-            .collect();
-        let successors: Vec<GraphNode> = graph
-            .neighbors_directed(start_node, Direction::Outgoing)
-            .collect();
-        for predecessor in &predecessors {
-            for successor in &successors {
-                graph.remove_edge(*predecessor, *successor);
-            }
-        }
-        graph.remove_edge(end_node, start_node);
-        Some((end_node, start_node))
-    } else {
-        None
-    };
-
-    let mut backward_edges = Vec::new();
-    let starts: Vec<GraphNode> = graph.nodes().collect();
-    depth_first_search(&*graph, starts, |event| {
-        if let DfsEvent::BackEdge(source, target) = event {
-            backward_edges.push((source, target));
-        }
-        petgraph::visit::Control::<()>::Continue
-    });
-    backward_edges.extend(synthetic_edge);
-    backward_edges
-}
-
 /// Create a `LayoutEngine`/`ZoomLevels`/`GraphViewState` triple for a GenGraph with the
 /// standard theme and settings.
 ///
@@ -1350,78 +1271,127 @@ where
     build_gen_graph_engine(graph, build_send_sync_annotated_zoom_levels(source, layer))
 }
 
-/// Rebuild `graph` with its nodes and edges inserted in sorted order.
-///
-/// `GenGraph` is a `DiGraphMap`, which iterates in insertion order, and the layout resolves
-/// its remaining tie-breaks in that order. The order a block group's graph arrives in is not
-/// guaranteed: blocks come out of `blocks_from_edges` sorted by sequence hash, and sequences
-/// are content addressed, so two nodes carrying the same sequence tie and fall through to
-/// `HashMap` iteration - randomized per process. Nothing downstream of persistence is wrong
-/// about that; it just means rendering the same block group twice can place symmetric
-/// branches differently, which makes the view jump between sessions and snapshot tests
-/// irreproducible. Sorting here, where a graph becomes something to draw, keeps that concern
-/// out of the persistence layer.
-///
-/// Edges are sorted for the same reason. Their order happens to be stable today, so this
-/// changes nothing on its own, but it makes the guarantee unconditional rather than reliant
-/// on how `build_graph` came to walk them.
-fn normalize_graph_order(graph: &GenGraph) -> GenGraph {
-    let mut normalized = GenGraph::new();
-    // Start sentinels lead. `LayoutEngine::default_anchor` takes the graph's lowest-index
-    // node, deliberately without a rank pass, so whatever lands first decides where the view
-    // opens. Sorting alone would hand that role to an arbitrary node in the middle of the
-    // graph and open the viewer clipped; putting the sentinels first makes the cheap default
-    // the beginning of the graph, which is where a reader expects to start.
-    for node in graph
-        .nodes()
-        .sorted_by_key(|node| (!is_start_node(node.node_id), *node))
-    {
-        normalized.add_node(node);
-    }
-    for (source, target, weights) in graph
-        .all_edges()
-        .sorted_by_key(|(source, target, _)| (*source, *target))
-    {
-        normalized.add_edge(source, target, weights.clone());
-    }
-    normalized
-}
-
 type GraphEngineSetup<R> = (
     LayoutEngine<GenGraph>,
     Vec<(VisualDetail, R, GapSizes)>,
     GraphViewState<GraphNode>,
 );
 
-/// Shared body of [`create_gen_graph_engine`]/[`create_send_sync_gen_graph_engine`]: dims
-/// pruned edges and inaccessible nodes, starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
-/// free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
-fn build_gen_graph_engine<R>(
-    graph: GenGraph,
-    levels: Vec<(VisualDetail, R, GapSizes)>,
-) -> GraphEngineSetup<R> {
-    let mut graph = normalize_graph_order(&graph);
-    collapse_reverse_complement_edges(&mut graph);
-    let backward_edges = extract_backward_edges(&mut graph);
-    let pruned = compute_pruned_edges(&graph);
-    let inaccessible = compute_inaccessible_nodes(&graph, &pruned);
-    let engine = if backward_edges.is_empty() {
-        LayoutEngine::new(graph)
-    } else {
-        LayoutEngine::new_with_backward_edges(graph, &backward_edges)
-    };
-
-    let mut view_state = GraphViewState::default();
+/// (Re)compute pruned-edge/inaccessible-node dimming from whatever of `graph` is currently
+/// loaded, replacing whatever dimming `view_state` held before.
+///
+/// For an eagerly-loaded graph this only ever needs to run once, at setup - `graph` never
+/// changes afterward. For a lazily-loaded graph (see [`build_gen_graph_engine_lazy`]) it must
+/// be called again every time the crawl has grown `engine.graph()`, since a node or edge that
+/// wasn't loaded yet cannot have been judged prunable/inaccessible the first time around.
+/// `compute_inaccessible_nodes` in particular needs a real BFS from every loaded
+/// `is_start_node` - that can't be approximated by scoping it to just the active window,
+/// since a window seeded from a wormhole target may not contain a start node at all, which
+/// would wrongly mark the entire window inaccessible. Recomputing over the accumulated
+/// `engine.graph()` instead stays correct at the cost of scaling with how much of the graph
+/// this session has actually crawled into, not with the size of the underlying database -
+/// the renderer only ever paints dimming for nodes/edges in the active window in any case
+/// (see `graph_painter::resolve_edge_lowlights`/`resolve_node_lowlights`), so a lowlight list
+/// that runs ahead of what's on screen right now is harmless, just extra bookkeeping.
+pub(crate) fn refresh_dimming(view_state: &mut GraphViewState<GraphNode>, graph: &GenGraph) {
+    view_state.highlights.edge_lowlights.clear();
+    view_state.highlights.node_lowlights.clear();
+    let pruned = compute_pruned_edges(graph);
+    let inaccessible = compute_inaccessible_nodes(graph, &pruned);
     for edge in pruned {
         view_state.dim_edge(edge);
     }
     for node in inaccessible {
         view_state.dim_node(node);
     }
+}
+
+/// Shared body of [`create_gen_graph_engine`]/[`create_send_sync_gen_graph_engine`]: dims
+/// pruned edges and inaccessible nodes, starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
+/// free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
+///
+/// Cycle safety (including a circular genome's `PATH_END -> PATH_START` closure) is left
+/// entirely to `LayoutEngine`'s own per-window cycle detection (`crawl::build_window_graph`)
+/// rather than a whole-graph pre-pass here - for the whole-graph-as-one-window case this is
+/// today's only caller, that detects exactly the same cycles a dedicated whole-graph DFS would.
+/// Reverse-complement link collapsing (redundant `A+ -> B+` / `B- -> A-` GFA pairs) is not
+/// performed here either; that GFA-import cleanup is deferred for now.
+fn build_gen_graph_engine<R>(
+    graph: GenGraph,
+    levels: Vec<(VisualDetail, R, GapSizes)>,
+) -> GraphEngineSetup<R> {
+    let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
+    let mut view_state = GraphViewState::default();
+    refresh_dimming(&mut view_state, &graph);
+    let mut engine = LayoutEngine::new(graph);
+    if let Some(start_node) = start_node {
+        engine.set_preferred_initial_anchor(start_node);
+    }
+
     apply_zoom_level(&mut view_state, DEFAULT_ZOOM_LEVEL, &levels);
     view_state.hide_cursor();
 
     (engine, levels, view_state)
+}
+
+type GraphEngineSetupLazy<R, S> = (
+    LayoutEngine<GenGraph, S>,
+    Vec<(VisualDetail, R, GapSizes)>,
+    GraphViewState<GraphNode>,
+);
+
+/// Like [`build_gen_graph_engine`], but for a `graph` that is only seeded (e.g. just its
+/// starting anchor) and grows lazily through `source` as the crawl reaches unloaded nodes -
+/// see [`crate::views::lazy_graph_source::SqlGraphSource`]. Dimming is computed once here over
+/// whatever of `graph` is loaded at construction time (typically just the seed); callers must
+/// call [`refresh_dimming`] again themselves whenever the active world changes, since the
+/// crawl grows `engine.graph()` behind the scenes on every render - see `refresh_dimming`'s
+/// own doc for why that can't be avoided.
+fn build_gen_graph_engine_lazy<R, S>(
+    graph: GenGraph,
+    source: S,
+    levels: Vec<(VisualDetail, R, GapSizes)>,
+) -> GraphEngineSetupLazy<R, S>
+where
+    S: GraphSource<GenGraph>,
+{
+    let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
+    let mut view_state = GraphViewState::default();
+    refresh_dimming(&mut view_state, &graph);
+    let mut engine = LayoutEngine::new_with_source(graph, source);
+    if let Some(start_node) = start_node {
+        engine.set_preferred_initial_anchor(start_node);
+    }
+
+    apply_zoom_level(&mut view_state, DEFAULT_ZOOM_LEVEL, &levels);
+    view_state.hide_cursor();
+
+    (engine, levels, view_state)
+}
+
+/// Like [`create_annotated_gen_graph_engine`], but for a lazily-loaded `graph`/`source` pair -
+/// see [`build_gen_graph_engine_lazy`]. The caller is responsible for calling
+/// [`refresh_dimming`] again after the active world changes, since dimming is only computed
+/// once here, over the seed graph.
+pub fn create_annotated_gen_graph_engine_lazy<'a, Src, Seq>(
+    graph: GenGraph,
+    source: Src,
+    sequence_source: Seq,
+    layer: NodeAnnotationLayer,
+) -> (
+    LayoutEngine<GenGraph, Src>,
+    ZoomLevels<'a>,
+    GraphViewState<GraphNode>,
+)
+where
+    Src: GraphSource<GenGraph>,
+    Seq: SequenceSource + Clone + 'a,
+{
+    build_gen_graph_engine_lazy(
+        graph,
+        source,
+        build_annotated_zoom_levels(sequence_source, layer),
+    )
 }
 
 /// The slice and local offset (0-based, within that slice's block) at the
@@ -1629,14 +1599,15 @@ fn accent_colors() -> [Color; 8] {
 /// labels. Annotation spans leave sequence cells and graph edges in their normal colors.
 /// Callers run this after zoom or detail changes, or every frame in the live TUI viewers
 /// because the overlay set changes with scrolling.
-pub fn reapply_overlays<R>(
-    engine: &LayoutEngine<GenGraph>,
+pub fn reapply_overlays<R, S>(
+    engine: &LayoutEngine<GenGraph, S>,
     view_state: &mut GraphViewState<GraphNode>,
     levels: &[(VisualDetail, R, GapSizes)],
     overlays: &mut [GraphOverlay],
     color_cache: &mut AnnotationColorCache,
 ) where
     R: NodeRenderer<GenGraph>,
+    S: GraphSource<GenGraph>,
 {
     let detail_level = levels[view_state.zoom_index.min(levels.len() - 1)].0;
     let graph = engine.graph();
@@ -1735,14 +1706,17 @@ pub fn reapply_overlays<R>(
 /// on top, when it collapses into a truncated node, or when no free cell is found near its
 /// span. Returns `true` if any labelled overlay was suppressed, so the caller can show a
 /// single "some annotations hidden" hint.
-pub fn draw_annotation_labels<R>(
+pub fn draw_annotation_labels<R, S>(
     buf: &mut Buffer,
     area: Rect,
-    engine: &LayoutEngine<GenGraph>,
+    engine: &LayoutEngine<GenGraph, S>,
     view_state: &GraphViewState<GraphNode>,
     levels: &[(VisualDetail, R, GapSizes)],
     overlays: &[GraphOverlay],
-) -> bool {
+) -> bool
+where
+    S: GraphSource<GenGraph>,
+{
     let detail_level = levels[view_state.zoom_index.min(levels.len() - 1)].0;
     let graph = engine.graph();
     let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
@@ -2004,47 +1978,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn collapses_redundant_reverse_complement_links() {
-        let source = GraphNode {
-            node_id: HashId::convert_str("source"),
-            sequence_start: 0,
-            sequence_end: 3,
-        };
-        let target = GraphNode {
-            node_id: HashId::convert_str("target"),
-            sequence_start: 0,
-            sequence_end: 3,
-        };
-        let edge = |edge_id, source_strand, target_strand| GraphEdge {
-            edge_id: HashId::convert_str(edge_id),
-            source_strand,
-            target_strand,
-            chromosome_index: NO_CHROMOSOME_INDEX,
-            phased: 0,
-            created_on: 0,
-        };
-        let mut graph = GenGraph::new();
-        graph.add_edge(
-            source,
-            target,
-            vec![edge("forward", Strand::Forward, Strand::Forward)],
-        );
-        graph.add_edge(
-            target,
-            source,
-            vec![edge("reverse", Strand::Reverse, Strand::Reverse)],
-        );
-
-        collapse_reverse_complement_edges(&mut graph);
-
-        assert_eq!(graph.edge_count(), 1);
-        assert_ne!(
-            graph.contains_edge(source, target),
-            graph.contains_edge(target, source)
-        );
-    }
-
     /// Test coordinate handling for very large genomic sequences
     ///
     /// Genomic sequences can span hundreds of thousands of base pairs, creating
@@ -2189,6 +2122,9 @@ mod tests {
         insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
     }
 
+    /// Renders through `SqlGraphSource` (the same lazy-crawl path the live TUI viewer uses for
+    /// every non-historical block group - see `views::block_group::load_block_group_graph`),
+    /// not the eager `BlockGroup::get_graph`, which the viewers no longer use for this case.
     fn render_gfa_snapshot(gfa_fixture: &str, collection_name: &str) -> String {
         use std::path::PathBuf;
 
@@ -2196,7 +2132,11 @@ mod tests {
         use gen_tui::{graph_view::GraphView, testing::create_test_terminal};
         use ratatui::widgets::StatefulWidget as _;
 
-        use crate::{imports::gfa::import_gfa, test_helpers::setup_gen_on_disk};
+        use crate::{
+            imports::gfa::import_gfa,
+            test_helpers::setup_gen_on_disk,
+            views::lazy_graph_source::{SqlGraphSource, seed_block_group_graph},
+        };
 
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
@@ -2205,10 +2145,15 @@ mod tests {
         import_gfa(&context, &gfa_path, collection_name, Sample::DEFAULT_NAME).unwrap();
 
         let block_group_id = BlockGroup::get_id(collection_name, Sample::DEFAULT_NAME, "", None);
-        let graph =
-            BlockGroup::get_graph(conn, context.workspace(), &block_group_id, None).unwrap();
-        let (mut engine, zoom_levels, mut view_state) =
-            create_gen_graph_engine(graph, (conn, context.workspace()));
+        let db_path = PathBuf::from(conn.path().expect("graph database has no file path"));
+        let source = SqlGraphSource::new(db_path, context.workspace().clone(), block_group_id);
+        let seed = seed_block_group_graph(conn, context.workspace(), &block_group_id);
+        let (mut engine, zoom_levels, mut view_state) = create_annotated_gen_graph_engine_lazy(
+            seed,
+            source,
+            (conn, context.workspace()),
+            NodeAnnotationLayer::new(),
+        );
         let visual = &zoom_levels[view_state.zoom_index].1;
 
         let mut terminal = create_test_terminal(132, 43);

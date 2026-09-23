@@ -159,7 +159,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        crawl::{build_window_graph, neighborhood},
+        crawl::{EagerSource, GraphCursor, build_window_graph, neighborhood},
         testing::mocks::MockDomainGraph,
     };
 
@@ -177,7 +177,7 @@ mod tests {
         let subgraph = neighborhood(
             nodes[0],
             10,
-            &domain_graph,
+            &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -215,7 +215,7 @@ mod tests {
         let subgraph = neighborhood(
             nodes[0],
             10,
-            &domain_graph,
+            &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -247,7 +247,7 @@ mod tests {
         let subgraph = neighborhood(
             node,
             10,
-            &domain_graph,
+            &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
@@ -276,7 +276,7 @@ mod tests {
         let subgraph = neighborhood(
             nodes[0],
             10,
-            &domain_graph,
+            &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),

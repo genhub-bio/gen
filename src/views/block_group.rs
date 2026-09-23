@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -10,6 +11,7 @@ use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
     LineStyle,
+    crawl::{EagerSource, GraphSource},
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
     layout_engine::{LayoutEngine, WorldKey},
@@ -34,8 +36,8 @@ use crate::{
         },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
-            self, NodeAnnotationLayer, create_annotated_gen_graph_engine,
-            draw_annotation_connectors, draw_annotation_labels, reapply_overlays,
+            self, NodeAnnotationLayer, create_annotated_gen_graph_engine_lazy,
+            draw_annotation_connectors, draw_annotation_labels, reapply_overlays, refresh_dimming,
             update_node_annotations,
         },
         graph_overlay::{
@@ -43,6 +45,7 @@ use crate::{
             has_path_overlay, remove_path_overlay, remove_track_overlays, replace_track_overlays,
             set_path_overlay,
         },
+        lazy_graph_source::{EagerOrSqlSource, SqlGraphSource, seed_block_group_graph},
         panels::{render_status_bar, render_with_optional_clear},
         tui_runtime::TuiSession,
     },
@@ -68,6 +71,33 @@ fn get_empty_graph() -> GenGraph {
     g
 }
 
+/// Load `block_group_id`'s graph and the source its `LayoutEngine` should crawl through.
+///
+/// A historical view (`history_ref: Some(_)`) always eager-loads the full graph up front:
+/// `gen_models::graph::expand`, which the lazy path below is built on, has no `history_ref`
+/// parameter of its own and can only ever answer for the live graph. Otherwise, the graph is
+/// seeded with just its `PATH_START` sentinel and grown lazily from SQLite as the viewer's
+/// crawl reaches unloaded nodes - see `SqlGraphSource`, which is what turns opening a large
+/// block group from a full-graph-materializing stall into an near-instant open.
+fn load_block_group_graph(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    block_group_id: &gen_core::HashId,
+    history_ref: Option<&str>,
+) -> Result<(GenGraph, EagerOrSqlSource), Box<dyn Error>> {
+    if history_ref.is_some() {
+        let graph = BlockGroup::get_graph(conn, workspace, block_group_id, history_ref)?;
+        return Ok((graph, EagerOrSqlSource::Eager(EagerSource)));
+    }
+    let db_path = conn
+        .path()
+        .map(PathBuf::from)
+        .ok_or("graph database has no file path")?;
+    let source = SqlGraphSource::new(db_path, workspace.clone(), *block_group_id);
+    let seed = seed_block_group_graph(conn, workspace, block_group_id);
+    Ok((seed, EagerOrSqlSource::Sql(source)))
+}
+
 /// Get the most recent path for a block group and map it to GraphNodes in the current graph
 fn get_block_group_path_nodes(
     conn: &GraphConnection,
@@ -85,7 +115,9 @@ fn get_block_group_path_nodes(
 /// nodes) - the same deliberately-constrained local window `LayoutEngine` already
 /// subsets the graph to, so annotation loading has no need to subset any further by
 /// what happens to be on-screen right now.
-pub(crate) fn active_neighborhood_node_ids(engine: &LayoutEngine<GenGraph>) -> HashSet<HashId> {
+pub(crate) fn active_neighborhood_node_ids<S: GraphSource<GenGraph>>(
+    engine: &LayoutEngine<GenGraph, S>,
+) -> HashSet<HashId> {
     let Some(world) = engine.active_world() else {
         return HashSet::new();
     };
@@ -98,8 +130,8 @@ pub(crate) fn active_neighborhood_node_ids(engine: &LayoutEngine<GenGraph>) -> H
 
 /// Compute the coordinate window (min sequence start, max sequence end) spanned by the
 /// currently active crawled neighborhood.
-pub(crate) fn active_neighborhood_coordinate_window(
-    engine: &LayoutEngine<GenGraph>,
+pub(crate) fn active_neighborhood_coordinate_window<S: GraphSource<GenGraph>>(
+    engine: &LayoutEngine<GenGraph, S>,
 ) -> Option<(i64, i64)> {
     let world = engine.active_world()?;
     let mut start = i64::MAX;
@@ -167,14 +199,13 @@ fn load_annotation_groups_for_neighborhood(
 /// toggle from the sidebar - grouped into one struct since it's all `&`-borrowed context
 /// gathered from several owning locals in `view_block_group`, shared unchanged between
 /// the keyboard and mouse call sites.
-struct AnnotationToggleContext<'a> {
+struct AnnotationToggleContext<'a, S: GraphSource<GenGraph>> {
     conn: &'a GraphConnection,
     history_ref: Option<&'a str>,
     workspace: &'a Workspace,
     collection_name: &'a str,
     current_block_group: Option<&'a BlockGroup>,
-    block_graph: &'a GenGraph,
-    graph_engine: &'a LayoutEngine<GenGraph>,
+    graph_engine: &'a LayoutEngine<GenGraph, S>,
     explorer: &'a CollectionExplorer,
 }
 
@@ -182,8 +213,8 @@ struct AnnotationToggleContext<'a> {
 /// the sidebar's input/mouse handling. Shared by the keyboard and mouse event branches in
 /// `view_block_group`'s event loop, which both route sidebar interaction through the same
 /// `CollectionExplorerState` toggle-request fields.
-fn handle_annotation_toggle_requests(
-    ctx: &AnnotationToggleContext,
+fn handle_annotation_toggle_requests<S: GraphSource<GenGraph>>(
+    ctx: &AnnotationToggleContext<S>,
     explorer_state: &mut CollectionExplorerState,
     overlays: &mut Vec<GraphOverlay>,
     annotation_file_index_available: &mut HashMap<HashId, bool>,
@@ -197,8 +228,7 @@ fn handle_annotation_toggle_requests(
             {
                 let query_window = active_neighborhood_coordinate_window(ctx.graph_engine)
                     .map(expand_query_window);
-                let node_filter: HashSet<HashId> =
-                    ctx.block_graph.nodes().map(|node| node.node_id).collect();
+                let node_filter = active_neighborhood_node_ids(ctx.graph_engine);
                 let request = AnnotationFileTrackRequest {
                     conn: ctx.conn,
                     history_ref: ctx.history_ref,
@@ -281,10 +311,10 @@ fn handle_annotation_toggle_requests(
 /// The path lives in `overlays` alongside the annotation overlays and is repainted each
 /// frame by the render loop, so this only adds or removes it. Returns whether the path
 /// overlay is now enabled.
-fn toggle_path_highlight(
+fn toggle_path_highlight<S: GraphSource<GenGraph>>(
     conn: &GraphConnection,
     workspace: &Workspace,
-    engine: &LayoutEngine<GenGraph>,
+    engine: &LayoutEngine<GenGraph, S>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
     overlays: &mut Vec<GraphOverlay>,
@@ -317,8 +347,8 @@ fn toggle_path_highlight(
 /// `target` is a successor or predecessor of `boundary` (`LayoutEngine::is_successor`): exiting
 /// toward a successor enters the new window from the left, exiting toward a predecessor enters
 /// from the right - the same direction you'd naturally keep moving in.
-fn teleport_through_wormhole(
-    graph_engine: &mut LayoutEngine<GenGraph>,
+fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
+    graph_engine: &mut LayoutEngine<GenGraph, S>,
     graph_view_state: &mut GraphViewState<GraphNode>,
     boundary: GraphNode,
     target: GraphNode,
@@ -411,6 +441,7 @@ pub fn view_block_group(
     let _ = progress_bar.println("Loading block group");
 
     let mut block_graph;
+    let mut graph_source;
     let mut block_group_id: Option<gen_core::HashId> = None;
     let mut focus_zone = FocusZone::Sidebar;
     let mut explorer_state = CollectionExplorerState::new();
@@ -428,11 +459,13 @@ pub fn view_block_group(
                     )
                 });
         block_group_id = Some(block_group.id);
-        block_graph = BlockGroup::get_graph(conn, workspace, &block_group.id, history_ref)?;
+        (block_graph, graph_source) =
+            load_block_group_graph(conn, workspace, &block_group.id, history_ref)?;
         explorer_state.selected_block_group_id = Some(block_group.id);
         focus_zone = FocusZone::Canvas;
     } else {
         block_graph = get_empty_graph();
+        graph_source = EagerOrSqlSource::Eager(EagerSource);
     }
 
     bar.finish();
@@ -472,7 +505,16 @@ pub fn view_block_group(
     // Annotation flags drawn under nodes at full detail; refilled from `overlays` each frame.
     let node_annotations = NodeAnnotationLayer::new();
     let (mut graph_engine, mut graph_zoom_levels, mut graph_view_state) =
-        create_annotated_gen_graph_engine(block_graph.clone(), conn, node_annotations.clone());
+        create_annotated_gen_graph_engine_lazy(
+            block_graph,
+            graph_source,
+            conn,
+            node_annotations.clone(),
+        );
+    // The world dimming (pruned edges / inaccessible nodes) was last refreshed for - a lazily
+    // loaded graph grows as the crawl reaches new nodes, so this must be recomputed every time
+    // the active world changes rather than once up front. See `refresh_dimming`.
+    let mut dimming_world = graph_engine.active_world_key();
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if position.is_some() {
@@ -680,7 +722,6 @@ pub fn view_block_group(
                                     workspace,
                                     collection_name,
                                     current_block_group: current_block_group.as_ref(),
-                                    block_graph: &block_graph,
                                     graph_engine: &graph_engine,
                                     explorer: &explorer,
                                 },
@@ -715,7 +756,6 @@ pub fn view_block_group(
                             workspace,
                             collection_name,
                             current_block_group: current_block_group.as_ref(),
-                            block_graph: &block_graph,
                             graph_engine: &graph_engine,
                             explorer: &explorer,
                         },
@@ -827,8 +867,7 @@ pub fn view_block_group(
                 annotation_groups_loaded = false;
             }
             let query_window = expand_query_window(visible_window);
-            let node_filter: HashSet<HashId> =
-                block_graph.nodes().map(|node| node.node_id).collect();
+            let node_filter = active_neighborhood_node_ids(&graph_engine);
             for entry in &explorer.data.annotation_files {
                 let id = entry.file_addition.id;
                 if !explorer_state.is_annotation_file_active(&id) {
@@ -1203,6 +1242,14 @@ pub fn view_block_group(
             }
         })?;
 
+        // The crawl may have grown `graph_engine`'s graph (a fresh world, or activating an
+        // already-known one) during the render just above, so pruned-edge/inaccessible-node
+        // dimming can be stale relative to what's now loaded - see `refresh_dimming`.
+        if graph_engine.active_world_key() != dimming_world {
+            refresh_dimming(&mut graph_view_state, graph_engine.graph());
+            dimming_world = graph_engine.active_world_key();
+        }
+
         // Load (or reload) annotation groups for the active crawled neighborhood - that
         // neighborhood is already the deliberately-constrained local window, so this is
         // the sole source for which segments to fetch (no further viewport subsetting).
@@ -1234,14 +1281,18 @@ pub fn view_block_group(
         // This runs after terminal.draw() so the loading indicator is visible
         // for the full duration of the blocking DB work.
         if is_loading && let Some(ref new_block_group_id) = explorer_state.selected_block_group_id {
-            // Create a new graph for the selected block group
-            block_graph = BlockGroup::get_graph(conn, workspace, new_block_group_id, history_ref)?;
+            // Create a new graph (and matching source) for the selected block group
+            (block_graph, graph_source) =
+                load_block_group_graph(conn, workspace, new_block_group_id, history_ref)?;
             // Update the graph engine
-            (graph_engine, graph_zoom_levels, graph_view_state) = create_annotated_gen_graph_engine(
-                block_graph.clone(),
-                conn,
-                node_annotations.clone(),
-            );
+            (graph_engine, graph_zoom_levels, graph_view_state) =
+                create_annotated_gen_graph_engine_lazy(
+                    block_graph,
+                    graph_source,
+                    conn,
+                    node_annotations.clone(),
+                );
+            dimming_world = graph_engine.active_world_key();
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {
                 Ok(bg) => bg,
                 Err(err) => {
@@ -1273,8 +1324,7 @@ pub fn view_block_group(
             annotation_groups_loaded = false;
             annotation_groups_world = None;
             if let Some(block_group) = current_block_group.as_ref() {
-                let node_filter: HashSet<HashId> =
-                    block_graph.nodes().map(|node| node.node_id).collect();
+                let node_filter = active_neighborhood_node_ids(&graph_engine);
                 let query_window =
                     active_neighborhood_coordinate_window(&graph_engine).map(expand_query_window);
                 for entry in &explorer.data.annotation_files {
