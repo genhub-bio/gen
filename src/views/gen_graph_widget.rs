@@ -1293,7 +1293,7 @@ type GraphEngineSetup<R> = (
 /// the renderer only ever paints dimming for nodes/edges in the active window in any case
 /// (see `graph_painter::resolve_edge_lowlights`/`resolve_node_lowlights`), so a lowlight list
 /// that runs ahead of what's on screen right now is harmless, just extra bookkeeping.
-pub(crate) fn refresh_dimming(view_state: &mut GraphViewState<GraphNode>, graph: &GenGraph) {
+pub fn refresh_dimming(view_state: &mut GraphViewState<GraphNode>, graph: &GenGraph) {
     view_state.highlights.edge_lowlights.clear();
     view_state.highlights.node_lowlights.clear();
     let pruned = compute_pruned_edges(graph);
@@ -1391,6 +1391,31 @@ where
         graph,
         source,
         build_annotated_zoom_levels(sequence_source, layer),
+    )
+}
+
+/// Like [`create_send_sync_annotated_gen_graph_engine`], but for a lazily-loaded `graph`/`source`
+/// pair - see [`build_gen_graph_engine_lazy`]. The caller is responsible for calling
+/// [`refresh_dimming`] again after the active world changes, since dimming is only computed
+/// once here, over the seed graph.
+pub fn create_send_sync_annotated_gen_graph_engine_lazy<Src, Seq>(
+    graph: GenGraph,
+    source: Src,
+    sequence_source: Seq,
+    layer: NodeAnnotationLayer,
+) -> (
+    LayoutEngine<GenGraph, Src>,
+    SendSyncZoomLevels,
+    GraphViewState<GraphNode>,
+)
+where
+    Src: GraphSource<GenGraph>,
+    Seq: SequenceSource + Clone + Send + Sync + 'static,
+{
+    build_gen_graph_engine_lazy(
+        graph,
+        source,
+        build_send_sync_annotated_zoom_levels(sequence_source, layer),
     )
 }
 

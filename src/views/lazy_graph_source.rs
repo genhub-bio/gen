@@ -4,14 +4,14 @@
 //! because it is the shared `GenGraph`-viewer glue every binding sits on top of - see
 //! `gen_graph_widget`.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Mutex};
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Workspace};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     db::{GraphConnection, get_connection},
     edge::Edge,
-    graph::expand,
+    graph::{expand, expand_pruned},
 };
 use gen_tui::crawl::{EagerSource, GraphSource};
 use petgraph::Direction;
@@ -150,11 +150,40 @@ pub struct SqlGraphSource {
     db_path: PathBuf,
     workspace: Workspace,
     block_group_id: HashId,
+    /// When true, use [`expand_pruned`] instead of [`expand`] - so pruned/retired edit-site
+    /// edges (and anything only reachable through one) never enter the crawled graph in the
+    /// first place. This is what backs gen-python's `show_history=False`; see
+    /// `expand_pruned`'s own doc for why filtering before merge is required here, rather than
+    /// pruning the graph after the fact.
+    prune: bool,
     /// Whether this block group is circular, determined once (see
     /// [`block_group_is_circular`]) and cached - `None` until the first `ensure_loaded` call.
     is_circular: Option<bool>,
-    /// The connection opened on the first `ensure_loaded` call, reused thereafter.
-    connection: Option<GraphConnection>,
+    /// The connection opened on the first `ensure_loaded` call, reused thereafter. Wrapped in
+    /// a `Mutex` purely to make `SqlGraphSource` itself `Sync` - `rusqlite::Connection` holds a
+    /// `RefCell`-backed statement cache and so is `Send` but not `Sync` (see gen-python's
+    /// `jupyter_widget.rs`, whose `#[pyclass]` types must be both to survive ipykernel moving
+    /// them between its cell-execution thread pool and its asyncio ioloop thread). Every access
+    /// here goes through `&mut self` already, so this never actually contends - `get_mut`
+    /// reaches the connection directly, bypassing the lock.
+    connection: Mutex<Option<GraphConnection>>,
+}
+
+/// A `GraphConnection` can't itself be cloned (it wraps a live `rusqlite::Connection`), so a
+/// clone starts with no connection and opens its own lazily on its own first `ensure_loaded`
+/// call - safe because nothing about the connection is observable state (see this struct's
+/// own doc on why it's cached at all); a cloned source is a distinct session in its own right.
+impl Clone for SqlGraphSource {
+    fn clone(&self) -> Self {
+        Self {
+            db_path: self.db_path.clone(),
+            workspace: self.workspace.clone(),
+            block_group_id: self.block_group_id,
+            prune: self.prune,
+            is_circular: self.is_circular,
+            connection: Mutex::new(None),
+        }
+    }
 }
 
 impl SqlGraphSource {
@@ -163,8 +192,17 @@ impl SqlGraphSource {
             db_path,
             workspace,
             block_group_id,
+            prune: false,
             is_circular: None,
-            connection: None,
+            connection: Mutex::new(None),
+        }
+    }
+
+    /// Like [`Self::new`], but crawls with [`expand_pruned`] instead of [`expand`].
+    pub fn new_pruned(db_path: PathBuf, workspace: Workspace, block_group_id: HashId) -> Self {
+        Self {
+            prune: true,
+            ..Self::new(db_path, workspace, block_group_id)
         }
     }
 }
@@ -174,19 +212,33 @@ impl GraphSource<GenGraph> for SqlGraphSource {
     /// connection failure - the crawl will simply see `node` as boundary-less rather than fail
     /// outright, since gen-tui's `GraphSource` contract has no error channel of its own.
     fn ensure_loaded(&mut self, graph: &mut GenGraph, node: GraphNode) -> bool {
-        if self.connection.is_none() {
-            self.connection = get_connection(&self.db_path).ok();
+        let connection_slot = self
+            .connection
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if connection_slot.is_none() {
+            *connection_slot = get_connection(&self.db_path).ok();
         }
-        let Some(conn) = self.connection.as_ref() else {
+        let Some(conn) = connection_slot.as_ref() else {
             return false;
         };
-        let added = expand(
-            conn,
-            &self.workspace,
-            graph,
-            &self.block_group_id,
-            node.node_id,
-        );
+        let added = if self.prune {
+            expand_pruned(
+                conn,
+                &self.workspace,
+                graph,
+                &self.block_group_id,
+                node.node_id,
+            )
+        } else {
+            expand(
+                conn,
+                &self.workspace,
+                graph,
+                &self.block_group_id,
+                node.node_id,
+            )
+        };
         let is_circular = *self
             .is_circular
             .get_or_insert_with(|| block_group_is_circular(conn, &self.block_group_id));
