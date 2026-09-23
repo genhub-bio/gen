@@ -131,7 +131,7 @@ mod tests {
         use super::super::*;
         use crate::{
             assembly::assemble_window,
-            crawl::{build_window_graph, neighborhood},
+            crawl::{EagerSource, GraphCursor, build_window_graph, neighborhood},
             layout::NodeRole,
             testing::mocks::{MockDomainGraph, TestGraphs},
         };
@@ -142,17 +142,18 @@ mod tests {
                 .node_indices()
                 .next()
                 .expect("should have graph nodes");
+            let mut graph = graph.clone();
             let subgraph = neighborhood(
                 anchor,
                 graph.node_count(),
-                graph,
+                &mut GraphCursor::new(&mut graph, &mut EagerSource),
                 None,
                 &HashMap::new(),
                 &HashMap::new(),
             )
             .expect("should find the anchor in the graph");
             let (window, _) =
-                build_window_graph(&subgraph, graph, None).expect("should build the window");
+                build_window_graph(&subgraph, &graph, None).expect("should build the window");
             assemble_window(&window).expect("should assemble the window")
         }
 

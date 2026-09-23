@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use petgraph::graph::NodeIndex;
 
 use crate::{
-    crawl::neighborhood,
+    crawl::{EagerSource, GraphCursor, neighborhood},
     distribute_nodes::GapSizes,
     graph_widget::build_window_geometry,
     layout::NodeRole,
@@ -23,10 +23,11 @@ fn crawl_invariant_errors(
     node_budget: usize,
     case: &str,
 ) -> Vec<String> {
+    let mut graph = graph.clone();
     let subgraph = match neighborhood(
         anchor,
         node_budget,
-        graph,
+        &mut GraphCursor::new(&mut graph, &mut EagerSource),
         None,
         &HashMap::new(),
         &HashMap::new(),
@@ -138,10 +139,11 @@ fn run_case(
     errors.extend(crawl_invariant_errors(graph, anchor, node_budget, case));
 
     if node_budget >= total_nodes {
+        let mut cloned = graph.clone();
         match neighborhood(
             anchor,
             node_budget,
-            graph,
+            &mut GraphCursor::new(&mut cloned, &mut EagerSource),
             None,
             &HashMap::new(),
             &HashMap::new(),
