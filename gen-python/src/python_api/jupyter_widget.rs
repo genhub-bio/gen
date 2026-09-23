@@ -16,29 +16,33 @@ use r#gen::{
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
             self, NodeAnnotationLayer, PathSequenceSource, SendSyncZoomLevels,
-            create_send_sync_annotated_gen_graph_engine, draw_annotation_connectors,
-            draw_annotation_labels, locus_midpoint, reapply_overlays, update_node_annotations,
+            create_send_sync_annotated_gen_graph_engine_lazy, draw_annotation_connectors,
+            draw_annotation_labels, locus_midpoint, reapply_overlays, refresh_dimming,
+            update_node_annotations,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
             project_path_overlay_nodes, remove_path_overlay, set_path_overlay,
         },
+        lazy_graph_source::{SqlGraphSource, seed_block_group_graph},
     },
 };
 use gen_annotations::projection::annotation_segments;
 use gen_core::{HashId, Workspace, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode};
+use gen_graph::{GenGraph, GraphNode, MergeGraph};
 use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
+    block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     locus::GraphLocus,
+    path::Path as GenPath,
 };
 use gen_tui::{
     LineStyle,
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
-    layout_engine::LayoutEngine,
+    layout_engine::{LayoutEngine, WorldKey},
     plotter::PathStyle,
     theme::current_theme,
 };
@@ -67,7 +71,6 @@ use crate::python_api::{
     annotation::PyAnnotation,
     block_group::PySequenceGraph,
     graph_search::{PyGraphLocus, PyGraphPos},
-    utils::block_group_err_to_pyerr,
 };
 
 /// Convert a ratatui `Color` to a CSS hex string.
@@ -285,9 +288,14 @@ struct GraphPage {
     name: String,
     db_path: PathBuf,
     pub(crate) block_group_id: Option<HashId>,
-    engine: LayoutEngine<GenGraph>,
+    engine: LayoutEngine<GenGraph, SqlGraphSource>,
     zoom_levels: SendSyncZoomLevels,
     view_state: GraphViewState<GraphNode>,
+    /// The world `refresh_dimming` last ran over - re-checked, cheaply, on every
+    /// `render_into` call, since the lazy crawl can grow `engine.graph()` behind the scenes
+    /// on any render. See `refresh_dimming`'s own doc for why this can't be computed once
+    /// up front the way an eagerly-loaded graph's dimming can.
+    dimming_world: Option<WorldKey<GraphNode>>,
     /// Annotation and path overlays. The path (added by `show_path`, removed by
     /// `clear_path`/`clear_highlights`) is just another overlay, so it survives
     /// zoom/detail changes the same way the annotation overlays do.
@@ -306,6 +314,8 @@ struct PageRef {
     name: String,
     db_path: PathBuf,
     block_group_id: HashId,
+    /// Mirrors `plot(show_history=...)` - see `GraphPage::new`.
+    show_history: bool,
 }
 
 /// One page of a `PyGraphController`: either already loaded, or pending lazy
@@ -326,18 +336,48 @@ impl Page {
 }
 
 impl GraphPage {
-    fn new(name: String, db_path: PathBuf, graph: GenGraph) -> Self {
-        let source = PathSequenceSource::new(db_path.clone());
+    /// Build a page for `block_group_id`, seeding its graph with
+    /// [`seed_block_group_graph`] and growing it lazily afterward through a
+    /// `SqlGraphSource` scoped to this page - one connection, opened on that source's first
+    /// crawl step and reused for the rest of this page's life, rather than the whole graph
+    /// materialized eagerly via `BlockGroup::get_graph`. `show_history=False` (`prune`) uses
+    /// `SqlGraphSource::new_pruned`, so pruned/retired edit-site edges never enter the
+    /// crawled graph in the first place; `show_history=True` uses the plain source and relies
+    /// on `refresh_dimming` (called every render - see `Self::dimming_world`) to dim them
+    /// instead of hiding them.
+    fn new(
+        name: String,
+        db_path: PathBuf,
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        block_group_id: HashId,
+        show_history: bool,
+    ) -> Self {
+        let seed = seed_block_group_graph(conn, workspace, &block_group_id);
+        let graph_source = if show_history {
+            SqlGraphSource::new(db_path.clone(), workspace.clone(), block_group_id)
+        } else {
+            SqlGraphSource::new_pruned(db_path.clone(), workspace.clone(), block_group_id)
+        };
+        let sequence_source = PathSequenceSource::new(db_path.clone());
         let node_annotations = NodeAnnotationLayer::new();
-        let (engine, zoom_levels, view_state) =
-            create_send_sync_annotated_gen_graph_engine(graph, source, node_annotations.clone());
+        let (engine, zoom_levels, mut view_state) =
+            create_send_sync_annotated_gen_graph_engine_lazy(
+                seed,
+                graph_source,
+                sequence_source,
+                node_annotations.clone(),
+            );
+        refresh_dimming(&mut view_state, engine.graph());
+        let dimming_world = engine.active_world_key();
         Self {
             name,
             db_path,
-            block_group_id: None,
+            block_group_id: Some(block_group_id),
             engine,
             zoom_levels,
             view_state,
+            dimming_world,
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
             node_annotations,
@@ -553,6 +593,14 @@ impl GraphPage {
         let active_renderer = &self.zoom_levels[self.view_state.zoom_index].1;
         let view = GraphView::new(&mut self.engine, active_renderer);
         view.render(graph_area, buf, &mut self.view_state);
+
+        // The crawl may have grown `self.engine`'s graph (a fresh world, or activating an
+        // already-known one) during the render just above, so pruned-edge/inaccessible-node
+        // dimming can be stale relative to what's now loaded - see `refresh_dimming`.
+        if self.engine.active_world_key() != self.dimming_world {
+            refresh_dimming(&mut self.view_state, self.engine.graph());
+            self.dimming_world = self.engine.active_world_key();
+        }
 
         // At full detail, only names that could not fit beside their bars still float.
         let detail_level = self.zoom_levels[self.view_state.zoom_index].0;
@@ -805,6 +853,29 @@ impl GraphPage {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let workspace = workspace_for_connection(&conn)?;
         let path_blocks = path.blocks(&conn, &workspace, None).unwrap_or_default();
+        // `project_path`'s DFS needs a self-consistent fragment to walk, holistically split
+        // from one edge set rather than pieced together from several separately-merged crawl
+        // fragments (each computes its own block boundaries only from the edges it happened to
+        // fetch - see `merge_new_edges`). Build that fragment from exactly this path's own
+        // edges - `Path::edges_for_path` returns the specific, ordered `Edge` rows it's made
+        // of, which is bounded by the path's own length rather than the block group's, and
+        // sidesteps `self.engine`'s own source (and its `show_history` pruning) entirely: this
+        // page's designated path is not guaranteed to be made up of exactly the edges a
+        // display-oriented pruning policy would keep - see `LayoutEngine::graph_mut`'s doc.
+        let path_edge_ids: Vec<HashId> = GenPath::edges_for_path(&conn, &path.id, None)
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect();
+        let path_edges = BlockGroupEdge::specific_edges_for_block_group(
+            &conn,
+            &block_group_id,
+            &path_edge_ids,
+            None,
+        );
+        let path_fragment =
+            BlockGroup::get_graph_from_edges(&conn, &workspace, &block_group_id, &path_edges)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        self.engine.graph_mut().merge_graph(&path_fragment);
         let path_nodes = project_path_overlay_nodes(self.engine.graph(), &path_blocks);
 
         if path_nodes.is_empty() {
@@ -1154,9 +1225,8 @@ fn load_track_from_file(
     Ok(AnnotationTrack::new(display_name.to_string(), spans))
 }
 
-/// Build an eagerly-loaded `GraphPage` for a `PySequenceGraph`, loading its
-/// graph and auto-loading any stored annotation groups.
-fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
+/// Build a lazily-loaded `GraphPage` for a `PySequenceGraph` - see `GraphPage::new`.
+fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<GraphPage> {
     let context = sg.context.clone().ok_or_else(|| {
         PyRuntimeError::new_err(
             "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
@@ -1167,21 +1237,20 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphPage> {
         .path()
         .map(PathBuf::from)
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-    let graph = BlockGroup::get_graph(
+    let workspace = workspace_for_connection(graph_conn)?;
+    Ok(GraphPage::new(
+        sg.name.clone(),
+        db_path,
         graph_conn,
-        &workspace_for_connection(graph_conn)?,
-        &sg.id,
-        None,
-    )
-    .map_err(block_group_err_to_pyerr)?;
-    let mut page = GraphPage::new(sg.name.clone(), db_path, graph);
-    page.block_group_id = Some(sg.id);
-    Ok(page)
+        &workspace,
+        sg.id,
+        show_history,
+    ))
 }
 
 /// Capture the information needed to lazily build a page for `sg` later,
 /// without holding a live (non-`Send`) database handle in the meantime.
-fn page_ref_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<PageRef> {
+fn page_ref_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<PageRef> {
     let context = sg.context.clone().ok_or_else(|| {
         PyRuntimeError::new_err(
             "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
@@ -1197,6 +1266,7 @@ fn page_ref_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<PageRef> {
         name: sg.name.clone(),
         db_path,
         block_group_id: sg.id,
+        show_history,
     })
 }
 
@@ -1230,29 +1300,45 @@ pub struct PyGraphController {
 }
 
 impl PyGraphController {
-    /// Wrap a single, already-loaded graph as a one-page controller.
-    pub fn new(db_path: PathBuf, graph: GenGraph) -> Self {
+    /// Wrap a single block group as a one-page controller, its graph loaded lazily -
+    /// see `GraphPage::new`. Only used by this module's own tests.
+    #[cfg(test)]
+    fn new(
+        db_path: PathBuf,
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        block_group_id: HashId,
+    ) -> Self {
         Self {
             pages: vec![Page::Loaded(Box::new(GraphPage::new(
                 String::new(),
                 db_path,
-                graph,
+                conn,
+                workspace,
+                block_group_id,
+                true,
             )))],
             current_index: 0,
         }
     }
 
-    /// Build a single-page controller for `sg`, loading its graph eagerly.
-    pub(crate) fn for_sequence_graph(sg: &PySequenceGraph) -> PyResult<Self> {
+    /// Build a single-page controller for `sg`, loading its graph lazily.
+    pub(crate) fn for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<Self> {
         Ok(Self {
-            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(sg)?))],
+            pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(
+                sg,
+                show_history,
+            )?))],
             current_index: 0,
         })
     }
 
     /// Build a multi-page controller paging through every sequence graph in
     /// `block_groups`. Each page's graph is loaded lazily on first visit.
-    pub(crate) fn for_sample(block_groups: &[PySequenceGraph]) -> PyResult<Self> {
+    pub(crate) fn for_sample(
+        block_groups: &[PySequenceGraph],
+        show_history: bool,
+    ) -> PyResult<Self> {
         if block_groups.is_empty() {
             return Err(PyRuntimeError::new_err(
                 "Sample has no sequence graphs to plot",
@@ -1260,7 +1346,7 @@ impl PyGraphController {
         }
         let pages = block_groups
             .iter()
-            .map(|sg| page_ref_for_sequence_graph(sg).map(Page::Pending))
+            .map(|sg| page_ref_for_sequence_graph(sg, show_history).map(Page::Pending))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(Self {
             pages,
@@ -1274,10 +1360,14 @@ impl PyGraphController {
             let conn = get_connection(&page_ref.db_path)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let workspace = workspace_for_connection(&conn)?;
-            let graph = BlockGroup::get_graph(&conn, &workspace, &page_ref.block_group_id, None)
-                .map_err(block_group_err_to_pyerr)?;
-            let mut loaded = GraphPage::new(page_ref.name.clone(), page_ref.db_path.clone(), graph);
-            loaded.block_group_id = Some(page_ref.block_group_id);
+            let loaded = GraphPage::new(
+                page_ref.name.clone(),
+                page_ref.db_path.clone(),
+                &conn,
+                &workspace,
+                page_ref.block_group_id,
+                page_ref.show_history,
+            );
             *page = Page::Loaded(Box::new(loaded));
         }
         match page {
@@ -1590,13 +1680,12 @@ mod tests {
         },
     };
     use gen_core::{HashId, Strand, is_end_node, is_start_node};
-    use gen_models::block_group::BlockGroup;
     use gen_tui::plotter::PathStyle;
     use pyo3::{exceptions::PyValueError, prelude::*};
     use ratatui::style::Color;
     use serde_json::Value;
 
-    use super::{PyGraphController, current_theme};
+    use super::{PyGraphController, current_theme, workspace_for_connection};
 
     fn make_controller(detail: Option<&str>) -> PyResult<PyGraphController> {
         let ctx = setup_gen_on_disk();
@@ -1608,9 +1697,7 @@ mod tests {
             .expect("test DB must be file-backed");
         let (bg_id, _) = setup_block_group(graph_handle.conn());
         let workspace = workspace_for_connection(graph_handle.conn())?;
-        let graph = BlockGroup::get_graph(graph_handle.conn(), &workspace, &bg_id, None)
-            .map_err(crate::python_api::utils::block_group_err_to_pyerr)?;
-        let mut ctrl = PyGraphController::new(db_path, graph);
+        let mut ctrl = PyGraphController::new(db_path, graph_handle.conn(), &workspace, bg_id);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
@@ -1668,6 +1755,11 @@ mod tests {
     #[test]
     fn test_annotation_bars_follow_detail_and_removal() {
         let mut controller = make_controller(Some("full")).expect("should create a controller");
+        // The graph is only seeded, not fully loaded, until a render drives the crawl - see
+        // `GraphPage::new`.
+        controller
+            .render_frame(100, 30)
+            .expect("should render the graph");
         let page = controller.active().expect("should have an active page");
         let (source, target, _) = page
             .engine

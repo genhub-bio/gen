@@ -341,7 +341,7 @@ impl PyRepository {
         colors: Option<PyObject>,
         show_history: bool,
     ) -> PyResult<PyObject> {
-        let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph)?;
+        let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph, show_history)?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }

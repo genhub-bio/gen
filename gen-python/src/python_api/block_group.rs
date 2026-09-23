@@ -204,7 +204,7 @@ impl PySequenceGraph {
         show_history: bool,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow())?;
+        let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow(), show_history)?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }

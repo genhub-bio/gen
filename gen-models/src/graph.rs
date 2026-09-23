@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_core::{HashId, NodeIntervalBlock, Workspace, is_terminal};
+use gen_core::{
+    HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
+    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Workspace, is_terminal,
+};
 use gen_graph::{GenGraph, GraphError, GraphNode, GraphNodePosition, MergeGraph};
 use intervaltree::IntervalTree;
 use petgraph::Direction;
@@ -16,15 +19,16 @@ pub struct ResolvedGraph {
     pub block_group_id: HashId,
 }
 
-/// Identify all edges leading to and from a provided node_id in a block_group and merge them into an existing GenGraph.
-/// Returns true if the graph was expanded, false if no new edges were added.
-pub fn expand(
+/// Fetch every edge touching `node_id` or one of its immediate neighbors in `block_group_id` -
+/// the raw material `expand`/`expand_pruned` merge into a graph. Fetching the neighbors' own
+/// edges too (not just `node_id`'s) gives enough boundary context for the merged fragment to
+/// connect cleanly, and, for [`expand_pruned`], gives each neighbor's full outgoing edge set so
+/// its own chromosome_index dedup can be decided completely from this one batch.
+fn fetch_neighborhood_edges(
     conn: &GraphConnection,
-    workspace: &Workspace,
-    graph: &mut GenGraph,
     block_group_id: &HashId,
     node_id: HashId,
-) -> bool {
+) -> Vec<AugmentedEdge> {
     let edges_1hop = Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id], None)
         .unwrap_or_default();
 
@@ -46,14 +50,25 @@ pub fn expand(
             all_edges.entry(ae.edge.id).or_insert(ae);
         }
     }
+    all_edges.into_values().collect()
+}
 
+/// Merge whichever of `edges` are not already present in `graph`. Returns true if the graph was
+/// expanded, false if no new edges were added.
+fn merge_new_edges(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    graph: &mut GenGraph,
+    block_group_id: &HashId,
+    edges: Vec<AugmentedEdge>,
+) -> bool {
     let existing_edge_ids: HashSet<HashId> = graph
         .all_edges()
         .flat_map(|(_, _, edges)| edges.iter().map(|e| e.edge_id))
         .collect();
 
-    let new_edges: Vec<AugmentedEdge> = all_edges
-        .into_values()
+    let new_edges: Vec<AugmentedEdge> = edges
+        .into_iter()
         .filter(|ae| !existing_edge_ids.contains(&ae.edge.id))
         .collect();
 
@@ -68,6 +83,83 @@ pub fn expand(
         };
     graph.merge_graph(&fragment);
     true
+}
+
+/// Identify all edges leading to and from a provided node_id in a block_group and merge them into an existing GenGraph.
+/// Returns true if the graph was expanded, false if no new edges were added.
+pub fn expand(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    graph: &mut GenGraph,
+    block_group_id: &HashId,
+    node_id: HashId,
+) -> bool {
+    let edges = fetch_neighborhood_edges(conn, block_group_id, node_id);
+    merge_new_edges(conn, workspace, graph, block_group_id, edges)
+}
+
+/// Keep only the edges [`BlockGroup::prune_graph`] would also keep, grouping by source node and
+/// chromosome_index and keeping just the newest edge per group - a `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX`
+/// edge is always dropped, and a `NO_CHROMOSOME_INDEX`/`INDETERMINATE_CHROMOSOME_INDEX` edge is
+/// never dropped. Each source node's full outgoing set is always present in `edges` (see
+/// `fetch_neighborhood_edges`), so this one-hop batch has everything the decision needs; no
+/// broader graph context is required.
+fn drop_pruned_edges(edges: Vec<AugmentedEdge>) -> Vec<AugmentedEdge> {
+    let mut best_by_group: HashMap<(HashId, i64), &AugmentedEdge> = HashMap::new();
+    for edge in &edges {
+        if edge.chromosome_index == NO_CHROMOSOME_INDEX
+            || edge.chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
+            || edge.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+        {
+            continue;
+        }
+        best_by_group
+            .entry((edge.edge.source_node_id, edge.chromosome_index))
+            .and_modify(|current| {
+                if edge.created_on > current.created_on {
+                    *current = edge;
+                }
+            })
+            .or_insert(edge);
+    }
+    let kept_edge_ids: HashSet<HashId> = best_by_group.values().map(|edge| edge.edge.id).collect();
+
+    edges
+        .into_iter()
+        .filter(|edge| {
+            edge.chromosome_index == NO_CHROMOSOME_INDEX
+                || edge.chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
+                || kept_edge_ids.contains(&edge.edge.id)
+        })
+        .collect()
+}
+
+/// Like [`expand`], but never merges in an edge that [`BlockGroup::prune_graph`] would later
+/// remove from a fully-loaded graph (see [`drop_pruned_edges`]) - so a crawl built on this
+/// never traverses a pruned/retired edit-site edge, and never reaches a node that's only
+/// reachable through one. This is what backs `show_history=False` in gen-python's `plot()`:
+/// filtering before merge, rather than pruning the crawled graph after the fact, avoids
+/// resurrecting a dropped edge on a later `expand`/`expand_pruned` call for a neighboring
+/// node - see `SqlGraphSource`'s own doc for why mutating the crawled graph post hoc isn't
+/// safe here.
+///
+/// A node reachable *only* through a pruned edge can still end up as an isolated,
+/// zero-edge entry in `graph` - `blocks_from_edges`' own coordinate-completeness backfill
+/// (see its doc) queries the block group directly for any node whose split points aren't
+/// fully known from the edges passed in, independent of pruning, and unconditionally adds a
+/// block (hence a node) for whatever it finds. This doesn't affect what's visible or
+/// traversable: `neighborhood`'s crawl only ever discovers a node by following an edge from
+/// one it already reached, and an isolated node has none, so it's never selected as a
+/// `GraphSource::ensure_loaded` target and never enters a rendered window.
+pub fn expand_pruned(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    graph: &mut GenGraph,
+    block_group_id: &HashId,
+    node_id: HashId,
+) -> bool {
+    let edges = drop_pruned_edges(fetch_neighborhood_edges(conn, block_group_id, node_id));
+    merge_new_edges(conn, workspace, graph, block_group_id, edges)
 }
 
 /// From a given position in a graph, find positions a given number of characters away. An
@@ -795,6 +887,159 @@ mod tests {
         assert!(
             node_ids.contains(&HashId::convert_str("node-z")),
             "Z should be added after expanding Y"
+        );
+    }
+
+    #[test]
+    fn test_expand_pruned_never_merges_in_the_older_edge_of_a_chromosome_index_fork() {
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        Sample::get_or_create(
+            &conn,
+            NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let block_group = BlockGroup::create(
+            &conn,
+            NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "chr1",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let seq_y = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("YYYYY")
+            .save(&conn)
+            .unwrap();
+        let seq_old = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("OOOOO")
+            .save(&conn)
+            .unwrap();
+        let seq_new = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("NNNNN")
+            .save(&conn)
+            .unwrap();
+
+        let node_y = Node::create(&conn, &seq_y.hash, &HashId::convert_str("node-y")).unwrap();
+        let node_old =
+            Node::create(&conn, &seq_old.hash, &HashId::convert_str("node-old")).unwrap();
+        let node_new =
+            Node::create(&conn, &seq_new.hash, &HashId::convert_str("node-new")).unwrap();
+
+        let e_start = Edge::create(
+            &conn,
+            PATH_START_NODE_ID,
+            -1,
+            Strand::Forward,
+            node_y,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let e_old = Edge::create(
+            &conn,
+            node_y,
+            5,
+            Strand::Forward,
+            node_old,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        let e_new = Edge::create(
+            &conn,
+            node_y,
+            5,
+            Strand::Forward,
+            node_new,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[
+                BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: e_start.id,
+                    chromosome_index: 0,
+                    phased: 0,
+                },
+                BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: e_old.id,
+                    chromosome_index: 1,
+                    phased: 0,
+                },
+            ],
+        );
+        BlockGroupEdge::bulk_create(
+            &conn,
+            &[BlockGroupEdgeData {
+                block_group_id: block_group.id,
+                edge_id: e_new.id,
+                chromosome_index: 1,
+                phased: 0,
+            }],
+        );
+        // `bulk_create` timestamps a whole batch with one `Utc::now()` call, and two batches
+        // fired back-to-back in a test can land on the same nanosecond - force `e_new`
+        // strictly later than `e_old` explicitly, rather than relying on wall-clock
+        // granularity, since `prune_graph`/`expand_pruned` keep the newest edge per
+        // (source, chromosome_index) and treat a tie as "whichever this batch saw first".
+        conn.execute(
+            "UPDATE block_group_edges SET created_on = created_on + 1 WHERE edge_id = ?1",
+            [e_new.id],
+        )
+        .unwrap();
+
+        let mut graph = GenGraph::new();
+        graph.add_node(GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        });
+        expand_pruned(
+            &conn,
+            test_workspace(),
+            &mut graph,
+            &block_group.id,
+            PATH_START_NODE_ID,
+        );
+        expand_pruned(
+            &conn,
+            test_workspace(),
+            &mut graph,
+            &block_group.id,
+            HashId::convert_str("node-y"),
+        );
+
+        let node_new = HashId::convert_str("node-new");
+        let node_old = HashId::convert_str("node-old");
+        let node_ids: HashSet<HashId> = graph.nodes().map(|n| n.node_id).collect();
+        assert!(
+            node_ids.contains(&node_new),
+            "the newer chromosome_index edge should survive pruning"
+        );
+        let touches_old_node = graph
+            .all_edges()
+            .any(|(source, target, _)| source.node_id == node_old || target.node_id == node_old);
+        assert!(
+            !touches_old_node,
+            "the older chromosome_index edge, and the node only reachable through it, should \
+             never be merged in by expand_pruned - a crawl can only ever reach a node it's \
+             connected to by an edge (see expand_pruned's own doc on the isolated-node \
+             backfill caveat this stops just short of)"
         );
     }
 

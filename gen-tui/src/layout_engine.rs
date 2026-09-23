@@ -225,6 +225,19 @@ where
         &self.graph
     }
 
+    /// Mutably borrow the underlying domain graph, bypassing [`Self::source`] entirely -
+    /// without otherwise touching the active world or window cache, unlike
+    /// [`Self::window_for`]/[`Self::activate_world_at`], which both also navigate there. For a
+    /// caller that needs to merge in data its own way rather than through the crawl's usual
+    /// [`crate::crawl::GraphSource::ensure_loaded`] path - e.g. gen-python's `show_path`, which
+    /// must be able to project a stored path onto the graph regardless of whether the active
+    /// source is filtering some of that path's own edges out (see `SqlGraphSource::new_pruned`).
+    /// A caller's designated "current path" is not guaranteed to be made up of exactly the
+    /// edges a display-oriented pruning policy would keep.
+    pub fn graph_mut(&mut self) -> &mut G {
+        &mut self.graph
+    }
+
     /// The rendering neighbourhood's node budget for a viewport of the given width
     /// (columns). See `NEIGHBORHOOD_NODE_BUDGET_DIVISOR`.
     pub fn neighborhood_node_budget(&self, viewport_width: usize) -> usize {
