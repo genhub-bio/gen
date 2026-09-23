@@ -939,7 +939,9 @@ fn layout_layer_internal(
                 sorted_neighbors.sort_by_key(|node| (node.position, node.node_id));
                 for node2_data in sorted_neighbors {
                     let node2_pos = node2_data.position;
-                    if let Some(&layer_node2_idx) = position_to_node_idx.get(&node2_pos) {
+                    if let Some(&layer_node2_idx) = position_to_node_idx.get(&node2_pos)
+                        && layer_node1_idx != layer_node2_idx
+                    {
                         // Check if edge already exists to avoid duplicates
                         if layer_graph
                             .find_edge(layer_node1_idx, layer_node2_idx)
@@ -1003,26 +1005,25 @@ fn layout_layer_internal(
         }
     }
 
-    // If we flipped the positions for routing, flip the result back
+    // If we flipped the positions for routing, flip the result back. Negation
+    // about y=0 is its own exact inverse regardless of either side's vertical
+    // extent, so this always restores the original coordinates.
     if reverse_order {
-        // Find the vertical extent of the routed layer graph
-        let all_y: Vec<i64> = layer_graph
-            .node_indices()
-            .map(|idx| layer_graph.node_weight(idx).unwrap().pos.y)
-            .collect();
+        for node in layer_graph.node_weights_mut() {
+            node.pos.y = -node.pos.y;
+        }
 
-        if !all_y.is_empty() {
-            let min_y = *all_y.iter().min().unwrap();
-            let max_y = *all_y.iter().max().unwrap();
-
-            // Collect node indices first to avoid borrow checker issues
-            let node_indices: Vec<_> = layer_graph.node_indices().collect();
-
-            // Flip all node positions back: y_new = max_y + min_y - y_old
-            for node_idx in node_indices {
-                if let Some(node) = layer_graph.node_weight_mut(node_idx) {
-                    node.pos.y = max_y + min_y - node.pos.y;
-                }
+        for node_index in layer_graph.node_indices() {
+            let node = &layer_graph[node_index];
+            if matches!(node.role, NodeRole::Routing) {
+                let incident_bundles: Vec<_> = layer_graph
+                    .edges(node_index)
+                    .map(|edge| &edge.weight().bundle)
+                    .collect();
+                assert!(
+                    incident_bundles.len() != 2 || incident_bundles[0] == incident_bundles[1],
+                    "degree-two routing node {node_index:?} joins different bundles"
+                );
             }
         }
     }
