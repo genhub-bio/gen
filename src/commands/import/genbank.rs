@@ -27,8 +27,8 @@ pub struct Command {
     #[clap(index = 1)]
     pub path: String,
     /// The name of the collection to store the entry under
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// A sample name to associate the Genbank file with
     #[arg(short, long, conflicts_with = "reference")]
     sample: Option<String>,
@@ -56,8 +56,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = &cmd
-        .name
+    let collection_name = &cmd
+        .collection
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
     let file = File::open(&cmd.path)?;
@@ -91,7 +91,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     match import_genbank(
         context,
         &mut reader,
-        name.as_ref(),
+        collection_name.as_ref(),
         sample_name,
         OperationInfo {
             files: vec![OperationFile::new(cmd.path.clone()).set_file_type(FileTypes::GenBank)],

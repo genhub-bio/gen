@@ -24,8 +24,8 @@ pub struct Command {
     #[clap(index = 3)]
     library: Option<String>,
     /// The name of the collection to store the entry under
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// A sample name to associate the library with
     #[arg(short, long, conflicts_with = "reference")]
     sample: Option<String>,
@@ -45,8 +45,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     let config_conn = context.config().conn();
     let conn = context.graph().conn();
 
-    let name = &cmd
-        .name
+    let collection_name = &cmd
+        .collection
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
     let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
@@ -75,7 +75,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     match import_library(
         context,
-        name,
+        collection_name,
         sample_name,
         &cmd.library_name,
         parts_list,

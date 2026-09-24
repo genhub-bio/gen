@@ -303,8 +303,8 @@ pub enum Commands {
     #[command(arg_required_else_help(true))]
     PropagateAnnotations {
         /// The name of the collection to annotate
-        #[arg(short, long)]
-        name: Option<String>,
+        #[arg(short = 'c', long)]
+        collection: Option<String>,
         /// The name of the sample the annotations are referenced to (if not provided, the default)
         #[arg(short, long)]
         from_sample: String,
@@ -420,8 +420,8 @@ pub enum Commands {
         #[arg(long = "ref")]
         history_ref: Option<String>,
         /// The name of the collection to list graphs for
-        #[arg(short, long)]
-        name: Option<String>,
+        #[arg(short = 'c', long)]
+        collection: Option<String>,
         /// The name of the sample to list graphs for
         #[arg(short, long)]
         sample: String,
@@ -433,8 +433,8 @@ pub enum Commands {
         #[arg(long = "ref")]
         history_ref: Option<String>,
         /// The name of the collection containing the sequence
-        #[arg(short, long)]
-        name: Option<String>,
+        #[arg(short = 'c', long)]
+        collection: Option<String>,
         /// The name of the sample containing the sequence
         #[arg(short, long)]
         sample: String,
@@ -454,8 +454,8 @@ pub enum Commands {
     /// Output a file representing the diff between a query and base
     Diff {
         /// The name of the collection to diff
-        #[arg(short, long)]
-        name: Option<String>,
+        #[arg(short = 'c', long)]
+        collection: Option<String>,
         /// Query whose contents are compared against the base
         #[arg(long, visible_alias = "sample1")]
         query: String,
@@ -476,8 +476,8 @@ pub enum Commands {
     )]
     MakeStitch {
         /// The name of the collection to derive the subgraph from
-        #[arg(short, long)]
-        name: Option<String>,
+        #[arg(short = 'c', long)]
+        collection: Option<String>,
         /// The name of the parent sample
         #[arg(short, long)]
         sample: String,
@@ -596,6 +596,25 @@ mod tests {
             error.to_string().contains("--base"),
             "missing endpoint error should name --base: {error}"
         );
+    }
+
+    #[test]
+    fn test_collection_option_accepts_long_and_short_forms() {
+        for collection_flag in ["--collection", "-c"] {
+            let cli = Cli::try_parse_from([
+                "gen",
+                "list-graphs",
+                collection_flag,
+                "selected",
+                "--sample",
+                "default",
+            ])
+            .expect("should parse the collection selector");
+            let Some(Commands::ListGraphs { collection, .. }) = cli.command else {
+                panic!("should parse list-graphs command");
+            };
+            assert_eq!(collection.as_deref(), Some("selected"));
+        }
     }
 
     #[test]

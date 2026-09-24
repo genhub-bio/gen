@@ -3,7 +3,7 @@
 This controls default choices for the `gen` command line
 
 - collection
-  - This controls the default collection for `gen` to work on, it is what is passed to the `--name` argument.
+  - This controls the default collection for `gen` to work on, it is what is passed to the `--collection` (`-c`) argument.
 
 # Apply
 

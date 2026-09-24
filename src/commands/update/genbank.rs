@@ -21,8 +21,8 @@ pub struct Command {
     #[clap(index = 1)]
     pub path: String,
     /// The name of the collection to update
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// The name of the sample to update
     #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
     sample: String,
@@ -44,8 +44,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     conn.execute("BEGIN TRANSACTION", [])?;
 
-    let name = &cmd
-        .name
+    let collection_name = &cmd
+        .collection
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
 
@@ -53,7 +53,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     match update_with_genbank(
         context,
         &f,
-        name.as_ref(),
+        collection_name.as_ref(),
         &cmd.sample,
         cmd.create_missing,
         &OperationInfo {

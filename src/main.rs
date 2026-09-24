@@ -652,13 +652,13 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Defaults { .. }) => Ok(()),
         Some(Commands::Transform { format_csv_for_gaf }) => Ok(()),
         Some(Commands::PropagateAnnotations {
-            name,
+            collection,
             from_sample,
             to_sample,
             gff,
             output_gff,
         }) => {
-            let collection_name = &(match name {
+            let collection_name = &(match collection {
                 Some(collection) => collection,
                 None => get_default_collection(config_conn)?,
             });
@@ -858,10 +858,10 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::ListGraphs {
             history_ref,
-            name,
+            collection,
             sample,
         }) => {
-            let collection_name = &(match name {
+            let collection_name = &(match collection {
                 Some(collection) => collection,
                 None => get_default_collection(config_conn)?,
             });
@@ -878,14 +878,14 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::GetSequence {
             history_ref,
-            name,
+            collection,
             sample,
             graph,
             start,
             end,
             region,
         }) => {
-            let collection_name = &(match name {
+            let collection_name = &(match collection {
                 Some(collection) => collection,
                 None => get_default_collection(config_conn)?,
             });
@@ -938,12 +938,12 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::Diff {
-            name,
+            collection,
             query,
             base,
             gfa,
         }) => {
-            let collection_name = &(match name {
+            let collection_name = &(match collection {
                 Some(collection) => collection,
                 None => get_default_collection(config_conn)?,
             });
@@ -958,14 +958,20 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::MakeStitch {
-            name,
+            collection,
             sample,
             new_sample,
             regions,
             new_region,
         }) => {
-            match make_stitch_operation(&db_context, name, sample, new_sample, regions, new_region)
-            {
+            match make_stitch_operation(
+                &db_context,
+                collection,
+                sample,
+                new_sample,
+                regions,
+                new_region,
+            ) {
                 Ok(_) => Ok(()),
                 Err(e) => Err(format!("Error making a stitch: {e}").into()),
             }
