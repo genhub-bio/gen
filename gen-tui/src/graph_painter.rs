@@ -38,8 +38,6 @@ pub enum HighlightKind<N> {
     Node(N),
     /// An edge between two nodes (source, target)
     Edge(N, N),
-    /// A path consisting of a sequence of nodes
-    Path(Vec<N>),
     /// Tint a sub-rectangle of a single node.
     /// tl/br are (col, row) offsets from the node's top-left corner; br is exclusive.
     Cells {
@@ -321,29 +319,6 @@ fn paint<G, V>(
                     *style,
                     &mut edge_highlights,
                 );
-            }
-            HighlightKind::Path(nodes) => {
-                for &node_id in nodes {
-                    apply_node_highlight(
-                        viewport_graph,
-                        graph,
-                        node_id,
-                        *style,
-                        &mut node_highlights,
-                    );
-                }
-                for window in nodes.windows(2) {
-                    if let [source, target] = window {
-                        apply_edge_highlight(
-                            viewport_graph,
-                            graph,
-                            *source,
-                            *target,
-                            *style,
-                            &mut edge_highlights,
-                        );
-                    }
-                }
             }
             HighlightKind::Cells { node, tl, br } => {
                 apply_cell_highlight(
