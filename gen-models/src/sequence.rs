@@ -1,7 +1,7 @@
 use core::hash::{Hash, Hasher};
 use std::{io::BufReader, ops::Range, rc::Rc, str, sync};
 
-use cached::proc_macro::cached;
+use cached::{Cached, SizedCache, proc_macro::cached};
 use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, Sha256Hash, Workspace, traits::Capnp};
 use indexmap::IndexMap;
@@ -422,6 +422,115 @@ fn sequence_slice(
     })
 }
 
+/// Whether a `sequence_type` marks the sequence as circular.
+pub(crate) fn is_circular_sequence_type(sequence_type: &str) -> bool {
+    sequence_type
+        .split_whitespace()
+        .any(|part| part.eq_ignore_ascii_case("circular"))
+}
+
+/// How many bases of a database-stored sequence are read and cached together. Viewers render
+/// short slices of sequences that can be chromosome length, so they read only the chunks a slice
+/// covers instead of the whole sequence.
+const STORED_SEQUENCE_CHUNK_LENGTH: i64 = 1_000;
+
+/// How many chunks [`stored_sequence_range`] keeps, about 4 MB of sequence text.
+const STORED_SEQUENCE_CHUNK_CAPACITY: usize = 4_096;
+
+/// Chunks of database-stored sequences by `(sequence hash, chunk index)`. Sequences are
+/// content-addressed, so a chunk stays valid whichever database it was read from.
+static STORED_SEQUENCE_CHUNKS: sync::LazyLock<sync::Mutex<SizedCache<(Sha256Hash, i64), String>>> =
+    sync::LazyLock::new(|| sync::Mutex::new(SizedCache::with_size(STORED_SEQUENCE_CHUNK_CAPACITY)));
+
+/// Bases `start..end` of the database-stored sequence `hash`, which is `length` bases long,
+/// read chunk by chunk through [`STORED_SEQUENCE_CHUNKS`]. A circular sequence may wrap, with
+/// `start` after `end`.
+pub(crate) fn stored_sequence_range(
+    conn: &GraphConnection,
+    hash: &Sha256Hash,
+    length: i64,
+    circular: bool,
+    start: i64,
+    end: i64,
+) -> Result<String, SequenceError> {
+    let (start, end) = validate_sequence_bounds(start, end, length)?;
+    let (start, end) = (start as i64, end as i64);
+    if start <= end {
+        return stored_sequence_run(conn, hash, length, start, end);
+    }
+    if !circular {
+        return Err(SequenceError::BoundsError { start, end, length });
+    }
+    let mut wrapped = stored_sequence_run(conn, hash, length, start, length)?;
+    wrapped.push_str(&stored_sequence_run(conn, hash, length, 0, end)?);
+    Ok(wrapped)
+}
+
+/// Bases `start..end` (with `start <= end`) of a database-stored sequence. Missing chunks are
+/// read with one `substr` query per contiguous run of them.
+fn stored_sequence_run(
+    conn: &GraphConnection,
+    hash: &Sha256Hash,
+    length: i64,
+    start: i64,
+    end: i64,
+) -> Result<String, SequenceError> {
+    if start == end {
+        return Ok(String::new());
+    }
+    let first_chunk = start / STORED_SEQUENCE_CHUNK_LENGTH;
+    let last_chunk = (end - 1) / STORED_SEQUENCE_CHUNK_LENGTH;
+    let mut cache = STORED_SEQUENCE_CHUNKS
+        .lock()
+        .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
+    let mut chunks: Vec<Option<String>> = (first_chunk..=last_chunk)
+        .map(|chunk| cache.cache_get(&(*hash, chunk)).cloned())
+        .collect();
+    let mut offset = 0;
+    while offset < chunks.len() {
+        if chunks[offset].is_some() {
+            offset += 1;
+            continue;
+        }
+        let run_end = chunks[offset..]
+            .iter()
+            .position(Option::is_some)
+            .map_or(chunks.len(), |position| offset + position);
+        let run_start_base = (first_chunk + offset as i64) * STORED_SEQUENCE_CHUNK_LENGTH;
+        let run_end_base =
+            ((first_chunk + run_end as i64) * STORED_SEQUENCE_CHUNK_LENGTH).min(length);
+        // As a BLOB, substr seeks by byte offset instead of counting characters from the start
+        // of the sequence; stored sequences are ASCII, so bytes and bases line up. SQLite's substr
+        // is 1-based.
+        let bytes: Vec<u8> = conn.query_row(
+            "SELECT substr(CAST(sequence AS BLOB), ?1, ?2) FROM sequences WHERE hash = ?3",
+            params![run_start_base + 1, run_end_base - run_start_base, hash],
+            |row| row.get(0),
+        )?;
+        for (index, chunk_text) in bytes
+            .chunks(STORED_SEQUENCE_CHUNK_LENGTH as usize)
+            .enumerate()
+        {
+            let chunk_text = str::from_utf8(chunk_text)
+                .map_err(|err| SequenceError::Utf8(err.to_string()))?
+                .to_string();
+            let chunk = first_chunk + (offset + index) as i64;
+            cache.cache_set((*hash, chunk), chunk_text.clone());
+            chunks[offset + index] = Some(chunk_text);
+        }
+        offset = run_end;
+    }
+    drop(cache);
+
+    let joined: String = chunks.into_iter().flatten().collect();
+    let skip = (start - first_chunk * STORED_SEQUENCE_CHUNK_LENGTH) as usize;
+    let take = (end - start) as usize;
+    joined
+        .get(skip..skip + take)
+        .map(str::to_string)
+        .ok_or(SequenceError::BoundsError { start, end, length })
+}
+
 type SequenceCache = sync::RwLock<Option<((HashId, String), Option<String>)>>;
 
 pub fn cached_sequence(
@@ -599,9 +708,7 @@ impl Sequence {
     }
 
     fn is_circular(&self) -> bool {
-        self.sequence_type
-            .split_whitespace()
-            .any(|part| part.eq_ignore_ascii_case("circular"))
+        is_circular_sequence_type(&self.sequence_type)
     }
 
     pub fn query_by_ids<T>(
@@ -822,7 +929,7 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 mod tests {
     use std::{fs, fs::OpenOptions, io::Write, time};
 
-    use gen_core::traits::Capnp as _;
+    use gen_core::{HashId, traits::Capnp as _};
     use rand::RngExt;
     use sha2::Digest as _;
 
@@ -830,6 +937,7 @@ mod tests {
     use crate::{
         assets::{AssetRef, AssetRole},
         gen_models_capnp::sequence,
+        node::Node,
         operations::OperationFile,
         test_helpers::{get_connection, setup_gen_on_disk},
     };
@@ -1147,6 +1255,37 @@ mod tests {
                 end: 10,
                 length: 9,
             })
+        );
+    }
+
+    #[test]
+    fn test_node_sequence_range_reads_external_sequences_from_their_asset() {
+        let context = setup_gen_on_disk();
+        let temp_file_path = context.workspace().repo_root().unwrap().join("simple.fa");
+        fs::write(&temp_file_path, ">m123\nAAACCCTTT\n").unwrap();
+        let asset_ref = prepare_asset(&context, temp_file_path.to_str().unwrap(), AssetRole::Input);
+        let sequence = Sequence::new()
+            .sequence_type("circular")
+            .name("m123")
+            .asset_ref_id(Some(&asset_ref.id))
+            .length(9)
+            .save(context.graph().conn())
+            .unwrap();
+        let node_id = Node::create(
+            context.graph().conn(),
+            &sequence.hash,
+            &HashId::convert_str("external-node"),
+        )
+        .unwrap();
+        let conn = context.graph().conn();
+        let workspace = context.workspace();
+        assert_eq!(
+            Node::get_sequence_range(conn, workspace, node_id, 3, 6).unwrap(),
+            Some("CCC".to_string())
+        );
+        assert_eq!(
+            Node::get_sequence_range(conn, workspace, node_id, 7, 2).unwrap(),
+            Some("TTAA".to_string())
         );
     }
 
