@@ -289,10 +289,18 @@ number of paths takes time and memory.
 
 The package is built from three layers:
 
+### Client (`src/main.rs`)
+
+The existing Rust command-line client is compiled separately and staged in
+maturin's wheel data `scripts` directory. Package installers place that executable
+on `PATH` as `gen` on macOS and Linux or `gen.exe` on Windows.
+
 ### Rust (`src/python_api/`)
 
 The core of the package. [PyO3](https://pyo3.rs) + [maturin](https://www.maturin.rs)
-compile the Gen engine into a native extension module (`gen.so`). This layer owns:
+compile the Gen engine into a native extension module (`gen.so`). Release wheels
+use CPython's stable ABI with Python 3.11 as the minimum supported version. This
+layer owns:
 
 - **`Repository`** — opens a Gen workspace, drives all import/export operations
   (FASTA, GenBank, GFA, VCF, GAF, …), exposes version-control and remote
@@ -341,24 +349,29 @@ Loaded by anywidget directly in the browser. Responsible for:
 
 ```sh
 make          # from the project root — builds the native extension via maturin
+make python-wheel  # builds a wheel containing the extension and client
 make jupyter  # also builds the JS widget bundle and installs the `jupyter` extras
 ```
 
 ## Testing
 
-`gen-python/Makefile` has three targets:
+`gen-python/Makefile` has four testing targets:
 
-- `pyenv-test` — runs `cargo test` with the pyenv-managed Python interpreter set
+- `bindings-test` — runs `cargo test` with the pyenv-managed Python interpreter set
   as the PyO3 Python — necessary because PyO3 must link against the same Python
   that will load the extension. Use it when working on the Rust layer.
+- `api-test` — rebuilds the extension into the project-root `.venv` and runs
+  `unittest discover` over `tests/`, exercising the installed extension's public
+  API (including remote clone/push/pull/fetch against mock HTTP and file remotes).
 - `notebook-test` — rebuilds the extension into the project-root `.venv` and runs
   `pytest --nbmake` over `examples/`, executing every example notebook end to end.
-- `test` — runs both of the above.
+- `test` — runs all of the above.
 
 ```sh
-cd gen-python && make pyenv-test     # Rust-layer tests
+cd gen-python && make bindings-test  # Rust-layer tests
+cd gen-python && make api-test       # installed public API tests
 cd gen-python && make notebook-test  # example notebooks
-cd gen-python && make test           # both
+cd gen-python && make test           # all three
 ```
 
 ## For AI agents
