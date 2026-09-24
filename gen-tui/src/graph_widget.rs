@@ -147,8 +147,7 @@ mod tests {
                 anchor,
                 graph.node_count(),
                 &mut GraphCursor::new(&mut graph, &mut EagerSource),
-                None,
-                &HashMap::new(),
+                &|_| false,
                 &HashMap::new(),
             )
             .expect("should find the anchor in the graph");

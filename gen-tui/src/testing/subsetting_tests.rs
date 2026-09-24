@@ -28,8 +28,7 @@ fn crawl_invariant_errors(
         anchor,
         node_budget,
         &mut GraphCursor::new(&mut graph, &mut EagerSource),
-        None,
-        &HashMap::new(),
+        &|_| false,
         &HashMap::new(),
     ) {
         Ok(subgraph) => subgraph,
@@ -144,8 +143,7 @@ fn run_case(
             anchor,
             node_budget,
             &mut GraphCursor::new(&mut cloned, &mut EagerSource),
-            None,
-            &HashMap::new(),
+            &|_| false,
             &HashMap::new(),
         ) {
             Ok(subgraph) => {

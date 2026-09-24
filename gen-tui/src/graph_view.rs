@@ -25,7 +25,7 @@ use crate::{
     frame_index::FrameIndex,
     graph_painter::{Camera, GraphPainter, HighlightKind, Highlights, snap_camera},
     layout::NodeRole,
-    layout_engine::{LayoutEngine, WorldKey},
+    layout_engine::{BatchId, LayoutEngine},
     navigator::{CursorOverlay, CursorState},
     plotter::{NodeRenderer, PathStyle},
     theme::current_theme,
@@ -168,8 +168,8 @@ pub struct GraphViewState<N> {
     go_to_pending: bool,
     go_to_snap_left: bool,
     go_to_snap_right: bool,
-    /// Structural world used to produce `frame` and `wormhole`.
-    last_world_key: Option<WorldKey<N>>,
+    /// Batch whose world produced `frame` and `wormhole`.
+    last_batch: Option<BatchId>,
     /// Cursor state restored if an explicit jump cannot construct its requested world.
     go_to_previous_cursor: Option<CursorState<N>>,
     /// Most recent wormhole arrival node. Painted with the theme's Base0B color until the
@@ -197,7 +197,7 @@ impl<N> Default for GraphViewState<N> {
             go_to_frame_anchor: None,
             go_to_snap_left: false,
             go_to_snap_right: false,
-            last_world_key: None,
+            last_batch: None,
             go_to_previous_cursor: None,
             wormhole_entry: None,
             center_world_on_change: false,
@@ -218,8 +218,8 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         self.last_area.width
     }
 
-    pub fn last_world_key(&self) -> Option<WorldKey<N>> {
-        self.last_world_key
+    pub fn last_batch(&self) -> Option<BatchId> {
+        self.last_batch
     }
 
     /// Discard per-frame products so this state can be reused as an independent view of the
@@ -228,7 +228,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         self.frame = FrameIndex::empty();
         self.wormhole.clear();
         self.camera = None;
-        self.last_world_key = None;
+        self.last_batch = None;
         self.wormhole_entry = None;
         self.center_world_on_change = true;
     }
@@ -697,12 +697,12 @@ where
             .engine
             .neighborhood_node_budget(inner_area.width as usize);
 
-        let initial_key = match self.engine.ensure_initial_world(inner_area.width as usize) {
+        let initial_batch = match self.engine.ensure_initial_world(inner_area.width as usize) {
             Ok(Some(key)) => key,
             Ok(None) => {
                 state.frame = FrameIndex::empty();
                 state.wormhole.clear();
-                state.last_world_key = None;
+                state.last_batch = None;
                 return;
             }
             Err(error) => {
@@ -714,11 +714,12 @@ where
         };
 
         // An ordinary go-to inside the active world only reframes the camera. A target outside
-        // it is the one render-time operation allowed to request a new structural world.
+        // it is the one render-time operation allowed to switch batches, claiming a new one if
+        // nothing owns the target yet.
         if state.go_to_pending
             && let Some(target) = state.cursor.node
             && !self.engine.active_contains(target)
-            && let Err(error) = self.engine.activate_world_at(target, node_budget, None)
+            && let Err(error) = self.engine.activate_batch_containing(target, node_budget)
         {
             log::error!("GraphView: jump world construction failed: {}", error);
             if let Some(previous) = state.go_to_previous_cursor.take() {
@@ -730,13 +731,13 @@ where
             state.go_to_snap_right = false;
         }
 
-        let active_key = self.engine.active_world_key().unwrap_or(initial_key);
-        let had_rendered_world = state.last_world_key.is_some();
-        let world_changed = state.last_world_key != Some(active_key);
+        let active_batch = self.engine.active_batch().unwrap_or(initial_batch);
+        let had_rendered_world = state.last_batch.is_some();
+        let world_changed = state.last_batch != Some(active_batch);
         if world_changed {
             state.frame = FrameIndex::empty();
             state.wormhole.clear();
-            state.last_world_key = Some(active_key);
+            state.last_batch = Some(active_batch);
         }
 
         let Some(active_world) = self.engine.active_world() else {
@@ -745,7 +746,7 @@ where
             return;
         };
         let window = active_world.layout().clone();
-        let structural_anchor = active_key.anchor;
+        let structural_anchor = active_world.anchor();
         let half_height = inner_area.height as i64 / 2;
 
         // The main view initially frames from the left; secondary views center the anchor.
@@ -1124,9 +1125,7 @@ mod tests {
 
         let mut main_buffer = ratatui::buffer::Buffer::empty(main_area);
         GraphView::new(&mut engine, &visual).render(main_area, &mut main_buffer, &mut main_state);
-        let key = engine
-            .active_world_key()
-            .expect("should have an active world");
+        let key = engine.active_batch().expect("should have an active world");
         let membership: HashSet<_> = engine
             .active_world()
             .expect("should retain the active world")
@@ -1141,12 +1140,16 @@ mod tests {
             &mut second_state,
         );
 
-        assert_eq!(engine.active_world_key(), Some(key));
+        assert_eq!(engine.active_batch(), Some(key));
         assert_eq!(engine.structural_build_counts(), counts);
         let second_camera = second_state
             .camera
             .expect("should give the second view a camera");
-        assert_eq!(second_camera.anchor, key.anchor);
+        let anchor = engine
+            .active_world()
+            .expect("should retain the active world")
+            .anchor();
+        assert_eq!(second_camera.anchor, anchor);
         assert_eq!(second_camera.anchor_screen.0, second_area.width as i64 / 2);
         assert_eq!(
             engine
@@ -1169,9 +1172,7 @@ mod tests {
         let area = Rect::new(0, 0, 60, 18);
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
-        let key = engine
-            .active_world_key()
-            .expect("should have an active world");
+        let key = engine.active_batch().expect("should have an active world");
         let counts = engine.structural_build_counts();
         let target = engine
             .active_world()
@@ -1190,7 +1191,7 @@ mod tests {
         let mut resized_buffer = ratatui::buffer::Buffer::empty(resized);
         GraphView::new(&mut engine, &visual).render(resized, &mut resized_buffer, &mut state);
 
-        assert_eq!(engine.active_world_key(), Some(key));
+        assert_eq!(engine.active_batch(), Some(key));
         assert_eq!(engine.structural_build_counts(), counts);
     }
 
@@ -1211,15 +1212,16 @@ mod tests {
 
         state.go_to_node(nodes[29], (0.5, 0.5));
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
-        let loaded_key = engine
-            .active_world_key()
-            .expect("should load the target world");
-        assert_eq!(loaded_key.anchor, nodes[29]);
+        let loaded_key = engine.active_batch().expect("should load the target world");
+        assert_eq!(
+            engine.active_world().map(|world| world.anchor()),
+            Some(nodes[29])
+        );
         assert!(engine.active_contains(nodes[29]));
         assert_eq!(engine.structural_build_counts().crawl, 2);
 
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
-        assert_eq!(engine.active_world_key(), Some(loaded_key));
+        assert_eq!(engine.active_batch(), Some(loaded_key));
         assert_eq!(engine.structural_build_counts().crawl, 2);
     }
 
@@ -1249,9 +1251,7 @@ mod tests {
         let mut buffer = ratatui::buffer::Buffer::empty(area);
 
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
-        let world_key = engine
-            .active_world_key()
-            .expect("should have an active world");
+        let world_key = engine.active_batch().expect("should have an active world");
         assert!(
             !state.wormhole.is_empty(),
             "test graph should be large enough that the node budget forces a wormhole boundary"
@@ -1266,7 +1266,7 @@ mod tests {
             let mut repeat_buffer = ratatui::buffer::Buffer::empty(area);
             GraphView::new(&mut engine, &visual).render(area, &mut repeat_buffer, &mut state);
             assert_eq!(
-                engine.active_world_key(),
+                engine.active_batch(),
                 Some(world_key),
                 "an unchanged render loop must not rebuild the structural world"
             );

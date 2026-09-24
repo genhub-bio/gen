@@ -42,7 +42,7 @@ use gen_tui::{
     LineStyle,
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
-    layout_engine::{LayoutEngine, WorldKey},
+    layout_engine::{BatchId, LayoutEngine},
     plotter::PathStyle,
     theme::current_theme,
 };
@@ -295,7 +295,7 @@ struct GraphPage {
     /// `render_into` call, since the lazy crawl can grow `engine.graph()` behind the scenes
     /// on any render. See `refresh_dimming`'s own doc for why this can't be computed once
     /// up front the way an eagerly-loaded graph's dimming can.
-    dimming_world: Option<WorldKey<GraphNode>>,
+    dimming_world: Option<BatchId>,
     /// Annotation and path overlays. The path (added by `show_path`, removed by
     /// `clear_path`/`clear_highlights`) is just another overlay, so it survives
     /// zoom/detail changes the same way the annotation overlays do.
@@ -368,7 +368,7 @@ impl GraphPage {
                 node_annotations.clone(),
             );
         refresh_dimming(&mut view_state, engine.graph());
-        let dimming_world = engine.active_world_key();
+        let dimming_world = engine.active_batch();
         Self {
             name,
             db_path,
@@ -596,9 +596,9 @@ impl GraphPage {
         // The crawl may have grown `self.engine`'s graph (a fresh world, or activating an
         // already-known one) during the render just above, so pruned-edge/inaccessible-node
         // dimming can be stale relative to what's now loaded - see `refresh_dimming`.
-        if self.engine.active_world_key() != self.dimming_world {
+        if self.engine.active_batch() != self.dimming_world {
             refresh_dimming(&mut self.view_state, self.engine.graph());
-            self.dimming_world = self.engine.active_world_key();
+            self.dimming_world = self.engine.active_batch();
         }
 
         // At full detail, only names that could not fit beside their bars still float.
@@ -770,13 +770,13 @@ impl GraphPage {
         let block = pos.inner.block;
         self.set_detail_level(VisualDetail::Full);
 
-        // Build (or reactivate) the crawled neighbourhood window anchored on this block.
+        // Open the batch that owns this block, claiming a new one around it if none does.
         let node_budget = self
             .engine
             .neighborhood_node_budget(self.view_state.last_area_width() as usize);
         if self
             .engine
-            .activate_world_at(block, node_budget, None)
+            .activate_batch_containing(block, node_budget)
             .is_err()
         {
             return;
