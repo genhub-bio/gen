@@ -14,13 +14,13 @@ pub struct Command {
     #[clap(index = 1)]
     pub path: String,
     /// The name of the collection to update
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// The name of the sample to update
     #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
     sample: String,
     /// The csv describing changes to make
-    #[arg(short, long)]
+    #[arg(long)]
     csv: String,
     /// If specified, the newly created sample will inherit this sample's existing graph
     #[arg(short, long, default_value_t = Sample::DEFAULT_NAME.to_string())]
@@ -36,8 +36,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     conn.execute("BEGIN TRANSACTION", [])?;
 
-    let name = &cmd
-        .name
+    let collection_name = &cmd
+        .collection
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
 
@@ -45,7 +45,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         context,
         &cmd.path,
         &cmd.csv,
-        name,
+        collection_name,
         cmd.sample.as_str(),
         Some(cmd.parent_sample.as_str()),
     ) {
@@ -63,4 +63,38 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::commands::{Cli, Commands, update::Commands as UpdateCommands};
+
+    #[test]
+    fn test_update_gaf_accepts_collection_short_and_csv_long_options() {
+        for collection_flag in ["--collection", "-c"] {
+            let cli = Cli::try_parse_from([
+                "gen",
+                "update",
+                "gaf",
+                "alignment.gaf",
+                collection_flag,
+                "selected",
+                "--csv",
+                "changes.csv",
+            ])
+            .expect("should parse update gaf collection and csv options");
+
+            let Some(Commands::Update(update_command)) = cli.command else {
+                panic!("should parse update command");
+            };
+            let UpdateCommands::Gaf(command) = update_command.command else {
+                panic!("should parse GAF update command");
+            };
+
+            assert_eq!(command.collection.as_deref(), Some("selected"));
+            assert_eq!(command.csv, "changes.csv");
+        }
+    }
 }

@@ -14,8 +14,8 @@ pub struct Command {
     #[clap(index = 1)]
     pub path: String,
     /// The name of the collection to update
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// If no genotype is provided, enter the genotype to assign variants
     #[arg(short, long)]
     genotype: Option<String>,
@@ -50,15 +50,15 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     conn.execute("BEGIN TRANSACTION", [])?;
 
-    let name = &cmd
-        .name
+    let collection_name = &cmd
+        .collection
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
 
     match update_with_vcf(
         context,
         &cmd.path,
-        name,
+        collection_name,
         cmd.genotype.clone().unwrap_or("".to_string()),
         cmd.sample.as_deref(),
         cmd.parent_samples.clone(),

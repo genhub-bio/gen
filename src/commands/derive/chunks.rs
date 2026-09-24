@@ -8,8 +8,8 @@ use crate::commands::{
 #[derive(Debug, Args, Clone)]
 pub struct Command {
     /// The name of the collection (defaults to the current default collection)
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// The name of the parent sample
     #[arg(short, long)]
     sample: String,
@@ -45,7 +45,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> anyhow::Result<()> {
 
     derive_chunks_operation(
         cli_context.context,
-        cmd.name,
+        cmd.collection,
         cmd.sample,
         cmd.new_sample,
         cmd.region,

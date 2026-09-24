@@ -19,8 +19,8 @@ pub struct Command {
     #[clap(index = 1)]
     pub path: String,
     /// The name of the collection to store the entry under
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// A sample name to associate the GFA file with
     #[arg(short, long, conflicts_with = "reference")]
     sample: Option<String>,
@@ -42,8 +42,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     conn.execute("BEGIN TRANSACTION", []).unwrap();
 
-    let name = &cmd
-        .name
+    let collection_name = &cmd
+        .collection
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
     let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
@@ -62,7 +62,12 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         conn.execute("ROLLBACK TRANSACTION;", [])?;
         return Err(e.into());
     }
-    match import_gfa(context, &PathBuf::from(cmd.path.clone()), name, sample_name) {
+    match import_gfa(
+        context,
+        &PathBuf::from(cmd.path.clone()),
+        collection_name,
+        sample_name,
+    ) {
         Ok(operation_summary) => {
             conn.execute("END TRANSACTION", [])?;
             match commit_operation(context, &operation_summary) {

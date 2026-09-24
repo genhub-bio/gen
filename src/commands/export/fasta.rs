@@ -15,8 +15,8 @@ pub struct Command {
     #[clap(index = 1)]
     pub path: String,
     /// The name of the collection for exporting
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// The name of the sample for exporting
     #[arg(short, long)]
     sample: String,
@@ -32,14 +32,14 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     conn.execute("BEGIN TRANSACTION", [])?;
 
-    let name = &cmd
-        .name
+    let collection_name = &cmd
+        .collection
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
     export_fasta(
         conn,
         context.workspace(),
-        name,
+        collection_name,
         Some(cmd.sample.as_str()),
         &PathBuf::from(cmd.path),
         cli_context.history_ref,

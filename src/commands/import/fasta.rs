@@ -24,8 +24,8 @@ pub struct Command {
     #[arg(long, requires = "shallow")]
     index: Vec<String>,
     /// The name of the collection to store the entry under
-    #[arg(short, long)]
-    name: Option<String>,
+    #[arg(short = 'c', long)]
+    collection: Option<String>,
     /// A sample name to associate the fasta file with
     #[arg(short, long, conflicts_with = "reference")]
     sample: Option<String>,
@@ -47,8 +47,8 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
 
     conn.execute("BEGIN TRANSACTION", [])?;
 
-    let name = &cmd
-        .name
+    let collection_name = &cmd
+        .collection
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
     let (sample_name, is_reference) = crate::commands::import::resolve_import_sample(
@@ -67,7 +67,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     match import_fasta(
         context,
         &cmd.path.clone(),
-        name,
+        collection_name,
         sample_name,
         cmd.shallow,
         &cmd.index,

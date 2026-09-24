@@ -31,9 +31,9 @@ gunzip -c HG001_GRCh38_1_22_v4.2.1_benchmark.vcf.gz | awk '/^#/ || /^chr1\t/' | 
 
 ```sh
 gen init
-gen --db hg38.db import --name hg38 --fasta ./chr1.fa.gz --shallow
-gen --db hg38.db update --name hg38 --vcf chr1.vcf.bgz
-gen --db hg38.db export --name hg38 --gfa hg38.gfa
+gen import fasta ./chr1.fa.gz --reference hg38 --shallow
+gen update vcf chr1.vcf.bgz  --parent-samples hg38
+gen export gfa hg38.gfa  --sample HG001
 ```
 
 ## Download vg and align reads
