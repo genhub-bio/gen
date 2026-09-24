@@ -458,10 +458,15 @@ where
     Ok((window, window_backward_edges))
 }
 
-/// Alternate outgoing and incoming breadth-first passes until the budget or graph is exhausted.
+/// Alternate one incoming and one outgoing breadth-first shell until the budget or graph is
+/// exhausted, so the window grows evenly around `anchor` instead of spending most of its budget
+/// in one direction. The incoming hop goes first, so an odd budget leans backward.
 ///
-/// Incoming passes start from the full forward reach so they can discover reconverging branches.
-/// Claimed nodes remain boundaries.
+/// Each direction keeps its own frontier: the nodes it has not yet expanded. Nodes found by
+/// either direction join both frontiers, so an incoming hop from a forward-reached node finds
+/// reconverging branches and an outgoing hop from a backward-reached node finds sibling
+/// branches. A hop cut short by its budget keeps its shell in the frontier so the neighbours it
+/// skipped can still be claimed later. Claimed nodes remain boundaries.
 fn crawl_neighborhood<G, S>(
     anchor: G::NodeId,
     node_budget: usize,
@@ -475,99 +480,86 @@ where
     S: GraphSource<G>,
 {
     let mut visited: HashSet<G::NodeId> = HashSet::from([anchor]);
+    let mut budget = node_budget.saturating_sub(visited.len());
+    let mut outgoing_frontier = vec![anchor];
+    let mut incoming_frontier = vec![anchor];
 
-    let remaining_budget = node_budget.saturating_sub(visited.len());
-    let mut forward_budget = remaining_budget / 2;
-    let mut backward_budget = remaining_budget - forward_budget;
-
-    // Give unused budget from each directional pass to the next pass.
-    loop {
-        let before_len = visited.len();
-
-        let forward_seed: Vec<G::NodeId> = {
-            let mut nodes: Vec<G::NodeId> = visited.iter().copied().collect();
-            nodes.sort();
-            nodes
-        };
-        directional_bfs(
-            &mut visited,
-            forward_seed,
-            &mut forward_budget,
-            cursor,
-            Direction::Outgoing,
-            is_claimed,
-        );
-        backward_budget += forward_budget;
-        forward_budget = 0;
-
-        // Seed from the full reach to find predecessors and reconverging branches.
-        let backward_seed: Vec<G::NodeId> = {
-            let mut nodes: Vec<G::NodeId> = visited.iter().copied().collect();
-            nodes.sort();
-            nodes
-        };
-        directional_bfs(
-            &mut visited,
-            backward_seed,
-            &mut backward_budget,
-            cursor,
-            Direction::Incoming,
-            is_claimed,
-        );
-        forward_budget += backward_budget;
-        backward_budget = 0;
-
-        if forward_budget == 0 || visited.len() == before_len {
-            break;
+    while budget > 0 && !(outgoing_frontier.is_empty() && incoming_frontier.is_empty()) {
+        for direction in [Direction::Incoming, Direction::Outgoing] {
+            let (frontier, other_frontier) = match direction {
+                Direction::Outgoing => (&mut outgoing_frontier, &mut incoming_frontier),
+                Direction::Incoming => (&mut incoming_frontier, &mut outgoing_frontier),
+            };
+            // Leave the other direction at least half of what remains, so one wide shell cannot
+            // spend the whole budget before the other direction gets its hop.
+            let hop_budget = if other_frontier.is_empty() {
+                budget
+            } else {
+                budget.div_ceil(2)
+            };
+            let mut shell = std::mem::take(frontier);
+            let (next_shell, truncated) = bfs_hop(
+                &mut visited,
+                &shell,
+                hop_budget,
+                cursor,
+                direction,
+                is_claimed,
+            );
+            budget -= next_shell.len();
+            other_frontier.extend_from_slice(&next_shell);
+            if truncated {
+                shell.extend_from_slice(&next_shell);
+                *frontier = shell;
+            } else {
+                *frontier = next_shell;
+            }
         }
     }
 
     visited
 }
 
-/// Crawl breadth-first in one direction, decrementing `budget` for each new node.
-fn directional_bfs<G, S>(
+/// Expand `shell` by one breadth-first hop in `direction`, claiming up to `budget` unvisited,
+/// unclaimed neighbours. Returns them as the next shell, plus whether the budget left some
+/// neighbours unclaimed.
+fn bfs_hop<G, S>(
     visited: &mut HashSet<G::NodeId>,
-    mut current_shell: Vec<G::NodeId>,
-    budget: &mut usize,
+    shell: &[G::NodeId],
+    budget: usize,
     cursor: &mut GraphCursor<G, S>,
     direction: Direction,
     is_claimed: &dyn Fn(G::NodeId) -> bool,
-) where
+) -> (Vec<G::NodeId>, bool)
+where
     G: GraphBase,
     for<'b> &'b G: IntoNeighborsDirected<NodeId = G::NodeId>,
     G::NodeId: Copy + Eq + Hash + Ord,
     S: GraphSource<G>,
 {
-    while !current_shell.is_empty() && *budget > 0 {
-        cursor.complete(&current_shell, direction, *budget);
-        let graph = cursor.graph();
-        let mut candidates: Vec<G::NodeId> = current_shell
-            .iter()
-            .flat_map(|&node_id| graph.neighbors_directed(node_id, direction))
-            .filter(|neighbor| !visited.contains(neighbor) && !is_claimed(*neighbor))
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        // No rank bias - just a deterministic tie-break so repeat crawls of the same window
-        // are stable, using the domain node's own identity rather than wherever it landed in
-        // the underlying graph structure.
-        candidates.sort();
-
-        let mut next_shell = Vec::with_capacity(candidates.len());
-        for node_id in candidates {
-            if *budget == 0 {
-                break;
-            }
-            visited.insert(node_id);
-            next_shell.push(node_id);
-            *budget -= 1;
-        }
-        if next_shell.is_empty() {
-            break;
-        }
-        current_shell = next_shell;
+    if shell.is_empty() {
+        return (Vec::new(), false);
     }
+    if budget == 0 {
+        return (Vec::new(), true);
+    }
+    cursor.complete(shell, direction, budget);
+    let graph = cursor.graph();
+    let mut candidates: Vec<G::NodeId> = shell
+        .iter()
+        .flat_map(|&node_id| graph.neighbors_directed(node_id, direction))
+        .filter(|neighbor| !visited.contains(neighbor) && !is_claimed(*neighbor))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    // No rank bias - just a deterministic tie-break so repeat crawls of the same window are
+    // stable, using the domain node's own identity rather than wherever it landed in the
+    // underlying graph structure.
+    candidates.sort();
+    let truncated = candidates.len() > budget;
+    candidates.truncate(budget);
+    visited.extend(candidates.iter().copied());
+    (candidates, truncated)
 }
 
 #[cfg(test)]
@@ -762,9 +754,9 @@ mod tests {
     }
 
     #[test]
-    fn neighborhood_forward_then_backward_crawls_a_chain() {
-        // 0 -> 1 -> 2 -> 3 -> 4, anchor 2, budget 3: only the anchor's own budget slot is
-        // guaranteed: 1 more forward (finds 3), 1 more backward seeded from {2,3} (finds 1).
+    fn test_neighborhood_alternating_hops_crawl_a_chain() {
+        // 0 -> 1 -> 2 -> 3 -> 4, anchor 2, budget 3: after the anchor's own slot, one backward
+        // hop (finds 1) and one forward hop (finds 3).
         let mut graph = make_test_graph(vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
 
         let subgraph = neighborhood(
@@ -794,6 +786,77 @@ mod tests {
                 .map(|edge| (edge.boundary, edge.target))
                 .collect::<HashSet<_>>(),
             HashSet::from([(TestNode(1), TestNode(0)), (TestNode(3), TestNode(4))]),
+        );
+    }
+
+    #[test]
+    fn test_neighborhood_alternating_hops_grow_both_sides_by_distance() {
+        // Chain 0 -> ... -> 6 with anchor 3, plus 10 -> 5 rejoining two hops downstream. A
+        // forward sweep followed by a backward sweep from its whole reach would spend the
+        // backward budget on 10 (one incoming hop from 5). Alternating single hops instead
+        // reaches two nodes on each side of the anchor before 10 is ever a candidate.
+        let mut graph = make_test_graph(vec![
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (10, 5),
+        ]);
+
+        let subgraph = neighborhood(
+            TestNode(3),
+            5,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
+            &|_| false,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            subgraph.nodes,
+            vec![
+                TestNode(1),
+                TestNode(2),
+                TestNode(3),
+                TestNode(4),
+                TestNode(5)
+            ],
+            "the window should extend two hops on each side of the anchor"
+        );
+        assert_eq!(
+            subgraph
+                .external_edges
+                .iter()
+                .map(|edge| (edge.boundary, edge.target))
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                (TestNode(1), TestNode(0)),
+                (TestNode(5), TestNode(10)),
+                (TestNode(5), TestNode(6)),
+            ]),
+        );
+    }
+
+    #[test]
+    fn test_neighborhood_wide_shell_leaves_the_other_direction_its_hop() {
+        // 0 -> 1 and 1 -> {2, 3, 4, 5}, anchor 1, budget 4: the four-wide successor shell may
+        // only take half of what the backward hop leaves, so the predecessor is still claimed.
+        let mut graph = make_test_graph(vec![(0, 1), (1, 2), (1, 3), (1, 4), (1, 5)]);
+
+        let subgraph = neighborhood(
+            TestNode(1),
+            4,
+            &mut GraphCursor::new(&mut graph, &mut EagerSource),
+            &|_| false,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            subgraph.nodes,
+            vec![TestNode(0), TestNode(1), TestNode(2), TestNode(3)],
         );
     }
 
