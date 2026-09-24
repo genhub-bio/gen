@@ -16,7 +16,7 @@ use gen_tui::{
     crawl::{EagerSource, GraphSource},
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
-    layout_engine::{LayoutEngine, WorldKey},
+    layout_engine::{BatchId, LayoutEngine},
     plotter::PathStyle,
     theme::current_theme,
 };
@@ -473,16 +473,14 @@ fn toggle_path_highlight<S: GraphSource<GenGraph>>(
 /// current window the stub is attached to, `target` is the off-screen domain node it leads to
 /// (see `GraphViewState::wormhole_hit`).
 ///
-/// If `target` belongs to a known world (`LayoutEngine::wormhole_world_for`), reactivate that
-/// exact world and frame the entry node. An evicted world is rebuilt from the same `WorldKey`.
+/// If another batch already owns `target`, that batch's world reopens; otherwise a new batch is
+/// claimed around `target`. Either way `boundary` stays with the batch we are leaving, so the
+/// world we arrive in shows a door straight back to it.
 ///
-/// Otherwise this is new territory: build fresh, anchored on `target`, with `boundary`
-/// force-included so it is guaranteed visible as the new world's return boundary.
-///
-/// Either way, direction (which edge of the new window to enter from) is decided by whether
-/// `target` is a successor or predecessor of `boundary` (`LayoutEngine::is_successor`): exiting
-/// toward a successor enters the new window from the left, exiting toward a predecessor enters
-/// from the right - the same direction you'd naturally keep moving in.
+/// Direction (which edge of the new window to enter from) is decided by whether `target` is a
+/// successor or predecessor of `boundary` (`LayoutEngine::is_successor`): exiting toward a
+/// successor enters the new window from the left, exiting toward a predecessor enters from the
+/// right - the same direction you'd naturally keep moving in.
 fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
     graph_engine: &mut LayoutEngine<GenGraph, S>,
     graph_view_state: &mut GraphViewState<GraphNode>,
@@ -491,11 +489,10 @@ fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
 ) {
     let coarse_mode = graph_view_state.cursor.coarse_mode;
     // Direction is always about what we're actually leaving (the clicked stub's own boundary
-    // node) versus what we're heading toward (its target) - independent of which node ends up
-    // being the framed/placed one below, so this must not be recomputed against that instead.
-    // `boundary` and `target` are always directly adjacent (that's what makes them an
-    // external-edge pair), so whether we're heading "ahead" is just whether `target` is a
-    // successor of `boundary` - no whole-graph rank needed.
+    // node) versus what we're heading toward (its target). `boundary` and `target` are always
+    // directly adjacent (that's what makes them an external-edge pair), so whether we're
+    // heading "ahead" is just whether `target` is a successor of `boundary` - no whole-graph
+    // rank needed.
     let exits_toward_successor = graph_engine.is_successor(boundary, target);
     let entry_fraction = if exits_toward_successor {
         (0.0, 0.5)
@@ -503,38 +500,22 @@ fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
         (1.0, 0.5)
     };
     graph_engine.remember_wormhole_choice(boundary, target, exits_toward_successor);
-    // Also record the reverse: `target`'s own door facing `boundary` should prefer `boundary`
-    // right back, so that if `target` is ever (re)built as its own window and `boundary` falls
-    // outside its budget, leaving immediately back through "the same door" still lands where we
-    // actually came from rather than whatever's lowest-index on that side. Doesn't matter for
-    // *this* render (a fresh build force-includes `boundary` as a real node, and a cache hit
-    // reuses the window exactly as built) - only for a later rebuild of either window.
+    // Also record the reverse, so `target`'s door on the side facing `boundary` leads straight
+    // back to where we came from rather than to whichever neighbour on that side sorts lowest.
     graph_engine.remember_wormhole_choice(target, boundary, !exits_toward_successor);
 
-    match graph_engine.wormhole_world_for(target) {
-        Some(world_key) => {
-            if graph_engine.activate_known_world(world_key).is_err() {
-                return;
-            }
-            let world_boundary_node = target;
-            graph_view_state.go_to_node_framed(
-                world_key.anchor,
-                world_boundary_node,
-                entry_fraction,
-            );
-        }
-        None => {
-            let node_budget =
-                graph_engine.neighborhood_node_budget(graph_view_state.last_area_width() as usize);
-            if graph_engine
-                .activate_world_at(target, node_budget, Some(boundary))
-                .is_err()
-            {
-                return;
-            }
-            graph_view_state.go_to_node(target, entry_fraction);
-        }
+    let node_budget =
+        graph_engine.neighborhood_node_budget(graph_view_state.last_area_width() as usize);
+    if graph_engine
+        .activate_batch_containing(target, node_budget)
+        .is_err()
+    {
+        return;
+    }
+    let Some(anchor) = graph_engine.active_world().map(|world| world.anchor()) else {
+        return;
     };
+    graph_view_state.go_to_node_framed(anchor, target, entry_fraction);
 
     if exits_toward_successor {
         graph_view_state.queue_snap_left();
@@ -650,7 +631,7 @@ pub fn view_block_group(
     // The world dimming (pruned edges / inaccessible nodes) was last refreshed for - a lazily
     // loaded graph grows as the crawl reaches new nodes, so this must be recomputed every time
     // the active world changes rather than once up front. See `refresh_dimming`.
-    let mut dimming_world = graph_engine.active_world_key();
+    let mut dimming_world = graph_engine.active_batch();
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if position.is_some() {
@@ -664,7 +645,7 @@ pub fn view_block_group(
     // neighborhood is already the deliberately-constrained local window, so a reload is
     // only needed when it changes (block group switch, wormhole teleport into a
     // different world) - not on every pan/zoom within the same neighborhood.
-    let mut annotation_groups_world: Option<WorldKey<GraphNode>> = None;
+    let mut annotation_groups_world: Option<BatchId> = None;
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -1140,7 +1121,7 @@ pub fn view_block_group(
             && let Some(block_group) = current_block_group.as_ref()
             && let Some(visible_window) = active_neighborhood_coordinate_window(&graph_engine)
         {
-            if graph_engine.active_world_key() != annotation_groups_world {
+            if graph_engine.active_batch() != annotation_groups_world {
                 annotation_groups_loaded = false;
             }
             let query_window = expand_query_window(visible_window);
@@ -1630,9 +1611,9 @@ pub fn view_block_group(
         // The crawl may have grown `graph_engine`'s graph (a fresh world, or activating an
         // already-known one) during the render just above, so pruned-edge/inaccessible-node
         // dimming can be stale relative to what's now loaded - see `refresh_dimming`.
-        if graph_engine.active_world_key() != dimming_world {
+        if graph_engine.active_batch() != dimming_world {
             refresh_dimming(&mut graph_view_state, graph_engine.graph());
-            dimming_world = graph_engine.active_world_key();
+            dimming_world = graph_engine.active_batch();
         }
 
         // Load (or reload) annotation groups for the active crawled neighborhood - that
@@ -1658,7 +1639,7 @@ pub fn view_block_group(
                 );
                 annotation_groups_loaded = true;
                 annotation_groups_loaded_after_draw = true;
-                annotation_groups_world = graph_engine.active_world_key();
+                annotation_groups_world = graph_engine.active_batch();
             }
         }
 
@@ -1677,7 +1658,7 @@ pub fn view_block_group(
                     conn,
                     node_annotations.clone(),
                 );
-            dimming_world = graph_engine.active_world_key();
+            dimming_world = graph_engine.active_batch();
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {
                 Ok(bg) => bg,
                 Err(err) => {
@@ -1915,7 +1896,7 @@ mod tests {
 
         let (mut successor_engine, successor_nodes) = three_node_chain();
         successor_engine
-            .activate_world_at(successor_nodes[2], 10, None)
+            .activate_batch_containing(successor_nodes[2], 10)
             .expect("should preload the successor's world");
         let mut successor_state = GraphViewState::default();
         successor_state.cursor.coarse_mode = false;

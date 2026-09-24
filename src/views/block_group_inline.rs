@@ -12,7 +12,7 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
 use gen_tui::{
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
-    layout_engine::{LayoutEngine, WorldKey},
+    layout_engine::{BatchId, LayoutEngine},
     plotter::{LineStyle, PathStyle},
     theme::current_theme,
 };
@@ -93,7 +93,7 @@ pub struct InlineGenGraphState<'a> {
     /// The active neighborhood the annotation groups were last loaded for - the crawled
     /// neighborhood is already the deliberately-constrained local window, so a reload is
     /// only needed when it changes (not on every pan/zoom within the same neighborhood).
-    annotation_groups_world: Option<WorldKey<GraphNode>>,
+    annotation_groups_world: Option<BatchId>,
 }
 
 impl<'a> InlineGenGraphState<'a> {
@@ -163,7 +163,7 @@ impl<'a> InlineGenGraphState<'a> {
 /// the last load (or nothing has been loaded yet). Returns whether a reload happened, so
 /// the caller knows to redraw immediately rather than waiting for the next input event.
 fn maybe_reload_annotation_groups(state: &mut InlineGenGraphState) -> bool {
-    let current_world = state.engine.active_world_key();
+    let current_world = state.engine.active_batch();
     if current_world != state.annotation_groups_world {
         state.annotation_groups_loaded = false;
     }

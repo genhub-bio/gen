@@ -178,8 +178,7 @@ mod tests {
             nodes[0],
             10,
             &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
-            None,
-            &HashMap::new(),
+            &|_| false,
             &HashMap::new(),
         )
         .unwrap();
@@ -216,8 +215,7 @@ mod tests {
             nodes[0],
             10,
             &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
-            None,
-            &HashMap::new(),
+            &|_| false,
             &HashMap::new(),
         )
         .unwrap();
@@ -248,8 +246,7 @@ mod tests {
             node,
             10,
             &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
-            None,
-            &HashMap::new(),
+            &|_| false,
             &HashMap::new(),
         )
         .unwrap();
@@ -277,8 +274,7 @@ mod tests {
             nodes[0],
             10,
             &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
-            None,
-            &HashMap::new(),
+            &|_| false,
             &HashMap::new(),
         )
         .unwrap();
