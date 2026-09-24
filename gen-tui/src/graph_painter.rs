@@ -135,7 +135,6 @@ where
     gaps: GapSizes,
     block: Option<Block<'a>>,
     style: Style,
-    node_overlay: Option<(G::NodeId, PathStyle)>,
 }
 
 impl<'a, G, V> GraphPainter<'a, G, V>
@@ -156,7 +155,6 @@ where
             gaps: GapSizes::default(),
             block: None,
             style: Style::default(),
-            node_overlay: None,
         }
     }
 
@@ -173,12 +171,6 @@ where
 
     pub fn style(mut self, style: Style) -> Self {
         self.style = style;
-        self
-    }
-
-    /// Add a final node tint on top of the persistent highlight collection.
-    pub fn node_overlay(mut self, node: G::NodeId, style: PathStyle) -> Self {
-        self.node_overlay = Some((node, style));
         self
     }
 
@@ -227,7 +219,6 @@ where
             graph,
             visual,
             highlights,
-            self.node_overlay,
         );
 
         (
@@ -271,10 +262,6 @@ where
 
 /// Paint the window into `buf`, resolving `highlights` from domain terms to screen positions
 /// for this call only (nothing is baked into `viewport_graph` beyond this paint).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the paint pass keeps its independent render inputs explicit"
-)]
 fn paint<G, V>(
     viewport_graph: &ViewportGraph,
     area: Rect,
@@ -283,7 +270,6 @@ fn paint<G, V>(
     graph: &G,
     visual: &V,
     highlights: &Highlights<G::NodeId>,
-    node_overlay: Option<(G::NodeId, PathStyle)>,
 ) where
     G: GraphBase + NodeIndexable,
     V: NodeRenderer<G>,
@@ -332,9 +318,6 @@ fn paint<G, V>(
                 );
             }
         }
-    }
-    if let Some((node, style)) = node_overlay {
-        apply_node_highlight(viewport_graph, graph, node, style, &mut node_highlights);
     }
 
     let edge_lowlights = resolve_edge_lowlights(viewport_graph, graph, &highlights.edge_lowlights);
