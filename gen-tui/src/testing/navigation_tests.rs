@@ -86,7 +86,6 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         GraphView::new(&mut engine, &node_sizer).render(area, &mut buffer, &mut state);
 
-        state.cursor.coarse_mode = false;
         state.cursor.set_node(nodes[1], (1.0, 0.5));
         Navigator::move_horizontal(&mut state.cursor, 1, &state.frame).unwrap();
 

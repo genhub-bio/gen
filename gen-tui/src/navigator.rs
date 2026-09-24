@@ -13,8 +13,8 @@ use crate::{
 const NO_NEXT_LAYER_ERR: &str = "No next layer";
 const NO_PREVIOUS_LAYER_ERR: &str = "No previous layer";
 
-/// Semantic-only cursor state: node identity + fractional offset within it + visibility +
-/// coarse mode. Its screen position is always derived from the current `FrameIndex`
+/// Semantic-only cursor state: node identity + fractional offset within it + visibility.
+/// Its screen position is always derived from the current `FrameIndex`
 /// (`frame.rect_of(cursor.node)` + fractional offset), never stored - a stored copy would go
 /// stale on zoom, resize, camera movement, or a new window.
 #[derive(Debug, Clone, Copy)]
@@ -25,7 +25,6 @@ pub struct CursorState<N> {
     /// known limitation, not fixed here.
     pub fractional: (f64, f64),
     pub visible: bool,
-    pub coarse_mode: bool,
 }
 
 impl<N> Default for CursorState<N> {
@@ -34,7 +33,6 @@ impl<N> Default for CursorState<N> {
             node: None,
             fractional: (0.0, 0.0),
             visible: false,
-            coarse_mode: true,
         }
     }
 }
@@ -54,8 +52,7 @@ pub struct Navigator;
 impl Navigator {
     /// Move the cursor horizontally by `delta` screen cells: within the current node if the
     /// result stays in bounds, otherwise jump to the adjacent node in the next/previous layer,
-    /// landing at that node's near edge. In coarse mode, a missing adjacent layer clamps the
-    /// cursor to the current node's edge instead of failing.
+    /// landing at that node's near edge.
     pub fn move_horizontal<N: Copy + Eq + Hash>(
         cursor: &mut CursorState<N>,
         delta: i64,
@@ -80,11 +77,6 @@ impl Navigator {
             Some(target) => {
                 let target_frac_x = if delta > 0 { 0.0 } else { 1.0 };
                 cursor.set_node(target, (target_frac_x, cursor.fractional.1));
-                Ok(())
-            }
-            None if cursor.coarse_mode => {
-                let edge_x = if delta > 0 { 1.0 } else { 0.0 };
-                cursor.fractional = (edge_x, cursor.fractional.1);
                 Ok(())
             }
             None => Err(if delta > 0 {
@@ -127,10 +119,64 @@ impl Navigator {
             None => Err("No node found in same layer in that direction".to_string()),
         }
     }
+
+    /// Move the cursor to the nearest stop column past it in `direction` (`Left` or
+    /// `Right`), such as where an annotation starts. `stops(node)` lists a node's stops as
+    /// columns counted from its rect's left edge. The search walks the nodes the way
+    /// `move_horizontal` does: the rest of the current node, then `frame.neighbor(node,
+    /// direction)` and on, so a fork is resolved exactly as stepping the cursor across it
+    /// would be. The cursor lands on the node's middle row, where its sequence is drawn.
+    /// When the walk runs out of placed nodes the cursor is left unchanged and an error is
+    /// returned.
+    pub fn move_to_stop<N: Copy + Eq + Hash>(
+        cursor: &mut CursorState<N>,
+        direction: Direction,
+        frame: &FrameIndex<N>,
+        stops: impl Fn(N) -> Vec<i64>,
+    ) -> Result<(), String> {
+        let forward = match direction {
+            Direction::Right => true,
+            Direction::Left => false,
+            Direction::Up | Direction::Down => {
+                return Err("Stops are only searched horizontally".to_string());
+            }
+        };
+        let mut node = cursor.node.ok_or("No node associated with cursor")?;
+        let rect = frame.rect_of(node).ok_or("Node not found in frame")?;
+        // Column of the cursor within the node being searched; stops must lie strictly past it.
+        let mut from = rect.point_at_fraction(cursor.fractional).x - rect.left();
+        loop {
+            let rect = frame.rect_of(node).ok_or("Node not found in frame")?;
+            let columns = stops(node)
+                .into_iter()
+                .filter(|column| (0..=rect.width()).contains(column));
+            let target = if forward {
+                columns.filter(|column| *column > from).min()
+            } else {
+                columns.filter(|column| *column < from).max()
+            };
+            if let Some(column) = target {
+                let x = rect
+                    .fraction_of(WorldPos::new(rect.left() + column, rect.bottom()))
+                    .0;
+                cursor.set_node(node, (x, 0.5));
+                return Ok(());
+            }
+            node = frame.neighbor(node, direction).ok_or(if forward {
+                NO_NEXT_LAYER_ERR
+            } else {
+                NO_PREVIOUS_LAYER_ERR
+            })?;
+            let width = frame
+                .rect_of(node)
+                .ok_or("Node not found in frame")?
+                .width();
+            from = if forward { -1 } else { width + 1 };
+        }
+    }
 }
 
-/// Draws the cursor overlay: coarse mode restyles every cell of the node rect and draws
-/// `⟨`/`⟩` flanking glyphs at mid-height; fine mode restyles one cell and draws `⌃` above it.
+/// Draws the cursor overlay: restyles the cursor's cell and draws `⌃` below it.
 /// A view without a cursor (not visible, or no node placed in `frame`) simply skips drawing.
 pub struct CursorOverlay;
 
@@ -163,28 +209,9 @@ impl CursorOverlay {
         let indicator_style = Style::default().fg(theme[0x0B]);
         let mut cursor_buffer = WorldBuffer::new(buf, &viewport_state);
 
-        if cursor.coarse_mode {
-            for y in rect.bottom()..=rect.top() {
-                for x in rect.left()..=rect.right() {
-                    style_cursor_cell(&mut cursor_buffer, WorldPos::new(x, y), &theme);
-                }
-            }
-            let ymid = (rect.bottom() + rect.top()) / 2;
-            cursor_buffer.set_char_styled(
-                WorldPos::new(rect.left() - 1, ymid),
-                '⟨',
-                indicator_style,
-            );
-            cursor_buffer.set_char_styled(
-                WorldPos::new(rect.right() + 1, ymid),
-                '⟩',
-                indicator_style,
-            );
-        } else {
-            let Point { x, y } = rect.point_at_fraction(cursor.fractional);
-            style_cursor_cell(&mut cursor_buffer, WorldPos::new(x, y), &theme);
-            cursor_buffer.set_char_styled(WorldPos::new(x, y - 1), '⌃', indicator_style);
-        }
+        let Point { x, y } = rect.point_at_fraction(cursor.fractional);
+        style_cursor_cell(&mut cursor_buffer, WorldPos::new(x, y), &theme);
+        cursor_buffer.set_char_styled(WorldPos::new(x, y - 1), '⌃', indicator_style);
     }
 }
 
@@ -205,29 +232,11 @@ mod tests {
     fn cursor_indicators_use_base0b() {
         let area = Rect::new(0, 0, 20, 10);
         let frame = frame_with(vec![(0, WorldRect::from_coords(5, 3, 8, 5), 0)]);
-        let mut cursor = CursorState {
+        let cursor = CursorState {
             node: Some(0),
             fractional: (0.5, 0.5),
             visible: true,
-            coarse_mode: true,
         };
-        let mut coarse_buffer = Buffer::empty(area);
-
-        CursorOverlay::render(area, &mut coarse_buffer, &cursor, &frame);
-
-        let mut chevrons = 0;
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                let cell = &coarse_buffer[(x, y)];
-                if matches!(cell.symbol(), "⟨" | "⟩") {
-                    assert_eq!(cell.fg, current_theme()[0x0B]);
-                    chevrons += 1;
-                }
-            }
-        }
-        assert_eq!(chevrons, 2);
-
-        cursor.coarse_mode = false;
         let mut fine_buffer = Buffer::empty(area);
         CursorOverlay::render(area, &mut fine_buffer, &cursor, &frame);
         let caret = (area.top()..area.bottom())
@@ -236,7 +245,7 @@ mod tests {
                 let cell = &fine_buffer[position];
                 (cell.symbol() == "⌃").then_some(cell)
             })
-            .expect("should draw the fine cursor caret");
+            .expect("should draw the cursor caret");
         assert_eq!(caret.fg, current_theme()[0x0B]);
     }
 
@@ -247,7 +256,6 @@ mod tests {
             node: Some(0),
             fractional: (0.0, 0.5),
             visible: true,
-            coarse_mode: false,
         };
         Navigator::move_horizontal(&mut cursor, 1, &frame).expect("should move within node");
         assert!(cursor.fractional.0 > 0.0);
@@ -264,7 +272,6 @@ mod tests {
             node: Some(0),
             fractional: (1.0, 0.5),
             visible: true,
-            coarse_mode: false,
         };
         Navigator::move_horizontal(&mut cursor, 1, &frame).expect("should jump to next layer");
         assert_eq!(cursor.node, Some(1));
@@ -272,27 +279,12 @@ mod tests {
     }
 
     #[test]
-    fn test_move_horizontal_coarse_mode_clamps_at_boundary() {
+    fn test_move_horizontal_errors_at_boundary() {
         let frame = frame_with(vec![(0, WorldRect::from_coords(0, 0, 4, 2), 0)]);
         let mut cursor = CursorState {
             node: Some(0),
             fractional: (1.0, 0.5),
             visible: true,
-            coarse_mode: true,
-        };
-        Navigator::move_horizontal(&mut cursor, 1000, &frame).expect("should clamp in coarse mode");
-        assert_eq!(cursor.node, Some(0));
-        assert_eq!(cursor.fractional, (1.0, 0.5));
-    }
-
-    #[test]
-    fn test_move_horizontal_fine_mode_errors_at_boundary() {
-        let frame = frame_with(vec![(0, WorldRect::from_coords(0, 0, 4, 2), 0)]);
-        let mut cursor = CursorState {
-            node: Some(0),
-            fractional: (1.0, 0.5),
-            visible: true,
-            coarse_mode: false,
         };
         let result = Navigator::move_horizontal(&mut cursor, 1000, &frame);
         assert!(result.is_err());
@@ -308,10 +300,100 @@ mod tests {
             node: Some(0),
             fractional: (0.3, 1.0),
             visible: true,
-            coarse_mode: false,
         };
         Navigator::move_vertical(&mut cursor, 1, &frame).expect("should jump within layer");
         assert_eq!(cursor.node, Some(1));
         assert_eq!(cursor.fractional.1, 0.0);
+    }
+
+    mod stops {
+        use super::*;
+
+        /// A fork: `first` in layer 0, then `lower` and `upper` side by side in layer 1.
+        /// `upper`'s stop is further left on screen than `lower`'s, so only the cursor's
+        /// neighbour rule decides which branch a stop search follows.
+        fn fork(first_row: i64) -> FrameIndex<u32> {
+            frame_with(vec![
+                (0, WorldRect::from_coords(0, first_row, 8, first_row + 2), 0),
+                (1, WorldRect::from_coords(12, 0, 20, 2), 1),
+                (2, WorldRect::from_coords(12, 10, 20, 12), 1),
+            ])
+        }
+
+        fn stops(node: u32) -> Vec<i64> {
+            match node {
+                0 => vec![2, 6],
+                1 => vec![5],
+                _ => vec![1],
+            }
+        }
+
+        fn cursor_at(node: u32, column_fraction: f64) -> CursorState<u32> {
+            CursorState {
+                node: Some(node),
+                fractional: (column_fraction, 0.0),
+                visible: true,
+            }
+        }
+
+        fn column(cursor: &CursorState<u32>, frame: &FrameIndex<u32>) -> (u32, i64) {
+            let node = cursor.node.expect("should have a node");
+            let rect = frame.rect_of(node).expect("should place the node");
+            (
+                node,
+                rect.point_at_fraction(cursor.fractional).x - rect.left(),
+            )
+        }
+
+        #[test]
+        fn test_move_to_stop_steps_through_stops_in_the_current_node() {
+            let frame = fork(0);
+            let mut cursor = cursor_at(0, 0.0);
+            Navigator::move_to_stop(&mut cursor, Direction::Right, &frame, stops)
+                .expect("should find a stop");
+            assert_eq!(column(&cursor, &frame), (0, 2));
+            assert_eq!(cursor.fractional.1, 0.5, "should land on the sequence row");
+            Navigator::move_to_stop(&mut cursor, Direction::Right, &frame, stops)
+                .expect("should find a stop");
+            assert_eq!(column(&cursor, &frame), (0, 6));
+            Navigator::move_to_stop(&mut cursor, Direction::Left, &frame, stops)
+                .expect("should find a stop");
+            assert_eq!(column(&cursor, &frame), (0, 2));
+        }
+
+        #[test]
+        fn test_move_to_stop_follows_the_cursor_neighbor_at_a_fork() {
+            // From a node level with `lower`, the search takes `lower` even though `upper`'s
+            // stop sits further left on screen.
+            let frame = fork(0);
+            let mut cursor = cursor_at(0, 1.0);
+            Navigator::move_to_stop(&mut cursor, Direction::Right, &frame, stops)
+                .expect("should find a stop");
+            assert_eq!(column(&cursor, &frame), (1, 5));
+
+            // Raised level with `upper`, the same search takes `upper`.
+            let frame = fork(10);
+            let mut cursor = cursor_at(0, 1.0);
+            Navigator::move_to_stop(&mut cursor, Direction::Right, &frame, stops)
+                .expect("should find a stop");
+            assert_eq!(column(&cursor, &frame), (2, 1));
+
+            Navigator::move_to_stop(&mut cursor, Direction::Left, &frame, stops)
+                .expect("should find a stop");
+            assert_eq!(column(&cursor, &frame), (0, 6));
+        }
+
+        #[test]
+        fn test_move_to_stop_stops_at_the_last_placed_node() {
+            let frame = fork(0);
+            let mut cursor = cursor_at(1, 1.0);
+            let result = Navigator::move_to_stop(&mut cursor, Direction::Right, &frame, stops);
+            assert!(result.is_err(), "should find no stop past the last layer");
+            assert_eq!(
+                column(&cursor, &frame),
+                (1, 8),
+                "should leave the cursor in place"
+            );
+        }
     }
 }

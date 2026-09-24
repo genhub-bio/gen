@@ -479,7 +479,6 @@ fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
     boundary: GraphNode,
     target: GraphNode,
 ) {
-    let coarse_mode = graph_view_state.cursor.coarse_mode;
     // Direction is always about what we're actually leaving (the clicked stub's own boundary
     // node) versus what we're heading toward (its target). `boundary` and `target` are always
     // directly adjacent (that's what makes them an external-edge pair), so whether we're
@@ -514,7 +513,6 @@ fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
     } else {
         graph_view_state.queue_snap_right();
     }
-    graph_view_state.cursor.coarse_mode = coarse_mode;
     graph_view_state.mark_wormhole_entry(target);
 }
 
@@ -751,7 +749,7 @@ pub fn view_block_group(
                                 | KeyCode::Right
                                 | KeyCode::Up
                                 | KeyCode::Down
-                                | KeyCode::Char('h' | 'j' | 'k' | 'l')
+                                | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'w' | 'b')
                         )
                     {
                         graph_view_state.show_cursor();
@@ -809,24 +807,31 @@ pub fn view_block_group(
                     match focus_zone {
                         FocusZone::Canvas => match key.code {
                             KeyCode::Enter => {
-                                if graph_view_state.cursor.coarse_mode {
-                                    graph_view_state.cursor.coarse_mode = false;
-                                } else {
-                                    // TODO: Node selection not yet supported, always show panel for now
-                                    show_panel = true;
-                                    panel_mode = PanelMode::Details;
-                                    focus_zone = FocusZone::Panel;
-                                    tui_layout_change = true;
-                                }
+                                // TODO: Node selection not yet supported, always show panel for now
+                                show_panel = true;
+                                panel_mode = PanelMode::Details;
+                                focus_zone = FocusZone::Panel;
+                                tui_layout_change = true;
                             }
                             KeyCode::Esc => {
                                 if !graph_view_state.is_cursor_visible() {
                                     graph_view_state.show_cursor();
-                                } else if !graph_view_state.cursor.coarse_mode {
-                                    graph_view_state.cursor.coarse_mode = true;
                                 } else if !show_panel {
                                     focus_zone = FocusZone::Sidebar;
                                 }
+                            }
+                            // Annotation starts are only known in screen columns where the
+                            // annotations are drawn under their nodes, at full detail.
+                            KeyCode::Char(key_char @ ('w' | 'b'))
+                                if graph_zoom_levels[graph_view_state.zoom_index].0
+                                    == VisualDetail::Full =>
+                            {
+                                // Reaching the edge of the loaded batch leaves the cursor
+                                // where it is, like an arrow key with nothing beyond it.
+                                let _ = graph_view_state
+                                    .move_cursor_to_stop(key_char == 'w', |node| {
+                                        node_annotations.annotation_starts(&node)
+                                    });
                             }
                             KeyCode::Char('p') => {
                                 if let Some(ref block_group_id) =
@@ -1368,10 +1373,8 @@ pub fn view_block_group(
                         let tab_dest = if show_panel { "to panel" } else { "to sidebar" };
                         if !graph_view_state.is_cursor_visible() {
                             format!("*drag* pan | *click* select | *↑↓←→* show cursor | *g* search | *tab* {tab_dest}")
-                        } else if graph_view_state.cursor.coarse_mode {
-                            format!("*←→↑↓* navigate by block | *enter* by character | *+/-* zoom | *p* path | *m* messages | *g* search | *tab* {tab_dest}")
                         } else {
-                            format!("*←→↑↓* navigate by character | *enter* details | *+/-* zoom | *p* path | *m* messages | *g* search | *tab* {tab_dest}")
+                            format!("*←→↑↓* move | *w/b* next/prev annotation | *enter* details | *+/-* zoom | *p* path | *m* messages | *g* search | *tab* {tab_dest}")
                         }
                     }
                     FocusZone::Panel => match panel_mode {
@@ -1886,7 +1889,6 @@ mod tests {
 
         assert_eq!(predecessor_state.cursor.node, Some(predecessor_nodes[0]));
         assert_eq!(predecessor_state.cursor.fractional, (1.0, 0.5));
-        assert!(predecessor_state.cursor.coarse_mode);
         assert_eq!(
             predecessor_state.wormhole_entry(),
             Some(predecessor_nodes[0])
@@ -1897,7 +1899,6 @@ mod tests {
             .activate_batch_containing(successor_nodes[2], 10)
             .expect("should preload the successor's world");
         let mut successor_state = GraphViewState::default();
-        successor_state.cursor.coarse_mode = false;
         teleport_through_wormhole(
             &mut successor_engine,
             &mut successor_state,
@@ -1907,7 +1908,6 @@ mod tests {
 
         assert_eq!(successor_state.cursor.node, Some(successor_nodes[2]));
         assert_eq!(successor_state.cursor.fractional, (0.0, 0.5));
-        assert!(!successor_state.cursor.coarse_mode);
         assert_eq!(successor_state.wormhole_entry(), Some(successor_nodes[2]));
     }
 }
