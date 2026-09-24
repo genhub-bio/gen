@@ -502,6 +502,32 @@ impl Edge {
         edges: &[AugmentedEdge],
         history_ref: Option<&str>,
     ) -> Result<Vec<GroupBlock>, EdgeError> {
+        Self::blocks_from_edges_excluding(
+            conn,
+            workspace,
+            block_group_id,
+            edges,
+            history_ref,
+            &HashSet::new(),
+        )
+    }
+
+    /// Like `blocks_from_edges`, but builds no blocks for `frontier_node_ids` and never
+    /// backfills them.
+    ///
+    /// A lazily loaded viewer fetches a node's neighborhood plus its neighbors' edges. The nodes
+    /// one step past that are only half described by the fetched edges, and resolving them would
+    /// recurse down the whole chain. The caller names them here instead: their coordinates still
+    /// feed the endpoints we keep (a kept node's slices depend on every edge touching it), but they
+    /// get no blocks, so `build_graph` leaves their edges out until a later fetch reaches them.
+    pub fn blocks_from_edges_excluding(
+        conn: &GraphConnection,
+        workspace: &Workspace,
+        block_group_id: &HashId,
+        edges: &[AugmentedEdge],
+        history_ref: Option<&str>,
+        frontier_node_ids: &HashSet<HashId>,
+    ) -> Result<Vec<GroupBlock>, EdgeError> {
         let mut node_ids = IndexSet::new();
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
@@ -518,7 +544,9 @@ impl Edge {
                 &mut outgoing_jump_coordinates_by_node_id,
                 &mut incoming_jump_coordinates_by_node_id,
             );
-            if !is_terminal(edge.source_node_id) {
+            if !is_terminal(edge.source_node_id)
+                && !frontier_node_ids.contains(&edge.source_node_id)
+            {
                 node_ids.insert(edge.source_node_id);
             }
             ends_by_node_id
@@ -526,7 +554,9 @@ impl Edge {
                 .or_default()
                 .insert(edge.source_coordinate);
 
-            if !is_terminal(edge.target_node_id) {
+            if !is_terminal(edge.target_node_id)
+                && !frontier_node_ids.contains(&edge.target_node_id)
+            {
                 node_ids.insert(edge.target_node_id);
             }
             starts_by_node_id
@@ -575,7 +605,9 @@ impl Edge {
                     &mut outgoing_jump_coordinates_by_node_id,
                     &mut incoming_jump_coordinates_by_node_id,
                 );
-                if !is_terminal(edge.source_node_id) {
+                if !is_terminal(edge.source_node_id)
+                    && !frontier_node_ids.contains(&edge.source_node_id)
+                {
                     node_ids.insert(edge.source_node_id);
                 }
                 ends_by_node_id
@@ -583,7 +615,9 @@ impl Edge {
                     .or_default()
                     .insert(edge.source_coordinate);
 
-                if !is_terminal(edge.target_node_id) {
+                if !is_terminal(edge.target_node_id)
+                    && !frontier_node_ids.contains(&edge.target_node_id)
+                {
                     node_ids.insert(edge.target_node_id);
                 }
                 starts_by_node_id
@@ -593,6 +627,7 @@ impl Edge {
 
                 for candidate_node_id in [edge.source_node_id, edge.target_node_id] {
                     if !is_terminal(candidate_node_id)
+                        && !frontier_node_ids.contains(&candidate_node_id)
                         && !queried_node_ids.contains(&candidate_node_id)
                         && is_incomplete(&candidate_node_id, &starts_by_node_id, &ends_by_node_id)
                     {
@@ -905,6 +940,7 @@ impl Edge {
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use gen_core::PathBlock;
+    use petgraph::Direction;
 
     use super::*;
     use crate::{
@@ -1926,6 +1962,121 @@ mod tests {
         let c_block = blocks.iter().find(|block| block.node_id == n_c).unwrap();
         assert_eq!(c_block.start, 0);
         assert_eq!(c_block.end, 3);
+    }
+
+    #[test]
+    fn test_blocks_from_edges_excluding_leaves_frontier_nodes_unresolved() {
+        // A lazily loaded crawl fetches a node's edges and its neighbors' edges, which leaves the
+        // nodes one step further out described by a single edge each. Those frontier nodes must
+        // get no blocks and must not be looked up, while still contributing their coordinate to
+        // the neighbor they touch.
+        let conn = get_connection(None).unwrap();
+        Collection::get_or_create(&conn, "test").unwrap();
+        crate::sample::Sample::get_or_create(
+            &conn,
+            crate::sample::NewSample {
+                name: "test",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bg = BlockGroup::create(
+            &conn,
+            crate::block_group::NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "frontier",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let node_ids = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|name| {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence("AAA")
+                    .save(&conn)
+                    .unwrap();
+                Node::create(&conn, &sequence.hash, &HashId::convert_str(name)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let edges = node_ids
+            .windows(2)
+            .map(|pair| {
+                Edge::create(
+                    &conn,
+                    pair[0],
+                    3,
+                    Strand::Forward,
+                    pair[1],
+                    0,
+                    Strand::Forward,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let block_group_edges = edges
+            .iter()
+            .map(|edge| BlockGroupEdgeData {
+                block_group_id: bg.id,
+                edge_id: edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            })
+            .collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(&conn, &block_group_edges);
+
+        // Expanding "b": its own edges, its neighbors' edges, and "d" as the frontier. The edge
+        // d -> e exists in the block group but was never fetched.
+        let fetched_edges = edges[..3]
+            .iter()
+            .map(|edge| AugmentedEdge {
+                edge: edge.clone(),
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            })
+            .collect::<Vec<_>>();
+        let frontier = HashSet::from([node_ids[3]]);
+
+        let blocks = Edge::blocks_from_edges_excluding(
+            &conn,
+            test_workspace(),
+            &bg.id,
+            &fetched_edges,
+            None,
+            &frontier,
+        )
+        .unwrap();
+
+        let block_node_ids = blocks
+            .iter()
+            .map(|block| block.node_id)
+            .collect::<HashSet<_>>();
+        assert!(!block_node_ids.contains(&node_ids[3]));
+        assert!(!block_node_ids.contains(&node_ids[4]));
+
+        // "c" is complete because c -> d supplied its end even though "d" is excluded.
+        let c_block = blocks
+            .iter()
+            .find(|block| block.node_id == node_ids[2])
+            .unwrap();
+        assert_eq!((c_block.start, c_block.end), (0, 3));
+
+        let (graph, _) = Edge::build_graph(&fetched_edges, &blocks);
+        let c_node = GraphNode {
+            node_id: node_ids[2],
+            sequence_start: 0,
+            sequence_end: 3,
+        };
+        assert_eq!(
+            graph
+                .neighbors_directed(c_node, Direction::Outgoing)
+                .count(),
+            0
+        );
     }
 
     #[test]

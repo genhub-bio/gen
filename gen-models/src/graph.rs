@@ -8,10 +8,7 @@ use gen_graph::{GenGraph, GraphError, GraphNode, GraphNodePosition, MergeGraph};
 use intervaltree::IntervalTree;
 use petgraph::Direction;
 
-use crate::{
-    block_group::BlockGroup, block_group_edge::AugmentedEdge, db::GraphConnection, edge::Edge,
-    node::Node,
-};
+use crate::{block_group_edge::AugmentedEdge, db::GraphConnection, edge::Edge, node::Node};
 
 pub struct ResolvedGraph {
     pub graph: GenGraph,
@@ -19,16 +16,25 @@ pub struct ResolvedGraph {
     pub block_group_id: HashId,
 }
 
+/// The edges around one node, plus the nodes at the far edge of what was fetched.
+struct NeighborhoodEdges {
+    edges: Vec<AugmentedEdge>,
+    /// Nodes two steps from the requested one. Only the edges that reach them were fetched, so
+    /// their own slices are undetermined until a later `expand` lands on them; see
+    /// `Edge::blocks_from_edges_excluding`.
+    frontier_node_ids: HashSet<HashId>,
+}
+
 /// Fetch every edge touching `node_id` or one of its immediate neighbors in `block_group_id` -
 /// the raw material `expand`/`expand_pruned` merge into a graph. Fetching the neighbors' own
-/// edges too (not just `node_id`'s) gives enough boundary context for the merged fragment to
-/// connect cleanly, and, for [`expand_pruned`], gives each neighbor's full outgoing edge set so
-/// its own chromosome_index dedup can be decided completely from this one batch.
+/// edges too (not just `node_id`'s) gives every neighbor its complete set of slice boundaries,
+/// and, for [`expand_pruned`], gives each neighbor's full outgoing edge set so its own
+/// chromosome_index dedup can be decided completely from this one batch.
 fn fetch_neighborhood_edges(
     conn: &GraphConnection,
     block_group_id: &HashId,
     node_id: HashId,
-) -> Vec<AugmentedEdge> {
+) -> NeighborhoodEdges {
     let edges_1hop = Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id], None)
         .unwrap_or_default();
 
@@ -50,7 +56,16 @@ fn fetch_neighborhood_edges(
             all_edges.entry(ae.edge.id).or_insert(ae);
         }
     }
-    all_edges.into_values().collect()
+
+    let frontier_node_ids = all_edges
+        .values()
+        .flat_map(|ae| [ae.edge.source_node_id, ae.edge.target_node_id])
+        .filter(|id| *id != node_id && neighbor_ids.binary_search(id).is_err())
+        .collect();
+    NeighborhoodEdges {
+        edges: all_edges.into_values().collect(),
+        frontier_node_ids,
+    }
 }
 
 /// Merge whichever of `edges` are not already present in `graph`. Returns true if the graph was
@@ -60,27 +75,38 @@ fn merge_new_edges(
     workspace: &Workspace,
     graph: &mut GenGraph,
     block_group_id: &HashId,
-    edges: Vec<AugmentedEdge>,
+    neighborhood: NeighborhoodEdges,
 ) -> bool {
     let existing_edge_ids: HashSet<HashId> = graph
         .all_edges()
         .flat_map(|(_, _, edges)| edges.iter().map(|e| e.edge_id))
         .collect();
 
-    let new_edges: Vec<AugmentedEdge> = edges
-        .into_iter()
+    let new_edges: Vec<AugmentedEdge> = neighborhood
+        .edges
+        .iter()
         .filter(|ae| !existing_edge_ids.contains(&ae.edge.id))
+        .cloned()
         .collect();
 
     if new_edges.is_empty() {
         return false;
     }
 
-    let fragment =
-        match BlockGroup::get_graph_from_edges(conn, workspace, block_group_id, &new_edges) {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
+    // Blocks come from every fetched edge, not just the new ones: a node's slices depend on all
+    // the edges touching it, including ones already merged into `graph`.
+    let blocks = match Edge::blocks_from_edges_excluding(
+        conn,
+        workspace,
+        block_group_id,
+        &neighborhood.edges,
+        None,
+        &neighborhood.frontier_node_ids,
+    ) {
+        Ok(blocks) => blocks,
+        Err(_) => return false,
+    };
+    let (fragment, _) = Edge::build_graph(&new_edges, &blocks);
     graph.merge_graph(&fragment);
     true
 }
@@ -94,11 +120,11 @@ pub fn expand(
     block_group_id: &HashId,
     node_id: HashId,
 ) -> bool {
-    let edges = fetch_neighborhood_edges(conn, block_group_id, node_id);
-    merge_new_edges(conn, workspace, graph, block_group_id, edges)
+    let neighborhood = fetch_neighborhood_edges(conn, block_group_id, node_id);
+    merge_new_edges(conn, workspace, graph, block_group_id, neighborhood)
 }
 
-/// Keep only the edges [`BlockGroup::prune_graph`] would also keep, grouping by source node and
+/// Keep only the edges [`crate::block_group::BlockGroup::prune_graph`] would also keep, grouping by source node and
 /// chromosome_index and keeping just the newest edge per group - a `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX`
 /// edge is always dropped, and a `NO_CHROMOSOME_INDEX`/`INDETERMINATE_CHROMOSOME_INDEX` edge is
 /// never dropped. Each source node's full outgoing set is always present in `edges` (see
@@ -134,7 +160,7 @@ fn drop_pruned_edges(edges: Vec<AugmentedEdge>) -> Vec<AugmentedEdge> {
         .collect()
 }
 
-/// Like [`expand`], but never merges in an edge that [`BlockGroup::prune_graph`] would later
+/// Like [`expand`], but never merges in an edge that [`crate::block_group::BlockGroup::prune_graph`] would later
 /// remove from a fully-loaded graph (see [`drop_pruned_edges`]) - so a crawl built on this
 /// never traverses a pruned/retired edit-site edge, and never reaches a node that's only
 /// reachable through one. This is what backs `show_history=False` in gen-python's `plot()`:
@@ -158,8 +184,9 @@ pub fn expand_pruned(
     block_group_id: &HashId,
     node_id: HashId,
 ) -> bool {
-    let edges = drop_pruned_edges(fetch_neighborhood_edges(conn, block_group_id, node_id));
-    merge_new_edges(conn, workspace, graph, block_group_id, edges)
+    let mut neighborhood = fetch_neighborhood_edges(conn, block_group_id, node_id);
+    neighborhood.edges = drop_pruned_edges(neighborhood.edges);
+    merge_new_edges(conn, workspace, graph, block_group_id, neighborhood)
 }
 
 /// From a given position in a graph, find positions a given number of characters away. An
