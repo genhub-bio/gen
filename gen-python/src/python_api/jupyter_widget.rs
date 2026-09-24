@@ -301,6 +301,9 @@ struct GraphPage {
     /// Set to `true` once annotation groups have been loaded (auto or with colors).
     /// Survives cloning so that cell-display clones do not double-load.
     annotation_groups_loaded: bool,
+    /// The annotation whose pieces are joined by connectors at full detail. Set by
+    /// `show()`, and dropped once no overlay carries that annotation any more.
+    focused_annotation: Option<HashId>,
 }
 
 /// The information needed to lazily build a `GraphPage` on first visit,
@@ -374,6 +377,7 @@ impl GraphPage {
             annotation_colors: AnnotationColorCache::new(),
             node_annotations,
             annotation_groups_loaded: false,
+            focused_annotation: None,
         }
     }
 
@@ -499,6 +503,14 @@ impl GraphPage {
     /// Must run on every render, not just after `overlays` mutates: which spans register
     /// depends on the current detail level, so a zoom/detail change alone can change the result.
     fn reapply(&mut self) {
+        if let Some(focused) = self.focused_annotation
+            && !self
+                .overlays
+                .iter()
+                .any(|overlay| overlay.span().is_some_and(|span| span.id == focused))
+        {
+            self.focused_annotation = None;
+        }
         reapply_overlays(
             &self.engine,
             &mut self.view_state,
@@ -616,6 +628,7 @@ impl GraphPage {
                 graph_area,
                 &self.view_state.frame,
                 &self.node_annotations,
+                self.focused_annotation,
             );
             &floating_overlays
         } else {
@@ -827,7 +840,13 @@ impl GraphPage {
     /// Remove all highlights from the graph, including any path shown by `show_path`.
     fn clear_highlights(&mut self) {
         self.overlays.clear();
+        self.focused_annotation = None;
         self.view_state.clear_all_highlights();
+    }
+
+    /// Make `annotation` the one whose pieces are joined by connectors, or clear the focus.
+    fn focus_annotation(&mut self, annotation: Option<&PyAnnotation>) {
+        self.focused_annotation = annotation.map(|annotation| annotation.inner.id);
     }
 
     /// Highlight the most recent path associated with this sequence graph.
@@ -1543,6 +1562,21 @@ impl PyGraphController {
         Ok(())
     }
 
+    /// Connect the pieces of `annotation` across nodes at full detail, replacing any
+    /// previously focused annotation; ``None`` clears the focus. ``show()`` calls this, so
+    /// the most recently shown annotation is the connected one.
+    #[pyo3(signature = (annotation=None))]
+    pub fn focus_annotation(&mut self, annotation: Option<PyRef<PyAnnotation>>) -> PyResult<()> {
+        self.active()?.focus_annotation(annotation.as_deref());
+        Ok(())
+    }
+
+    /// Hash ID of the annotation whose pieces are connected, or ``None``.
+    #[getter]
+    fn focused_annotation(&mut self) -> PyResult<Option<String>> {
+        Ok(self.active()?.focused_annotation.map(|id| id.to_string()))
+    }
+
     /// Highlight an `Annotation` on the graph as a nameless inline annotation,
     /// so the locus is coloured without duplicating the track label.
     pub fn highlight_annotation_obj(
@@ -1756,6 +1790,17 @@ mod tests {
             source: OverlaySource::Annotation("gene".to_string()),
             style: PathStyle::new(Color::Red),
         });
+        let unfocused = rendered_text(&mut controller);
+        assert!(
+            !unfocused
+                .chars()
+                .any(|glyph| ('\u{2801}'..='\u{28ff}').contains(&glyph)),
+            "should draw no connectors without a focused annotation"
+        );
+        controller
+            .active()
+            .expect("should have an active page")
+            .focused_annotation = Some(HashId::convert_str("gene"));
 
         for detail in ["full", "normal", "minimal", "full"] {
             controller.set_detail(detail).expect("should change detail");
@@ -1793,6 +1838,13 @@ mod tests {
                 .chars()
                 .any(|glyph| ('\u{2801}'..='\u{28ff}').contains(&glyph)),
             "should remove annotation connectors"
+        );
+        assert_eq!(
+            controller
+                .focused_annotation()
+                .expect("should read the focused annotation"),
+            None,
+            "should drop the focus on a removed annotation"
         );
     }
 

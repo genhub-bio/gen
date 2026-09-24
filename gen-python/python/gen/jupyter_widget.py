@@ -446,6 +446,11 @@ class GraphWidget(anywidget.AnyWidget):
             When ``True``, center the target in the viewport instead of the
             default snap-left placement.
 
+        When an annotation spans several sequence blocks, its pieces are joined
+        by dotted connectors at full detail. Only the most recently shown
+        annotation is connected; showing a locus or calling
+        ``clear_highlights()`` removes the connectors.
+
         Example
         -------
         ::
@@ -463,9 +468,11 @@ class GraphWidget(anywidget.AnyWidget):
         if isinstance(target, Annotation):
             self._controller.go_to_annotation_obj(target, center)
             self._controller.highlight_annotation_obj(target, color)
+            self._controller.focus_annotation(target)
         else:
             self._controller.go_to_pos(target.start(), center)
             self._controller.highlight_match(target, color)
+            self._controller.focus_annotation(None)
         self._render()
 
     def highlight_match(self, locus, color: str | None = None) -> None:

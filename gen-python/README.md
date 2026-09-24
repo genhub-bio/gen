@@ -32,7 +32,9 @@ The notebook creates a temporary repository and displays the existing `GraphWidg
 The graph, annotations, and widget remain available for further exploration.
 
 At full detail, the widget uses the CLI's annotation display: packed directional
-bars beneath nodes, with Braille curves connecting fragments of the same annotation.
+bars beneath nodes. `widget.show(annotation)` also joins the fragments of that one
+annotation with a dotted Braille curve; showing another annotation moves the curve to it,
+and `widget.clear_highlights()` removes it.
 Names that do not fit beside their bars fall back to floating labels. Annotation colors
 apply to bars, connectors, and labels; sequence characters keep their normal colors. Use
 `widget.zoom_in()` to reach full detail and see this display.
