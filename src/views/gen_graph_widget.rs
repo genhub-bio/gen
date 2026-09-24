@@ -281,11 +281,7 @@ impl SequenceSource for &GraphConnection {
                 SequenceError::Io("graph database is not inside a workspace".to_string())
             })?;
         let workspace = Workspace::new(workspace_path);
-        let sequences = Node::get_sequences_by_node_ids(self, &workspace, &[node_id], None);
-        match sequences.get(&node_id) {
-            Some(seq) => seq.get_sequence(start, end),
-            None => Ok("?".repeat((end - start).max(0) as usize)),
-        }
+        (*self, &workspace).get_node_sequence(node_id, start, end)
     }
 }
 
@@ -296,11 +292,10 @@ impl<'a> SequenceSource for (&'a GraphConnection, &'a Workspace) {
         start: i64,
         end: i64,
     ) -> Result<String, SequenceError> {
-        let sequences = Node::get_sequences_by_node_ids(self.0, self.1, &[node_id], None);
-        match sequences.get(&node_id) {
-            Some(seq) => seq.get_sequence(start, end),
-            None => Ok("?".repeat((end - start).max(0) as usize)),
-        }
+        Ok(
+            Node::get_sequence_range(self.0, self.1, node_id, start, end)?
+                .unwrap_or_else(|| "?".repeat((end - start).max(0) as usize)),
+        )
     }
 }
 
