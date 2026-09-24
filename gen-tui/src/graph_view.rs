@@ -16,17 +16,15 @@ use ratatui::{
     widgets::{Block, StatefulWidget, Widget},
 };
 
-#[cfg(feature = "crossterm")]
-use crate::navigator::Navigator;
 use crate::{
     assembly::AssembledLayout,
     crawl::{EagerSource, GraphSource},
     distribute_nodes::GapSizes,
-    frame_index::FrameIndex,
+    frame_index::{Direction, FrameIndex},
     graph_painter::{Camera, GraphPainter, HighlightKind, Highlights, snap_camera},
     layout::NodeRole,
     layout_engine::{BatchId, LayoutEngine},
-    navigator::{CursorOverlay, CursorState},
+    navigator::{CursorOverlay, CursorState, Navigator},
     plotter::{NodeRenderer, PathStyle},
     theme::current_theme,
 };
@@ -160,10 +158,9 @@ pub struct GraphViewState<N> {
     /// enforced by compaction (see `distribute_nodes::compact_layout`).
     pub gaps: GapSizes,
     pub highlights: Highlights<N>,
-    /// The area passed to the most recent `GraphView::render` call. Used for coarse-mode
-    /// navigation deltas, click-to-world conversion, and the `snap_camera` hard-zone
-    /// boundary - all facts knowable only from the last time this view was actually
-    /// rendered, not a cached geometry.
+    /// The area passed to the most recent `GraphView::render` call. Used for click-to-world
+    /// conversion and the `snap_camera` hard-zone boundary - facts knowable only from the
+    /// last time this view was actually rendered, not a cached geometry.
     last_area: Rect,
     go_to_pending: bool,
     go_to_snap_left: bool,
@@ -259,15 +256,14 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         self.wormhole_entry
     }
 
-    /// Jump to a specific node at a fractional offset within it. Switches to fine mode,
-    /// shows the cursor, and queues a one-shot viewport centering for the next render (see
-    /// `GraphView::render`'s go-to handling).
+    /// Jump to a specific node at a fractional offset within it. Shows the cursor and queues
+    /// a one-shot viewport centering for the next render (see `GraphView::render`'s go-to
+    /// handling).
     pub fn go_to_node(&mut self, node: N, offset: (f64, f64)) {
         if !self.go_to_pending {
             self.go_to_previous_cursor = Some(self.cursor);
         }
         self.cursor.set_node(node, offset);
-        self.cursor.coarse_mode = false;
         self.cursor.visible = true;
         self.go_to_pending = true;
     }
@@ -279,7 +275,6 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
             self.go_to_previous_cursor = Some(self.cursor);
         }
         self.cursor.set_node(frame_node, offset);
-        self.cursor.coarse_mode = false;
         self.cursor.visible = true;
         self.go_to_pending = true;
         self.go_to_frame_anchor = Some(camera_anchor);
@@ -465,51 +460,51 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<Option<(N, N)>, String> {
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => {
-                let delta = if self.cursor.coarse_mode {
-                    -(self.last_area.width as i64)
-                } else {
-                    -1
-                };
-                if let Some(wormhole) = self.horizontal_wormhole(delta) {
+                if let Some(wormhole) = self.horizontal_wormhole(-1) {
                     return Ok(Some(wormhole));
                 }
-                Navigator::move_horizontal(&mut self.cursor, delta, &self.frame)?;
+                Navigator::move_horizontal(&mut self.cursor, -1, &self.frame)?;
                 self.rebase_camera_to_cursor();
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                let delta = if self.cursor.coarse_mode {
-                    self.last_area.width as i64
-                } else {
-                    1
-                };
-                if let Some(wormhole) = self.horizontal_wormhole(delta) {
+                if let Some(wormhole) = self.horizontal_wormhole(1) {
                     return Ok(Some(wormhole));
                 }
-                Navigator::move_horizontal(&mut self.cursor, delta, &self.frame)?;
+                Navigator::move_horizontal(&mut self.cursor, 1, &self.frame)?;
                 self.rebase_camera_to_cursor();
             }
             // Note: in world/screen coordinates, Y increases upward.
             KeyCode::Up | KeyCode::Char('k') => {
-                let delta = if self.cursor.coarse_mode {
-                    self.last_area.height as i64
-                } else {
-                    1
-                };
-                Navigator::move_vertical(&mut self.cursor, delta, &self.frame)?;
+                Navigator::move_vertical(&mut self.cursor, 1, &self.frame)?;
                 self.rebase_camera_to_cursor();
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let delta = if self.cursor.coarse_mode {
-                    -(self.last_area.height as i64)
-                } else {
-                    -1
-                };
-                Navigator::move_vertical(&mut self.cursor, delta, &self.frame)?;
+                Navigator::move_vertical(&mut self.cursor, -1, &self.frame)?;
                 self.rebase_camera_to_cursor();
             }
             _ => (),
         }
         Ok(None)
+    }
+
+    /// Move the cursor to the next stop to its right (`forward`) or left, as listed per node
+    /// by `stops` in columns from the node's left edge, and keep the camera following it.
+    /// See `Navigator::move_to_stop`. The search stays within the active batch: it does not
+    /// pass through wormhole doors, so it fails and leaves the cursor in place when no
+    /// placed node ahead has a stop.
+    pub fn move_cursor_to_stop(
+        &mut self,
+        forward: bool,
+        stops: impl Fn(N) -> Vec<i64>,
+    ) -> Result<(), String> {
+        let direction = if forward {
+            Direction::Right
+        } else {
+            Direction::Left
+        };
+        Navigator::move_to_stop(&mut self.cursor, direction, &self.frame, stops)?;
+        self.rebase_camera_to_cursor();
+        Ok(())
     }
 
     /// Rebase the camera's anchor onto the cursor's current node, pinning it at the screen
@@ -997,7 +992,6 @@ mod tests {
         let mut engine = LayoutEngine::new(domain_graph);
         let visual = FixedSizeVisual;
         let mut state = GraphViewState::default();
-        state.cursor.coarse_mode = false;
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buffer = ratatui::buffer::Buffer::empty(area);
@@ -1071,7 +1065,6 @@ mod tests {
         assert_eq!(state.cursor.node, cursor_before.node);
         assert_eq!(state.cursor.fractional, cursor_before.fractional);
         assert_eq!(state.cursor.visible, cursor_before.visible);
-        assert_eq!(state.cursor.coarse_mode, cursor_before.coarse_mode);
     }
 
     #[test]
@@ -1335,7 +1328,6 @@ mod tests {
             state
                 .cursor
                 .set_node(boundary, (if exits_right { 1.0 } else { 0.0 }, 0.5));
-            state.cursor.coarse_mode = false;
             state.show_cursor();
             let key = crossterm::event::KeyEvent::new(
                 if exits_right {

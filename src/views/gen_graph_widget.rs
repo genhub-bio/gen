@@ -711,6 +711,24 @@ impl NodeAnnotationLayer {
             .collect()
     }
 
+    /// Node-local columns where an annotation starts on `node`, in reading direction: the
+    /// first column of a forward or unstranded annotation's first piece, and the last column
+    /// of a reverse-strand annotation's last piece. These are the stops the viewer's `w`/`b`
+    /// keys move the cursor between.
+    pub fn annotation_starts(&self, node: &GraphNode) -> Vec<i64> {
+        let mut starts: Vec<i64> = self
+            .flags(node)
+            .iter()
+            .filter_map(|flag| match flag.strand {
+                Strand::Reverse => (!flag.continues_right).then_some(flag.bar_end - 1),
+                _ => (!flag.continues_left).then_some(flag.bar_start),
+            })
+            .collect();
+        starts.sort_unstable();
+        starts.dedup();
+        starts
+    }
+
     /// Every flag, grouped by annotation and ordered by piece, with the node each is on.
     fn pieces(&self) -> Vec<Vec<(GraphNode, AnnotationFlag)>> {
         let mut by_id: HashMap<HashId, Vec<(GraphNode, AnnotationFlag)>> = HashMap::new();
@@ -2406,7 +2424,10 @@ mod tests {
     mod annotation_snapshots {
         use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
         use gen_graph::{GenGraph, GraphEdge, GraphNode};
-        use gen_tui::{graph_view::GraphView, testing::create_test_terminal};
+        use gen_tui::{
+            GraphViewState, frame_index::Direction, graph_view::GraphView,
+            testing::create_test_terminal,
+        };
         use ratatui::{style::Color, widgets::StatefulWidget as _};
 
         use super::{RepeatingSequenceSource, span_overlay};
@@ -2467,11 +2488,22 @@ mod tests {
         // uses the placed nodes for connectors and floating labels.
         fn render(
             graph: GenGraph,
-            mut overlays: Vec<GraphOverlay>,
+            overlays: Vec<GraphOverlay>,
             zoom_level: usize,
             size: (u16, u16),
             focused: Option<HashId>,
         ) -> String {
+            render_view(graph, overlays, zoom_level, size, focused).0
+        }
+
+        /// `render`, also returning the annotation layer and view state it rendered with.
+        fn render_view(
+            graph: GenGraph,
+            mut overlays: Vec<GraphOverlay>,
+            zoom_level: usize,
+            size: (u16, u16),
+            focused: Option<HashId>,
+        ) -> (String, NodeAnnotationLayer, GraphViewState<GraphNode>) {
             let layer = NodeAnnotationLayer::new();
             let (mut engine, zoom_levels, mut view_state) =
                 create_annotated_gen_graph_engine(graph, RepeatingSequenceSource, layer.clone());
@@ -2513,7 +2545,7 @@ mod tests {
                     })
                     .expect("should render annotations");
             }
-            terminal.backend().to_string()
+            (terminal.backend().to_string(), layer, view_state)
         }
 
         #[test]
@@ -2655,6 +2687,81 @@ mod tests {
             assert!(
                 tail.iter().all(|cell| !coding.contains(cell)),
                 "should not draw another span's connector"
+            );
+        }
+
+        /// The cursor's node and its column within that node.
+        fn cursor_column(view_state: &GraphViewState<GraphNode>) -> (GraphNode, i64) {
+            let node = view_state.cursor.node.expect("should have a cursor node");
+            let rect = view_state
+                .frame
+                .rect_of(node)
+                .expect("should place the cursor node");
+            (
+                node,
+                rect.point_at_fraction(view_state.cursor.fractional).x - rect.left(),
+            )
+        }
+
+        #[test]
+        fn test_annotation_start_jumps_across_a_fork() {
+            let (graph, overlays) = branching_spans();
+            let (_, layer, mut view_state) =
+                render_view(graph, overlays, FULL_ZOOM_LEVEL, (110, 31), None);
+            let (first, upper, lower, merge) = (
+                node("first", 16),
+                node("upper", 22),
+                node("lower", 12),
+                node("merge", 16),
+            );
+            // Forward and unstranded spans start at their first column; reverse-strand spans
+            // (`nested`, and `reverse` on `merge`) start at their last column.
+            assert_eq!(layer.annotation_starts(&first), vec![6]);
+            assert_eq!(layer.annotation_starts(&upper), vec![17]);
+            assert_eq!(layer.annotation_starts(&lower), vec![5]);
+            assert_eq!(layer.annotation_starts(&merge), vec![5, 11]);
+
+            let starts = |node: GraphNode| layer.annotation_starts(&node);
+            let branch_start = |branch: GraphNode| {
+                let column = if branch == upper { 17 } else { 5 };
+                (branch, column)
+            };
+            view_state.cursor.set_node(first, (0.0, 0.5));
+            let mut forward = Vec::new();
+            while view_state.move_cursor_to_stop(true, starts).is_ok() {
+                forward.push(cursor_column(&view_state));
+            }
+            // At the fork, the jump takes whichever branch the cursor's right-arrow step would.
+            let forward_branch = view_state
+                .frame
+                .neighbor(first, Direction::Right)
+                .expect("should have a branch after the fork");
+            assert_eq!(
+                forward,
+                vec![
+                    (first, 6),
+                    branch_start(forward_branch),
+                    (merge, 5),
+                    (merge, 11)
+                ]
+            );
+            assert_eq!(
+                cursor_column(&view_state),
+                (merge, 11),
+                "should stay put at the batch's last annotation start"
+            );
+
+            let mut backward = Vec::new();
+            while view_state.move_cursor_to_stop(false, starts).is_ok() {
+                backward.push(cursor_column(&view_state));
+            }
+            let backward_branch = view_state
+                .frame
+                .neighbor(merge, Direction::Left)
+                .expect("should have a branch before the join");
+            assert_eq!(
+                backward,
+                vec![(merge, 5), branch_start(backward_branch), (first, 6)]
             );
         }
 
