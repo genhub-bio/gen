@@ -1,17 +1,14 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-use gen_core::{
-    HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
-    PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_end_node, is_start_node,
-};
-use gen_graph::{GenGraph, GraphEdge, GraphNode, GraphNodeSlice};
+use gen_core::{HashId, Strand, Workspace, is_end_node, is_start_node};
+use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
-    crawl::GraphSource,
+    crawl::{EagerSource, GraphSource},
     distribute_nodes::GapSizes,
     frame_index::FrameIndex,
     geometry::{WorldPos, WorldRect, floor_half},
@@ -34,6 +31,7 @@ use crate::views::{
         AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
         span_should_show_in_truncated,
     },
+    graph_dimming::GraphDimming,
     graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
     inline_label_placement::draw_label_near_pos,
 };
@@ -1124,88 +1122,11 @@ pub fn inner_truncation(s: &str, target_length: u32) -> String {
     format!("{}...{}", left, right)
 }
 
-/// Compute which edges would be removed by `BlockGroup::prune_graph`.
-///
-/// Mirrors the per-source-node, per-chromosome_index deduplication logic: for each
-/// chromosome_index appearing on outgoing edges of a node, the edge with the highest
-/// `created_on` is kept; all others are dimmed. Edges with
-/// `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` are always dimmed; edges with
-/// `NO_CHROMOSOME_INDEX` or `INDETERMINATE_CHROMOSOME_INDEX` are never dimmed.
-fn compute_pruned_edges(graph: &GenGraph) -> HashSet<(GraphNode, GraphNode)> {
-    let mut pruned: HashSet<(GraphNode, GraphNode)> = HashSet::new();
-
-    for node in graph.nodes() {
-        // chromosome_index -> (source, target, best_created_on)
-        let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
-
-        for (source_node, target_node, edge_weights) in graph.edges(node) {
-            for edge_weight in edge_weights {
-                let GraphEdge {
-                    chromosome_index,
-                    created_on,
-                    ..
-                } = *edge_weight;
-
-                if chromosome_index == NO_CHROMOSOME_INDEX
-                    || chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
-                {
-                    continue;
-                }
-                if chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
-                    pruned.insert((source_node, target_node));
-                    continue;
-                }
-                edges_by_ci
-                    .entry(chromosome_index)
-                    .and_modify(|(best_src, best_tgt, best_ts)| {
-                        if created_on > *best_ts {
-                            pruned.insert((*best_src, *best_tgt));
-                            *best_src = source_node;
-                            *best_tgt = target_node;
-                            *best_ts = created_on;
-                        } else {
-                            pruned.insert((source_node, target_node));
-                        }
-                    })
-                    .or_insert((source_node, target_node, created_on));
-            }
-        }
-    }
-
-    pruned
-}
-
-/// Find nodes that become inaccessible when all pruned edges are removed.
-///
-/// BFS from all start nodes following only non-pruned edges. Any node not reached
-/// is only reachable through pruned (lowlighted) edges and should be dimmed.
-fn compute_inaccessible_nodes(
-    graph: &GenGraph,
-    pruned: &HashSet<(GraphNode, GraphNode)>,
-) -> Vec<GraphNode> {
-    let mut reachable: HashSet<GraphNode> = HashSet::new();
-    let mut queue: VecDeque<GraphNode> =
-        graph.nodes().filter(|n| is_start_node(n.node_id)).collect();
-    for &node in &queue {
-        reachable.insert(node);
-    }
-
-    while let Some(node) = queue.pop_front() {
-        for (src, tgt, _) in graph.edges(node) {
-            if !pruned.contains(&(src, tgt)) && reachable.insert(tgt) {
-                queue.push_back(tgt);
-            }
-        }
-    }
-
-    graph.nodes().filter(|n| !reachable.contains(n)).collect()
-}
-
 /// Create a `LayoutEngine`/`ZoomLevels`/`GraphViewState` triple for a GenGraph with the
 /// standard theme and settings.
 ///
 /// This is the standard way to initialize a `GraphView` for GenGraph visualization: it dims
-/// pruned edges and inaccessible nodes, starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
+/// pruned edges and the nodes only they lead into (see [`GraphDimming`]), starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
 /// free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
 ///
 /// # Arguments
@@ -1277,37 +1198,8 @@ type GraphEngineSetup<R> = (
     GraphViewState<GraphNode>,
 );
 
-/// (Re)compute pruned-edge/inaccessible-node dimming from whatever of `graph` is currently
-/// loaded, replacing whatever dimming `view_state` held before.
-///
-/// For an eagerly-loaded graph this only ever needs to run once, at setup - `graph` never
-/// changes afterward. For a lazily-loaded graph (see [`build_gen_graph_engine_lazy`]) it must
-/// be called again every time the crawl has grown `engine.graph()`, since a node or edge that
-/// wasn't loaded yet cannot have been judged prunable/inaccessible the first time around.
-/// `compute_inaccessible_nodes` in particular needs a real BFS from every loaded
-/// `is_start_node` - that can't be approximated by scoping it to just the active window,
-/// since a window seeded from a wormhole target may not contain a start node at all, which
-/// would wrongly mark the entire window inaccessible. Recomputing over the accumulated
-/// `engine.graph()` instead stays correct at the cost of scaling with how much of the graph
-/// this session has actually crawled into, not with the size of the underlying database -
-/// the renderer only ever paints dimming for nodes/edges in the active window in any case
-/// (see `graph_painter::resolve_edge_lowlights`/`resolve_node_lowlights`), so a lowlight list
-/// that runs ahead of what's on screen right now is harmless, just extra bookkeeping.
-pub fn refresh_dimming(view_state: &mut GraphViewState<GraphNode>, graph: &GenGraph) {
-    view_state.highlights.edge_lowlights.clear();
-    view_state.highlights.node_lowlights.clear();
-    let pruned = compute_pruned_edges(graph);
-    let inaccessible = compute_inaccessible_nodes(graph, &pruned);
-    for edge in pruned {
-        view_state.dim_edge(edge);
-    }
-    for node in inaccessible {
-        view_state.dim_node(node);
-    }
-}
-
 /// Shared body of [`create_gen_graph_engine`]/[`create_send_sync_gen_graph_engine`]: dims
-/// pruned edges and inaccessible nodes, starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
+/// pruned edges and the nodes only they lead into, starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
 /// free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
 ///
 /// Cycle safety (including a circular genome's `PATH_END -> PATH_START` closure) is left
@@ -1322,7 +1214,8 @@ fn build_gen_graph_engine<R>(
 ) -> GraphEngineSetup<R> {
     let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
     let mut view_state = GraphViewState::default();
-    refresh_dimming(&mut view_state, &graph);
+    // The graph never grows, so one sync decides all of its dimming.
+    GraphDimming::default().sync(&graph, &EagerSource, &mut view_state);
     let mut engine = LayoutEngine::new(graph);
     if let Some(start_node) = start_node {
         engine.set_preferred_initial_anchor(start_node);
@@ -1342,11 +1235,9 @@ type GraphEngineSetupLazy<R, S> = (
 
 /// Like [`build_gen_graph_engine`], but for a `graph` that is only seeded (e.g. just its
 /// starting anchor) and grows lazily through `source` as the crawl reaches unloaded nodes -
-/// see [`crate::views::lazy_graph_source::SqlGraphSource`]. Dimming is computed once here over
-/// whatever of `graph` is loaded at construction time (typically just the seed); callers must
-/// call [`refresh_dimming`] again themselves whenever the active world changes, since the
-/// crawl grows `engine.graph()` behind the scenes on every render - see `refresh_dimming`'s
-/// own doc for why that can't be avoided.
+/// see [`crate::views::lazy_graph_source::SqlGraphSource`]. The view state starts undimmed:
+/// callers keep a [`GraphDimming`] and sync it whenever the crawl may have grown
+/// `engine.graph()`, which any render can do.
 fn build_gen_graph_engine_lazy<R, S>(
     graph: GenGraph,
     source: S,
@@ -1357,7 +1248,6 @@ where
 {
     let start_node = graph.nodes().find(|node| is_start_node(node.node_id));
     let mut view_state = GraphViewState::default();
-    refresh_dimming(&mut view_state, &graph);
     let mut engine = LayoutEngine::new_with_source(graph, source);
     if let Some(start_node) = start_node {
         engine.set_preferred_initial_anchor(start_node);
@@ -1370,9 +1260,7 @@ where
 }
 
 /// Like [`create_annotated_gen_graph_engine`], but for a lazily-loaded `graph`/`source` pair -
-/// see [`build_gen_graph_engine_lazy`]. The caller is responsible for calling
-/// [`refresh_dimming`] again after the active world changes, since dimming is only computed
-/// once here, over the seed graph.
+/// see [`build_gen_graph_engine_lazy`], including how the caller keeps it dimmed.
 pub fn create_annotated_gen_graph_engine_lazy<'a, Src, Seq>(
     graph: GenGraph,
     source: Src,
@@ -1395,9 +1283,7 @@ where
 }
 
 /// Like [`create_send_sync_annotated_gen_graph_engine`], but for a lazily-loaded `graph`/`source`
-/// pair - see [`build_gen_graph_engine_lazy`]. The caller is responsible for calling
-/// [`refresh_dimming`] again after the active world changes, since dimming is only computed
-/// once here, over the seed graph.
+/// pair - see [`build_gen_graph_engine_lazy`], including how the caller keeps it dimmed.
 pub fn create_send_sync_annotated_gen_graph_engine_lazy<Src, Seq>(
     graph: GenGraph,
     source: Src,
@@ -1820,6 +1706,7 @@ mod tests {
     use std::path::PathBuf;
 
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use gen_graph::GraphEdge;
     use gen_models::{block_group::BlockGroup, sample::Sample};
     use gen_tui::{
         geometry::{WorldPos, WorldRect},

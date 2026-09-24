@@ -226,6 +226,12 @@ where
         &self.graph
     }
 
+    /// The source that grows [`Self::graph`], for callers that need to know which of its nodes
+    /// still have unloaded edges (see [`crate::crawl::GraphSource::is_frontier`]).
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
     /// The node budget for a new batch claimed while the viewport is the given width
     /// (columns). See `NEIGHBORHOOD_NODE_BUDGET_DIVISOR`.
     pub fn neighborhood_node_budget(&self, viewport_width: usize) -> usize {

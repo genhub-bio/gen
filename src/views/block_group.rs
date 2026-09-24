@@ -39,9 +39,10 @@ use crate::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_widget::{
             self, NodeAnnotationLayer, create_annotated_gen_graph_engine_lazy,
-            draw_annotation_connectors, draw_annotation_labels, reapply_overlays, refresh_dimming,
+            draw_annotation_connectors, draw_annotation_labels, reapply_overlays,
             update_node_annotations,
         },
+        graph_dimming::GraphDimming,
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership, file_track_key,
             group_track_key, has_path_overlay, remove_path_overlay, remove_track_overlays,
@@ -619,10 +620,9 @@ pub fn view_block_group(
             conn,
             node_annotations.clone(),
         );
-    // The world dimming (pruned edges / inaccessible nodes) was last refreshed for - a lazily
-    // loaded graph grows as the crawl reaches new nodes, so this must be recomputed every time
-    // the active world changes rather than once up front. See `refresh_dimming`.
-    let mut dimming_world = graph_engine.active_batch();
+    // Pruned edges and the nodes only they lead into, kept up to date as the crawl grows the
+    // graph: synced before each draw, and again after it since rendering can crawl too.
+    let mut graph_dimming = GraphDimming::default();
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if position.is_some() {
@@ -1176,6 +1176,13 @@ pub fn view_block_group(
             }
         }
 
+        // A teleport or jump handled above may already have grown the graph.
+        graph_dimming.sync(
+            graph_engine.graph(),
+            graph_engine.source(),
+            &mut graph_view_state,
+        );
+
         // Draw the UI
         terminal.draw(|frame| {
             let status_bar_height: u16 = 1;
@@ -1598,13 +1605,13 @@ pub fn view_block_group(
             }
         })?;
 
-        // The crawl may have grown `graph_engine`'s graph (a fresh world, or activating an
-        // already-known one) during the render just above, so pruned-edge/inaccessible-node
-        // dimming can be stale relative to what's now loaded - see `refresh_dimming`.
-        if graph_engine.active_batch() != dimming_world {
-            refresh_dimming(&mut graph_view_state, graph_engine.graph());
-            dimming_world = graph_engine.active_batch();
-        }
+        // The render just above may have claimed a new world, growing the graph; if that
+        // changed any dimming, the frame is redrawn below.
+        let dimming_changed_after_draw = graph_dimming.sync(
+            graph_engine.graph(),
+            graph_engine.source(),
+            &mut graph_view_state,
+        );
 
         // Load (or reload) annotation groups for the active crawled neighborhood - that
         // neighborhood is already the deliberately-constrained local window, so this is
@@ -1648,7 +1655,7 @@ pub fn view_block_group(
                     conn,
                     node_annotations.clone(),
                 );
-            dimming_world = graph_engine.active_batch();
+            graph_dimming = GraphDimming::default();
             let block_group = match BlockGroup::get_by_id(conn, new_block_group_id, history_ref) {
                 Ok(bg) => bg,
                 Err(err) => {
@@ -1726,9 +1733,9 @@ pub fn view_block_group(
             continue;
         }
 
-        // The overlays were populated after the frame was rendered. Draw them immediately
+        // The overlays or dimming changed after the frame was rendered. Draw them immediately
         // instead of waiting for the next keyboard or mouse event to wake the idle viewer.
-        if annotation_groups_loaded_after_draw {
+        if annotation_groups_loaded_after_draw || dimming_changed_after_draw {
             continue;
         }
 
