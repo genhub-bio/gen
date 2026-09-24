@@ -96,7 +96,7 @@ pub(crate) struct StructuralBuildCounts {
 /// Owns the domain graph, one explicit active structural world, and a small LRU of previously
 /// visited worlds. Multiple views consume the same active world without structural rebuilding.
 ///
-/// `S` is how the engine grows `graph` on demand when a crawl reaches an unloaded node - see
+/// `S` is how the engine grows `graph` on demand when a crawl reaches a frontier node - see
 /// [`crate::crawl::GraphSource`]. It defaults to [`EagerSource`], a no-op, for the common case
 /// of an already-fully-loaded graph; a lazily-loaded graph plugs in its own source via
 /// [`LayoutEngine::new_with_source`] instead. Either way there is exactly one crawl
@@ -179,7 +179,7 @@ where
     S: GraphSource<G>,
 {
     /// Create a new LayoutEngine that lazily grows `graph` via `source` whenever a crawl
-    /// reaches a node it hasn't loaded yet - see [`crate::crawl::GraphSource`]. Backward
+    /// needs to go past a frontier node - see [`crate::crawl::GraphSource`]. Backward
     /// (cycle-closing) edges, if any, are auto-detected per window - see
     /// `explicit_backward_edges`.
     pub fn new_with_source(graph: G, source: S) -> Self {
@@ -229,7 +229,7 @@ where
     /// without otherwise touching the active world or window cache, unlike
     /// [`Self::window_for`]/[`Self::activate_world_at`], which both also navigate there. For a
     /// caller that needs to merge in data its own way rather than through the crawl's usual
-    /// [`crate::crawl::GraphSource::ensure_loaded`] path - e.g. gen-python's `show_path`, which
+    /// [`crate::crawl::GraphSource::expand_frontier`] path - e.g. gen-python's `show_path`, which
     /// must be able to project a stored path onto the graph regardless of whether the active
     /// source is filtering some of that path's own edges out (see `SqlGraphSource::new_pruned`).
     /// A caller's designated "current path" is not guaranteed to be made up of exactly the

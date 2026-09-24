@@ -2171,8 +2171,8 @@ mod tests {
 
         let block_group_id = BlockGroup::get_id(collection_name, Sample::DEFAULT_NAME, "", None);
         let db_path = PathBuf::from(conn.path().expect("graph database has no file path"));
-        let source = SqlGraphSource::new(db_path, context.workspace().clone(), block_group_id);
-        let seed = seed_block_group_graph(conn, context.workspace(), &block_group_id);
+        let source = SqlGraphSource::new(db_path, block_group_id);
+        let seed = seed_block_group_graph(conn, &block_group_id);
         let (mut engine, zoom_levels, mut view_state) = create_annotated_gen_graph_engine_lazy(
             seed,
             source,

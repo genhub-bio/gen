@@ -75,36 +75,43 @@ impl<NodeId> ExternalEdge<NodeId> {
     }
 }
 
-/// Grows a domain graph `G` on demand as a crawl reaches a node whose neighbours aren't yet
-/// loaded. This is the one seam through which a crawl ever touches whatever backs `G` -
-/// gen-tui itself never needs to know how (or whether) a node's edges get fetched.
+/// Grows a domain graph `G` on demand. This is the one seam through which a crawl ever touches
+/// whatever backs `G`: gen-tui only sees a graph whose nodes either carry all their edges on a
+/// given side or are frontier on that side, and asks the source to push the frontier outward
+/// when a crawl needs to go past it. How the source finds those edges is its own business.
 pub trait GraphSource<G: GraphBase> {
-    /// Ensure `node`'s full neighbourhood (both directions) is present in `graph`, mutating it
-    /// in place. Idempotent - a no-op once `node` is already loaded. Returns whether the call
-    /// added anything.
-    fn ensure_loaded(&mut self, graph: &mut G, node: G::NodeId) -> bool;
+    /// Whether `graph` may still be missing some of `node`'s edges on its `direction` side.
+    fn is_frontier(&self, node: G::NodeId, direction: Direction) -> bool;
+
+    /// Load every edge on the `direction` side of each node in `frontier`, then keep crawling
+    /// that way, loading up to `budget` further nodes. Neighbours reached this way enter
+    /// `graph` as frontier nodes until their own edges are loaded.
+    fn expand_frontier(
+        &mut self,
+        graph: &mut G,
+        frontier: &[G::NodeId],
+        direction: Direction,
+        budget: usize,
+    );
 }
 
-/// A source for a graph that is already fully loaded in memory, so a crawl never needs to grow
-/// `G` - a permanent no-op. The default source for [`crate::layout_engine::LayoutEngine`].
+/// A source for a graph that is already fully loaded in memory, so no node is ever frontier.
+/// The default source for [`crate::layout_engine::LayoutEngine`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EagerSource;
 
 impl<G: GraphBase> GraphSource<G> for EagerSource {
-    fn ensure_loaded(&mut self, _graph: &mut G, _node: G::NodeId) -> bool {
+    fn is_frontier(&self, _node: G::NodeId, _direction: Direction) -> bool {
         false
     }
-}
 
-/// Any `FnMut(&mut G, G::NodeId) -> bool` works as a source too, for callers who would rather
-/// pass a closure than name a type.
-impl<G, F> GraphSource<G> for F
-where
-    G: GraphBase,
-    F: FnMut(&mut G, G::NodeId) -> bool,
-{
-    fn ensure_loaded(&mut self, graph: &mut G, node: G::NodeId) -> bool {
-        self(graph, node)
+    fn expand_frontier(
+        &mut self,
+        _graph: &mut G,
+        _frontier: &[G::NodeId],
+        _direction: Direction,
+        _budget: usize,
+    ) {
     }
 }
 
@@ -130,9 +137,30 @@ where
         self.graph
     }
 
-    /// Ensure `node`'s full neighbourhood is loaded. See [`GraphSource::ensure_loaded`].
-    fn ensure_loaded(&mut self, node: G::NodeId) -> bool {
-        self.source.ensure_loaded(self.graph, node)
+    /// Make sure every node in `nodes` carries all its edges on the `direction` side, letting
+    /// the source crawl up to `budget` further nodes that way while it is at it.
+    fn complete(&mut self, nodes: &[G::NodeId], direction: Direction, budget: usize)
+    where
+        G::NodeId: Copy,
+    {
+        let frontier: Vec<G::NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|node| self.source.is_frontier(*node, direction))
+            .collect();
+        if !frontier.is_empty() {
+            self.source
+                .expand_frontier(self.graph, &frontier, direction, budget);
+        }
+    }
+
+    /// [`Self::complete`] on both sides, with no further crawling.
+    fn complete_both_sides(&mut self, nodes: &[G::NodeId])
+    where
+        G::NodeId: Copy,
+    {
+        self.complete(nodes, Direction::Outgoing, 0);
+        self.complete(nodes, Direction::Incoming, 0);
     }
 }
 
@@ -152,8 +180,8 @@ pub struct StructuralSubgraph<NodeId> {
 }
 
 /// Select up to `node_budget` nodes around `anchor`, including internal and boundary edges.
-/// `cursor` is consulted (via [`GraphSource::ensure_loaded`]) whenever the crawl needs a node's
-/// neighbours; pass an [`EagerSource`]-backed cursor for a graph that is already fully loaded.
+/// `cursor`'s source is asked to expand the frontier whenever the crawl needs to go past it;
+/// pass an [`EagerSource`]-backed cursor for a graph that is already fully loaded.
 pub fn neighborhood<G, S>(
     anchor: G::NodeId,
     node_budget: usize,
@@ -169,7 +197,6 @@ where
         IntoNodeIdentifiers<NodeId = G::NodeId> + IntoNeighborsDirected<NodeId = G::NodeId>,
     S: GraphSource<G>,
 {
-    cursor.ensure_loaded(anchor);
     if !cursor
         .graph()
         .node_identifiers()
@@ -186,12 +213,11 @@ where
         wormhole_targets,
     );
     // Every selected node's neighbours are read below to find in-window edges and boundary
-    // doors; make sure they are loaded regardless of exactly which nodes `crawl_neighborhood`
-    // itself happened to expand along the way (e.g. a zero-budget crawl never touches its own
-    // seed's neighbours).
-    for &node_id in &selected {
-        cursor.ensure_loaded(node_id);
-    }
+    // doors, so none of them may stay frontier, whichever ones the crawl itself went past (a
+    // zero-budget crawl never looks past its own seed).
+    let mut selected_nodes: Vec<G::NodeId> = selected.iter().copied().collect();
+    selected_nodes.sort();
+    cursor.complete_both_sides(&selected_nodes);
     let graph = cursor.graph();
 
     // Sorted by the domain node's own identity, not by wherever it landed in the underlying
@@ -421,7 +447,7 @@ where
 {
     let mut visited: HashSet<G::NodeId> = HashSet::from([anchor]);
     if let Some(forced) = forced_include {
-        cursor.ensure_loaded(forced);
+        cursor.complete_both_sides(&[forced]);
         visited.insert(forced);
     }
 
@@ -492,9 +518,7 @@ fn directional_bfs<G, S>(
     S: GraphSource<G>,
 {
     while !current_shell.is_empty() && *budget > 0 {
-        for &node_id in &current_shell {
-            cursor.ensure_loaded(node_id);
-        }
+        cursor.complete(&current_shell, direction, *budget);
         let graph = cursor.graph();
         let mut candidates: Vec<G::NodeId> = current_shell
             .iter()
@@ -529,6 +553,8 @@ fn directional_bfs<G, S>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use petgraph::graphmap::DiGraphMap;
 
     use super::*;
@@ -1012,5 +1038,108 @@ mod tests {
             windowed.iter().copied().collect::<HashSet<_>>(),
             HashSet::from([TestNode(0), TestNode(1), TestNode(2), TestNode(3)])
         );
+    }
+
+    /// Reveals a hidden graph one side of one node at a time, like a database-backed source
+    /// would.
+    struct RevealingSource {
+        hidden: DiGraphMap<TestNode, ()>,
+        loaded: HashSet<(TestNode, Direction)>,
+    }
+
+    impl GraphSource<DiGraphMap<TestNode, ()>> for RevealingSource {
+        fn is_frontier(&self, node: TestNode, direction: Direction) -> bool {
+            !self.loaded.contains(&(node, direction))
+        }
+
+        fn expand_frontier(
+            &mut self,
+            graph: &mut DiGraphMap<TestNode, ()>,
+            frontier: &[TestNode],
+            direction: Direction,
+            budget: usize,
+        ) {
+            let mut queue: VecDeque<TestNode> = frontier.iter().copied().collect();
+            let mut requested_remaining = frontier.len();
+            let mut remaining_budget = budget;
+            while let Some(node) = queue.pop_front() {
+                if requested_remaining > 0 {
+                    requested_remaining -= 1;
+                } else if remaining_budget == 0 {
+                    break;
+                } else {
+                    remaining_budget -= 1;
+                }
+                if !self.loaded.insert((node, direction)) {
+                    continue;
+                }
+                for neighbor in self.hidden.neighbors_directed(node, direction) {
+                    match direction {
+                        Direction::Outgoing => graph.add_edge(node, neighbor, ()),
+                        Direction::Incoming => graph.add_edge(neighbor, node, ()),
+                    };
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_neighborhood_over_a_revealing_source_matches_the_eager_graph() {
+        let shapes = vec![
+            vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)],
+            vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)],
+            vec![
+                (0, 1),
+                (0, 2),
+                (1, 3),
+                (2, 3),
+                (3, 4),
+                (4, 5),
+                (4, 6),
+                (6, 7),
+                (5, 7),
+            ],
+            vec![(0, 2), (1, 2), (2, 3), (3, 4), (5, 4), (4, 6), (6, 0)],
+        ];
+        for edges in shapes {
+            let eager_graph = make_test_graph(edges);
+            let anchors: Vec<TestNode> = eager_graph.nodes().collect();
+            for anchor in anchors {
+                for budget in 0..=eager_graph.node_count() + 1 {
+                    let expected = neighborhood(
+                        anchor,
+                        budget,
+                        &mut GraphCursor::new(&mut eager_graph.clone(), &mut EagerSource),
+                        None,
+                        &HashMap::new(),
+                        &HashMap::new(),
+                    )
+                    .unwrap();
+
+                    let mut lazy_graph = DiGraphMap::new();
+                    lazy_graph.add_node(anchor);
+                    let mut source = RevealingSource {
+                        hidden: eager_graph.clone(),
+                        loaded: HashSet::new(),
+                    };
+                    let actual = neighborhood(
+                        anchor,
+                        budget,
+                        &mut GraphCursor::new(&mut lazy_graph, &mut source),
+                        None,
+                        &HashMap::new(),
+                        &HashMap::new(),
+                    )
+                    .unwrap();
+
+                    assert_eq!(
+                        actual, expected,
+                        "anchor {anchor:?}, budget {budget}: a lazily revealed graph should \
+                         produce the same window as the fully loaded one"
+                    );
+                }
+            }
+        }
     }
 }

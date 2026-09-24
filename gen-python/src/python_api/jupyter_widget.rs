@@ -356,15 +356,14 @@ impl GraphPage {
         name: String,
         db_path: PathBuf,
         conn: &GraphConnection,
-        workspace: &Workspace,
         block_group_id: HashId,
         show_history: bool,
     ) -> Self {
-        let seed = seed_block_group_graph(conn, workspace, &block_group_id);
+        let seed = seed_block_group_graph(conn, &block_group_id);
         let graph_source = if show_history {
-            SqlGraphSource::new(db_path.clone(), workspace.clone(), block_group_id)
+            SqlGraphSource::new(db_path.clone(), block_group_id)
         } else {
-            SqlGraphSource::new_pruned(db_path.clone(), workspace.clone(), block_group_id)
+            SqlGraphSource::new_pruned(db_path.clone(), block_group_id)
         };
         let sequence_source = PathSequenceSource::new(db_path.clone());
         let node_annotations = NodeAnnotationLayer::new();
@@ -1262,12 +1261,10 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> P
         .path()
         .map(PathBuf::from)
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
-    let workspace = workspace_for_connection(graph_conn)?;
     Ok(GraphPage::new(
         sg.name.clone(),
         db_path,
         graph_conn,
-        &workspace,
         sg.id,
         show_history,
     ))
@@ -1328,18 +1325,12 @@ impl PyGraphController {
     /// Wrap a single block group as a one-page controller, its graph loaded lazily -
     /// see `GraphPage::new`. Only used by this module's own tests.
     #[cfg(test)]
-    fn new(
-        db_path: PathBuf,
-        conn: &GraphConnection,
-        workspace: &Workspace,
-        block_group_id: HashId,
-    ) -> Self {
+    fn new(db_path: PathBuf, conn: &GraphConnection, block_group_id: HashId) -> Self {
         Self {
             pages: vec![Page::Loaded(Box::new(GraphPage::new(
                 String::new(),
                 db_path,
                 conn,
-                workspace,
                 block_group_id,
                 true,
             )))],
@@ -1384,12 +1375,10 @@ impl PyGraphController {
         if let Page::Pending(page_ref) = page {
             let conn = get_connection(&page_ref.db_path)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            let workspace = workspace_for_connection(&conn)?;
             let loaded = GraphPage::new(
                 page_ref.name.clone(),
                 page_ref.db_path.clone(),
                 &conn,
-                &workspace,
                 page_ref.block_group_id,
                 page_ref.show_history,
             );
@@ -1812,8 +1801,7 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("test DB must be file-backed");
         let (bg_id, _) = setup_block_group(graph_handle.conn());
-        let workspace = workspace_for_connection(graph_handle.conn())?;
-        let mut ctrl = PyGraphController::new(db_path, graph_handle.conn(), &workspace, bg_id);
+        let mut ctrl = PyGraphController::new(db_path, graph_handle.conn(), bg_id);
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }
