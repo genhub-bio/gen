@@ -938,17 +938,23 @@ fn draw_braille_curve(buf: &mut Buffer, from: (u16, u16), to: (u16, u16), color:
     }
 }
 
-/// Connect the pieces of every annotation that spans several nodes with a dotted braille
-/// cubic curve from the end of one piece's bar to the start of the next, drawn after the graph so
-/// it can use the placed node rects in `frame`. Only pieces whose nodes were both placed by
-/// the last render are connected, and the curve only ever fills empty cells, so it never
-/// breaks an edge or a node it crosses.
+/// Connect the pieces of the focused annotation, when it spans several nodes, with a dotted
+/// braille cubic curve from the end of one piece's bar to the start of the next, drawn after
+/// the graph so it can use the placed node rects in `frame`. Connectors for every annotation
+/// at once crowd the graph, so only the span `focused` names is connected, and nothing is
+/// drawn without a focus. Only pieces whose nodes were both placed by the last render are
+/// connected, and the curve only ever fills empty cells, so it never breaks an edge or a node
+/// it crosses.
 pub fn draw_annotation_connectors(
     buf: &mut Buffer,
     area: Rect,
     frame: &FrameIndex<GraphNode>,
     layer: &NodeAnnotationLayer,
+    focused: Option<HashId>,
 ) {
+    let Some(focused) = focused else {
+        return;
+    };
     let to_terminal = |x: i64, y: i64| -> Option<(u16, u16)> {
         if x < 0 || y < 0 || x >= area.width as i64 || y >= area.height as i64 {
             return None;
@@ -958,7 +964,11 @@ pub fn draw_annotation_connectors(
     let lane_row = |rect: WorldRect, flag: &AnnotationFlag| -> i64 {
         sequence_row(rect) - 1 - flag.lane as i64
     };
-    for pieces in layer.pieces() {
+    for pieces in layer
+        .pieces()
+        .into_iter()
+        .filter(|pieces| pieces[0].1.id == focused)
+    {
         for pair in pieces.windows(2) {
             let ((from_node, from_flag), (to_node, to_flag)) = (&pair[0], &pair[1]);
             let (Some(from_rect), Some(to_rect)) =
@@ -2356,7 +2366,13 @@ mod tests {
                         f.buffer_mut(),
                         &mut view_state,
                     );
-                    draw_annotation_connectors(f.buffer_mut(), area, &view_state.frame, &layer);
+                    draw_annotation_connectors(
+                        f.buffer_mut(),
+                        area,
+                        &view_state.frame,
+                        &layer,
+                        None,
+                    );
                     draw_annotation_labels(
                         f.buffer_mut(),
                         area,
@@ -2454,6 +2470,7 @@ mod tests {
             mut overlays: Vec<GraphOverlay>,
             zoom_level: usize,
             size: (u16, u16),
+            focused: Option<HashId>,
         ) -> String {
             let layer = NodeAnnotationLayer::new();
             let (mut engine, zoom_levels, mut view_state) =
@@ -2483,6 +2500,7 @@ mod tests {
                             area,
                             &view_state.frame,
                             &layer,
+                            focused,
                         );
                         draw_annotation_labels(
                             frame.buffer_mut(),
@@ -2512,6 +2530,7 @@ mod tests {
                     vec![span_overlay("gene", vec![(sequence, 0, 24, strand)])],
                     FULL_ZOOM_LEVEL,
                     (44, 7),
+                    None,
                 );
                 insta::assert_snapshot!(format!("annotation_simple_{name}"), snapshot);
             }
@@ -2541,13 +2560,15 @@ mod tests {
                 ],
                 FULL_ZOOM_LEVEL,
                 (64, 15),
+                None,
             );
             assert!(snapshot.contains("a_label_too_long_for_either_side"));
             insta::assert_snapshot!("annotation_packed_labels", snapshot);
         }
 
-        #[test]
-        fn test_annotation_branching_spans() {
+        /// A fork and join carrying spans that cross it on either branch, a nested and a
+        /// one-column span, and a span continuing past the join.
+        fn branching_spans() -> (GenGraph, Vec<GraphOverlay>) {
             let first = node("first", 16);
             let upper = node("upper", 22);
             let lower = node("lower", 12);
@@ -2587,8 +2608,61 @@ mod tests {
                     ],
                 ),
             ];
+            (graph, overlays)
+        }
+
+        fn braille_cells(rendered: &str) -> Vec<(usize, usize)> {
+            rendered
+                .lines()
+                .enumerate()
+                .flat_map(|(row, line)| {
+                    line.chars()
+                        .enumerate()
+                        .filter(|(_, glyph)| ('\u{2801}'..='\u{28FF}').contains(glyph))
+                        .map(move |(column, _)| (row, column))
+                })
+                .collect()
+        }
+
+        #[test]
+        fn test_annotation_connectors_only_for_focused_span() {
+            let (graph, overlays) = branching_spans();
+            let render_focused = |focused: Option<&str>| {
+                render(
+                    graph.clone(),
+                    overlays.clone(),
+                    FULL_ZOOM_LEVEL,
+                    (110, 31),
+                    focused.map(HashId::convert_str),
+                )
+            };
+            assert!(
+                braille_cells(&render_focused(None)).is_empty(),
+                "should draw no connectors without a focused annotation"
+            );
+            assert!(
+                braille_cells(&render_focused(Some("site"))).is_empty(),
+                "should draw no connectors for a focused span on a single node"
+            );
+            let coding = braille_cells(&render_focused(Some("coding")));
+            let reverse = braille_cells(&render_focused(Some("reverse")));
+            let tail = braille_cells(&render_focused(Some("tail")));
+            assert!(!coding.is_empty(), "should connect the focused span");
+            assert!(!reverse.is_empty(), "should connect the focused span");
+            assert_ne!(coding, reverse, "should connect only the focused span");
+            // `tail` joins pieces on adjacent nodes, so its connector spans the gap between them.
+            assert!(!tail.is_empty(), "should connect the focused span");
+            assert!(
+                tail.iter().all(|cell| !coding.contains(cell)),
+                "should not draw another span's connector"
+            );
+        }
+
+        #[test]
+        fn test_annotation_branching_spans() {
+            let (graph, overlays) = branching_spans();
             for zoom_level in [FULL_ZOOM_LEVEL, 5] {
-                let snapshot = render(graph.clone(), overlays.clone(), zoom_level, (110, 31));
+                let snapshot = render(graph.clone(), overlays.clone(), zoom_level, (110, 31), None);
                 for label in ["coding", "reverse", "nested", "site", "tail"] {
                     assert_eq!(
                         snapshot.matches(label).count(),

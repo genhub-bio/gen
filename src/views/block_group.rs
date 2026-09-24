@@ -1482,6 +1482,7 @@ pub fn view_block_group(
                         main_canvas_area,
                         &graph_view_state.frame,
                         &node_annotations,
+                        None,
                     );
                     &floating_overlays
                 } else {
