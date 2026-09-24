@@ -21,22 +21,20 @@ use r#gen::{
             update_node_annotations,
         },
         graph_overlay::{
-            AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
-            project_path_overlay_nodes, remove_path_overlay, set_path_overlay,
+            AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource, PathMembership,
+            remove_path_overlay, set_path_overlay,
         },
         lazy_graph_source::{SqlGraphSource, seed_block_group_graph},
     },
 };
 use gen_annotations::projection::annotation_segments;
 use gen_core::{HashId, Workspace, is_end_node, is_start_node};
-use gen_graph::{GenGraph, GraphNode, MergeGraph};
+use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     annotations::{Annotation, AnnotationError},
     block_group::BlockGroup,
-    block_group_edge::BlockGroupEdge,
     db::GraphConnection,
     locus::GraphLocus,
-    path::Path as GenPath,
 };
 use gen_tui::{
     LineStyle,
@@ -850,44 +848,19 @@ impl GraphPage {
 
         let path = BlockGroup::get_current_path(&conn, &block_group_id, None)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let workspace = workspace_for_connection(&conn)?;
-        let path_blocks = path.blocks(&conn, &workspace, None).unwrap_or_default();
-        // `project_path`'s DFS needs a self-consistent fragment to walk, holistically split
-        // from one edge set rather than pieced together from several separately-merged crawl
-        // fragments (each computes its own block boundaries only from the edges it happened to
-        // fetch - see `merge_new_edges`). Build that fragment from exactly this path's own
-        // edges - `Path::edges_for_path` returns the specific, ordered `Edge` rows it's made
-        // of, which is bounded by the path's own length rather than the block group's, and
-        // sidesteps `self.engine`'s own source (and its `show_history` pruning) entirely: this
-        // page's designated path is not guaranteed to be made up of exactly the edges a
-        // display-oriented pruning policy would keep - see `LayoutEngine::graph_mut`'s doc.
-        let path_edge_ids: Vec<HashId> = GenPath::edges_for_path(&conn, &path.id, None)
-            .into_iter()
-            .map(|edge| edge.id)
-            .collect();
-        let path_edges = BlockGroupEdge::specific_edges_for_block_group(
-            &conn,
-            &block_group_id,
-            &path_edge_ids,
-            None,
-        );
-        let path_fragment =
-            BlockGroup::get_graph_from_edges(&conn, &workspace, &block_group_id, &path_edges)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        self.engine.graph_mut().merge_graph(&path_fragment);
-        let path_nodes = project_path_overlay_nodes(self.engine.graph(), &path_blocks);
-
-        if path_nodes.is_empty() {
-            return Err(PyRuntimeError::new_err(
-                "Path nodes not found in current graph state",
-            ));
+        // Only the path's edge ids are fetched; nothing is added to the crawled graph. Each
+        // reapply highlights whichever of those edges are loaded, so batches crawled later
+        // extend the highlight without touching the database again.
+        let membership = PathMembership::load(&conn, &path.id, None);
+        if membership.is_empty() {
+            return Err(PyRuntimeError::new_err("Path has no edges"));
         }
 
         let style = PathStyle::new(highlight_color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
 
-        set_path_overlay(&mut self.overlays, style, path_nodes);
+        set_path_overlay(&mut self.overlays, style, membership);
         self.reapply();
         Ok(())
     }

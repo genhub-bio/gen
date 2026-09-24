@@ -43,9 +43,9 @@ use crate::{
             update_node_annotations,
         },
         graph_overlay::{
-            AnnotationColorCache, GraphOverlay, OverlaySource, file_track_key, group_track_key,
-            has_path_overlay, remove_path_overlay, remove_track_overlays, replace_track_overlays,
-            set_path_overlay,
+            AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership, file_track_key,
+            group_track_key, has_path_overlay, remove_path_overlay, remove_track_overlays,
+            replace_track_overlays, set_path_overlay,
         },
         lazy_graph_source::{EagerOrSqlSource, SqlGraphSource, seed_block_group_graph},
         panels::{render_status_bar, render_with_optional_clear},
@@ -232,19 +232,6 @@ fn load_block_group_graph(
     let source = SqlGraphSource::new(db_path, *block_group_id);
     let seed = seed_block_group_graph(conn, block_group_id);
     Ok((seed, EagerOrSqlSource::Sql(Box::new(source))))
-}
-
-/// Get the most recent path for a block group and map it to GraphNodes in the current graph
-fn get_block_group_path_nodes(
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    block_group_id: &gen_core::HashId,
-    graph: &GenGraph,
-) -> Result<Vec<gen_graph::GraphNode>, String> {
-    let path = BlockGroup::get_current_path(conn, block_group_id, None)
-        .map_err(|error| format!("Failed to query path: {error}"))?;
-
-    crate::views::helpers::project_path_nodes(conn, workspace, &path, graph)
 }
 
 /// Node IDs in the currently active crawled neighborhood (excluding terminal start/end
@@ -445,12 +432,12 @@ fn handle_annotation_toggle_requests<S: GraphSource<GenGraph>>(
 /// Toggle path highlighting for a block group.
 ///
 /// The path lives in `overlays` alongside the annotation overlays and is repainted each
-/// frame by the render loop, so this only adds or removes it. Returns whether the path
-/// overlay is now enabled.
-fn toggle_path_highlight<S: GraphSource<GenGraph>>(
+/// frame by the render loop, so this only adds or removes it. The block group's current path
+/// is fetched once as edge membership; each repaint highlights whichever of its edges the
+/// crawl has loaded so far. Returns whether the path overlay is now enabled.
+fn toggle_path_highlight(
     conn: &GraphConnection,
-    workspace: &Workspace,
-    engine: &LayoutEngine<GenGraph, S>,
+    history_ref: Option<&str>,
     block_group_id: &gen_core::HashId,
     color: ratatui::style::Color,
     overlays: &mut Vec<GraphOverlay>,
@@ -462,9 +449,13 @@ fn toggle_path_highlight<S: GraphSource<GenGraph>>(
         let style = PathStyle::new(color)
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
-        let path_nodes =
-            get_block_group_path_nodes(conn, workspace, block_group_id, engine.graph())?;
-        set_path_overlay(overlays, style, path_nodes);
+        let path = BlockGroup::get_current_path(conn, block_group_id, history_ref)
+            .map_err(|error| format!("Failed to query path: {error}"))?;
+        let membership = PathMembership::load(conn, &path.id, history_ref);
+        if membership.is_empty() {
+            return Err("Path has no edges".to_string());
+        }
+        set_path_overlay(overlays, style, membership);
         Ok(true)
     }
 }
@@ -843,8 +834,7 @@ pub fn view_block_group(
                                 {
                                     match toggle_path_highlight(
                                         conn,
-                                        workspace,
-                                        &graph_engine,
+                                        history_ref,
                                         block_group_id,
                                         Color::Red,
                                         &mut overlays,

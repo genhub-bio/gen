@@ -275,7 +275,7 @@ impl GraphSource<GenGraph> for EagerOrSqlSource {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
     use gen_models::{
         block_group::{BlockGroup, NewBlockGroup},
@@ -295,6 +295,16 @@ mod tests {
     /// own connection lazily via `get_connection`, which is why this needs a real file rather
     /// than an in-memory database).
     fn setup_chain_block_group(db_path: &std::path::Path) -> HashId {
+        setup_labelled_chain_block_group(db_path, &["x", "y", "z"]).0
+    }
+
+    /// Build an on-disk `start -> labels[0] -> ... -> end` chain of 5-base nodes, each node id
+    /// derived from its label. Returns the block group id and the chain's edge ids in order,
+    /// ready to store as a path.
+    pub(crate) fn setup_labelled_chain_block_group(
+        db_path: &std::path::Path,
+        labels: &[&str],
+    ) -> (HashId, Vec<HashId>) {
         let conn = get_connection(db_path).unwrap();
         Collection::get_or_create(&conn, "test").unwrap();
         Sample::get_or_create(
@@ -317,7 +327,7 @@ mod tests {
         .unwrap();
 
         let mut node_ids = Vec::new();
-        for label in ["x", "y", "z"] {
+        for label in labels {
             let sequence = Sequence::new()
                 .sequence_type("DNA")
                 .sequence("AAAAA")
@@ -379,7 +389,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
 
-        block_group.id
+        (block_group.id, edges.iter().map(|edge| edge.id).collect())
     }
 
     fn graph_node(label: &str) -> GraphNode {
@@ -436,9 +446,11 @@ mod tests {
     /// Build a tiny on-disk circular `start -> x -> y -> z -> end`, `z -> x` (real closure),
     /// `end -> start` (GFA-import synthetic marker) block group - the shape
     /// `discard_circular_marker_edge` is meant to see: two distinct closing edges, only one of
-    /// which is the marker that should be dropped.
-    fn setup_circular_block_group(db_path: &std::path::Path) -> HashId {
-        let block_group_id = setup_chain_block_group(db_path);
+    /// which is the marker that should be dropped. Also returns the linear chain's edge ids in
+    /// order, ready to store as a path.
+    pub(crate) fn setup_circular_block_group(db_path: &std::path::Path) -> (HashId, Vec<HashId>) {
+        let (block_group_id, chain_edge_ids) =
+            setup_labelled_chain_block_group(db_path, &["x", "y", "z"]);
         let conn = get_connection(db_path).unwrap();
         let real_closure = Edge::create(
             &conn,
@@ -472,14 +484,14 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
         );
-        block_group_id
+        (block_group_id, chain_edge_ids)
     }
 
     #[test]
     fn test_expand_frontier_discards_marker_and_sentinel_attachment_edges() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("graph.db");
-        let block_group_id = setup_circular_block_group(&db_path);
+        let (block_group_id, _) = setup_circular_block_group(&db_path);
 
         let mut source = SqlGraphSource::new(db_path, block_group_id);
         let mut graph = GenGraph::new();
@@ -525,7 +537,7 @@ mod tests {
     fn test_seed_block_group_graph_anchors_on_the_real_first_node_for_a_circular_block_group() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("graph.db");
-        let block_group_id = setup_circular_block_group(&db_path);
+        let (block_group_id, _) = setup_circular_block_group(&db_path);
         let conn = get_connection(&db_path).unwrap();
 
         let seed = seed_block_group_graph(&conn, &block_group_id);

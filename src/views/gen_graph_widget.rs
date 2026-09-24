@@ -1716,10 +1716,18 @@ pub fn reapply_overlays<R, S>(
         overlays[idx].style.color = color;
     }
 
+    // A path is resolved against whatever is loaded right now, so a batch the crawl adds
+    // later picks up its share of the highlight on the next reapply.
     view_state.clear_all_highlights();
     for overlay in overlays.iter() {
-        if let Some(nodes) = overlay.path_nodes() {
-            view_state.set_path_highlight(overlay.style, nodes.to_vec());
+        if let Some(path) = overlay.path() {
+            let route = path.loaded_route(graph);
+            for node in route.nodes {
+                view_state.set_node_highlight(node, overlay.style);
+            }
+            for edge in route.edges {
+                view_state.set_edge_highlight(edge, overlay.style);
+            }
         }
     }
 }
