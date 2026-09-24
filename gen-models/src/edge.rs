@@ -11,7 +11,8 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use rusqlite::{ToSql, params, types::Value};
+use petgraph::Direction;
+use rusqlite::{OptionalExtension, ToSql, named_params, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -168,6 +169,20 @@ impl GroupBlock {
         }
     }
 
+    /// A block that carries only its coordinates. `build_graph` reads nothing else, so a lazy
+    /// crawl that carves a handful of slices around one port can build their topology without
+    /// loading the backing node's sequence. Calling [`Self::sequence`] on it panics.
+    pub(crate) fn without_sequence(id: i64, node_id: HashId, start: i64, end: i64) -> Self {
+        GroupBlock {
+            id,
+            node_id,
+            sequence: None,
+            external_sequence: None,
+            start,
+            end,
+        }
+    }
+
     pub fn sequence(&self) -> String {
         if let Some(sequence) = &self.sequence {
             sequence.to_string()
@@ -177,6 +192,15 @@ impl GroupBlock {
             panic!("Sequence or external sequence is not set.")
         }
     }
+}
+
+/// The edges of one block group that leave or arrive at a single `(node, coordinate)` port.
+#[derive(Clone, Debug, Default)]
+pub struct PortEdges {
+    /// Edges whose source endpoint is the port.
+    pub leaving: Vec<AugmentedEdge>,
+    /// Edges whose target endpoint is the port.
+    pub arriving: Vec<AugmentedEdge>,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -392,6 +416,130 @@ impl Edge {
         }
 
         Ok(edges)
+    }
+
+    /// The edges in `block_group_id` with an endpoint at `coordinate` on `node_id`.
+    ///
+    /// A lazily crawled viewer uses this to learn one port at a time instead of every edge that
+    /// touches a node, which for a chromosome-length node carrying a VCF can be hundreds of
+    /// thousands. Both lookups are served by the `(node_id, coordinate)` edge indexes; the
+    /// `CROSS JOIN` keeps SQLite from starting at `block_group_edges`, which would scan the
+    /// whole block group.
+    pub fn edges_at_port(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_id: HashId,
+        coordinate: i64,
+    ) -> Result<PortEdges, EdgeError> {
+        let query_for_side = |side: &str| {
+            format!(
+                "\
+                SELECT
+                    e.id,
+                    e.source_node_id,
+                    e.source_coordinate,
+                    e.source_strand,
+                    e.target_node_id,
+                    e.target_coordinate,
+                    e.target_strand,
+                    bge.chromosome_index,
+                    bge.phased,
+                    bge.created_on
+                FROM {edges} e
+                CROSS JOIN {block_group_edges} bge
+                WHERE e.{side}_node_id = :node_id
+                  AND e.{side}_coordinate = :coordinate
+                  AND bge.block_group_id = :block_group_id
+                  AND bge.edge_id = e.id;",
+                edges = Self::table_name_with_history_ref(None),
+                block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+            )
+        };
+        let mut port_edges = PortEdges::default();
+        for (side, edges) in [
+            ("source", &mut port_edges.leaving),
+            ("target", &mut port_edges.arriving),
+        ] {
+            let mut stmt = conn.prepare_cached(&query_for_side(side))?;
+            let rows = stmt.query_map(
+                named_params! {
+                    ":node_id": node_id,
+                    ":coordinate": coordinate,
+                    ":block_group_id": block_group_id,
+                },
+                |row| {
+                    Ok(AugmentedEdge {
+                        edge: Edge {
+                            id: row.get(0)?,
+                            source_node_id: row.get(1)?,
+                            source_coordinate: row.get(2)?,
+                            source_strand: row.get(3)?,
+                            target_node_id: row.get(4)?,
+                            target_coordinate: row.get(5)?,
+                            target_strand: row.get(6)?,
+                        },
+                        chromosome_index: row.get(7)?,
+                        phased: row.get(8)?,
+                        created_on: row.get(9)?,
+                    })
+                },
+            )?;
+            for row in rows {
+                edges.push(row?);
+            }
+        }
+        Ok(port_edges)
+    }
+
+    /// The nearest coordinate on `node_id` past `coordinate` where an edge of `block_group_id`
+    /// leaves or arrives: the next higher one for `Direction::Outgoing`, the next lower one for
+    /// `Direction::Incoming`. Neighboring coordinates are what bound the slices on either side
+    /// of a port, so a lazy crawl can carve exact blocks without reading the rest of the node.
+    pub fn adjacent_edge_coordinate(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_id: HashId,
+        coordinate: i64,
+        direction: Direction,
+    ) -> Result<Option<i64>, EdgeError> {
+        let (comparison, order) = match direction {
+            Direction::Outgoing => (">", "ASC"),
+            Direction::Incoming => ("<", "DESC"),
+        };
+        let mut nearest: Option<i64> = None;
+        for side in ["source", "target"] {
+            let query = format!(
+                "\
+                SELECT e.{side}_coordinate
+                FROM {edges} e
+                CROSS JOIN {block_group_edges} bge
+                WHERE e.{side}_node_id = :node_id
+                  AND e.{side}_coordinate {comparison} :coordinate
+                  AND bge.block_group_id = :block_group_id
+                  AND bge.edge_id = e.id
+                ORDER BY e.{side}_coordinate {order}
+                LIMIT 1;",
+                edges = Self::table_name_with_history_ref(None),
+                block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+            );
+            let mut stmt = conn.prepare_cached(&query)?;
+            let found: Option<i64> = stmt
+                .query_row(
+                    named_params! {
+                        ":node_id": node_id,
+                        ":coordinate": coordinate,
+                        ":block_group_id": block_group_id,
+                    },
+                    |row| row.get(0),
+                )
+                .optional()?;
+            nearest = match (nearest, found, direction) {
+                (Some(current), Some(found), Direction::Outgoing) => Some(current.min(found)),
+                (Some(current), Some(found), Direction::Incoming) => Some(current.max(found)),
+                (current, found, _) => current.or(found),
+            };
+        }
+        Ok(nearest)
     }
 
     /// Converts input edge coordinates for one backing node into the sequence slices represented
@@ -940,7 +1088,6 @@ impl Edge {
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use gen_core::PathBlock;
-    use petgraph::Direction;
 
     use super::*;
     use crate::{

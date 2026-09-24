@@ -210,11 +210,11 @@ fn get_empty_graph() -> GenGraph {
 /// Load `block_group_id`'s graph and the source its `LayoutEngine` should crawl through.
 ///
 /// A historical view (`history_ref: Some(_)`) always eager-loads the full graph up front:
-/// `gen_models::graph::expand`, which the lazy path below is built on, has no `history_ref`
-/// parameter of its own and can only ever answer for the live graph. Otherwise, the graph is
-/// seeded with just its `PATH_START` sentinel and grown lazily from SQLite as the viewer's
-/// crawl reaches unloaded nodes - see `SqlGraphSource`, which is what turns opening a large
-/// block group from a full-graph-materializing stall into an near-instant open.
+/// the port queries the lazy path below is built on can only answer for the live graph.
+/// Otherwise, the graph is seeded with just its `PATH_START` sentinel and grown lazily from
+/// SQLite as the viewer's crawl pushes past its frontier - see `SqlGraphSource`, which is what
+/// turns opening a large block group from a full-graph-materializing stall into an
+/// near-instant open.
 fn load_block_group_graph(
     conn: &GraphConnection,
     workspace: &Workspace,
@@ -229,9 +229,9 @@ fn load_block_group_graph(
         .path()
         .map(PathBuf::from)
         .ok_or("graph database has no file path")?;
-    let source = SqlGraphSource::new(db_path, workspace.clone(), *block_group_id);
-    let seed = seed_block_group_graph(conn, workspace, block_group_id);
-    Ok((seed, EagerOrSqlSource::Sql(source)))
+    let source = SqlGraphSource::new(db_path, *block_group_id);
+    let seed = seed_block_group_graph(conn, block_group_id);
+    Ok((seed, EagerOrSqlSource::Sql(Box::new(source))))
 }
 
 /// Get the most recent path for a block group and map it to GraphNodes in the current graph
