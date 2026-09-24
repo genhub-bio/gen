@@ -870,11 +870,11 @@ fn apply_graph_ops(
                     continue;
                 }
                 set_detail_level(view_state, zoom_levels, VisualDetail::Full);
-                // Build (or reactivate) the crawled neighbourhood window anchored on this
-                // node. `render_frame`/`handle_click` rebuild the engine fresh each call
+                // Open the batch that owns this node, claiming a new one around it if none
+                // does. `render_frame`/`handle_click` rebuild the engine fresh each call
                 // (no persisted viewport width), so use the floor budget.
                 let node_budget = engine.neighborhood_node_budget(0);
-                if engine.activate_world_at(node, node_budget, None).is_err() {
+                if engine.activate_batch_containing(node, node_budget).is_err() {
                     continue;
                 }
                 view_state.go_to_node(node, (frac_x, 0.5));

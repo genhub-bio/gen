@@ -405,7 +405,7 @@ fn viewport_long_chain_middle_window_wormholes() {
     let anchor = NodeIndex::new(50);
     let mut engine = crate::layout_engine::LayoutEngine::new(domain_graph);
     engine
-        .activate_world_at(anchor, NODE_BUDGET, None)
+        .activate_batch_containing(anchor, NODE_BUDGET)
         .expect("should build the middle window");
     let world = engine.active_world().expect("should have an active world");
     assert_eq!(
