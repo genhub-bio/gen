@@ -513,7 +513,6 @@ fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
     } else {
         graph_view_state.queue_snap_right();
     }
-    graph_view_state.mark_wormhole_entry(target);
 }
 
 /// Initial graph selection and navigation for the full-screen viewer.
@@ -1877,7 +1876,7 @@ mod tests {
     }
 
     #[test]
-    fn wormhole_entry_preserves_target_and_directional_fraction() {
+    fn test_wormhole_entry_frames_target_without_highlighting_it() {
         let (mut predecessor_engine, predecessor_nodes) = three_node_chain();
         let mut predecessor_state = GraphViewState::default();
         teleport_through_wormhole(
@@ -1889,10 +1888,7 @@ mod tests {
 
         assert_eq!(predecessor_state.cursor.node, Some(predecessor_nodes[0]));
         assert_eq!(predecessor_state.cursor.fractional, (1.0, 0.5));
-        assert_eq!(
-            predecessor_state.wormhole_entry(),
-            Some(predecessor_nodes[0])
-        );
+        assert!(predecessor_state.highlights.styles.is_empty());
 
         let (mut successor_engine, successor_nodes) = three_node_chain();
         successor_engine
@@ -1908,6 +1904,6 @@ mod tests {
 
         assert_eq!(successor_state.cursor.node, Some(successor_nodes[2]));
         assert_eq!(successor_state.cursor.fractional, (0.0, 0.5));
-        assert_eq!(successor_state.wormhole_entry(), Some(successor_nodes[2]));
+        assert!(successor_state.highlights.styles.is_empty());
     }
 }

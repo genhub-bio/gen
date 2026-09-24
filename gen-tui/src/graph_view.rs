@@ -169,9 +169,6 @@ pub struct GraphViewState<N> {
     last_batch: Option<BatchId>,
     /// Cursor state restored if an explicit jump cannot construct its requested world.
     go_to_previous_cursor: Option<CursorState<N>>,
-    /// Most recent wormhole arrival node. Painted with the theme's Base0B color until the
-    /// next wormhole traversal replaces it.
-    wormhole_entry: Option<N>,
     /// Independent overview views center each newly observed active world.
     center_world_on_change: bool,
     /// Set by `go_to_node_framed`: selects an independent camera anchor inside the active world
@@ -196,7 +193,6 @@ impl<N> Default for GraphViewState<N> {
             go_to_snap_right: false,
             last_batch: None,
             go_to_previous_cursor: None,
-            wormhole_entry: None,
             center_world_on_change: false,
         }
     }
@@ -226,7 +222,6 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         self.wormhole.clear();
         self.camera = None;
         self.last_batch = None;
-        self.wormhole_entry = None;
         self.center_world_on_change = true;
     }
 
@@ -244,16 +239,6 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     /// Show the cursor and re-enable camera-following.
     pub fn show_cursor(&mut self) {
         self.cursor.visible = true;
-    }
-
-    /// Mark the node at which the most recent wormhole traversal arrived.
-    pub fn mark_wormhole_entry(&mut self, node: N) {
-        self.wormhole_entry = Some(node);
-    }
-
-    /// Return the most recent wormhole arrival node, if any.
-    pub fn wormhole_entry(&self) -> Option<N> {
-        self.wormhole_entry
     }
 
     /// Jump to a specific node at a fractional offset within it. Shows the cursor and queues
@@ -873,10 +858,7 @@ where
         };
 
         let graph = self.engine.graph();
-        let mut painter = GraphPainter::new(window, graph, self.visual).spacing(&state.gaps);
-        if let Some(entry) = state.wormhole_entry {
-            painter = painter.node_overlay(entry, PathStyle::new(current_theme()[0x0B]));
-        }
+        let painter = GraphPainter::new(window, graph, self.visual).spacing(&state.gaps);
         let (frame, wormhole) = painter.render(inner_area, buf, &camera, &state.highlights);
         if let Some(overlay_fn) = self.overlay_fn {
             overlay_fn(buf, &frame);
@@ -960,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn wormhole_entry_uses_base0b_over_other_node_highlights() {
+    fn test_framed_go_to_leaves_no_tint_on_the_framed_node() {
         let domain_graph = TestGraphs::domain_simple_chain();
         let mut engine = LayoutEngine::new(domain_graph);
         let visual = FixedSizeVisual;
@@ -969,21 +951,27 @@ mod tests {
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
         let entry = state.cursor.node.expect("should initialize the cursor");
+        let anchor = engine
+            .active_world()
+            .map(|world| world.anchor())
+            .expect("should have an active world");
 
         state.set_node_highlight(entry, PathStyle::new(Color::Red));
-        state.mark_wormhole_entry(entry);
+        state.go_to_node_framed(anchor, entry, (0.0, 0.5));
+        state.queue_snap_left();
+        GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
         state.hide_cursor();
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
 
         let center = state
             .frame
             .rect_of(entry)
-            .expect("should place the entry node")
+            .expect("should place the framed node")
             .center();
         let terminal = state
             .screen_to_terminal(center.x, center.y)
-            .expect("should keep the entry node visible");
-        assert_eq!(buffer[terminal].fg, current_theme()[0x0B]);
+            .expect("should keep the framed node visible");
+        assert_eq!(buffer[terminal].fg, Color::Red);
     }
 
     #[test]

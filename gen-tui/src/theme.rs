@@ -12,7 +12,7 @@ use ratatui::style::Color;
 ///   0x03 – cursor cell background
 ///   0x05 – node background and edge foreground
 ///   0x07 – default highlight for `Color::Reset`
-///   0x08–0x0F – highlight/accent colors; 0x0B also marks cursors and wormhole arrivals
+///   0x08–0x0F – highlight/accent colors; 0x0B also marks cursors
 #[derive(Debug, Clone, Copy)]
 pub struct Theme(pub [Color; 16]);
 
