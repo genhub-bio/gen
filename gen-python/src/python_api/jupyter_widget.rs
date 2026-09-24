@@ -17,9 +17,9 @@ use r#gen::{
         gen_graph_widget::{
             self, NodeAnnotationLayer, PathSequenceSource, SendSyncZoomLevels,
             create_send_sync_annotated_gen_graph_engine_lazy, draw_annotation_connectors,
-            draw_annotation_labels, locus_midpoint, reapply_overlays, refresh_dimming,
-            update_node_annotations,
+            draw_annotation_labels, locus_midpoint, reapply_overlays, update_node_annotations,
         },
+        graph_dimming::GraphDimming,
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource, PathMembership,
             remove_path_overlay, set_path_overlay,
@@ -40,7 +40,7 @@ use gen_tui::{
     LineStyle,
     graph_view::{GraphView, GraphViewState},
     layout::VisualDetail,
-    layout_engine::{BatchId, LayoutEngine},
+    layout_engine::LayoutEngine,
     plotter::PathStyle,
     theme::current_theme,
 };
@@ -49,7 +49,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::StatefulWidget,
+    widgets::{Clear, StatefulWidget, Widget},
 };
 
 fn workspace_for_connection(conn: &GraphConnection) -> PyResult<Workspace> {
@@ -289,11 +289,9 @@ struct GraphPage {
     engine: LayoutEngine<GenGraph, SqlGraphSource>,
     zoom_levels: SendSyncZoomLevels,
     view_state: GraphViewState<GraphNode>,
-    /// The world `refresh_dimming` last ran over - re-checked, cheaply, on every
-    /// `render_into` call, since the lazy crawl can grow `engine.graph()` behind the scenes
-    /// on any render. See `refresh_dimming`'s own doc for why this can't be computed once
-    /// up front the way an eagerly-loaded graph's dimming can.
-    dimming_world: Option<BatchId>,
+    /// Pruned edges and the nodes only they lead into, synced around every `render_into`
+    /// call, since any render can crawl more of the graph in.
+    dimming: GraphDimming,
     /// Annotation and path overlays. The path (added by `show_path`, removed by
     /// `clear_path`/`clear_highlights`) is just another overlay, so it survives
     /// zoom/detail changes the same way the annotation overlays do.
@@ -341,7 +339,7 @@ impl GraphPage {
     /// materialized eagerly via `BlockGroup::get_graph`. `show_history=False` (`prune`) uses
     /// `SqlGraphSource::new_pruned`, so pruned/retired edit-site edges never enter the
     /// crawled graph in the first place; `show_history=True` uses the plain source and relies
-    /// on `refresh_dimming` (called every render - see `Self::dimming_world`) to dim them
+    /// on `GraphDimming` (synced every render - see `Self::dimming`) to dim them
     /// instead of hiding them.
     fn new(
         name: String,
@@ -358,15 +356,12 @@ impl GraphPage {
         };
         let sequence_source = PathSequenceSource::new(db_path.clone());
         let node_annotations = NodeAnnotationLayer::new();
-        let (engine, zoom_levels, mut view_state) =
-            create_send_sync_annotated_gen_graph_engine_lazy(
-                seed,
-                graph_source,
-                sequence_source,
-                node_annotations.clone(),
-            );
-        refresh_dimming(&mut view_state, engine.graph());
-        let dimming_world = engine.active_batch();
+        let (engine, zoom_levels, view_state) = create_send_sync_annotated_gen_graph_engine_lazy(
+            seed,
+            graph_source,
+            sequence_source,
+            node_annotations.clone(),
+        );
         Self {
             name,
             db_path,
@@ -374,7 +369,7 @@ impl GraphPage {
             engine,
             zoom_levels,
             view_state,
-            dimming_world,
+            dimming: GraphDimming::default(),
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
             node_annotations,
@@ -587,16 +582,30 @@ impl GraphPage {
         // Packing before layout reserves room beneath each node for its annotation bars.
         let floating_overlays =
             update_node_annotations(&self.node_annotations, &self.engine, &self.overlays);
+        self.dimming.sync(
+            self.engine.graph(),
+            self.engine.source(),
+            &mut self.view_state,
+        );
         let active_renderer = &self.zoom_levels[self.view_state.zoom_index].1;
-        let view = GraphView::new(&mut self.engine, active_renderer);
-        view.render(graph_area, buf, &mut self.view_state);
-
-        // The crawl may have grown `self.engine`'s graph (a fresh world, or activating an
-        // already-known one) during the render just above, so pruned-edge/inaccessible-node
-        // dimming can be stale relative to what's now loaded - see `refresh_dimming`.
-        if self.engine.active_batch() != self.dimming_world {
-            refresh_dimming(&mut self.view_state, self.engine.graph());
-            self.dimming_world = self.engine.active_batch();
+        GraphView::new(&mut self.engine, active_renderer).render(
+            graph_area,
+            buf,
+            &mut self.view_state,
+        );
+        // The render just above may have claimed a new world, growing the graph. If that changed
+        // any dimming, paint the frame again so it never shows stale dimming.
+        if self.dimming.sync(
+            self.engine.graph(),
+            self.engine.source(),
+            &mut self.view_state,
+        ) {
+            Clear.render(graph_area, buf);
+            GraphView::new(&mut self.engine, active_renderer).render(
+                graph_area,
+                buf,
+                &mut self.view_state,
+            );
         }
 
         // At full detail, only names that could not fit beside their bars still float.
