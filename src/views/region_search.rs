@@ -264,7 +264,7 @@ mod tests {
     };
     use crate::views::{
         annotation_track::{AnnotationSpan, annotation_span_from_resolved_region},
-        graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
+        graph_overlay::{GraphOverlay, OverlayContent, OverlaySource, PathMembership},
     };
 
     fn match_for_query(fixture: &RegionSearchFixture, query: &str) -> RegionSearchMatch {
@@ -511,7 +511,7 @@ mod tests {
                 style: PathStyle::new(Color::Cyan),
             },
             GraphOverlay {
-                content: OverlayContent::Path(vec![]),
+                content: OverlayContent::Path(PathMembership::default()),
                 source: OverlaySource::Path,
                 style: PathStyle::new(Color::Blue),
             },

@@ -577,12 +577,6 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
             .push((HighlightKind::Edge(edge.0, edge.1), style));
     }
 
-    pub fn set_path_highlight(&mut self, style: PathStyle, path_nodes: Vec<N>) {
-        self.highlights
-            .styles
-            .push((HighlightKind::Path(path_nodes), style));
-    }
-
     pub fn set_cell_highlight(
         &mut self,
         node: N,

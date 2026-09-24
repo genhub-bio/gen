@@ -31,20 +31,10 @@ use crate::views::{
         reapply_overlays,
     },
     graph_overlay::{
-        AnnotationColorCache, GraphOverlay, group_track_key, has_path_overlay, remove_path_overlay,
-        replace_track_overlays, set_path_overlay,
+        AnnotationColorCache, GraphOverlay, PathMembership, group_track_key, has_path_overlay,
+        remove_path_overlay, replace_track_overlays, set_path_overlay,
     },
 };
-
-/// Get path nodes for a path and map it to GraphNodes in the current graph
-fn get_path_nodes(
-    conn: &GraphConnection,
-    workspace: &Workspace,
-    path: &Path,
-    graph: &GenGraph,
-) -> std::io::Result<Vec<gen_graph::GraphNode>> {
-    crate::views::helpers::project_path_nodes(conn, workspace, path, graph).map_err(Error::other)
-}
 
 #[derive(Debug)]
 pub enum AppEvent {
@@ -81,7 +71,7 @@ pub struct InlineGenGraphState<'a> {
     engine: LayoutEngine<GenGraph>,
     zoom_levels: ZoomLevels<'a>,
     view_state: GraphViewState<GraphNode>,
-    paths: Vec<Vec<gen_graph::GraphNode>>,
+    paths: Vec<PathMembership>,
     conn: &'a GraphConnection,
     workspace: &'a Workspace,
     block_group_id: Option<HashId>,
@@ -126,11 +116,11 @@ impl<'a> InlineGenGraphState<'a> {
         }
     }
 
-    /// Add a path to the widget, starting from a Path object
-    pub fn add_path(&mut self, path: &Path, conn: &'a GraphConnection) -> Result<()> {
-        let path_nodes = get_path_nodes(conn, self.workspace, path, self.engine.graph())?;
-        self.paths.push(path_nodes);
-        Ok(())
+    /// Add a path the `p` key can highlight. Only its edge membership is fetched; the
+    /// highlight itself is resolved against the loaded graph on every repaint.
+    pub fn add_path(&mut self, path: &Path) {
+        self.paths
+            .push(PathMembership::load(self.conn, &path.id, self.history_ref));
     }
 
     fn load_annotation_groups(&mut self, node_ids: &HashSet<HashId>) {
@@ -141,8 +131,7 @@ impl<'a> InlineGenGraphState<'a> {
             return;
         };
         // Drop the annotation overlays but keep the path overlay across viewport reloads.
-        self.overlays
-            .retain(|overlay| overlay.path_nodes().is_some());
+        self.overlays.retain(|overlay| overlay.path().is_some());
         for entry in load_annotation_group_entries(conn, &block_group, self.history_ref) {
             let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
                 conn,
@@ -255,7 +244,7 @@ fn show_inline_widget(
             let mut state =
                 InlineGenGraphState::new(graph, conn, workspace, block_group_id, history_ref);
             for path in paths {
-                state.add_path(&path, conn)?;
+                state.add_path(&path);
             }
             let mut events = CrosstermEventSource;
             let mut upgrade_requested = false;
