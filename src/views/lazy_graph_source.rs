@@ -6,7 +6,7 @@
 
 use std::{path::PathBuf, sync::Mutex};
 
-use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, is_terminal};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{
     db::{GraphConnection, get_connection},
@@ -130,6 +130,72 @@ pub fn seed_block_group_graph(conn: &GraphConnection, block_group_id: &HashId) -
         seed.add_node(start);
     }
     seed
+}
+
+/// The real content slices a block group opens and closes on: every non-sentinel target of a
+/// `PATH_START` edge and every non-sentinel source of a `PATH_END` edge.
+///
+/// Annotation loading uses these to hide an annotation that covers the whole block group end to
+/// end. A lazily crawled graph cannot answer that by looking for nodes without predecessors or
+/// successors, since every frontier node looks like one, so the bounds are resolved once per
+/// block group, independent of how much of the graph is loaded.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockGroupBounds {
+    /// The first content slices, reached from `PATH_START`.
+    pub roots: Vec<GraphNode>,
+    /// The last content slices, leading into `PATH_END`.
+    pub leaves: Vec<GraphNode>,
+}
+
+impl BlockGroupBounds {
+    /// Resolve the live block group's bounds by probing only the two sentinel ports, the way
+    /// [`seed_block_group_graph`] probes `PATH_START`. The probe carves the boundary slices
+    /// through the crawl itself, so they match the slices a viewer's crawl later loads. A
+    /// circular block group keeps its sentinel attachment edges in the database next to the
+    /// `PATH_END -> PATH_START` marker, so its bounds come out the same way; the marker itself
+    /// joins two sentinels and never counts as a bound.
+    pub fn load(conn: &GraphConnection, block_group_id: &HashId) -> Self {
+        let start = start_sentinel();
+        let end = end_sentinel();
+        let mut probe = GenGraph::new();
+        probe.add_node(start);
+        probe.add_node(end);
+        let mut crawler = PortCrawler::new(*block_group_id, false);
+        let _ = crawler.expand(conn, &mut probe, &[start], Direction::Outgoing, 0);
+        let _ = crawler.expand(conn, &mut probe, &[end], Direction::Incoming, 0);
+        Self::from_graph(&probe)
+    }
+
+    /// Read the bounds off a graph that already carries its sentinels' attachment edges, such
+    /// as a historical view's fully materialized `BlockGroup::get_graph`.
+    pub fn from_graph(graph: &GenGraph) -> Self {
+        let content_neighbors = |sentinel: GraphNode, direction: Direction| -> Vec<GraphNode> {
+            graph
+                .neighbors_directed(sentinel, direction)
+                .filter(|node| !is_terminal(node.node_id))
+                .collect()
+        };
+        Self {
+            roots: content_neighbors(start_sentinel(), Direction::Outgoing),
+            leaves: content_neighbors(end_sentinel(), Direction::Incoming),
+        }
+    }
+
+    /// The bounds for a viewer's block group: read off `graph` for a historical view, whose
+    /// graph is always fully loaded and whose history the port queries cannot answer for, and
+    /// probed from the live database otherwise.
+    pub fn for_view(
+        conn: &GraphConnection,
+        graph: &GenGraph,
+        block_group_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> Self {
+        if history_ref.is_some() {
+            Self::from_graph(graph)
+        } else {
+            Self::load(conn, block_group_id)
+        }
+    }
 }
 
 /// Grows a block group's `GenGraph` from SQLite as a crawl pushes past its frontier, one port
@@ -262,7 +328,7 @@ impl GraphSource<GenGraph> for EagerOrSqlSource {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace};
     use gen_models::{
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
@@ -553,6 +619,70 @@ pub(crate) mod tests {
             seed.nodes().collect::<Vec<_>>(),
             vec![start_sentinel()],
             "an ordinary (non-circular) block group should seed on PATH_START as before"
+        );
+    }
+
+    #[test]
+    fn test_block_group_bounds_load_the_first_and_last_content_slices() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let block_group_id = setup_chain_block_group(&db_path);
+        let conn = get_connection(&db_path).unwrap();
+
+        let bounds = BlockGroupBounds::load(&conn, &block_group_id);
+
+        assert_eq!(
+            bounds,
+            BlockGroupBounds {
+                roots: vec![graph_node("x")],
+                leaves: vec![graph_node("z")],
+            }
+        );
+        let full_graph =
+            BlockGroup::get_graph(&conn, &Workspace::from_current_dir(), &block_group_id, None)
+                .unwrap();
+        assert_eq!(BlockGroupBounds::from_graph(&full_graph), bounds);
+    }
+
+    /// The `PATH_END -> PATH_START` marker joins the two sentinels, so a circular block group's
+    /// bounds are still its real first and last slices, whether probed or read off the eager
+    /// graph that keeps the marker.
+    #[test]
+    fn test_block_group_bounds_skip_the_circular_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let (block_group_id, _) = setup_circular_block_group(&db_path);
+        let conn = get_connection(&db_path).unwrap();
+
+        let bounds = BlockGroupBounds::load(&conn, &block_group_id);
+
+        assert_eq!(
+            bounds,
+            BlockGroupBounds {
+                roots: vec![graph_node("x")],
+                leaves: vec![graph_node("z")],
+            }
+        );
+        let full_graph =
+            BlockGroup::get_graph(&conn, &Workspace::from_current_dir(), &block_group_id, None)
+                .unwrap();
+        assert!(full_graph.contains_edge(end_sentinel(), start_sentinel()));
+        assert_eq!(BlockGroupBounds::from_graph(&full_graph), bounds);
+        assert_eq!(
+            BlockGroupBounds::for_view(&conn, &full_graph, &block_group_id, Some("main")),
+            bounds,
+            "a historical view reads the bounds off its full graph"
+        );
+    }
+
+    #[test]
+    fn test_block_group_bounds_are_empty_without_sentinel_edges() {
+        let mut graph = GenGraph::new();
+        graph.add_edge(graph_node("x"), graph_node("y"), Vec::new());
+
+        assert_eq!(
+            BlockGroupBounds::from_graph(&graph),
+            BlockGroupBounds::default()
         );
     }
 

@@ -32,7 +32,7 @@ use crate::views::{
         AnnotationColorCache, GraphOverlay, PathMembership, group_track_key, has_path_overlay,
         remove_path_overlay, replace_track_overlays, set_path_overlay,
     },
-    lazy_graph_source::EagerOrSqlSource,
+    lazy_graph_source::{BlockGroupBounds, EagerOrSqlSource},
 };
 
 #[derive(Debug)]
@@ -77,9 +77,10 @@ pub struct InlineGenGraphState<'a> {
     dimming: GraphDimming,
     paths: Vec<PathMembership>,
     conn: &'a GraphConnection,
-    workspace: &'a Workspace,
     history_ref: Option<&'a str>,
-    block_group: BlockGroup,
+    /// Where the block group starts and ends, resolved once so annotation loading never needs
+    /// the whole graph to tell.
+    block_group_bounds: BlockGroupBounds,
     /// Fetched once; a batch change only reloads their annotations for the new batch's nodes.
     annotation_group_entries: Vec<AnnotationGroupEntry>,
     /// Annotation and path overlays currently loaded, ready for highlight + label rendering.
@@ -114,6 +115,8 @@ impl<'a> InlineGenGraphState<'a> {
         view_state.show_cursor();
         let annotation_group_entries =
             load_annotation_group_entries(conn, &block_group, history_ref);
+        let block_group_bounds =
+            BlockGroupBounds::for_view(conn, engine.graph(), block_group_id, history_ref);
         Ok(Self {
             engine,
             zoom_levels,
@@ -121,9 +124,8 @@ impl<'a> InlineGenGraphState<'a> {
             dimming: GraphDimming::default(),
             paths: Vec::new(),
             conn,
-            workspace,
             history_ref,
-            block_group,
+            block_group_bounds,
             annotation_group_entries,
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
@@ -145,10 +147,10 @@ impl<'a> InlineGenGraphState<'a> {
         for entry in &self.annotation_group_entries {
             let Ok(entry_spans) = load_annotations_for_group(&AnnotationGroupTrackRequest {
                 conn: self.conn,
-                workspace: self.workspace,
                 history_ref: self.history_ref,
-                current_block_group: &self.block_group,
                 entry,
+                projection_graph: self.engine.graph(),
+                bounds: &self.block_group_bounds,
                 node_ids,
             }) else {
                 continue;
