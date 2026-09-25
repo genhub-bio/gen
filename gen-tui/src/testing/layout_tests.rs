@@ -398,7 +398,9 @@ fn viewport_wide_chain_go_to_node() {
 
 #[test]
 fn viewport_long_chain_middle_window_wormholes() {
-    const NODE_BUDGET: usize = 10;
+    // Odd, because each shell around a middle anchor adds one node on each side and the crawl
+    // only stops between shells.
+    const NODE_BUDGET: usize = 11;
     const NODE_COUNT: usize = 100;
 
     let domain_graph = TestGraphs::domain_long_chain(NODE_COUNT);

@@ -1172,8 +1172,9 @@ mod tests {
 
     #[test]
     fn go_to_outside_active_world_builds_once() {
+        // Longer than a 30-column viewport's budget, so the far end starts outside the world.
         let mut domain_graph = MockDomainGraph::new();
-        let nodes: Vec<_> = (0..30).map(|_| domain_graph.add_node(())).collect();
+        let nodes: Vec<_> = (0..100).map(|_| domain_graph.add_node(())).collect();
         for pair in nodes.windows(2) {
             domain_graph.add_edge(pair[0], pair[1], ());
         }
@@ -1183,16 +1184,16 @@ mod tests {
         let area = Rect::new(0, 0, 30, 12);
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
-        assert!(!engine.active_contains(nodes[29]));
+        assert!(!engine.active_contains(nodes[99]));
 
-        state.go_to_node(nodes[29], (0.5, 0.5));
+        state.go_to_node(nodes[99], (0.5, 0.5));
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
         let loaded_key = engine.active_batch().expect("should load the target world");
         assert_eq!(
             engine.active_world().map(|world| world.anchor()),
-            Some(nodes[29])
+            Some(nodes[99])
         );
-        assert!(engine.active_contains(nodes[29]));
+        assert!(engine.active_contains(nodes[99]));
         assert_eq!(engine.structural_build_counts().crawl, 2);
 
         GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
@@ -1204,7 +1205,8 @@ mod tests {
     #[test]
     fn render_is_stable_across_repeated_renders_of_an_unchanged_world() {
         let mut domain_graph = MockDomainGraph::new();
-        const LAYERS: usize = 6;
+        // More nodes than a 24-column viewport's budget, so the world has a boundary.
+        const LAYERS: usize = 20;
         const WIDTH: usize = 4;
         let mut layer_nodes: Vec<Vec<NodeIndex>> = Vec::new();
         for _ in 0..LAYERS {
@@ -1262,8 +1264,9 @@ mod tests {
 
     #[test]
     fn rendered_wormhole_is_hit_testable_at_its_glyph() {
+        // Longer than a 30-column viewport's budget, so the world ends in a door.
         let mut domain_graph = MockDomainGraph::new();
-        let nodes: Vec<_> = (0..30).map(|_| domain_graph.add_node(())).collect();
+        let nodes: Vec<_> = (0..100).map(|_| domain_graph.add_node(())).collect();
         for pair in nodes.windows(2) {
             domain_graph.add_edge(pair[0], pair[1], ());
         }

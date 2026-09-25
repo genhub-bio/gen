@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use petgraph::graph::NodeIndex;
 
 use crate::{
-    crawl::{EagerSource, GraphCursor, neighborhood},
+    crawl::{EagerSource, GraphCursor, SHELL_CUTOFF_FACTOR, neighborhood},
     distribute_nodes::GapSizes,
     graph_widget::build_window_geometry,
     layout::NodeRole,
@@ -40,9 +40,17 @@ fn crawl_invariant_errors(
     if !subgraph.nodes.contains(&anchor) {
         errors.push(format!("{case}: anchor must be part of its own window"));
     }
-    if subgraph.nodes.len() > node_budget {
+    let cutoff = node_budget * SHELL_CUTOFF_FACTOR;
+    if subgraph.nodes.len() > cutoff {
         errors.push(format!(
-            "{case}: crawl produced {} nodes, exceeding its budget of {node_budget}",
+            "{case}: crawl produced {} nodes, exceeding its cutoff of {cutoff}",
+            subgraph.nodes.len()
+        ));
+    }
+    let reachable = graph.node_count();
+    if subgraph.nodes.len() < node_budget.min(reachable) {
+        errors.push(format!(
+            "{case}: crawl stopped at {} nodes, short of its budget of {node_budget}",
             subgraph.nodes.len()
         ));
     }
