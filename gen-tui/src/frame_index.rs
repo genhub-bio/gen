@@ -33,6 +33,9 @@ pub struct FrameIndex<N> {
     placed: Vec<PlacedNode<N>>,
     by_id: HashMap<N, usize>,
     visible: Vec<usize>,
+    /// Where each invisible node's edges meet. Such a node is never placed, so it can't be
+    /// selected, but a camera or cursor aimed at it still needs to know where it landed.
+    junctions: HashMap<N, Point<i64>>,
 }
 
 impl<N> Default for FrameIndex<N> {
@@ -48,6 +51,7 @@ impl<N> FrameIndex<N> {
             placed: Vec::new(),
             by_id: HashMap::new(),
             visible: Vec::new(),
+            junctions: HashMap::new(),
         }
     }
 
@@ -75,7 +79,20 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
             placed,
             by_id,
             visible,
+            junctions: HashMap::new(),
         }
+    }
+
+    /// Record where each invisible node's edges meet, in the same screen space as the placed
+    /// rects.
+    pub fn with_junctions(mut self, junctions: HashMap<N, Point<i64>>) -> Self {
+        self.junctions = junctions;
+        self
+    }
+
+    /// Where an invisible node's edges meet, if it was in the painted window.
+    pub fn junction_point(&self, id: N) -> Option<Point<i64>> {
+        self.junctions.get(&id).copied()
     }
 
     /// The screen rect a node was placed at, whether or not it is currently visible.
@@ -126,6 +143,30 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
                 dx * dx + dy * dy
             })
             .map(|&index| self.placed[index].id)
+    }
+
+    /// The placed node closest to `pos` among those lying `toward` it (`Left` or `Right` of
+    /// `pos`), or among every placed node when `toward` is `None` or nothing lies that way.
+    /// Moves the cursor off a junction onto whichever of the junction's branches is nearest,
+    /// however many there are.
+    pub fn closest_toward(&self, pos: Point<i64>, toward: Option<Direction>) -> Option<N> {
+        let distance = |node: &PlacedNode<N>| {
+            let closest_cell = node.rect.find_closest_cell(pos);
+            let dx = closest_cell.x - pos.x;
+            let dy = closest_cell.y - pos.y;
+            dx * dx + dy * dy
+        };
+        let lies_toward = |node: &&PlacedNode<N>| match toward {
+            Some(Direction::Right) => node.rect.center().x > pos.x,
+            Some(Direction::Left) => node.rect.center().x < pos.x,
+            Some(Direction::Up | Direction::Down) | None => true,
+        };
+        self.placed
+            .iter()
+            .filter(lies_toward)
+            .min_by_key(|node| distance(node))
+            .or_else(|| self.placed.iter().min_by_key(|node| distance(node)))
+            .map(|node| node.id)
     }
 
     /// The neighbouring placed node in `direction`, considering every placed node (not just

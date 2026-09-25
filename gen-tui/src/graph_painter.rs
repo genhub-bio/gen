@@ -219,13 +219,21 @@ impl WindowScene {
         V: NodeRenderer<G>,
     {
         let backward_edges = std::mem::take(&mut window.backward_edges);
-        let geometry = build_window_geometry(window, gaps, |role| match role {
-            NodeRole::Data(node_index) => {
-                let node_id = <G as NodeIndexable>::from_index(graph, node_index.index());
-                visual.get_node_size(&node_id)
-            }
-            _ => visual.get_dummy_size(),
-        });
+        let is_visible = |node_index: NodeIndex| {
+            visual.is_visible(&<G as NodeIndexable>::from_index(graph, node_index.index()))
+        };
+        let geometry = build_window_geometry(
+            window,
+            gaps,
+            |role| match role {
+                NodeRole::Data(node_index) if is_visible(*node_index) => {
+                    let node_id = <G as NodeIndexable>::from_index(graph, node_index.index());
+                    visual.get_node_size(&node_id)
+                }
+                _ => visual.get_dummy_size(),
+            },
+            is_visible,
+        );
         let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
         Self {
             geometry,
@@ -287,7 +295,12 @@ where
             _ => None,
         });
 
-    let Some((pos, size)) = anchor_layout else {
+    // An invisible anchor was placed as the routing node its edges meet at.
+    let Some((pos, size)) = anchor_layout.or_else(|| {
+        geometry
+            .junction_node(anchor_node_index)
+            .map(|node| (node.pos, node.size))
+    }) else {
         return WorldPos::ZERO;
     };
 
@@ -509,13 +522,23 @@ where
         })
         .collect();
 
+    let junctions = geometry
+        .junctions()
+        .map(|(node_index, node)| {
+            (
+                <G as NodeIndexable>::from_index(graph, node_index.index()),
+                WorldPos::new(node.pos.x + offset.x, node.pos.y + offset.y),
+            )
+        })
+        .collect();
+
     let clip_area = WorldRect::from_coords(
         0,
         0,
         (area.width as i64).saturating_sub(1),
         (area.height as i64).saturating_sub(1),
     );
-    FrameIndex::build(placed, clip_area)
+    FrameIndex::build(placed, clip_area).with_junctions(junctions)
 }
 
 /// Every placed `NodeRole::Wormhole` (wormhole) stub's screen rect, the boundary node whose
@@ -730,6 +753,7 @@ mod tests {
             graph,
             width: 8,
             height: 3,
+            junctions: Vec::new(),
         };
 
         let indexed = wormhole_index(&geometry, &domain_graph, WorldPos::ZERO);
