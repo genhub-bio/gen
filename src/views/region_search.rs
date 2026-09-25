@@ -22,7 +22,7 @@ use ratatui::style::Color;
 
 use crate::views::{
     annotation_track::{
-        AnnotationSegment, AnnotationSpan, annotation_span_from_resolved_region,
+        AnnotationSegment, AnnotationSpan, LoadedNodeSlices, annotation_span_from_resolved_region,
         graph_locus_from_annotation_span,
     },
     gen_graph_widget::locus_midpoint,
@@ -113,7 +113,7 @@ fn fallback_locus_for_empty_span(
     region: &ResolvedGenRegion,
     conn: &GraphConnection,
     workspace: &Workspace,
-    graph: &GenGraph,
+    loaded: &LoadedNodeSlices,
 ) -> Result<GraphLocus, String> {
     let midpoint = region
         .start
@@ -147,7 +147,7 @@ fn fallback_locus_for_empty_span(
                 strand: Strand::Forward,
             }],
         };
-        if let Some(locus) = graph_locus_from_annotation_span(&point_span, graph) {
+        if let Some(locus) = graph_locus_from_annotation_span(&point_span, loaded) {
             return Ok(locus);
         }
     }
@@ -164,10 +164,11 @@ pub(super) fn activate_search_match(
     workspace: &Workspace,
 ) -> Result<(), String> {
     let span = annotation_span_from_resolved_region(conn, workspace, &search_match.region)?;
+    let loaded = LoadedNodeSlices::new(graph);
     let locus = if span.segments.is_empty() {
-        fallback_locus_for_empty_span(&search_match.region, conn, workspace, graph)?
+        fallback_locus_for_empty_span(&search_match.region, conn, workspace, &loaded)?
     } else {
-        graph_locus_from_annotation_span(&span, graph)
+        graph_locus_from_annotation_span(&span, &loaded)
             .ok_or_else(|| "region did not map to a graph position".to_string())?
     };
     let (midpoint_slice, midpoint_offset) = locus_midpoint(&locus)
