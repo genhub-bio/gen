@@ -119,10 +119,15 @@ fn full_render_errors(
         Ok(assembled) => assembled,
         Err(error) => return vec![format!("{case}: window_for failed: {error}")],
     };
-    let geometry = build_window_geometry(assembled, &GapSizes::default(), |role| match role {
-        NodeRole::Data(_) => (5, 3),
-        _ => (1, 1),
-    });
+    let geometry = build_window_geometry(
+        assembled,
+        &GapSizes::default(),
+        |role| match role {
+            NodeRole::Data(_) => (5, 3),
+            _ => (1, 1),
+        },
+        |_| true,
+    );
     let validation = validate_layout_graph(&geometry.graph);
     if validation.is_valid() {
         Vec::new()

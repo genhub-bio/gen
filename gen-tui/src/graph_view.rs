@@ -21,6 +21,7 @@ use crate::{
     crawl::{EagerSource, GraphSource},
     distribute_nodes::GapSizes,
     frame_index::{Direction, FrameIndex},
+    geometry::WorldRect,
     graph_painter::{Camera, HighlightKind, Highlights, WindowScene, snap_camera},
     layout::NodeRole,
     layout_engine::{BatchId, LayoutEngine},
@@ -92,12 +93,16 @@ where
     let mut width_by_rank: HashMap<i32, u64> = HashMap::new();
     for node in probe.graph.node_weights() {
         let Some(rank) = node.layer else { continue };
-        let width = match node.role {
+        let node_id = match node.role {
             NodeRole::Data(node_index) => {
-                let node_id = <G as NodeIndexable>::from_index(graph, node_index.index());
-                visual.get_node_size(&node_id).0
+                Some(<G as NodeIndexable>::from_index(graph, node_index.index()))
+                    .filter(|node_id| visual.is_visible(node_id))
             }
-            _ => visual.get_dummy_size().0,
+            _ => None,
+        };
+        let width = match node_id {
+            Some(node_id) => visual.get_node_size(&node_id).0,
+            None => visual.get_dummy_size().0,
         };
         width_by_rank
             .entry(rank)
@@ -462,6 +467,32 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         Some((boundary, target))
     }
 
+    /// The nearest door hanging off an invisible node in the direction of `delta`, for when the
+    /// cursor has no placed node left to move to that way. The cursor never sits on an invisible
+    /// node, so its doors are only reachable this way from the keyboard.
+    fn junction_wormhole(&self, delta: i64) -> Option<(N, N)> {
+        let origin = self.frame.rect_of(self.cursor.node?)?;
+        let cursor = origin.point_at_fraction(self.cursor.fractional);
+        let distance = |rect: WorldRect| {
+            let closest = rect.find_closest_cell(cursor);
+            let dx = closest.x - cursor.x;
+            let dy = closest.y - cursor.y;
+            dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+        };
+        self.wormhole
+            .iter()
+            .filter(|&&(rect, boundary, _)| {
+                self.frame.junction_point(boundary).is_some()
+                    && if delta > 0 {
+                        rect.center().x > cursor.x
+                    } else {
+                        rect.center().x < cursor.x
+                    }
+            })
+            .min_by_key(|&&(rect, _, target)| (distance(rect), rect.left(), rect.bottom(), target))
+            .map(|&(_, boundary, target)| (boundary, target))
+    }
+
     /// Handle keyboard events for graph navigation and control. Returns the wormhole reached
     /// by a navigation key, if any; the owning application performs the engine-level world
     /// activation because `GraphViewState` deliberately does not own a `LayoutEngine`.
@@ -472,14 +503,18 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
                 if let Some(wormhole) = self.horizontal_wormhole(-1) {
                     return Ok(Some(wormhole));
                 }
-                Navigator::move_horizontal(&mut self.cursor, -1, &self.frame)?;
+                if let Err(error) = Navigator::move_horizontal(&mut self.cursor, -1, &self.frame) {
+                    return self.junction_wormhole(-1).map(Some).ok_or(error);
+                }
                 self.rebase_camera_to_cursor();
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 if let Some(wormhole) = self.horizontal_wormhole(1) {
                     return Ok(Some(wormhole));
                 }
-                Navigator::move_horizontal(&mut self.cursor, 1, &self.frame)?;
+                if let Err(error) = Navigator::move_horizontal(&mut self.cursor, 1, &self.frame) {
+                    return self.junction_wormhole(1).map(Some).ok_or(error);
+                }
                 self.rebase_camera_to_cursor();
             }
             // Note: in world/screen coordinates, Y increases upward.
@@ -903,6 +938,22 @@ where
             &camera,
             &state.highlights,
         );
+        // A cursor sent to an invisible node (e.g. through a door whose target is a junction)
+        // has nothing to sit on. Move it to the branch nearest the junction on the side it
+        // entered toward, keeping the camera where the go-to framed it.
+        if let Some(cursor_node) = state.cursor.node
+            && frame.rect_of(cursor_node).is_none()
+            && let Some(junction) = frame.junction_point(cursor_node)
+        {
+            let toward = match state.cursor.fractional.0 {
+                fraction if fraction < 0.5 => Some(Direction::Right),
+                fraction if fraction > 0.5 => Some(Direction::Left),
+                _ => None,
+            };
+            if let Some(branch) = frame.closest_toward(junction, toward) {
+                state.cursor.set_node(branch, state.cursor.fractional);
+            }
+        }
         if let Some(overlay_fn) = self.overlay_fn {
             overlay_fn(buf, &frame);
         }
@@ -1439,6 +1490,270 @@ mod tests {
                 Ok(Some((boundary, target))),
                 "moving from a boundary toward its arrow should request wormhole activation"
             );
+        }
+    }
+
+    mod invisible_nodes {
+        use crossterm::event::KeyModifiers;
+        use petgraph::graph::NodeIndex;
+        use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+
+        use super::*;
+        use crate::{graph_widget::NODE_GLYPH, testing::mocks::MockDomainGraph};
+
+        /// Draws every node 3x1 except `hidden`, which is left for its edges to meet at.
+        struct HiddenNodeVisual {
+            hidden: NodeIndex,
+        }
+
+        impl NodeRenderer<MockDomainGraph> for HiddenNodeVisual {
+            fn get_node_size(&self, _node: &NodeIndex) -> (u64, u64) {
+                (3, 1)
+            }
+
+            fn render_node(
+                &self,
+                buffer: &mut crate::viewport_state::WorldBuffer,
+                area: crate::geometry::WorldRect,
+                _node_id: &NodeIndex,
+            ) {
+                buffer.set_char_styled(area.center(), NODE_GLYPH, Style::default());
+            }
+
+            fn is_visible(&self, node: &NodeIndex) -> bool {
+                *node != self.hidden
+            }
+        }
+
+        /// `start -> junction -> branches`, returning the junction and its branches.
+        fn fork(branch_count: usize) -> (MockDomainGraph, NodeIndex, NodeIndex, Vec<NodeIndex>) {
+            let mut graph = MockDomainGraph::new();
+            let start = graph.add_node(());
+            let junction = graph.add_node(());
+            graph.add_edge(start, junction, ());
+            let branches = (0..branch_count)
+                .map(|_| {
+                    let branch = graph.add_node(());
+                    graph.add_edge(junction, branch, ());
+                    branch
+                })
+                .collect();
+            (graph, start, junction, branches)
+        }
+
+        fn render(
+            engine: &mut LayoutEngine<MockDomainGraph>,
+            visual: &HiddenNodeVisual,
+            state: &mut GraphViewState<NodeIndex>,
+        ) -> Buffer {
+            let area = Rect::new(0, 0, 60, 12);
+            let mut buffer = Buffer::empty(area);
+            GraphView::new(engine, visual).render(area, &mut buffer, state);
+            buffer
+        }
+
+        fn cells_with_foreground(buffer: &Buffer, color: Color) -> usize {
+            buffer
+                .content()
+                .iter()
+                .filter(|cell| cell.fg == color)
+                .count()
+        }
+
+        #[test]
+        fn test_invisible_node_is_drawn_as_the_junction_of_its_edges() {
+            let (graph, start, junction, branches) = fork(1);
+            let visual = HiddenNodeVisual { hidden: junction };
+            let mut engine = LayoutEngine::new(graph);
+            let mut state = GraphViewState::default();
+
+            let buffer = render(&mut engine, &visual, &mut state);
+
+            assert!(state.frame.rect_of(start).is_some());
+            assert!(state.frame.rect_of(branches[0]).is_some());
+            assert!(
+                state.frame.rect_of(junction).is_none(),
+                "an invisible node should not be placed as a selectable node"
+            );
+            assert!(state.frame.junction_point(junction).is_some());
+            let drawn_nodes = buffer
+                .content()
+                .iter()
+                .filter(|cell| cell.symbol() == NODE_GLYPH.to_string())
+                .count();
+            assert_eq!(drawn_nodes, 2, "only the visible nodes should be drawn");
+        }
+
+        #[test]
+        fn test_edges_on_both_sides_of_an_invisible_node_keep_their_highlights() {
+            let (graph, start, junction, branches) = fork(1);
+            let visual = HiddenNodeVisual { hidden: junction };
+            let mut engine = LayoutEngine::new(graph);
+
+            let mut state = GraphViewState::default();
+            state.set_edge_highlight((start, junction), PathStyle::new(Color::Red));
+            let buffer = render(&mut engine, &visual, &mut state);
+            assert!(cells_with_foreground(&buffer, Color::Red) > 0);
+
+            let mut state = GraphViewState::default();
+            state.set_edge_highlight((junction, branches[0]), PathStyle::new(Color::Blue));
+            let buffer = render(&mut engine, &visual, &mut state);
+            assert!(cells_with_foreground(&buffer, Color::Blue) > 0);
+        }
+
+        #[test]
+        fn test_cursor_sent_to_an_invisible_node_moves_to_its_nearest_branch() {
+            let (graph, start, junction, branches) = fork(3);
+            let visual = HiddenNodeVisual { hidden: junction };
+            let mut engine = LayoutEngine::new(graph);
+            let mut state = GraphViewState::default();
+            render(&mut engine, &visual, &mut state);
+
+            // Entering from the left continues onto whichever branch is nearest.
+            state.go_to_node(junction, (0.0, 0.5));
+            render(&mut engine, &visual, &mut state);
+            let cursor_node = state.cursor.node.expect("should keep a cursor");
+            assert!(branches.contains(&cursor_node));
+            let junction_point = state
+                .frame
+                .junction_point(junction)
+                .expect("should place the junction");
+            let distance_to = |node: NodeIndex| {
+                let rect = state
+                    .frame
+                    .rect_of(node)
+                    .expect("should place every branch");
+                let cell = rect.find_closest_cell(junction_point);
+                (cell.x - junction_point.x).pow(2) + (cell.y - junction_point.y).pow(2)
+            };
+            assert!(
+                branches
+                    .iter()
+                    .all(|&branch| distance_to(cursor_node) <= distance_to(branch)),
+                "the cursor should land on the branch nearest the junction"
+            );
+
+            // Entering from the right continues back onto the node before it.
+            state.go_to_node(junction, (1.0, 0.5));
+            render(&mut engine, &visual, &mut state);
+            assert_eq!(state.cursor.node, Some(start));
+        }
+
+        #[test]
+        fn test_camera_can_anchor_on_an_invisible_node() {
+            let (graph, _, junction, _) = fork(2);
+            let visual = HiddenNodeVisual { hidden: junction };
+            let mut engine = LayoutEngine::new(graph);
+            engine.set_preferred_initial_anchor(junction);
+            let mut state = GraphViewState::default();
+
+            render(&mut engine, &visual, &mut state);
+
+            let junction_point = state
+                .frame
+                .junction_point(junction)
+                .expect("should place the junction");
+            assert!(
+                (0..60).contains(&junction_point.x) && (0..12).contains(&junction_point.y),
+                "the anchoring junction should be framed on screen, got {junction_point:?}"
+            );
+        }
+
+        #[test]
+        fn test_door_into_an_invisible_node_lands_on_one_of_its_branches() {
+            let mut graph = MockDomainGraph::new();
+            let chain: Vec<NodeIndex> = (0..12).map(|_| graph.add_node(())).collect();
+            for pair in chain.windows(2) {
+                graph.add_edge(pair[0], pair[1], ());
+            }
+            let junction = graph.add_node(());
+            graph.add_edge(chain[11], junction, ());
+            let branches: Vec<NodeIndex> = (0..3)
+                .map(|_| {
+                    let branch = graph.add_node(());
+                    graph.add_edge(junction, branch, ());
+                    branch
+                })
+                .collect();
+            let visual = HiddenNodeVisual { hidden: junction };
+            let mut engine = LayoutEngine::new(graph);
+            engine
+                .activate_batch_containing(chain[0], 4)
+                .expect("should claim the first batch");
+            assert_ne!(engine.batch_of(junction), engine.batch_of(chain[0]));
+
+            // The same steps `teleport_through_wormhole` takes through a door toward a successor.
+            engine
+                .activate_batch_containing(junction, 4)
+                .expect("should claim the junction's batch");
+            let anchor = engine
+                .active_world()
+                .expect("should have an active world")
+                .anchor();
+            let mut state = GraphViewState::default();
+            state.go_to_node_framed(anchor, junction, (0.0, 0.5));
+            render(&mut engine, &visual, &mut state);
+
+            let cursor_node = state.cursor.node.expect("should keep a cursor");
+            assert!(
+                branches.contains(&cursor_node),
+                "the cursor should land on one of the junction's branches, got {cursor_node:?}"
+            );
+            assert!(state.frame.rect_of(cursor_node).is_some());
+        }
+
+        #[test]
+        fn test_keyboard_reaches_a_door_hanging_off_an_invisible_node() {
+            let mut graph = MockDomainGraph::new();
+            let chain: Vec<NodeIndex> = (0..4).map(|_| graph.add_node(())).collect();
+            for pair in chain.windows(2) {
+                graph.add_edge(pair[0], pair[1], ());
+            }
+            let junction = graph.add_node(());
+            graph.add_edge(chain[3], junction, ());
+            let branches: Vec<NodeIndex> = (0..2)
+                .map(|_| {
+                    let branch = graph.add_node(());
+                    graph.add_edge(junction, branch, ());
+                    branch
+                })
+                .collect();
+            let visual = HiddenNodeVisual { hidden: junction };
+            let mut engine = LayoutEngine::new(graph);
+            engine
+                .activate_batch_containing(chain[0], 5)
+                .expect("should claim the chain's batch");
+            let chain_batch = engine.batch_of(chain[0]);
+            assert_eq!(engine.batch_of(junction), chain_batch);
+            assert!(
+                branches
+                    .iter()
+                    .all(|&branch| engine.batch_of(branch) != chain_batch),
+                "the branches should lie behind the junction's doors"
+            );
+
+            let mut state = GraphViewState::default();
+            render(&mut engine, &visual, &mut state);
+            state.go_to_node(chain[3], (1.0, 0.5));
+            render(&mut engine, &visual, &mut state);
+
+            let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+            let mut reached = None;
+            for _ in 0..20 {
+                match state.handle_key_event(right) {
+                    Ok(Some(wormhole)) => {
+                        reached = Some(wormhole);
+                        break;
+                    }
+                    Ok(None) => {
+                        render(&mut engine, &visual, &mut state);
+                    }
+                    Err(error) => panic!("moving right should reach the junction's door: {error}"),
+                }
+            }
+            let (boundary, target) = reached.expect("should reach a door within 20 presses");
+            assert_eq!(boundary, junction);
+            assert!(branches.contains(&target));
         }
     }
 }

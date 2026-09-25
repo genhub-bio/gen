@@ -214,13 +214,21 @@ pub struct WindowGeometry {
     pub graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
     pub width: i64,
     pub height: i64,
+    /// Each invisible domain node and the routing node it became (see [`Self::new`]).
+    pub(crate) junctions: Vec<(NodeIndex, NodeIndex<u32>)>,
 }
 
 impl WindowGeometry {
     /// Route and compact an assembled window whose nodes already have their rendered sizes.
+    ///
+    /// The Data nodes for `junctions` (domain nodes the renderer doesn't draw) are laid out and
+    /// routed like any other node, so every edge still meets at them and keeps its domain-edge
+    /// bundle, then become routing nodes before compaction: they are drawn as the junction of
+    /// their edges and are never placed as selectable nodes.
     pub fn new(
         mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
         gaps: &GapSizes,
+        junctions: &HashSet<NodeIndex>,
     ) -> Self {
         // Assembly places rows at their size-independent within-layer ordinals. The edge router
         // reacts only to y, so assign real-size-aware cross coordinates before routing. This pass
@@ -230,6 +238,20 @@ impl WindowGeometry {
 
         if let Err(error) = make_rectilinear(&mut layout_graph) {
             log::warn!("Edge routing failed: {:?}", error);
+        }
+
+        // Routing has already merged straight runs and labelled every segment, so a junction
+        // swapped only now keeps both the edges into it and the edges out of it.
+        let mut junction_nodes = Vec::new();
+        for layout_index in layout_graph.node_indices().collect::<Vec<_>>() {
+            let node = &mut layout_graph[layout_index];
+            if let NodeRole::Data(domain_index) = node.role
+                && junctions.contains(&domain_index)
+            {
+                node.role = NodeRole::Routing;
+                node.layer = None;
+                junction_nodes.push((domain_index, layout_index));
+            }
         }
 
         compact_layout(&mut layout_graph, gaps);
@@ -253,7 +275,27 @@ impl WindowGeometry {
             graph: layout_graph,
             width: max_x - min_x,
             height: max_y - min_y,
+            junctions: junction_nodes,
         }
+    }
+
+    /// The routing node an invisible domain node became, if it is in this window. A
+    /// `prune_pin_stubs` splice can remove one lying on a backward-edge loop's stub, in which
+    /// case there is none.
+    pub fn junction_node(&self, domain_index: NodeIndex) -> Option<&LayoutNode> {
+        self.junctions
+            .iter()
+            .find(|(junction, _)| *junction == domain_index)
+            .and_then(|(_, layout_index)| self.graph.node_weight(*layout_index))
+            .filter(|node| matches!(node.role, NodeRole::Routing))
+    }
+
+    /// The invisible domain nodes still present in this window as routing nodes.
+    pub fn junctions(&self) -> impl Iterator<Item = (NodeIndex, &LayoutNode)> + '_ {
+        self.junctions.iter().filter_map(|&(domain_index, _)| {
+            self.junction_node(domain_index)
+                .map(|node| (domain_index, node))
+        })
     }
 
     /// Check if the layout graph is empty (no nodes)

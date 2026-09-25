@@ -1,4 +1,6 @@
-use petgraph::visit::GraphBase;
+use std::collections::HashSet;
+
+use petgraph::{graph::NodeIndex, visit::GraphBase};
 use ratatui::style::Style;
 
 use crate::{
@@ -39,17 +41,26 @@ impl<G: GraphBase> NodeRenderer<G> for MinimalNodeRenderer {
 /// here before coordinate assignment, so the geometry reflects the detail the visual currently
 /// holds; the assembled neutral sizes are discarded.
 ///
-/// `size_of` supplies the rendered size for each node role.
+/// `size_of` supplies the rendered size for each node role, and `is_visible` says which domain
+/// nodes are drawn; the rest become junctions of their edges (see [`WindowGeometry::new`]) and
+/// should be given a routing node's size.
 pub fn build_window_geometry(
     assembled: AssembledLayout,
     gaps: &GapSizes,
     mut size_of: impl FnMut(&NodeRole) -> (u64, u64),
+    is_visible: impl Fn(NodeIndex) -> bool,
 ) -> WindowGeometry {
     let mut graph = assembled.graph;
+    let mut junctions = HashSet::new();
     for node in graph.node_weights_mut() {
         node.size = size_of(&node.role);
+        if let NodeRole::Data(domain_index) = node.role
+            && !is_visible(domain_index)
+        {
+            junctions.insert(domain_index);
+        }
     }
-    WindowGeometry::new(graph, gaps)
+    WindowGeometry::new(graph, gaps, &junctions)
 }
 
 pub(crate) fn style_cursor_cell(buffer: &mut WorldBuffer, pos: WorldPos, theme: &Theme) {
@@ -176,7 +187,8 @@ mod tests {
                 .count();
             assert!(expected_data > 0);
 
-            let geometry = build_window_geometry(assembled, &GapSizes::default(), size_of);
+            let geometry =
+                build_window_geometry(assembled, &GapSizes::default(), size_of, |_| true);
 
             let data_nodes = geometry
                 .graph
@@ -194,7 +206,8 @@ mod tests {
             let graph = TestGraphs::domain_extended_diamond();
             let assembled = assembled_window(&graph);
 
-            let geometry = build_window_geometry(assembled, &GapSizes::default(), size_of);
+            let geometry =
+                build_window_geometry(assembled, &GapSizes::default(), size_of, |_| true);
 
             for node in geometry.graph.node_weights() {
                 if matches!(node.role, NodeRole::Data(_)) {
