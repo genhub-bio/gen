@@ -17,7 +17,7 @@ use gen_annotations::projection::annotation_segments;
 use gen_graph::GraphNode;
 use gen_models::{
     annotations::Annotation,
-    block_group::BlockGroup,
+    block_group::{BlockGroup, SequenceIterator},
     db::DbContext,
     node::Node,
     operations::{OperationInfo, OperationSummary, commit_operation_summary},
@@ -266,6 +266,16 @@ impl PySequenceGraph {
             .collect())
     }
 
+    /// Lazily yields one string per path through the pruned graph.
+    /// Distinct paths may yield identical strings.
+    fn all_sequences(&self, py: Python<'_>) -> PyResult<Py<PySequenceIter>> {
+        let context = self.require_context("all_sequences()")?;
+        let sequences =
+            BlockGroup::sequences_iter(context.graph().conn(), context.workspace(), &self.id, None)
+                .map_err(block_group_err_to_pyerr)?;
+        Py::new(py, PySequenceIter { sequences })
+    }
+
     /// IPython display hook — called when a cell ends with a SequenceGraph.
     fn _ipython_display_(slf: &Bound<'_, PySequenceGraph>) -> PyResult<()> {
         let py = slf.py();
@@ -504,7 +514,11 @@ impl PySequenceGraph {
     /// Parameters
     /// filename : str
     ///     Output file path.
-    fn export_fasta(&self, filename: String) -> PyResult<()> {
+    /// all_sequences : bool, optional
+    ///     Export all graph paths as ``"{sequence_graph_name}.{index}"`` (1-based).
+    ///     Defaults to ``False`` (current paths only).
+    #[pyo3(signature = (filename, all_sequences=false))]
+    fn export_fasta(&self, filename: String, all_sequences: bool) -> PyResult<()> {
         let ctx = self.require_context("export_fasta()")?;
         let conn = ctx.graph().conn();
         export_fasta(
@@ -514,6 +528,7 @@ impl PySequenceGraph {
             Some(&self.sample_name),
             &PathBuf::from(&filename),
             None,
+            all_sequences,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export FASTA '{}': {e}", filename)))
     }
@@ -821,5 +836,21 @@ impl PySequenceGraph {
                 .map(|bg| self.to_py_block_group(bg))
                 .collect(),
         )
+    }
+}
+
+#[pyclass(unsendable)]
+struct PySequenceIter {
+    sequences: SequenceIterator,
+}
+
+#[pymethods]
+impl PySequenceIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<String> {
+        slf.sequences.next()
     }
 }
