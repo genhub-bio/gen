@@ -17,6 +17,9 @@ pub struct Command {
     /// Fasta file path
     #[clap(index = 1)]
     pub path: String,
+    /// Override the Dolt commit message
+    #[arg(short = 'm', long)]
+    message: Option<String>,
     /// Don't store the sequence in the database, instead store a reference to an asset
     #[arg(long, action)]
     shallow: bool,
@@ -74,6 +77,10 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     ) {
         Ok(operation_summary) => {
             conn.execute("END TRANSACTION", [])?;
+            let mut operation_summary = operation_summary;
+            if let Some(message) = cmd.message {
+                operation_summary.summary = message;
+            }
             match commit_operation(context, &operation_summary) {
                 Ok(_) => {
                     println!("Fasta imported.");

@@ -417,9 +417,12 @@ mod diff_views {
 }
 
 mod operation_history {
+    use gen_models::assets::OperationLog;
+
     use super::{
-        PathBuf, assert_success, asset_refs, commit_hash_for_summary, operations_stdout, run_gen,
-        tempdir, trailing_commit_hash,
+        DoltHistoryStore, HistoryStore, PathBuf, assert_success, asset_refs,
+        commit_hash_for_summary, fs, get_connection, operations_stdout, run_gen, tempdir,
+        trailing_commit_hash,
     };
 
     #[test]
@@ -458,6 +461,95 @@ mod operation_history {
         assert!(
             stdout.contains("m123:"),
             "operations output should include the fasta import commit summary: {stdout}"
+        );
+
+        let graph_conn = get_connection(repo_dir.path().join(".gen/default.db"))
+            .expect("should reopen graph database");
+        let history = DoltHistoryStore::new(&graph_conn)
+            .log(None)
+            .expect("should query dolt history");
+        assert!(
+            history[0].message.contains("m123:"),
+            "import without --message should retain the default summary: {}",
+            history[0].message
+        );
+    }
+
+    #[test]
+    fn test_import_and_update_messages_override_dolt_history() {
+        let repo_dir = tempdir().expect("should create temp repo directory");
+        let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_path = fixtures_dir.join("simple.fa");
+        let update_fasta_path = repo_dir.path().join("update.fa");
+        fs::write(&update_fasta_path, ">m123\nTTTT\n").expect("should write update FASTA");
+
+        assert_success(
+            &run_gen(repo_dir.path(), &["init"]),
+            "gen init should succeed",
+        );
+        let import_output = run_gen(
+            repo_dir.path(),
+            &[
+                "import",
+                "fasta",
+                fasta_path.to_str().expect("should encode fasta path"),
+                "--sample",
+                "test-sample",
+                "-m",
+                "custom import message",
+            ],
+        );
+        assert_success(&import_output, "fasta import with -m should succeed");
+
+        let update_output = run_gen(
+            repo_dir.path(),
+            &[
+                "update",
+                "fasta",
+                update_fasta_path
+                    .to_str()
+                    .expect("should encode update fasta path"),
+                "--sample",
+                "test-sample",
+                "--new-sample",
+                "edited-sample",
+                "--region-name",
+                "m123:1-5",
+                "--message",
+                "custom update message",
+            ],
+        );
+        assert_success(&update_output, "fasta update with --message should succeed");
+
+        let graph_conn = get_connection(repo_dir.path().join(".gen/default.db"))
+            .expect("should reopen graph database");
+        let history = DoltHistoryStore::new(&graph_conn)
+            .log(None)
+            .expect("should query dolt history");
+        assert_eq!(
+            history[0].message, "custom update message",
+            "--message should override the update commit message"
+        );
+        assert_eq!(
+            history[1].message, "custom import message",
+            "-m should override the import commit message"
+        );
+
+        let mut operation_logs =
+            OperationLog::all(&graph_conn).expect("should query operation metadata");
+        operation_logs.sort_by_key(|operation_log| (operation_log.created_on, operation_log.id));
+        assert_eq!(
+            operation_logs.len(),
+            2,
+            "import and update should create operation metadata entries"
+        );
+        assert_eq!(
+            operation_logs[1].command, "custom update message",
+            "--message should replace the update operation metadata summary"
+        );
+        assert_eq!(
+            operation_logs[0].command, "custom import message",
+            "-m should replace the import operation metadata summary"
         );
     }
 

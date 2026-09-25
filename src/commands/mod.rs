@@ -537,6 +537,115 @@ mod tests {
     use super::{Cli, Commands, parse_diff_revisions};
 
     #[test]
+    fn test_import_and_update_variants_accept_commit_messages() {
+        let cases: [&[&str]; 11] = [
+            &[
+                "import", "fasta", "input.fa", "--sample", "sample", "-m", "message",
+            ],
+            &[
+                "import",
+                "genbank",
+                "input.gb",
+                "--sample",
+                "sample",
+                "--message",
+                "message",
+            ],
+            &[
+                "import",
+                "gfa",
+                "input.gfa",
+                "--sample",
+                "sample",
+                "-m",
+                "message",
+            ],
+            &[
+                "import",
+                "library",
+                "library",
+                "parts.fa",
+                "library.csv",
+                "--sample",
+                "sample",
+                "--message",
+                "message",
+            ],
+            &[
+                "update",
+                "fasta",
+                "input.fa",
+                "--new-sample",
+                "updated",
+                "--region-name",
+                "region",
+                "-m",
+                "message",
+            ],
+            &[
+                "update",
+                "gaf",
+                "input.gaf",
+                "--csv",
+                "changes.csv",
+                "--message",
+                "message",
+            ],
+            &["update", "genbank", "input.gb", "-m", "message"],
+            &[
+                "update",
+                "gfa",
+                "input.gfa",
+                "--new-sample",
+                "updated",
+                "--message",
+                "message",
+            ],
+            &[
+                "update",
+                "library",
+                "--new-sample",
+                "updated",
+                "--region-name",
+                "region",
+                "--library",
+                "library.csv",
+                "--parts",
+                "parts.fa",
+                "-m",
+                "message",
+            ],
+            &[
+                "update",
+                "sequence",
+                "ACGT",
+                "--new-sample",
+                "updated",
+                "--region-name",
+                "region",
+                "--message",
+                "message",
+            ],
+            &[
+                "update",
+                "vcf",
+                "input.vcf",
+                "--sample",
+                "sample",
+                "-m",
+                "message",
+            ],
+        ];
+
+        for case in cases {
+            let parsed = Cli::try_parse_from(std::iter::once("gen").chain(case.iter().copied()));
+            if let Err(error) = parsed {
+                panic!("should parse {:?}: {error}", case);
+            }
+        }
+    }
+
+    #[test]
     fn test_view_diff_accepts_two_ref_form() {
         let cli = Cli::try_parse_from(["gen", "view-diff", "main", "feature"])
             .expect("should parse view-diff command");
