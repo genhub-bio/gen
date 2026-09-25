@@ -207,6 +207,11 @@ impl<'a> GenGraphController<'a> {
         self.block_group.as_ref()
     }
 
+    /// Where the open block group starts and ends; empty until a block group is opened.
+    pub fn block_group_bounds(&self) -> &BlockGroupBounds {
+        &self.block_group_bounds
+    }
+
     pub fn engine(&self) -> &LayoutEngine<GenGraph, EagerOrSqlSource> {
         &self.engine
     }
