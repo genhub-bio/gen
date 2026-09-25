@@ -20,6 +20,9 @@ pub struct PlacedNode<N> {
     pub id: N,
     pub rect: WorldRect,
     pub layer: i32,
+    /// The renderer's `NodeRenderer::cursor_row` for this node: the only row, counted up from
+    /// the bottom of `rect`, the cursor may sit on, or `None` for any row.
+    pub cursor_row: Option<u64>,
 }
 
 /// The per-frame product of a `GraphPainter::render` call: every node the painter placed,
@@ -98,6 +101,15 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
     /// The screen rect a node was placed at, whether or not it is currently visible.
     pub fn rect_of(&self, id: N) -> Option<WorldRect> {
         self.by_id.get(&id).map(|&index| self.placed[index].rect)
+    }
+
+    /// The only row the cursor may sit on in a placed node, counted up from the bottom of its
+    /// rect, when its renderer restricts the cursor to one row (see
+    /// `NodeRenderer::cursor_row`).
+    pub fn cursor_row(&self, id: N) -> Option<u64> {
+        self.by_id
+            .get(&id)
+            .and_then(|&index| self.placed[index].cursor_row)
     }
 
     /// The layer a node was placed in, whether or not it is currently visible.
@@ -224,7 +236,12 @@ mod tests {
     use crate::geometry::WorldPos;
 
     fn placed(id: u32, rect: WorldRect, layer: i32) -> PlacedNode<u32> {
-        PlacedNode { id, rect, layer }
+        PlacedNode {
+            id,
+            rect,
+            layer,
+            cursor_row: None,
+        }
     }
 
     fn small_layout() -> Vec<PlacedNode<u32>> {

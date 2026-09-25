@@ -4,7 +4,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use crate::{
     frame_index::{Direction, FrameIndex},
-    geometry::{Point, WorldPos, floor_half},
+    geometry::{Point, WorldPos, WorldRect, floor_half},
     graph_widget::style_cursor_cell,
     theme::current_theme,
     viewport_state::{ViewportState, WorldBuffer},
@@ -43,6 +43,23 @@ impl<N: Copy + Eq + Hash> CursorState<N> {
         self.node = Some(node);
         self.fractional = fractional;
     }
+
+    /// Put the cursor on `row` of `rect` (counted up from its bottom), keeping its column.
+    pub fn hold_to_row(&mut self, rect: WorldRect, row: u64) {
+        let y = rect.bottom().saturating_add_unsigned(row).min(rect.top());
+        self.fractional.1 = rect.fraction_of(WorldPos::new(rect.left(), y)).1;
+    }
+
+    /// Put the cursor on the only row its node's renderer lets it sit on, if the node is placed
+    /// in `frame` and restricted to one (see `NodeRenderer::cursor_row`).
+    pub fn hold_to_cursor_row(&mut self, frame: &FrameIndex<N>) {
+        let Some(node) = self.node else {
+            return;
+        };
+        if let (Some(rect), Some(row)) = (frame.rect_of(node), frame.cursor_row(node)) {
+            self.hold_to_row(rect, row);
+        }
+    }
 }
 
 /// Cursor navigation logic. Runs against a `FrameIndex` (screen rects + layer adjacency),
@@ -65,6 +82,7 @@ impl Navigator {
 
         if new_x >= rect.left() && new_x <= rect.right() {
             cursor.fractional = rect.fraction_of(WorldPos::new(new_x, current.y));
+            cursor.hold_to_cursor_row(frame);
             return Ok(());
         }
 
@@ -77,6 +95,7 @@ impl Navigator {
             Some(target) => {
                 let target_frac_x = if delta > 0 { 0.0 } else { 1.0 };
                 cursor.set_node(target, (target_frac_x, cursor.fractional.1));
+                cursor.hold_to_cursor_row(frame);
                 Ok(())
             }
             None => Err(if delta > 0 {
@@ -89,7 +108,9 @@ impl Navigator {
 
     /// Move the cursor vertically by `delta` screen cells: within the current node if the
     /// result stays in bounds, otherwise jump to the nearest node in the same layer, landing
-    /// at that node's near edge (fractional-x preserved).
+    /// at that node's near edge (fractional-x preserved). A node whose renderer holds the
+    /// cursor to one row has no other row to move to, so the move always jumps, landing on
+    /// the target's own cursor row when it has one.
     pub fn move_vertical<N: Copy + Eq + Hash>(
         cursor: &mut CursorState<N>,
         delta: i64,
@@ -100,7 +121,7 @@ impl Navigator {
         let current = rect.point_at_fraction(cursor.fractional);
         let new_y = current.y + delta;
 
-        if new_y >= rect.bottom() && new_y <= rect.top() {
+        if frame.cursor_row(node).is_none() && new_y >= rect.bottom() && new_y <= rect.top() {
             cursor.fractional = rect.fraction_of(WorldPos::new(current.x, new_y));
             return Ok(());
         }
@@ -114,6 +135,7 @@ impl Navigator {
             Some(target) => {
                 let target_frac_y = if delta > 0 { 0.0 } else { 1.0 };
                 cursor.set_node(target, (cursor.fractional.0, target_frac_y));
+                cursor.hold_to_cursor_row(frame);
                 Ok(())
             }
             None => Err("No node found in same layer in that direction".to_string()),
@@ -125,7 +147,8 @@ impl Navigator {
     /// columns counted from its rect's left edge. The search walks the nodes the way
     /// `move_horizontal` does: the rest of the current node, then `frame.neighbor(node,
     /// direction)` and on, so a fork is resolved exactly as stepping the cursor across it
-    /// would be. The cursor lands on the node's middle row, where its sequence is drawn.
+    /// would be. The cursor lands on the node's cursor row (see `NodeRenderer::cursor_row`),
+    /// or its middle row when the renderer leaves every row open.
     /// When the walk runs out of placed nodes the cursor is left unchanged and an error is
     /// returned.
     pub fn move_to_stop<N: Copy + Eq + Hash>(
@@ -160,6 +183,7 @@ impl Navigator {
                     .fraction_of(WorldPos::new(rect.left() + column, rect.bottom()))
                     .0;
                 cursor.set_node(node, (x, 0.5));
+                cursor.hold_to_cursor_row(frame);
                 return Ok(());
             }
             node = frame.neighbor(node, direction).ok_or(if forward {
@@ -218,12 +242,17 @@ impl CursorOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::WorldRect;
+    use crate::frame_index::PlacedNode;
 
     fn frame_with(rects: Vec<(u32, WorldRect, i32)>) -> FrameIndex<u32> {
         let placed = rects
             .into_iter()
-            .map(|(id, rect, layer)| crate::frame_index::PlacedNode { id, rect, layer })
+            .map(|(id, rect, layer)| PlacedNode {
+                id,
+                rect,
+                layer,
+                cursor_row: None,
+            })
             .collect();
         FrameIndex::build(placed, WorldRect::from_coords(0, 0, 100, 100))
     }
@@ -381,6 +410,31 @@ mod tests {
             Navigator::move_to_stop(&mut cursor, Direction::Left, &frame, stops)
                 .expect("should find a stop");
             assert_eq!(column(&cursor, &frame), (0, 6));
+        }
+
+        #[test]
+        fn test_move_to_stop_lands_on_the_cursor_row() {
+            // Two 5-row nodes whose renderer holds the cursor to their second row from the
+            // bottom, the way a sequence row sits between annotation lanes.
+            let placed = [(0, 0), (1, 12)]
+                .into_iter()
+                .map(|(id, left)| PlacedNode {
+                    id,
+                    rect: WorldRect::from_coords(left, 0, left + 8, 4),
+                    layer: id as i32,
+                    cursor_row: Some(1),
+                })
+                .collect();
+            let frame = FrameIndex::build(placed, WorldRect::from_coords(0, 0, 100, 100));
+            let mut cursor = cursor_at(0, 1.0);
+            Navigator::move_to_stop(&mut cursor, Direction::Right, &frame, stops)
+                .expect("should find a stop");
+            assert_eq!(column(&cursor, &frame), (1, 5));
+            let rect = frame.rect_of(1).expect("should place the node");
+            assert_eq!(
+                rect.point_at_fraction(cursor.fractional).y,
+                rect.bottom() + 1
+            );
         }
 
         #[test]
