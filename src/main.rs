@@ -22,7 +22,7 @@ use r#gen::{
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::{BlockGroupViewOptions, view_block_group},
-        block_group_inline::show_inline_block_group_widget,
+        block_group_inline::{InlineOutcome, show_inline_block_group_widget},
         diff::{view_diff, view_diff_graph},
         operations::view_operations,
         patch::view_patch,
@@ -339,8 +339,9 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                             clamp_inline_view_height(height),
                             history_ref.as_deref(),
                         ) {
-                            Ok(true) => {
-                                // User requested upgrade to full TUI
+                            Ok(InlineOutcome::OpenFullViewer(controller)) => {
+                                // User requested upgrade to full TUI, which keeps drawing the
+                                // inline widget's graph
                                 view_block_group(
                                     graph_conn,
                                     config_conn,
@@ -351,10 +352,11 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                                         collection_name,
                                         position,
                                         history_ref: history_ref.as_deref(),
+                                        controller: Some(controller),
                                     },
                                 )?;
                             }
-                            Ok(false) => {}
+                            Ok(InlineOutcome::Closed) => {}
                             Err(e) => {
                                 eprintln!("Error showing inline widget: {}", e);
                             }
@@ -379,6 +381,7 @@ fn call_cli() -> Result<(), Box<dyn std::error::Error>> {
                         collection_name,
                         position,
                         history_ref: history_ref.as_deref(),
+                        controller: None,
                     },
                 )?;
             }

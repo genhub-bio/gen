@@ -457,13 +457,41 @@ pub struct BlockGroupViewOptions<'a> {
     pub position: Option<String>,
     /// Historical revision to display, if requested.
     pub history_ref: Option<&'a str>,
+    /// A graph already on screen, such as the inline widget's, to keep drawing instead of
+    /// loading the selected graph again.
+    pub controller: Option<Box<GenGraphController<'a>>>,
 }
 
-pub fn view_block_group(
-    conn: &GraphConnection,
+/// The controller the full-screen viewer starts on: `handed_over` when given, otherwise a new
+/// one, with `selected` open unless it already is.
+///
+/// A handed-over controller keeps its loaded batches, overlays and annotation groups. Its
+/// camera was placed for the previous viewer's area, so it is reframed on the cursor node.
+fn starting_controller<'a>(
+    conn: &'a GraphConnection,
+    workspace: &'a Workspace,
+    history_ref: Option<&'a str>,
+    handed_over: Option<Box<GenGraphController<'a>>>,
+    selected: Option<&BlockGroup>,
+) -> Result<GenGraphController<'a>, Box<dyn Error>> {
+    let mut controller = match handed_over {
+        Some(controller) => *controller,
+        None => GenGraphController::new(conn, workspace, history_ref),
+    };
+    if let Some(selected) = selected
+        && controller.block_group().map(|open| open.id) != Some(selected.id)
+    {
+        controller.open_block_group(&selected.id)?;
+    }
+    controller.reframe_on_cursor();
+    Ok(controller)
+}
+
+pub fn view_block_group<'a>(
+    conn: &'a GraphConnection,
     config_conn: &gen_models::db::ConfigConnection,
-    workspace: &Workspace,
-    options: BlockGroupViewOptions<'_>,
+    workspace: &'a Workspace,
+    options: BlockGroupViewOptions<'a>,
 ) -> Result<(), Box<dyn Error>> {
     let BlockGroupViewOptions {
         name,
@@ -471,34 +499,43 @@ pub fn view_block_group(
         collection_name,
         position,
         history_ref,
+        controller: handed_over,
     } = options;
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Loading block group");
 
-    // The graph, its view, dimming and overlays; drawn into the canvas area each frame.
-    let mut controller = GenGraphController::new(conn, workspace, history_ref);
-    let mut block_group_id: Option<gen_core::HashId> = None;
     let mut focus_zone = FocusZone::Sidebar;
     let mut explorer_state = CollectionExplorerState::new();
     if let Some(ref s) = sample_name {
         explorer_state.set_sample_expanded(s, true);
     }
 
-    if let (Some(name), Some(sample_name)) = (name, sample_name.as_ref()) {
-        let block_group =
+    let selected = match (name, sample_name.as_ref()) {
+        (Some(name), Some(sample_name)) => Some(
             BlockGroup::get_by_name(conn, collection_name, sample_name, &name, history_ref)
                 .unwrap_or_else(|_| {
                     panic!(
                         "No block group found with name {:?} and sample {:?} in collection {} ",
                         name, sample_name, collection_name
                     )
-                });
-        block_group_id = Some(block_group.id);
-        controller.open_block_group(&block_group.id)?;
-        explorer_state.selected_block_group_id = Some(block_group.id);
+                }),
+        ),
+        _ => None,
+    };
+    // The graph, its view, dimming and overlays; drawn into the canvas area each frame.
+    let mut controller =
+        starting_controller(conn, workspace, history_ref, handed_over, selected.as_ref())?;
+    let block_group_id = controller.block_group().map(|block_group| block_group.id);
+    if block_group_id.is_some() {
+        explorer_state.selected_block_group_id = block_group_id;
         focus_zone = FocusZone::Canvas;
     }
+    explorer_state.active_annotation_groups.extend(
+        controller
+            .loaded_annotation_groups()
+            .map(ToString::to_string),
+    );
 
     bar.finish();
 
@@ -1517,15 +1554,26 @@ pub fn view_block_group(
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use gen_core::HashId;
+    use gen_core::{HashId, Workspace};
     use gen_graph::{GenGraph, GraphNode};
+    use gen_models::{
+        block_group::{BlockGroup, NewBlockGroup},
+        db::get_connection,
+        path::Path,
+    };
     use gen_tui::{graph_view::GraphViewState, layout_engine::LayoutEngine};
+    use ratatui::{Terminal, backend::TestBackend, style::Style};
 
     use super::{
         RegionSearchInputAction, RegionSearchState, focus_region_search, is_region_search_command,
-        refresh_region_search, teleport_through_wormhole,
+        refresh_region_search, starting_controller, teleport_through_wormhole,
     };
-    use crate::views::region_search::{resolve_region_search_matches, search_request_fixture};
+    use crate::views::{
+        gen_graph_controller::{AnnotationDisplay, GenGraphController},
+        graph_overlay::has_path_overlay,
+        lazy_graph_source::tests::setup_labelled_chain_block_group,
+        region_search::{resolve_region_search_matches, search_request_fixture},
+    };
 
     #[test]
     fn test_region_search_state_handles_dropdown_selection_without_default() {
@@ -1669,5 +1717,110 @@ mod tests {
         assert_eq!(successor_state.cursor.node, Some(successor_nodes[2]));
         assert_eq!(successor_state.cursor.fractional, (0.0, 0.5));
         assert!(successor_state.highlights.styles.is_empty());
+    }
+
+    /// Draw `controller` once into a narrow terminal, so it crawls its first batch.
+    fn draw_first_batch(controller: &mut GenGraphController) {
+        let mut terminal =
+            Terminal::new(TestBackend::new(12, 12)).expect("should create a test terminal");
+        controller.sync_active_world();
+        terminal
+            .draw(|frame| {
+                controller.render(
+                    frame,
+                    frame.area(),
+                    AnnotationDisplay::FloatingLabels,
+                    Style::default(),
+                );
+            })
+            .expect("should draw the first batch");
+        controller.sync_active_world();
+    }
+
+    #[test]
+    fn test_starting_controller_keeps_a_handed_over_controller_without_reloading() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let labels: Vec<String> = (0..80).map(|index| format!("n{index}")).collect();
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let (block_group_id, edge_ids) = setup_labelled_chain_block_group(&db_path, &label_refs);
+        let conn = get_connection(&db_path).unwrap();
+        let path = Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
+        let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None).unwrap();
+        let workspace = Workspace::from_current_dir();
+        let mut inline =
+            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
+                .expect("should load the block group");
+        inline.view_state_mut().show_cursor();
+        inline.add_path(&path);
+        assert!(inline.toggle_path());
+        draw_first_batch(&mut inline);
+        let anchor = inline
+            .engine()
+            .active_world()
+            .expect("should have an active world after drawing")
+            .anchor();
+        let anchor_batch = inline.engine().batch_of(anchor);
+        let active_batch = inline.engine().active_batch();
+        let node_count = inline.engine().graph().node_count();
+        let cursor = inline.view_state().cursor;
+        assert!(node_count > 2 && node_count < labels.len());
+        assert!(cursor.node.is_some());
+
+        let full = starting_controller(
+            &conn,
+            &workspace,
+            None,
+            Some(Box::new(inline)),
+            Some(&block_group),
+        )
+        .expect("should start the full viewer");
+
+        assert_eq!(full.engine().batch_of(anchor), anchor_batch);
+        assert_eq!(full.engine().active_batch(), active_batch);
+        assert_eq!(full.engine().graph().node_count(), node_count);
+        assert_eq!(full.view_state().cursor.node, cursor.node);
+        assert_eq!(full.view_state().cursor.fractional, cursor.fractional);
+        assert!(has_path_overlay(full.overlays()));
+    }
+
+    #[test]
+    fn test_starting_controller_opens_another_selected_block_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let labels: Vec<String> = (0..80).map(|index| format!("n{index}")).collect();
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &label_refs);
+        let conn = get_connection(&db_path).unwrap();
+        let other = BlockGroup::create(
+            &conn,
+            NewBlockGroup {
+                collection_name: "test",
+                sample_name: "test",
+                name: "chr2",
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let workspace = Workspace::from_current_dir();
+        let mut inline =
+            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
+                .expect("should load the block group");
+        draw_first_batch(&mut inline);
+        assert!(inline.engine().graph().node_count() > 2);
+
+        let full = starting_controller(
+            &conn,
+            &workspace,
+            None,
+            Some(Box::new(inline)),
+            Some(&other),
+        )
+        .expect("should start the full viewer");
+
+        assert_eq!(full.block_group().map(|open| open.id), Some(other.id));
+        assert!(full.engine().graph().node_count() <= 2);
+        assert_eq!(full.engine().active_batch(), None);
+        assert!(full.overlays().is_empty());
     }
 }
