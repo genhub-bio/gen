@@ -41,7 +41,7 @@ use crate::views::{
         AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership, group_track_key,
         has_path_overlay, remove_path_overlay, replace_track_overlays, set_path_overlay,
     },
-    lazy_graph_source::{BlockGroupBounds, EagerOrSqlSource},
+    lazy_graph_source::EagerOrSqlSource,
 };
 
 /// How annotation names are drawn around the graph.
@@ -102,9 +102,6 @@ pub struct GenGraphController<'a> {
     /// Fetched once per block group; a batch change only reloads their annotations for the
     /// new batch's nodes.
     annotation_group_entries: Vec<AnnotationGroupEntry>,
-    /// Where the open block group starts and ends, resolved once per block group so annotation
-    /// loading never needs the whole graph to tell.
-    block_group_bounds: BlockGroupBounds,
     /// The batch the annotation groups were last loaded for. A batch is already the
     /// deliberately-constrained local window, so a reload is only needed when it changes (not
     /// on every pan/zoom within the same batch).
@@ -162,7 +159,6 @@ impl<'a> GenGraphController<'a> {
             node_annotations,
             block_group: None,
             annotation_group_entries: Vec::new(),
-            block_group_bounds: BlockGroupBounds::default(),
             annotation_groups_world: None,
             paths: Vec::new(),
             overlays: Vec::new(),
@@ -202,12 +198,6 @@ impl<'a> GenGraphController<'a> {
         self.dimming = GraphDimming::default();
         self.annotation_group_entries =
             load_annotation_group_entries(self.conn, &block_group, self.history_ref);
-        self.block_group_bounds = BlockGroupBounds::for_view(
-            self.conn,
-            self.engine.graph(),
-            block_group_id,
-            self.history_ref,
-        );
         self.block_group = Some(block_group);
         self.annotation_groups_world = None;
         self.paths.clear();
@@ -219,11 +209,6 @@ impl<'a> GenGraphController<'a> {
     /// The open block group, if any.
     pub fn block_group(&self) -> Option<&BlockGroup> {
         self.block_group.as_ref()
-    }
-
-    /// Where the open block group starts and ends; empty until a block group is opened.
-    pub fn block_group_bounds(&self) -> &BlockGroupBounds {
-        &self.block_group_bounds
     }
 
     pub fn engine(&self) -> &LayoutEngine<GenGraph, EagerOrSqlSource> {
@@ -453,7 +438,6 @@ impl<'a> GenGraphController<'a> {
                 history_ref: self.history_ref,
                 entry,
                 projection_graph: self.engine.graph(),
-                bounds: &self.block_group_bounds,
                 node_ids,
             }) {
                 Ok(spans) => spans,

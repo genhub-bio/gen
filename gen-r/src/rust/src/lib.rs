@@ -43,7 +43,6 @@ use r#gen::{
             highlight_match_range, locus_midpoint, reapply_overlays,
         },
         graph_overlay::{AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource},
-        lazy_graph_source::BlockGroupBounds,
     },
 };
 use gen_annotations::{
@@ -595,8 +594,6 @@ fn load_tracks_from_specs(
         .filter(|n| !is_start_node(n.node_id) && !is_end_node(n.node_id))
         .map(|n| n.node_id)
         .collect();
-    // The engine holds the fully materialized graph, so its sentinels give the bounds directly.
-    let block_group_bounds = BlockGroupBounds::from_graph(engine.graph());
 
     let mut tracks = Vec::new();
     for spec in specs {
@@ -615,7 +612,6 @@ fn load_tracks_from_specs(
                         history_ref: None,
                         entry: &entry,
                         projection_graph: engine.graph(),
-                        bounds: &block_group_bounds,
                         node_ids: &node_filter,
                     };
                     if let Ok(spans) = load_annotations_for_group(&request) {

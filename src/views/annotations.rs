@@ -37,7 +37,6 @@ use crate::views::{
     annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
     annotation_groups::AnnotationGroupEntry,
     annotation_track::{AnnotationSegment, AnnotationSpan, AnnotationTrack},
-    lazy_graph_source::BlockGroupBounds,
 };
 
 pub struct AnnotationGroupTrackRequest<'a> {
@@ -48,9 +47,6 @@ pub struct AnnotationGroupTrackRequest<'a> {
     /// crawled graph only carries the slices crawled so far, so segments over unloaded slices
     /// are dropped until the crawl loads them and the groups reload.
     pub projection_graph: &'a GenGraph,
-    /// Where the viewed block group starts and ends, resolved once per block group (see
-    /// [`BlockGroupBounds::for_view`]) since a partial `projection_graph` cannot tell.
-    pub bounds: &'a BlockGroupBounds,
     /// Node IDs to restrict results to — typically the viewport's visible nodes.
     pub node_ids: &'a HashSet<HashId>,
 }
@@ -96,30 +92,6 @@ fn clip_segments_to_graph(
     clipped
 }
 
-/// True if `segments` cover the block group end to end: some segment overlaps the start of one
-/// of its root slices and some segment overlaps the end of one of its leaf slices.
-///
-/// `segments` are unclipped, so the answer does not depend on how much of the graph a viewer
-/// has loaded. Clipping onto the full graph never moved a segment's edges at a root's start or
-/// a leaf's end, since those slices are always part of it.
-fn spans_whole_block_group(segments: &[AnnotationSegment], bounds: &BlockGroupBounds) -> bool {
-    let starts_at_root = bounds.roots.iter().any(|root| {
-        segments.iter().any(|segment| {
-            segment.node_id == root.node_id
-                && segment.start <= root.sequence_start
-                && segment.end > root.sequence_start
-        })
-    });
-    let ends_at_leaf = bounds.leaves.iter().any(|leaf| {
-        segments.iter().any(|segment| {
-            segment.node_id == leaf.node_id
-                && segment.end >= leaf.sequence_end
-                && segment.start < leaf.sequence_end
-        })
-    });
-    starts_at_root && ends_at_leaf
-}
-
 pub fn load_annotations_for_group(
     request: &AnnotationGroupTrackRequest<'_>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
@@ -128,7 +100,6 @@ pub fn load_annotations_for_group(
         history_ref,
         entry,
         projection_graph,
-        bounds,
         node_ids,
     } = *request;
     // The entry identifies the block group that owns the annotations. The projection graph
@@ -164,9 +135,6 @@ pub fn load_annotations_for_group(
                     strand: segment.strand,
                 })
                 .collect();
-            if spans_whole_block_group(&unclipped_segments, bounds) {
-                return None;
-            }
             let clipped_segments = clip_segments_to_graph(&accession_segments, projection_graph);
             let full_segments = if clipped_segments.is_empty() {
                 unclipped_segments
@@ -858,10 +826,9 @@ mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use super::{
-        AnnotationFileTrackRequest, AnnotationGroupTrackRequest, AnnotationSegment,
-        BlockGroupBounds, annotation_index_is_tabix, load_annotation_file_track,
-        load_annotations_for_group, load_indexed_annotation_bytes, parse_translated_bed,
-        remote_annotation_cache_path, spans_whole_block_group,
+        AnnotationFileTrackRequest, AnnotationGroupTrackRequest, annotation_index_is_tabix,
+        load_annotation_file_track, load_annotations_for_group, load_indexed_annotation_bytes,
+        parse_translated_bed, remote_annotation_cache_path,
     };
     use crate::{
         graphs::combinatorial_library::parse_library,
@@ -1027,9 +994,10 @@ mod tests {
         assert_eq!(segments[1].end, 2686);
     }
 
-    /// pUC19's `source 1..2686` feature spans the whole plasmid and should be hidden.
+    /// pUC19's `source 1..2686` feature spans the whole plasmid and `ori` wraps its origin; both
+    /// are shown like any other feature.
     #[test]
-    fn load_annotations_for_group_hides_puc19_whole_plasmid_source_annotation() {
+    fn test_load_annotations_for_group_shows_puc19_whole_plasmid_and_origin_features() {
         use std::{fs::File, io::BufReader, path::PathBuf};
 
         use gen_models::{
@@ -1083,11 +1051,7 @@ mod tests {
             origin: AnnotationGroupOrigin::CurrentSample,
         };
 
-        let bounds = BlockGroupBounds::load(conn, &block_group.id);
-        assert_eq!(bounds, BlockGroupBounds::from_graph(&graph));
-
-        // The plasmid's own start only: nothing leads into `PATH_END` yet, so a graph-based
-        // root/leaf inference would have to guess.
+        // The plasmid's own start only, as a lazily crawling viewer first loads it.
         let partial_graph = crawl_from_path_start(conn, &block_group.id, 0);
         assert!(partial_graph.node_count() < graph.node_count());
 
@@ -1097,15 +1061,27 @@ mod tests {
                 history_ref: None,
                 entry: &entry,
                 projection_graph,
-                bounds: &bounds,
                 node_ids: &node_ids,
             })
             .unwrap();
 
             let names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
             assert!(
-                !names.contains(&"source"),
-                "expected the whole-plasmid `source` feature to be hidden, got {names:?}"
+                names.contains(&"source"),
+                "the whole-plasmid `source` feature should be shown, got {names:?}"
+            );
+            let ori = spans
+                .iter()
+                .find(|span| span.name == "ori")
+                .unwrap_or_else(|| panic!("the `ori` feature should be shown, got {names:?}"));
+            // `join(2315..2686,1..217)`: the half running off the end comes first, so it is
+            // drawn without an end cap and the half at the start without a start cap.
+            assert_eq!(
+                ori.segments
+                    .iter()
+                    .map(|segment| (segment.start, segment.end))
+                    .collect::<Vec<_>>(),
+                vec![(2314, 2686), (0, 217)]
             );
             assert!(
                 names.contains(&"AmpR"),
@@ -1175,7 +1151,6 @@ mod tests {
             history_ref: None,
             entry: &entry,
             projection_graph: &graph,
-            bounds: &BlockGroupBounds::load(conn, &block_group.id),
             node_ids: &node_ids,
         })
         .unwrap();
@@ -1190,9 +1165,8 @@ mod tests {
         );
     }
 
-    /// A viewer only loads part of the graph at a time. Projected onto that partial graph with
-    /// the block group's bounds, the annotations over its fully loaded nodes come out exactly as
-    /// they do on the full graph.
+    /// A viewer only loads part of the graph at a time. Projected onto that partial graph, the
+    /// annotations over its fully loaded nodes come out exactly as they do on the full graph.
     #[test]
     fn test_load_annotations_for_group_on_partial_graph_matches_full_graph() {
         let context = setup_gen();
@@ -1223,7 +1197,7 @@ mod tests {
             "m123:7-20",
         )
         .unwrap();
-        // Annotates the sequence end to end, so it only stays hidden if the bounds work.
+        // Annotates the sequence end to end.
         add_annotation(
             &context,
             &collection,
@@ -1267,8 +1241,6 @@ mod tests {
             })
             .collect();
         assert!(!fully_loaded_node_ids.is_empty());
-        let bounds = BlockGroupBounds::load(conn, &block_group.id);
-        assert_eq!(bounds, BlockGroupBounds::from_graph(&full_graph));
 
         let entries = load_annotation_group_entries(conn, &block_group, None);
         assert!(
@@ -1283,7 +1255,6 @@ mod tests {
                     history_ref: None,
                     entry: &entry,
                     projection_graph,
-                    bounds: &bounds,
                     node_ids: &fully_loaded_node_ids,
                 })
                 .unwrap()
@@ -1307,10 +1278,6 @@ mod tests {
                 partial_spans, full_spans,
                 "group {} should project the same onto the loaded nodes",
                 entry.name
-            );
-            assert!(
-                full_spans.iter().all(|(name, _)| name != "WHOLE"),
-                "the end-to-end annotation should stay hidden, got {full_spans:?}"
             );
             compared_span_count += full_spans.len();
         }
@@ -1398,7 +1365,6 @@ mod tests {
             history_ref: None,
             entry: &entry,
             projection_graph: &selected_graph,
-            bounds: &BlockGroupBounds::load(conn, &selected_block_group.id),
             node_ids: &node_ids,
         })
         .unwrap();
@@ -1412,103 +1378,6 @@ mod tests {
             names,
             ["cds1", "cds2", "cds3", "p1", "p2", "p3"],
             "annotations should be queried with the entry source ID and projected onto the selected graph"
-        );
-    }
-
-    /// A full-length annotation between sentinel-wrapped root/leaf should be hidden.
-    #[test]
-    fn spans_whole_block_group_hides_full_length_annotation_on_single_node_graph() {
-        use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID};
-
-        let node_id = HashId::convert_str("only-node");
-        let start = GraphNode {
-            node_id: PATH_START_NODE_ID,
-            sequence_start: 0,
-            sequence_end: 0,
-        };
-        let content = GraphNode {
-            node_id,
-            sequence_start: 0,
-            sequence_end: 100,
-        };
-        let end = GraphNode {
-            node_id: PATH_END_NODE_ID,
-            sequence_start: 0,
-            sequence_end: 0,
-        };
-        let mut graph = GenGraph::new();
-        graph.add_edge(start, content, Vec::new());
-        graph.add_edge(content, end, Vec::new());
-
-        let bounds = BlockGroupBounds::from_graph(&graph);
-        assert_eq!(
-            bounds,
-            BlockGroupBounds {
-                roots: vec![content],
-                leaves: vec![content],
-            }
-        );
-
-        let segments = vec![AnnotationSegment {
-            node_id,
-            start: 0,
-            end: 100,
-            strand: Strand::Forward,
-        }];
-        assert!(spans_whole_block_group(&segments, &bounds));
-    }
-
-    /// Only the explicit bounds decide, so a graph cut off mid-way cannot make a partial
-    /// annotation look like it reaches a root or a leaf.
-    #[test]
-    fn test_spans_whole_block_group_needs_both_explicit_bounds() {
-        let first = HashId::convert_str("first");
-        let last = HashId::convert_str("last");
-        let bounds = BlockGroupBounds {
-            roots: vec![GraphNode {
-                node_id: first,
-                sequence_start: 10,
-                sequence_end: 50,
-            }],
-            leaves: vec![GraphNode {
-                node_id: last,
-                sequence_start: 0,
-                sequence_end: 40,
-            }],
-        };
-        let segment = |node_id: HashId, start: i64, end: i64| AnnotationSegment {
-            node_id,
-            start,
-            end,
-            strand: Strand::Forward,
-        };
-
-        assert!(spans_whole_block_group(
-            &[segment(first, 0, 50), segment(last, 0, 40)],
-            &bounds
-        ));
-        assert!(
-            !spans_whole_block_group(&[segment(first, 0, 50)], &bounds),
-            "reaching only the root is not the whole block group"
-        );
-        assert!(
-            !spans_whole_block_group(&[segment(first, 11, 50), segment(last, 0, 40)], &bounds),
-            "starting past the root slice's start is not the whole block group"
-        );
-        assert!(
-            !spans_whole_block_group(&[segment(first, 0, 5), segment(last, 0, 40)], &bounds),
-            "a segment ending before the root slice does not reach it"
-        );
-        assert!(
-            !spans_whole_block_group(&[segment(first, 0, 50), segment(last, 0, 39)], &bounds),
-            "ending before the leaf slice's end is not the whole block group"
-        );
-        assert!(
-            !spans_whole_block_group(
-                &[segment(first, 0, 50), segment(last, 0, 40)],
-                &BlockGroupBounds::default()
-            ),
-            "a block group without bounds never hides anything"
         );
     }
 
