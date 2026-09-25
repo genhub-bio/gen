@@ -46,6 +46,14 @@ impl EventSource for CrosstermEventSource {
     }
 }
 
+/// How the inline widget was left.
+pub enum InlineOutcome<'a> {
+    /// The user closed the widget.
+    Closed,
+    /// The user asked for the full-screen viewer, which keeps drawing this controller.
+    OpenFullViewer(Box<GenGraphController<'a>>),
+}
+
 /// What a key press asks of the event loop.
 #[derive(Debug, PartialEq)]
 enum KeyOutcome {
@@ -127,16 +135,17 @@ fn run_inline_event_loop<B: Backend>(
 /// * q/Enter/Esc: Exit the widget
 ///
 /// # Returns
-/// * `Ok(true)` if the user requested to transition to full-screen view
-/// * `Ok(false)` if completed successfully and exited
-pub fn show_inline_block_group_widget(
-    conn: &GraphConnection,
-    workspace: &Workspace,
+/// * `Ok(InlineOutcome::OpenFullViewer(_))` if the user requested the full-screen view,
+///   carrying the controller for it to keep drawing
+/// * `Ok(InlineOutcome::Closed)` if completed successfully and exited
+pub fn show_inline_block_group_widget<'a>(
+    conn: &'a GraphConnection,
+    workspace: &'a Workspace,
     block_group_id: HashId,
     paths: Vec<Path>,
     height: u16,
-    history_ref: Option<&str>,
-) -> io::Result<bool> {
+    history_ref: Option<&'a str>,
+) -> io::Result<InlineOutcome<'a>> {
     let mut controller =
         GenGraphController::for_block_group(conn, workspace, &block_group_id, history_ref)
             .map_err(|error| io::Error::other(error.to_string()))?;
@@ -176,11 +185,15 @@ pub fn show_inline_block_group_widget(
 
             std::io::Write::flush(&mut std::io::stdout()).ok();
 
-            Ok(upgrade_requested)
+            if upgrade_requested {
+                Ok(InlineOutcome::OpenFullViewer(Box::new(controller)))
+            } else {
+                Ok(InlineOutcome::Closed)
+            }
         }
         Err(_) => {
             eprintln!("Interactive terminal not available, omitting visualization.");
-            Ok(false)
+            Ok(InlineOutcome::Closed)
         }
     }
 }
