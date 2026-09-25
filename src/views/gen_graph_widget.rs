@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -15,7 +16,7 @@ use gen_tui::{
     graph_view::GraphViewState,
     graph_widget::NODE_GLYPH,
     layout::VisualDetail,
-    layout_engine::LayoutEngine,
+    layout_engine::{BatchId, LayoutEngine},
     plotter::{NodeRenderer, PathStyle},
     theme::current_theme,
     viewport_state::WorldBuffer,
@@ -28,7 +29,8 @@ use ratatui::{
 
 use crate::views::{
     annotation_track::{
-        AnnotationSpan, graph_locus_from_annotation_span, span_covered_by_later, span_label_text,
+        AnnotationSpan, LoadedNodeSlices, graph_locus_from_annotation_span,
+        locus_should_show_in_truncated, span_covered_by_later, span_label_text,
         span_should_show_in_truncated,
     },
     graph_dimming::GraphDimming,
@@ -671,6 +673,9 @@ struct PackedAnnotations {
 #[derive(Clone, Debug, Default)]
 pub struct NodeAnnotationLayer {
     packed: Arc<Mutex<HashMap<GraphNode, PackedAnnotations>>>,
+    /// Bumped whenever `replace` changes any node's lane count, the only thing the layer
+    /// contributes to node sizes, so views know when to re-route their geometry.
+    size_generation: Arc<AtomicU64>,
 }
 
 impl NodeAnnotationLayer {
@@ -680,14 +685,33 @@ impl NodeAnnotationLayer {
 
     /// Pack `flags` per node and make them the layer's contents.
     pub fn replace(&self, flags_by_node: HashMap<GraphNode, Vec<AnnotationFlag>>) {
-        let packed = flags_by_node
+        let packed: HashMap<GraphNode, PackedAnnotations> = flags_by_node
             .into_iter()
             .map(|(node, mut flags)| {
                 let lanes = pack_annotation_flags(&mut flags, node.length());
                 (node, PackedAnnotations { flags, lanes })
             })
             .collect();
-        *self.lock() = packed;
+        let mut current = self.lock();
+        let lanes_in = |contents: &HashMap<GraphNode, PackedAnnotations>, node: &GraphNode| {
+            contents.get(node).map_or(0, |packed| packed.lanes)
+        };
+        let sizes_changed = packed
+            .iter()
+            .any(|(node, entry)| lanes_in(&current, node) != entry.lanes)
+            || current
+                .iter()
+                .any(|(node, entry)| lanes_in(&packed, node) != entry.lanes);
+        *current = packed;
+        if sizes_changed {
+            self.size_generation.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Changes whenever a `replace` changed how many lanes any node needs. See
+    /// [`NodeRenderer::size_generation`].
+    pub fn size_generation(&self) -> u64 {
+        self.size_generation.load(Ordering::Relaxed)
     }
 
     /// Rows of annotation lanes `node` needs under its sequence.
@@ -768,13 +792,13 @@ pub fn update_node_annotations<S: GraphSource<GenGraph>>(
     overlays: &[GraphOverlay],
 ) -> Vec<GraphOverlay> {
     let theme = current_theme();
-    let graph = engine.graph();
+    let loaded = LoadedNodeSlices::new(engine.graph());
     let mut flags_by_node: HashMap<GraphNode, Vec<AnnotationFlag>> = HashMap::new();
     for overlay in overlays {
         let Some(span) = overlay.span().filter(|span| !span.name.is_empty()) else {
             continue;
         };
-        let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+        let Some(locus) = graph_locus_from_annotation_span(span, &loaded) else {
             continue;
         };
         let color = match overlay.style.color {
@@ -1089,6 +1113,10 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
             let lanes = self.layer.lanes(node) as u64;
             (node.length() as u64, 2 * lanes + 1)
         })
+    }
+
+    fn size_generation(&self) -> u64 {
+        self.layer.size_generation()
     }
 
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) {
@@ -1545,6 +1573,7 @@ pub fn reapply_overlays<R, S>(
 {
     let detail_level = levels[view_state.zoom_index.min(levels.len() - 1)].0;
     let graph = engine.graph();
+    let loaded = LoadedNodeSlices::new(graph);
 
     // DB-loaded tracks are too busy to paint at minimal detail; a span confined to a
     // partial slice of a single node is also dropped at truncated detail, mirroring the
@@ -1563,7 +1592,7 @@ pub fn reapply_overlays<R, S>(
                 })
                 .filter(|span| {
                     detail_level != VisualDetail::Truncated
-                        || span_should_show_in_truncated(span, graph)
+                        || span_should_show_in_truncated(span, &loaded)
                 })
                 .map(|_| idx)
         })
@@ -1586,7 +1615,7 @@ pub fn reapply_overlays<R, S>(
         let span = overlays[idx]
             .span()
             .expect("filtered to span overlays above");
-        let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+        let Some(locus) = graph_locus_from_annotation_span(span, &loaded) else {
             continue;
         };
         let regions: Vec<CellRegion> = locus
@@ -1641,82 +1670,158 @@ pub fn reapply_overlays<R, S>(
     }
 }
 
-/// Draw floating labels for `overlays` after the graph has been rendered into `buf`.
+/// Everything besides the overlays themselves that highlights, annotation flags, and floating
+/// labels are resolved against: the zoom step (which picks the detail level) and the loaded
+/// graph, identified by the active batch and how many nodes have been crawled in. Viewers
+/// rebuild that overlay-derived state only when this or their overlays change, instead of on
+/// every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverlayInputs {
+    zoom_index: usize,
+    active_batch: Option<BatchId>,
+    loaded_nodes: usize,
+}
+
+impl OverlayInputs {
+    pub fn current<S: GraphSource<GenGraph>>(
+        engine: &LayoutEngine<GenGraph, S>,
+        view_state: &GraphViewState<GraphNode>,
+    ) -> Self {
+        Self {
+            zoom_index: view_state.zoom_index,
+            active_batch: engine.active_batch(),
+            loaded_nodes: engine.graph().node_count(),
+        }
+    }
+}
+
+/// One floating label resolved against the loaded graph, waiting only for a camera to place it.
+#[derive(Clone)]
+struct PendingLabel {
+    locus: GraphLocus,
+    text: String,
+    color: Color,
+}
+
+/// The floating labels for a set of overlays at one detail level, mapped onto the loaded graph
+/// and with covered or truncated-away spans already dropped. Only placement depends on the
+/// camera, so a viewer rebuilds this when its overlays, zoom level, or loaded batch change and
+/// hands it to [`draw_annotation_labels`] every frame.
+#[derive(Clone)]
+pub struct AnnotationLabels {
+    detail_level: VisualDetail,
+    labels: Vec<PendingLabel>,
+    /// Whether a labelled span was dropped before placement, which counts as hidden.
+    any_suppressed: bool,
+}
+
+impl Default for AnnotationLabels {
+    fn default() -> Self {
+        Self {
+            detail_level: VisualDetail::Minimal,
+            labels: Vec::new(),
+            any_suppressed: false,
+        }
+    }
+}
+
+impl AnnotationLabels {
+    /// Resolve the labels of `overlays` at `detail_level` against `graph`.
+    ///
+    /// Overlays are labelled longest-first so the covered-by-later check matches highlight
+    /// paint order. A label is suppressed when its span is fully covered by a shorter overlay
+    /// on top, or when it collapses into a truncated node.
+    pub fn new(graph: &GenGraph, detail_level: VisualDetail, overlays: &[GraphOverlay]) -> Self {
+        let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
+            .iter()
+            .filter_map(|overlay| {
+                overlay
+                    .span()
+                    .filter(|span| !span.name.is_empty())
+                    .filter(|_| {
+                        !matches!(
+                            (detail_level, &overlay.source),
+                            (VisualDetail::Minimal, OverlaySource::Track(_))
+                        )
+                    })
+                    .map(|span| (span, overlay.style))
+            })
+            .collect();
+        let mut result = Self {
+            detail_level,
+            ..Self::default()
+        };
+        if labeled.is_empty() {
+            return result;
+        }
+        labeled.sort_by_key(|(span, _)| {
+            -(span
+                .segments
+                .iter()
+                .map(|segment| segment.end - segment.start)
+                .sum::<i64>())
+        });
+
+        let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
+        let theme = current_theme();
+        let loaded = LoadedNodeSlices::new(graph);
+        for (idx, (span, style)) in labeled.iter().enumerate() {
+            let Some(locus) = graph_locus_from_annotation_span(span, &loaded) else {
+                continue;
+            };
+            if span_covered_by_later(span, idx, &span_refs)
+                || (detail_level == VisualDetail::Truncated
+                    && !locus_should_show_in_truncated(&locus))
+            {
+                result.any_suppressed = true;
+                continue;
+            }
+            let color = match style.color {
+                Color::Reset => theme[0x06],
+                other => other,
+            };
+            result.labels.push(PendingLabel {
+                locus,
+                text: span_label_text(span),
+                color,
+            });
+        }
+        result
+    }
+}
+
+/// Draw `labels` near their spans after the graph has been rendered into `buf`.
 ///
-/// Overlays are labelled longest-first so the covered-by-later check matches highlight
-/// paint order. A label is suppressed when its span is fully covered by a shorter overlay
-/// on top, when it collapses into a truncated node, or when no free cell is found near its
-/// span. Returns `true` if any labelled overlay was suppressed, so the caller can show a
-/// single "some annotations hidden" hint.
-pub fn draw_annotation_labels<R, S>(
+/// A label is hidden when no free cell is found near its span. Returns `true` if any label
+/// was hidden here or suppressed when `labels` was built, so the caller can show a single
+/// "some annotations hidden" hint.
+pub fn draw_annotation_labels(
     buf: &mut Buffer,
     area: Rect,
-    engine: &LayoutEngine<GenGraph, S>,
     view_state: &GraphViewState<GraphNode>,
-    levels: &[(VisualDetail, R, GapSizes)],
-    overlays: &[GraphOverlay],
-) -> bool
-where
-    S: GraphSource<GenGraph>,
-{
-    let detail_level = levels[view_state.zoom_index.min(levels.len() - 1)].0;
-    let graph = engine.graph();
-    let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
-        .iter()
-        .filter_map(|overlay| {
-            overlay
-                .span()
-                .filter(|span| !span.name.is_empty())
-                .filter(|_| {
-                    !matches!(
-                        (detail_level, &overlay.source),
-                        (VisualDetail::Minimal, OverlaySource::Track(_))
-                    )
-                })
-                .map(|span| (span, overlay.style))
-        })
-        .collect();
-    if labeled.is_empty() {
-        return false;
-    }
-    labeled.sort_by_key(|(span, _)| {
-        -(span
-            .segments
-            .iter()
-            .map(|segment| segment.end - segment.start)
-            .sum::<i64>())
-    });
-
-    let span_refs: Vec<&AnnotationSpan> = labeled.iter().map(|(span, _)| *span).collect();
-    let theme = current_theme();
-    let max_distance = if detail_level == VisualDetail::Minimal {
+    labels: &AnnotationLabels,
+) -> bool {
+    let max_distance = if labels.detail_level == VisualDetail::Minimal {
         10
     } else {
         5
     };
-
-    let mut any_hidden = false;
-    for (idx, (span, style)) in labeled.iter().enumerate() {
-        let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
+    let mut any_hidden = labels.any_suppressed;
+    for label in &labels.labels {
+        let Some(bounds) = locus_label_bounds(&label.locus, &view_state.frame, labels.detail_level)
+        else {
             continue;
         };
-        if span_covered_by_later(span, idx, &span_refs) {
-            any_hidden = true;
-            continue;
-        }
-        if detail_level == VisualDetail::Truncated && !span_should_show_in_truncated(span, graph) {
-            any_hidden = true;
-            continue;
-        }
-        let Some(bounds) = locus_label_bounds(&locus, &view_state.frame, detail_level) else {
-            continue;
-        };
-        let color = match style.color {
-            Color::Reset => theme[0x06],
-            other => other,
-        };
-        let label = span_label_text(span);
-        if draw_label_near_pos(buf, area, bounds, &label, color, view_state, max_distance).is_none()
+        if draw_label_near_pos(
+            buf,
+            area,
+            bounds,
+            &label.text,
+            label.color,
+            view_state,
+            max_distance,
+        )
+        .is_none()
         {
             any_hidden = true;
         }
@@ -2251,6 +2356,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_annotated_renderer_size_generation_moves_only_when_lanes_change() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("annotated"),
+            sequence_start: 0,
+            sequence_end: 40,
+        };
+        let layer = NodeAnnotationLayer::new();
+        let renderer = GenGraphAnnotatedRenderer::new(SyntheticSequenceSource, layer.clone());
+        let initial = renderer.size_generation();
+
+        layer.replace(HashMap::new());
+        assert_eq!(renderer.size_generation(), initial);
+
+        layer.replace(HashMap::from([(
+            node,
+            vec![flag("a", 0, 10, Strand::Forward)],
+        )]));
+        let one_lane = renderer.size_generation();
+        assert_ne!(one_lane, initial);
+
+        // Moving a flag within its lane changes what is drawn, not how big the node is.
+        layer.replace(HashMap::from([(
+            node,
+            vec![flag("a", 2, 12, Strand::Forward)],
+        )]));
+        assert_eq!(renderer.size_generation(), one_lane);
+
+        layer.replace(HashMap::from([(
+            node,
+            vec![
+                flag("a", 0, 10, Strand::Forward),
+                flag("b", 5, 15, Strand::Forward),
+            ],
+        )]));
+        let two_lanes = renderer.size_generation();
+        assert_ne!(two_lanes, one_lane);
+
+        layer.replace(HashMap::new());
+        assert_ne!(renderer.size_generation(), two_lanes);
+    }
+
     #[derive(Clone, Copy)]
     struct RepeatingSequenceSource;
 
@@ -2371,6 +2518,11 @@ mod tests {
                 &mut colors,
             );
             let floating = update_node_annotations(&layer, &engine, &overlays);
+            let labels = AnnotationLabels::new(
+                engine.graph(),
+                zoom_levels[view_state.zoom_index].0,
+                &floating,
+            );
             let visual = &zoom_levels[view_state.zoom_index].1;
             terminal
                 .draw(|f| {
@@ -2386,14 +2538,7 @@ mod tests {
                         &layer,
                         None,
                     );
-                    draw_annotation_labels(
-                        f.buffer_mut(),
-                        area,
-                        &engine,
-                        &view_state,
-                        &zoom_levels,
-                        &floating,
-                    );
+                    draw_annotation_labels(f.buffer_mut(), area, &view_state, &labels);
                 })
                 .unwrap();
         }
@@ -2428,7 +2573,7 @@ mod tests {
         use super::{RepeatingSequenceSource, span_overlay};
         use crate::views::{
             gen_graph_widget::{
-                FULL_ZOOM_LEVEL, NodeAnnotationLayer, apply_zoom_level,
+                AnnotationLabels, FULL_ZOOM_LEVEL, NodeAnnotationLayer, apply_zoom_level,
                 create_annotated_gen_graph_engine, draw_annotation_connectors,
                 draw_annotation_labels, draw_braille_curve, reapply_overlays,
                 update_node_annotations,
@@ -2514,6 +2659,11 @@ mod tests {
                     &mut colors,
                 );
                 let floating = update_node_annotations(&layer, &engine, &overlays);
+                let labels = AnnotationLabels::new(
+                    engine.graph(),
+                    zoom_levels[view_state.zoom_index].0,
+                    &floating,
+                );
                 terminal
                     .draw(|frame| {
                         let area = frame.area();
@@ -2529,14 +2679,7 @@ mod tests {
                             &layer,
                             focused,
                         );
-                        draw_annotation_labels(
-                            frame.buffer_mut(),
-                            area,
-                            &engine,
-                            &view_state,
-                            &zoom_levels,
-                            &floating,
-                        );
+                        draw_annotation_labels(frame.buffer_mut(), area, &view_state, &labels);
                     })
                     .expect("should render annotations");
             }

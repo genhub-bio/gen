@@ -10,14 +10,15 @@ use r#gen::{
     views::{
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
         annotation_track::{
-            AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
+            AnnotationSpan, AnnotationTrack, LoadedNodeSlices, annotation_span_from_graph_locus,
             graph_locus_from_annotation_span,
         },
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
-            self, NodeAnnotationLayer, PathSequenceSource, SendSyncZoomLevels,
-            create_send_sync_annotated_gen_graph_engine_lazy, draw_annotation_connectors,
-            draw_annotation_labels, locus_midpoint, reapply_overlays, update_node_annotations,
+            self, AnnotationLabels, NodeAnnotationLayer, OverlayInputs, PathSequenceSource,
+            SendSyncZoomLevels, create_send_sync_annotated_gen_graph_engine_lazy,
+            draw_annotation_connectors, draw_annotation_labels, locus_midpoint, reapply_overlays,
+            update_node_annotations,
         },
         graph_dimming::GraphDimming,
         graph_overlay::{
@@ -307,6 +308,17 @@ struct GraphPage {
     /// The annotation whose pieces are joined by connectors at full detail. Set by
     /// `show()`, and dropped once no overlay carries that annotation any more.
     focused_annotation: Option<HashId>,
+    /// What the highlights were last registered against by `reapply`; a render reapplies
+    /// only when the zoom step or the loaded graph moved on since.
+    applied_overlay_inputs: Option<OverlayInputs>,
+    /// Whether `node_annotations` and `floating_overlays` predate the latest `reapply`.
+    node_annotations_stale: bool,
+    /// The overlays whose names found no room under their node at the last refill.
+    floating_overlays: Vec<GraphOverlay>,
+    /// Floating labels resolved against the graph as last rendered, and what they were
+    /// resolved against (`None` once the overlays change).
+    annotation_labels: AnnotationLabels,
+    labelled_overlay_inputs: Option<OverlayInputs>,
 }
 
 /// The information needed to lazily build a `GraphPage` on first visit,
@@ -383,6 +395,11 @@ impl GraphPage {
             node_annotations,
             annotation_groups_loaded: false,
             focused_annotation: None,
+            applied_overlay_inputs: None,
+            node_annotations_stale: true,
+            floating_overlays: Vec::new(),
+            annotation_labels: AnnotationLabels::default(),
+            labelled_overlay_inputs: None,
         }
     }
 
@@ -495,8 +512,8 @@ impl GraphPage {
 
     /// Re-register every overlay highlight on the controller from the current overlay list.
     ///
-    /// Must run on every render, not just after `overlays` mutates: which spans register
-    /// depends on the current detail level, so a zoom/detail change alone can change the result.
+    /// Runs after every `overlays` mutation, and again from `render_into` whenever the zoom
+    /// step (which picks the detail level) or the loaded graph changed since the last run.
     fn reapply(&mut self) {
         if let Some(focused) = self.focused_annotation
             && !self
@@ -513,6 +530,8 @@ impl GraphPage {
             &mut self.overlays,
             &mut self.annotation_colors,
         );
+        self.applied_overlay_inputs = Some(OverlayInputs::current(&self.engine, &self.view_state));
+        self.node_annotations_stale = true;
     }
 
     fn push_track_as_overlays_with_colors(
@@ -570,7 +589,8 @@ impl GraphPage {
     }
 
     fn navigate_to_span(&mut self, span: &AnnotationSpan, center: bool) {
-        let Some(locus) = graph_locus_from_annotation_span(span, self.engine.graph()) else {
+        let loaded = LoadedNodeSlices::new(self.engine.graph());
+        let Some(locus) = graph_locus_from_annotation_span(span, &loaded) else {
             return;
         };
         let Some(pos) = locus_target_pos(&locus, center) else {
@@ -584,11 +604,20 @@ impl GraphPage {
     /// Shared by the standalone `render_frame` pymethod and `PySampleController`,
     /// which renders a header row above the graph and offsets `graph_area` accordingly.
     fn render_into(&mut self, buf: &mut Buffer, graph_area: Rect) -> PyResult<()> {
-        // Re-register overlays: detail level affects which spans register (see `reapply`).
-        self.reapply();
+        // Re-register overlays when the detail level or the loaded graph changed since the last
+        // run, since both affect which spans register (see `reapply`).
+        if self.applied_overlay_inputs
+            != Some(OverlayInputs::current(&self.engine, &self.view_state))
+        {
+            self.reapply();
+        }
         // Packing before layout reserves room beneath each node for its annotation bars.
-        let floating_overlays =
-            update_node_annotations(&self.node_annotations, &self.engine, &self.overlays);
+        if self.node_annotations_stale {
+            self.floating_overlays =
+                update_node_annotations(&self.node_annotations, &self.engine, &self.overlays);
+            self.node_annotations_stale = false;
+            self.labelled_overlay_inputs = None;
+        }
         self.dimming.sync(
             self.engine.graph(),
             self.engine.source(),
@@ -615,9 +644,21 @@ impl GraphPage {
             );
         }
 
-        // At full detail, only names that could not fit beside their bars still float.
+        // At full detail, only names that could not fit beside their bars still float. Labels
+        // are resolved against the graph as rendered, which may have just grown.
         let detail_level = self.zoom_levels[self.view_state.zoom_index].0;
-        let labelled_overlays = if detail_level == VisualDetail::Full {
+        let label_inputs = OverlayInputs::current(&self.engine, &self.view_state);
+        if self.labelled_overlay_inputs != Some(label_inputs) {
+            let labelled_overlays = if detail_level == VisualDetail::Full {
+                &self.floating_overlays
+            } else {
+                &self.overlays
+            };
+            self.annotation_labels =
+                AnnotationLabels::new(self.engine.graph(), detail_level, labelled_overlays);
+            self.labelled_overlay_inputs = Some(label_inputs);
+        }
+        if detail_level == VisualDetail::Full {
             draw_annotation_connectors(
                 buf,
                 graph_area,
@@ -625,18 +666,9 @@ impl GraphPage {
                 &self.node_annotations,
                 self.focused_annotation,
             );
-            &floating_overlays
-        } else {
-            &self.overlays
-        };
-        let any_hidden = draw_annotation_labels(
-            buf,
-            graph_area,
-            &self.engine,
-            &self.view_state,
-            &self.zoom_levels,
-            labelled_overlays,
-        );
+        }
+        let any_hidden =
+            draw_annotation_labels(buf, graph_area, &self.view_state, &self.annotation_labels);
         if any_hidden {
             let note = if detail_level == VisualDetail::Full {
                 " some annotations hidden due to space constraints "
@@ -837,6 +869,7 @@ impl GraphPage {
         self.overlays.clear();
         self.focused_annotation = None;
         self.view_state.clear_all_highlights();
+        self.node_annotations_stale = true;
     }
 
     /// Make `annotation` the one whose pieces are joined by connectors, or clear the focus.

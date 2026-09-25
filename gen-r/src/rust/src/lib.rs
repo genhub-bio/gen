@@ -32,14 +32,14 @@ use r#gen::{
         annotation_groups::{AnnotationGroupEntry, AnnotationGroupOrigin, annotation_group_names},
         annotation_track::{
             AnnotationSegment as ViewAnnotationSegment, AnnotationSpan, AnnotationTrack,
-            graph_locus_from_annotation_span,
+            LoadedNodeSlices, graph_locus_from_annotation_span,
         },
         annotations::{
             AnnotationGroupTrackRequest, load_annotations_for_group, parse_translated_bed,
             parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
         },
         gen_graph_widget::{
-            self, ZoomLevels, create_gen_graph_engine, draw_annotation_labels,
+            self, AnnotationLabels, ZoomLevels, create_gen_graph_engine, draw_annotation_labels,
             highlight_match_range, locus_midpoint, reapply_overlays,
         },
         graph_overlay::{AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource},
@@ -209,7 +209,11 @@ fn gen_annotation_record_id(obj: &Robj) -> std::result::Result<Option<HashId>, E
 }
 
 /// Build a `gen_annotation` R record (id, name, group, kind, segments, length, locus).
-fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &GenGraph) -> Robj {
+fn annotation_record(
+    conn: &GraphConnection,
+    annotation: &Annotation,
+    loaded: &LoadedNodeSlices,
+) -> Robj {
     let segments = annotation_segments(conn, annotation, None);
     let span = AnnotationSpan {
         id: annotation.id,
@@ -224,7 +228,7 @@ fn annotation_record(conn: &GraphConnection, annotation: &Annotation, graph: &Ge
             })
             .collect(),
     };
-    let locus_robj: Robj = match graph_locus_from_annotation_span(&span, graph) {
+    let locus_robj: Robj = match graph_locus_from_annotation_span(&span, loaded) {
         Some(locus) => graph_locus_record(&locus),
         None => r!(NULL),
     };
@@ -277,9 +281,10 @@ fn list_annotation_records(
         .map_err(|e| Error::Other(e.to_string()))?;
     let annotations = Annotation::query_with_lineage(conn, collection_name, sample_name, name)
         .map_err(|e| Error::Other(e.to_string()))?;
+    let loaded = LoadedNodeSlices::new(&graph);
     let records: Vec<Robj> = annotations
         .iter()
-        .map(|a| annotation_record(conn, a, &graph))
+        .map(|a| annotation_record(conn, a, &loaded))
         .collect();
     Ok(List::from_values(records))
 }
@@ -2151,16 +2156,10 @@ impl Repository {
         view.render(area, &mut buf, &mut view_state);
 
         // Draw floating labels after the graph, then a single hint if any were hidden.
-        let any_hidden = draw_annotation_labels(
-            &mut buf,
-            area,
-            &engine,
-            &view_state,
-            &zoom_levels,
-            &overlays,
-        );
+        let detail_level = zoom_levels[view_state.zoom_index].0;
+        let labels = AnnotationLabels::new(engine.graph(), detail_level, &overlays);
+        let any_hidden = draw_annotation_labels(&mut buf, area, &view_state, &labels);
         if any_hidden {
-            let detail_level = zoom_levels[view_state.zoom_index].0;
             let note = if detail_level == VisualDetail::Full {
                 " some annotations hidden due to space constraints "
             } else {

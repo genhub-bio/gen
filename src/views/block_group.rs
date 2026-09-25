@@ -6,7 +6,7 @@ use std::{
 };
 
 use crossterm::event::{
-    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use gen_core::{HashId, Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
@@ -591,10 +591,23 @@ pub fn view_block_group<'a>(
     let mut is_loading = false;
     let mut last_refresh = Instant::now();
     let mut should_quit = false;
+    // Mouse capture reports every pointer movement; only events that can change the screen
+    // earn a redraw.
+    let mut needs_redraw = true;
     loop {
         // Drain ALL pending input events before doing any work
         while crossterm::event::poll(Duration::from_millis(0))? {
-            match event::read()? {
+            let input = event::read()?;
+            if !matches!(
+                input,
+                event::Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    ..
+                })
+            ) {
+                needs_redraw = true;
+            }
+            match input {
                 event::Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if search_state.focused && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
                     {
@@ -966,6 +979,7 @@ pub fn view_block_group<'a>(
                 explorer.force_reload(&mut explorer_state);
                 explorer_state.retain_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
+                needs_redraw = true;
                 annotation_file_index_available
                     .retain(|id, _| explorer_state.is_annotation_file_active(id));
                 annotation_file_loaded_windows
@@ -993,9 +1007,18 @@ pub fn view_block_group<'a>(
         }
 
         // Reload indexed annotation file tracks when the crawled neighborhood has changed
-        // enough that the loaded window no longer covers it. Annotation group reload
-        // piggybacks on the same neighborhood-changed signal.
+        // enough that the loaded window no longer covers it. The neighborhood's window and node
+        // ids are only worth computing while an indexed file is active.
+        let has_indexed_annotation_file = explorer.data.annotation_files.iter().any(|entry| {
+            let id = entry.file_addition.id;
+            explorer_state.is_annotation_file_active(&id)
+                && annotation_file_index_available
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(false)
+        });
         if !is_loading
+            && has_indexed_annotation_file
             && let Some(block_group) = current_block_group.as_ref()
             && let Some(visible_window) = active_neighborhood_coordinate_window(controller.engine())
         {
@@ -1036,6 +1059,7 @@ pub fn view_block_group<'a>(
                     node_filter: &node_filter,
                     entry,
                 };
+                needs_redraw = true;
                 match load_annotation_file_track(&request) {
                     Ok(load) => {
                         replace_track_overlays(
@@ -1064,7 +1088,18 @@ pub fn view_block_group<'a>(
         // A teleport or jump handled above may already have grown the graph, or moved it into
         // another batch whose annotation groups are loaded here.
         let pre_draw_sync = controller.sync_active_world();
+        if pre_draw_sync.changed {
+            needs_redraw = true;
+        }
         apply_group_reload(pre_draw_sync, &mut explorer_state, &mut messages);
+
+        // Nothing that reaches the screen changed (e.g. only the mouse moved): wait for the
+        // next event instead of redrawing an identical frame.
+        if !needs_redraw {
+            let _ = crossterm::event::poll(Duration::from_secs(3600));
+            continue;
+        }
+        needs_redraw = false;
 
         // Draw the UI
         terminal.draw(|frame| {
@@ -1335,10 +1370,6 @@ pub fn view_block_group<'a>(
 
                 let main_canvas_area = canvas_area;
 
-                // Re-register overlay highlights before rendering. This reruns every frame
-                // because `overlays` can change between frames (file/group toggles,
-                // scroll-triggered reloads).
-                controller.mark_overlays_dirty();
                 // At full detail annotations are drawn as flags under their nodes, so only the
                 // names that found no room there still float.
                 let any_hidden = controller.render(
@@ -1534,12 +1565,15 @@ pub fn view_block_group<'a>(
             search_state.clear_matches();
             search_state.focused = false;
             search_error = None;
+            needs_redraw = true;
             continue;
         }
 
-        // The overlays or dimming changed after the frame was rendered. Draw them immediately
-        // instead of waiting for the next keyboard or mouse event to wake the idle viewer.
+        // The overlays, dimming, or loaded graph changed after the frame was rendered. Draw
+        // them immediately instead of waiting for the next keyboard or mouse event to wake the
+        // idle viewer.
         if changed_after_draw {
+            needs_redraw = true;
             continue;
         }
 
