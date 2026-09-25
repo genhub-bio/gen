@@ -182,7 +182,7 @@ where
     /// than folded into it, since `FrameIndex`'s `N` key space is domain node ids only and
     /// wormhole stubs are synthetic routing nodes with no domain id of their own.
     pub fn render(
-        mut self,
+        self,
         area: Rect,
         buf: &mut Buffer,
         camera: &Camera<G::NodeId>,
@@ -197,33 +197,73 @@ where
             area
         };
 
-        let graph = self.graph;
-        let visual = self.visual;
-        let backward_edges = std::mem::take(&mut self.window.backward_edges);
-        let geometry = build_window_geometry(self.window, &self.gaps, |role| match role {
+        let scene = WindowScene::new(self.window, self.graph, self.visual, &self.gaps);
+        scene.paint(self.graph, self.visual, inner_area, buf, camera, highlights)
+    }
+}
+
+/// One window's routed, compacted geometry at fixed node sizes and gaps, with the viewport
+/// graph painted from it. Neither depends on the camera, so a view that only pans or moves its
+/// cursor keeps painting the same scene at a new offset instead of re-routing the window.
+#[derive(Clone)]
+pub struct WindowScene {
+    geometry: WindowGeometry,
+    viewport_graph: ViewportGraph,
+}
+
+impl WindowScene {
+    /// Size every node of `window` via `visual`, then route and compact it with `gaps`.
+    pub fn new<G, V>(mut window: AssembledLayout, graph: &G, visual: &V, gaps: &GapSizes) -> Self
+    where
+        G: GraphBase + NodeIndexable,
+        V: NodeRenderer<G>,
+    {
+        let backward_edges = std::mem::take(&mut window.backward_edges);
+        let geometry = build_window_geometry(window, gaps, |role| match role {
             NodeRole::Data(node_index) => {
                 let node_id = <G as NodeIndexable>::from_index(graph, node_index.index());
                 visual.get_node_size(&node_id)
             }
             _ => visual.get_dummy_size(),
         });
-
-        let offset = anchor_offset(&geometry, graph, camera);
-
         let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
+        Self {
+            geometry,
+            viewport_graph,
+        }
+    }
+
+    /// Place the scene so the camera's anchor pixel lands at `camera.anchor_screen`, paint the
+    /// visible parts into `buf`, and index where everything landed (see
+    /// [`GraphPainter::render`]). `graph` and `visual` must be the ones the scene was built
+    /// with.
+    pub fn paint<G, V>(
+        &self,
+        graph: &G,
+        visual: &V,
+        area: Rect,
+        buf: &mut Buffer,
+        camera: &Camera<G::NodeId>,
+        highlights: &Highlights<G::NodeId>,
+    ) -> (FrameIndex<G::NodeId>, WormholeStubs<G::NodeId>)
+    where
+        G: GraphBase + NodeIndexable,
+        G::NodeId: Copy + Eq + Hash,
+        V: NodeRenderer<G>,
+    {
+        let offset = anchor_offset(&self.geometry, graph, camera);
         paint(
-            &viewport_graph,
-            inner_area,
+            &self.viewport_graph,
+            area,
             buf,
             offset,
             graph,
             visual,
             highlights,
         );
-
         (
-            frame_index(&geometry, graph, offset, inner_area),
-            wormhole_index(&geometry, graph, offset),
+            frame_index(&self.geometry, graph, offset, area),
+            wormhole_index(&self.geometry, graph, offset),
         )
     }
 }

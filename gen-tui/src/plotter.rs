@@ -90,6 +90,14 @@ where
 
     /// Render a node in its allocated world area.
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId);
+
+    /// A counter that changes whenever `get_node_size` or `get_dummy_size` may answer
+    /// differently than before. Views reuse a window's routed geometry until it changes, so a
+    /// renderer whose sizes depend on mutable state (e.g. annotation lanes under each node) must
+    /// bump it on every real change; a renderer with fixed sizes keeps the default.
+    fn size_generation(&self) -> u64 {
+        0
+    }
 }
 
 /// Forward rendering through a boxed renderer.
@@ -109,6 +117,10 @@ where
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
         (**self).render_node(buffer, area, node_id);
     }
+
+    fn size_generation(&self) -> u64 {
+        (**self).size_generation()
+    }
 }
 
 /// Forward rendering through a shared renderer.
@@ -127,6 +139,10 @@ where
 
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
         (**self).render_node(buffer, area, node_id);
+    }
+
+    fn size_generation(&self) -> u64 {
+        (**self).size_generation()
     }
 }
 
