@@ -32,9 +32,9 @@ use crate::views::{
         active_neighborhood_node_ids, load_block_group_graph, teleport_through_wormhole,
     },
     gen_graph_widget::{
-        self, NodeAnnotationLayer, ZoomLevels, create_annotated_gen_graph_engine_lazy,
-        draw_annotation_connectors, draw_annotation_labels, reapply_overlays,
-        update_node_annotations,
+        self, AnnotationLabels, NodeAnnotationLayer, OverlayInputs, ZoomLevels,
+        create_annotated_gen_graph_engine_lazy, draw_annotation_connectors, draw_annotation_labels,
+        reapply_overlays, update_node_annotations,
     },
     graph_dimming::GraphDimming,
     graph_overlay::{
@@ -119,6 +119,16 @@ pub struct GenGraphController<'a> {
     /// level, or the loaded batch changed since `reapply_overlays` last ran. Highlights persist
     /// between frames, so plain panning and cursor moves skip that work.
     overlays_dirty: bool,
+    /// What the highlights and node annotation flags were last built against. A draw rebuilds
+    /// them when this no longer matches, even if nothing marked the overlays dirty.
+    applied_overlay_inputs: Option<(OverlayInputs, AnnotationDisplay)>,
+    /// The overlays whose names found no room under their node at the last flag refill;
+    /// `None` when drawing with [`AnnotationDisplay::FloatingLabels`].
+    floating_overlays: Option<Vec<GraphOverlay>>,
+    /// Floating labels resolved against the graph as last drawn, and what they were resolved
+    /// against (`None` once the overlays are rebuilt).
+    annotation_labels: AnnotationLabels,
+    labelled_overlay_inputs: Option<(OverlayInputs, AnnotationDisplay)>,
 }
 
 impl<'a> GenGraphController<'a> {
@@ -158,6 +168,10 @@ impl<'a> GenGraphController<'a> {
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
             overlays_dirty: true,
+            applied_overlay_inputs: None,
+            floating_overlays: None,
+            annotation_labels: AnnotationLabels::default(),
+            labelled_overlay_inputs: None,
         }
     }
 
@@ -399,17 +413,23 @@ impl<'a> GenGraphController<'a> {
             self.engine.source(),
             &mut self.view_state,
         );
+        // Highlights and annotation flags drawn for a graph that has since grown or moved to
+        // another batch are stale too.
+        let overlays_stale = self.applied_overlay_inputs.is_some_and(|(inputs, _)| {
+            inputs != OverlayInputs::current(&self.engine, &self.view_state)
+        });
+        let changed = dimming_changed || overlays_stale;
         let current_world = self.engine.active_batch();
         if self.block_group.is_none() || current_world == self.annotation_groups_world {
             return WorldSync {
-                changed: dimming_changed,
+                changed,
                 group_reload: None,
             };
         }
         let node_ids = active_neighborhood_node_ids(&self.engine);
         if node_ids.is_empty() {
             return WorldSync {
-                changed: dimming_changed,
+                changed,
                 group_reload: None,
             };
         }
@@ -468,9 +488,14 @@ impl<'a> GenGraphController<'a> {
         annotation_display: AnnotationDisplay,
         style: Style,
     ) -> bool {
-        // Re-register overlay highlights only when the overlay set, zoom level, or loaded batch
-        // changed since they were last registered.
-        if self.overlays_dirty {
+        // Re-register overlay highlights and refill the node annotation flags only when the
+        // overlay set, the zoom level, the loaded graph, or how annotations are drawn changed
+        // since they were last registered.
+        let overlay_inputs = (
+            OverlayInputs::current(&self.engine, &self.view_state),
+            annotation_display,
+        );
+        if self.overlays_dirty || self.applied_overlay_inputs != Some(overlay_inputs) {
             reapply_overlays(
                 &self.engine,
                 &mut self.view_state,
@@ -478,44 +503,55 @@ impl<'a> GenGraphController<'a> {
                 &mut self.overlays,
                 &mut self.annotation_colors,
             );
+            // Names with no room under their node fall back to floating labels.
+            self.floating_overlays = match annotation_display {
+                AnnotationDisplay::FlagsUnderNodes => Some(update_node_annotations(
+                    &self.node_annotations,
+                    &self.engine,
+                    &self.overlays,
+                )),
+                AnnotationDisplay::FloatingLabels => None,
+            };
             self.overlays_dirty = false;
+            self.applied_overlay_inputs = Some(overlay_inputs);
+            self.labelled_overlay_inputs = None;
         }
-        // Names with no room under their node fall back to floating labels.
-        let floating_overlays = match annotation_display {
-            AnnotationDisplay::FlagsUnderNodes => Some(update_node_annotations(
-                &self.node_annotations,
-                &self.engine,
-                &self.overlays,
-            )),
-            AnnotationDisplay::FloatingLabels => None,
-        };
 
         let active_renderer = &self.zoom_levels[self.view_state.zoom_index].1;
         let view = GraphView::new(&mut self.engine, active_renderer).style(style);
         frame.render_stateful_widget(view, area, &mut self.view_state);
 
-        // Draw floating labels after the graph. At full detail with flags under nodes, only
-        // the names that found no room there still float.
-        let labelled_overlays = match &floating_overlays {
-            Some(floating_overlays) if self.detail_level() == VisualDetail::Full => {
-                draw_annotation_connectors(
-                    frame.buffer_mut(),
-                    area,
-                    &self.view_state.frame,
-                    &self.node_annotations,
-                    None,
-                );
-                floating_overlays
-            }
-            _ => &self.overlays,
-        };
+        // Resolve floating labels against the graph as drawn, which may have just grown. At
+        // full detail with flags under nodes, only the names that found no room there float.
+        let detail_level = self.detail_level();
+        let flags_drawn = self.floating_overlays.is_some() && detail_level == VisualDetail::Full;
+        let label_inputs = (
+            OverlayInputs::current(&self.engine, &self.view_state),
+            annotation_display,
+        );
+        if self.labelled_overlay_inputs != Some(label_inputs) {
+            let labelled_overlays = match &self.floating_overlays {
+                Some(floating_overlays) if flags_drawn => floating_overlays,
+                _ => &self.overlays,
+            };
+            self.annotation_labels =
+                AnnotationLabels::new(self.engine.graph(), detail_level, labelled_overlays);
+            self.labelled_overlay_inputs = Some(label_inputs);
+        }
+        if flags_drawn {
+            draw_annotation_connectors(
+                frame.buffer_mut(),
+                area,
+                &self.view_state.frame,
+                &self.node_annotations,
+                None,
+            );
+        }
         draw_annotation_labels(
             frame.buffer_mut(),
             area,
-            &self.engine,
             &self.view_state,
-            &self.zoom_levels,
-            labelled_overlays,
+            &self.annotation_labels,
         )
     }
 

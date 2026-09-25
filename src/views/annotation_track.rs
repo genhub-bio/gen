@@ -74,25 +74,36 @@ fn annotation_segments_from_graph_locus(locus: &GraphLocus) -> Vec<AnnotationSeg
         .collect()
 }
 
-/// Map `span`'s per-node segments onto the current graph.
+/// Every loaded `GraphNode` grouped by the node it slices, in `sequence_start` order: the
+/// lookup that maps annotation segments onto a graph. Build it once for a pass over many spans;
+/// it only goes stale when the graph grows.
+pub struct LoadedNodeSlices(HashMap<HashId, Vec<GraphNode>>);
+
+impl LoadedNodeSlices {
+    pub fn new(graph: &GenGraph) -> Self {
+        let mut by_node_id: HashMap<HashId, Vec<GraphNode>> = HashMap::new();
+        for node in graph.node_identifiers() {
+            by_node_id.entry(node.node_id).or_default().push(node);
+        }
+        for candidates in by_node_id.values_mut() {
+            candidates.sort_unstable_by_key(|block| block.sequence_start);
+        }
+        Self(by_node_id)
+    }
+}
+
+/// Map `span`'s per-node segments onto the graph `loaded` was built from.
 pub fn graph_locus_from_annotation_span(
     span: &AnnotationSpan,
-    graph: &GenGraph,
+    loaded: &LoadedNodeSlices,
 ) -> Option<GraphLocus> {
     if span.segments.is_empty() {
         return None;
     }
-    let mut node_map: HashMap<HashId, Vec<GraphNode>> = HashMap::new();
-    for node in graph.node_identifiers() {
-        node_map.entry(node.node_id).or_default().push(node);
-    }
-    for candidates in node_map.values_mut() {
-        candidates.sort_unstable_by_key(|block| block.sequence_start);
-    }
 
     let mut slices = Vec::new();
     for segment in &span.segments {
-        let candidates = node_map.get(&segment.node_id)?;
+        let candidates = loaded.0.get(&segment.node_id)?;
         let mut segment_slices = candidates
             .iter()
             .filter_map(|block| {
@@ -140,11 +151,14 @@ pub fn span_label_text(span: &AnnotationSpan) -> String {
 }
 
 /// Return `true` if every segment of `span` resolves to the same `GraphNode`
-/// fragment in `graph`, i.e. the annotation does not cross a node boundary.
-pub fn span_is_single_node(span: &AnnotationSpan, graph: &GenGraph) -> bool {
-    let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
-        return true;
-    };
+/// fragment in `loaded`, i.e. the annotation does not cross a node boundary.
+pub fn span_is_single_node(span: &AnnotationSpan, loaded: &LoadedNodeSlices) -> bool {
+    graph_locus_from_annotation_span(span, loaded)
+        .as_ref()
+        .is_none_or(locus_is_single_node)
+}
+
+fn locus_is_single_node(locus: &GraphLocus) -> bool {
     match locus.slices.first() {
         Some(first) => locus.slices.iter().all(|slice| slice.block == first.block),
         None => true,
@@ -158,13 +172,17 @@ pub fn span_is_single_node(span: &AnnotationSpan, graph: &GenGraph) -> bool {
 /// of the single node it lies on, is kept. This way you avoid pileups of many
 /// small annotations that lie within the truncated sequence, but still show
 /// the annotations that get interrupted by variants since those are relevant.
-pub fn span_should_show_in_truncated(span: &AnnotationSpan, graph: &GenGraph) -> bool {
-    if !span_is_single_node(span, graph) {
+pub fn span_should_show_in_truncated(span: &AnnotationSpan, loaded: &LoadedNodeSlices) -> bool {
+    graph_locus_from_annotation_span(span, loaded)
+        .as_ref()
+        .is_none_or(locus_should_show_in_truncated)
+}
+
+/// [`span_should_show_in_truncated`] for a span already mapped onto the graph.
+pub fn locus_should_show_in_truncated(locus: &GraphLocus) -> bool {
+    if !locus_is_single_node(locus) {
         return true;
     }
-    let Some(locus) = graph_locus_from_annotation_span(span, graph) else {
-        return true;
-    };
     let Some(first) = locus.slices.first() else {
         return true;
     };
@@ -252,7 +270,8 @@ mod tests {
             }],
         };
         let span = annotation_span_from_graph_locus(&locus, "");
-        let recovered = graph_locus_from_annotation_span(&span, &graph).unwrap();
+        let recovered =
+            graph_locus_from_annotation_span(&span, &LoadedNodeSlices::new(&graph)).unwrap();
         assert_eq!(recovered.slices.len(), 1);
         assert_eq!(recovered.slices[0].block, node);
         assert_eq!(recovered.slices[0].start, 5);
@@ -268,7 +287,7 @@ mod tests {
             name: "x".into(),
             segments: vec![],
         };
-        assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
+        assert!(graph_locus_from_annotation_span(&span, &LoadedNodeSlices::new(&graph)).is_none());
     }
 
     #[test]
@@ -284,7 +303,7 @@ mod tests {
             }],
         };
         let span = annotation_span_from_graph_locus(&locus, "");
-        assert!(graph_locus_from_annotation_span(&span, &graph).is_none());
+        assert!(graph_locus_from_annotation_span(&span, &LoadedNodeSlices::new(&graph)).is_none());
     }
 
     /// A node that has been split by a later edit (e.g. a library insertion) shows up as
@@ -318,7 +337,8 @@ mod tests {
             ],
         };
 
-        let locus = graph_locus_from_annotation_span(&span, &graph).unwrap();
+        let locus =
+            graph_locus_from_annotation_span(&span, &LoadedNodeSlices::new(&graph)).unwrap();
         assert_eq!(locus.slices.len(), 2);
         assert_eq!(locus.slices[0].block, left_fragment);
         assert_eq!(locus.slices[0].start, 0);
@@ -348,7 +368,8 @@ mod tests {
             segments: vec![make_segment("split-node", 300, 600, Strand::Forward)],
         };
 
-        let locus = graph_locus_from_annotation_span(&span, &graph).unwrap();
+        let locus =
+            graph_locus_from_annotation_span(&span, &LoadedNodeSlices::new(&graph)).unwrap();
         assert_eq!(locus.slices.len(), 2);
         assert_eq!(locus.slices[0].block, left_fragment);
         assert_eq!(locus.slices[0].start, 300);
@@ -419,7 +440,7 @@ mod tests {
             name: "x".into(),
             segments: vec![make_segment("n1", 0, 10, Strand::Forward)],
         };
-        assert!(span_is_single_node(&span, &graph));
+        assert!(span_is_single_node(&span, &LoadedNodeSlices::new(&graph)));
     }
 
     #[test]
@@ -434,7 +455,7 @@ mod tests {
                 make_segment("n1", 10, 20, Strand::Forward),
             ],
         };
-        assert!(span_is_single_node(&span, &graph));
+        assert!(span_is_single_node(&span, &LoadedNodeSlices::new(&graph)));
     }
 
     #[test]
@@ -450,7 +471,7 @@ mod tests {
                 make_segment("n2", 0, 10, Strand::Forward),
             ],
         };
-        assert!(!span_is_single_node(&span, &graph));
+        assert!(!span_is_single_node(&span, &LoadedNodeSlices::new(&graph)));
     }
 
     #[test]
@@ -461,7 +482,7 @@ mod tests {
             name: "x".into(),
             segments: vec![],
         };
-        assert!(span_is_single_node(&span, &graph));
+        assert!(span_is_single_node(&span, &LoadedNodeSlices::new(&graph)));
     }
 
     /// Segments on different fragments of a split node must not count as single-node,
@@ -488,7 +509,7 @@ mod tests {
                 make_segment("split-node", 10, 15, Strand::Forward),
             ],
         };
-        assert!(!span_is_single_node(&span, &graph));
+        assert!(!span_is_single_node(&span, &LoadedNodeSlices::new(&graph)));
     }
 
     #[test]
@@ -500,7 +521,10 @@ mod tests {
             name: "x".into(),
             segments: vec![make_segment("n1", 5, 10, Strand::Forward)],
         };
-        assert!(!span_should_show_in_truncated(&span, &graph));
+        assert!(!span_should_show_in_truncated(
+            &span,
+            &LoadedNodeSlices::new(&graph)
+        ));
     }
 
     #[test]
@@ -512,7 +536,10 @@ mod tests {
             name: "x".into(),
             segments: vec![make_segment("n1", 0, 20, Strand::Forward)],
         };
-        assert!(span_should_show_in_truncated(&span, &graph));
+        assert!(span_should_show_in_truncated(
+            &span,
+            &LoadedNodeSlices::new(&graph)
+        ));
     }
 
     #[test]
@@ -528,7 +555,10 @@ mod tests {
                 make_segment("n2", 0, 5, Strand::Forward),
             ],
         };
-        assert!(span_should_show_in_truncated(&span, &graph));
+        assert!(span_should_show_in_truncated(
+            &span,
+            &LoadedNodeSlices::new(&graph)
+        ));
     }
 
     /// Regression test: an annotation spanning a variant bubble must stay visible in
@@ -555,6 +585,9 @@ mod tests {
                 make_segment("split-node", 10, 15, Strand::Forward),
             ],
         };
-        assert!(span_should_show_in_truncated(&span, &graph));
+        assert!(span_should_show_in_truncated(
+            &span,
+            &LoadedNodeSlices::new(&graph)
+        ));
     }
 }
