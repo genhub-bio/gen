@@ -97,6 +97,14 @@ where
         true
     }
 
+    /// The one row of `node` the cursor may sit on, counted up from the bottom of its rect, or
+    /// `None` to let the cursor use every row. A renderer that draws decoration around a node's
+    /// content (e.g. annotation lanes above and below a sequence row) names the content row, so
+    /// cursor moves, clicks, and jumps always land on it.
+    fn cursor_row(&self, _node: &G::NodeId) -> Option<u64> {
+        None
+    }
+
     /// A counter that changes whenever `get_node_size` or `get_dummy_size` may answer
     /// differently than before. Views reuse a window's routed geometry until it changes, so a
     /// renderer whose sizes depend on mutable state (e.g. annotation lanes under each node) must
@@ -128,6 +136,10 @@ where
         (**self).is_visible(node)
     }
 
+    fn cursor_row(&self, node: &G::NodeId) -> Option<u64> {
+        (**self).cursor_row(node)
+    }
+
     fn size_generation(&self) -> u64 {
         (**self).size_generation()
     }
@@ -153,6 +165,10 @@ where
 
     fn is_visible(&self, node: &G::NodeId) -> bool {
         (**self).is_visible(node)
+    }
+
+    fn cursor_row(&self, node: &G::NodeId) -> Option<u64> {
+        (**self).cursor_row(node)
     }
 
     fn size_generation(&self) -> u64 {

@@ -568,16 +568,15 @@ mod tests {
         lazy_graph_source::tests::setup_labelled_chain_block_group,
     };
 
-    fn draw(controller: &mut GenGraphController, terminal: &mut Terminal<TestBackend>) {
+    fn draw(
+        controller: &mut GenGraphController,
+        terminal: &mut Terminal<TestBackend>,
+        display: AnnotationDisplay,
+    ) {
         controller.sync_active_world();
         terminal
             .draw(|frame| {
-                controller.render(
-                    frame,
-                    frame.area(),
-                    AnnotationDisplay::FloatingLabels,
-                    Style::default(),
-                );
+                controller.render(frame, frame.area(), display, Style::default());
             })
             .expect("should draw the graph");
         controller.sync_active_world();
@@ -595,9 +594,17 @@ mod tests {
                 .expect("should load the block group");
         let mut terminal =
             Terminal::new(TestBackend::new(80, 12)).expect("should create a test terminal");
-        draw(&mut controller, &mut terminal);
+        draw(
+            &mut controller,
+            &mut terminal,
+            AnnotationDisplay::FloatingLabels,
+        );
         if controller.overlays_dirty {
-            draw(&mut controller, &mut terminal);
+            draw(
+                &mut controller,
+                &mut terminal,
+                AnnotationDisplay::FloatingLabels,
+            );
         }
         assert!(!controller.overlays_dirty);
 
@@ -662,7 +669,11 @@ mod tests {
         controller.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
         let mut terminal =
             Terminal::new(TestBackend::new(12, 12)).expect("should create a test terminal");
-        draw(&mut controller, &mut terminal);
+        draw(
+            &mut controller,
+            &mut terminal,
+            AnnotationDisplay::FloatingLabels,
+        );
         assert!(controller.engine().graph().node_count() > 2);
 
         controller
@@ -673,5 +684,188 @@ mod tests {
         assert_eq!(controller.engine().active_batch(), None);
         assert_eq!(controller.view_state().zoom_index, DEFAULT_ZOOM_LEVEL);
         assert!(controller.overlays().is_empty());
+    }
+
+    /// A chain of five-base nodes at full detail with annotations on some of them, the way
+    /// either viewer shows a block group's annotation groups.
+    mod annotated_chain {
+        use gen_core::{HashId, PATH_START_NODE_ID, Strand};
+        use gen_graph::GraphNode;
+        use gen_models::db::GraphConnection;
+        use gen_tui::{
+            geometry::WorldRect,
+            plotter::{LineStyle, PathStyle},
+        };
+        use petgraph::Direction;
+        use ratatui::style::Color;
+
+        use super::*;
+        use crate::views::{
+            annotation_track::{AnnotationSegment, AnnotationSpan},
+            gen_graph_widget::{FULL_ZOOM_LEVEL, apply_zoom_level},
+            graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
+        };
+
+        /// The active batch's nodes along the chain, in order from its start.
+        fn active_chain(controller: &GenGraphController) -> Vec<GraphNode> {
+            let graph = controller.engine().graph();
+            let mut node = graph
+                .nodes()
+                .find(|node| node.node_id == PATH_START_NODE_ID)
+                .expect("should load the chain's start");
+            let mut chain = Vec::new();
+            while let Some(next) = graph.neighbors_directed(node, Direction::Outgoing).next() {
+                if !controller.engine().active_contains(next) {
+                    break;
+                }
+                chain.push(next);
+                node = next;
+            }
+            chain
+        }
+
+        /// Annotate bases 1-3 of each of `nodes`, forward, one annotation per node.
+        fn annotate(controller: &mut GenGraphController, nodes: &[GraphNode]) {
+            for (index, node) in nodes.iter().enumerate() {
+                controller.overlays_mut().push(GraphOverlay {
+                    content: OverlayContent::Span(AnnotationSpan {
+                        id: HashId::convert_str(&format!("feature {index}")),
+                        name: format!("f{index}"),
+                        segments: vec![AnnotationSegment {
+                            node_id: node.node_id,
+                            start: node.sequence_start + 1,
+                            end: node.sequence_start + 4,
+                            strand: Strand::Forward,
+                        }],
+                    }),
+                    source: OverlaySource::Track("features".to_string()),
+                    style: PathStyle {
+                        color: Color::Reset,
+                        line_style: LineStyle::Normal,
+                        merge_glyphs: true,
+                    },
+                });
+            }
+        }
+
+        /// A controller over an 80-node chain, zoomed to full detail and drawn once so its
+        /// first batch is loaded.
+        fn full_detail_chain<'a>(
+            conn: &'a GraphConnection,
+            workspace: &'a Workspace,
+            block_group_id: &HashId,
+            terminal: &mut Terminal<TestBackend>,
+            display: AnnotationDisplay,
+        ) -> GenGraphController<'a> {
+            let mut controller =
+                GenGraphController::for_block_group(conn, workspace, block_group_id, None)
+                    .expect("should load the block group");
+            let zoom_levels = controller.zoom_levels().clone();
+            apply_zoom_level(controller.view_state_mut(), FULL_ZOOM_LEVEL, &zoom_levels);
+            draw(&mut controller, terminal, display);
+            controller
+        }
+
+        fn chain_block_group(db_path: &std::path::Path) -> HashId {
+            let labels: Vec<String> = (0..80).map(|index| format!("n{index}")).collect();
+            let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+            setup_labelled_chain_block_group(db_path, &label_refs).0
+        }
+
+        /// The cursor's rect and the screen row it sits on.
+        fn cursor_rect_and_row(controller: &GenGraphController) -> (WorldRect, i64) {
+            let view_state = controller.view_state();
+            let node = view_state.cursor.node.expect("should have a cursor node");
+            let rect = view_state
+                .frame
+                .rect_of(node)
+                .expect("should place the cursor node");
+            (rect, rect.point_at_fraction(view_state.cursor.fractional).y)
+        }
+
+        /// The sequence row of an annotated node: its middle row, with a flag lane on either
+        /// side.
+        fn sequence_row(rect: WorldRect) -> i64 {
+            rect.center().y
+        }
+
+        #[test]
+        fn test_cursor_stays_on_the_sequence_row_of_annotated_nodes() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let mut terminal =
+                Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
+            let display = AnnotationDisplay::FlagsUnderNodes;
+            let mut controller =
+                full_detail_chain(&conn, &workspace, &block_group_id, &mut terminal, display);
+            let chain = active_chain(&controller);
+            annotate(&mut controller, &chain[..3]);
+            draw(&mut controller, &mut terminal, display);
+
+            // A go-to aimed at a flag lane, as a door entry or a caller's fraction may be.
+            controller.view_state_mut().go_to_node(chain[1], (0.5, 0.0));
+            draw(&mut controller, &mut terminal, display);
+            let (rect, row) = cursor_rect_and_row(&controller);
+            assert!(
+                rect.height() > 0,
+                "the annotated node should have flag lanes"
+            );
+            assert_eq!(
+                row,
+                sequence_row(rect),
+                "a go-to should land on the sequence row"
+            );
+            let view_state = controller.view_state();
+            let cursor_x = rect.point_at_fraction(view_state.cursor.fractional).x;
+            let caret = view_state
+                .screen_to_terminal(cursor_x, row - 1)
+                .expect("should draw the row under the cursor on screen");
+            assert_eq!(
+                terminal.backend().buffer()[caret].symbol(),
+                "⌃",
+                "the caret should sit just under the sequence row"
+            );
+
+            // The chain has nothing above or below, so up and down leave the cursor put
+            // instead of moving it onto a flag lane.
+            let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+            for code in [KeyCode::Up, KeyCode::Down, KeyCode::Down] {
+                controller.handle_key(press(code));
+                draw(&mut controller, &mut terminal, display);
+                let (rect, row) = cursor_rect_and_row(&controller);
+                assert_eq!(
+                    row,
+                    sequence_row(rect),
+                    "{code:?} should keep the sequence row"
+                );
+            }
+            for code in [KeyCode::Right, KeyCode::Right, KeyCode::Left] {
+                controller.handle_key(press(code));
+                draw(&mut controller, &mut terminal, display);
+                let (rect, row) = cursor_rect_and_row(&controller);
+                assert_eq!(
+                    row,
+                    sequence_row(rect),
+                    "{code:?} should keep the sequence row"
+                );
+            }
+
+            // A click on a flag lane selects the column above it on the sequence row.
+            let (rect, _) = cursor_rect_and_row(&controller);
+            let (column, flag_row) = controller
+                .view_state()
+                .screen_to_terminal(rect.left() + 2, rect.bottom())
+                .expect("should draw the lower flag lane on screen");
+            assert!(controller.view_state_mut().handle_click(column, flag_row));
+            let (rect, row) = cursor_rect_and_row(&controller);
+            assert_eq!(
+                row,
+                sequence_row(rect),
+                "a click should land on the sequence row"
+            );
+        }
     }
 }

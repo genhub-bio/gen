@@ -1163,6 +1163,11 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
         self.layer.size_generation()
     }
 
+    /// The sequence row (see [`sequence_row`]); the flag lanes around it are only decoration.
+    fn cursor_row(&self, node: &GraphNode) -> Option<u64> {
+        Some(floor_half(self.get_node_size(node).1 as i64) as u64)
+    }
+
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) {
         let theme = current_theme();
         let background_style = Style::default().bg(theme[0x05]);
