@@ -216,7 +216,7 @@ fn get_empty_graph() -> GenGraph {
 /// SQLite as the viewer's crawl pushes past its frontier - see `SqlGraphSource`, which is what
 /// turns opening a large block group from a full-graph-materializing stall into an
 /// near-instant open.
-fn load_block_group_graph(
+pub(crate) fn load_block_group_graph(
     conn: &GraphConnection,
     workspace: &Workspace,
     block_group_id: &gen_core::HashId,
@@ -473,7 +473,7 @@ fn toggle_path_highlight(
 /// successor or predecessor of `boundary` (`LayoutEngine::is_successor`): exiting toward a
 /// successor enters the new window from the left, exiting toward a predecessor enters from the
 /// right - the same direction you'd naturally keep moving in.
-fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
+pub(crate) fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
     graph_engine: &mut LayoutEngine<GenGraph, S>,
     graph_view_state: &mut GraphViewState<GraphNode>,
     boundary: GraphNode,
