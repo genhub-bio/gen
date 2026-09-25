@@ -78,10 +78,11 @@ impl<NodeId: Copy + Eq + Hash> LoadedWorld<NodeId> {
     }
 }
 
-/// Divisor applied to the current viewport width (in columns) to derive the node budget for
-/// the alternating BFS crawl that claims a new batch (see `crawl::crawl_batch`). A smaller
+/// Nodes per viewport column in the budget for the breadth-first crawl that claims a new batch
+/// (see `crawl::crawl_batch`). At the most zoomed-out level a node takes a single cell, so the
+/// batch needs a few nodes per column before its boundary doors fall off screen. A smaller
 /// viewport claims smaller batches.
-const NEIGHBORHOOD_NODE_BUDGET_DIVISOR: usize = 2;
+const NEIGHBORHOOD_NODES_PER_COLUMN: usize = 2;
 /// Floor under the derived budget, so a momentarily zero-width (uninitialized) viewport still
 /// produces a usable window instead of degenerating to just the anchor node.
 const MIN_NEIGHBORHOOD_NODE_BUDGET: usize = 10;
@@ -233,9 +234,9 @@ where
     }
 
     /// The node budget for a new batch claimed while the viewport is the given width
-    /// (columns). See `NEIGHBORHOOD_NODE_BUDGET_DIVISOR`.
+    /// (columns). See `NEIGHBORHOOD_NODES_PER_COLUMN`.
     pub fn neighborhood_node_budget(&self, viewport_width: usize) -> usize {
-        (viewport_width / NEIGHBORHOOD_NODE_BUDGET_DIVISOR.max(1)).max(MIN_NEIGHBORHOOD_NODE_BUDGET)
+        (viewport_width * NEIGHBORHOOD_NODES_PER_COLUMN).max(MIN_NEIGHBORHOOD_NODE_BUDGET)
     }
 
     /// Pick a default anchor: the domain graph's own lowest-index node. Deliberately not a
