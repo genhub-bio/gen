@@ -8,6 +8,7 @@ pub mod collection;
 pub mod diff;
 pub mod diff_graph;
 pub mod dot_export;
+pub mod gen_graph_controller;
 pub mod gen_graph_widget;
 pub mod graph_dimming;
 pub mod graph_overlay;
