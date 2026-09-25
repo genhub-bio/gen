@@ -1,5 +1,9 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
 
+use cached::{Cached, SizedCache};
 use gen_core::{
     HashId, PATH_END_NODE_ID, PATH_END_SEQUENCE_HASH, PATH_START_NODE_ID, PATH_START_SEQUENCE_HASH,
     Sha256Hash, Workspace, traits::Capnp,
@@ -162,18 +166,13 @@ impl Node {
         start: i64,
         end: i64,
     ) -> Result<Option<String>, SequenceError> {
-        // Everything but the sequence text itself, which is what this avoids loading.
-        let stored: Option<(Sha256Hash, String, i64, Option<HashId>)> = conn
-            .query_row(
-                "SELECT sequences.hash, sequences.sequence_type, sequences.length,
-                        sequences.asset_ref_id
-                 FROM nodes JOIN sequences ON sequences.hash = nodes.sequence_hash
-                 WHERE nodes.id = ?1",
-                params![node_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        let Some((hash, sequence_type, length, asset_ref_id)) = stored else {
+        let Some(NodeSequenceInfo {
+            hash,
+            sequence_type,
+            length,
+            asset_ref_id,
+        }) = node_sequence_info(conn, node_id)?
+        else {
             return Ok(None);
         };
         if asset_ref_id.is_some() {
@@ -246,6 +245,69 @@ impl Node {
         }
     }
 }
+/// What [`Node::get_sequence_range`] needs to know about a node's sequence, short of its text.
+#[derive(Clone, Debug)]
+struct NodeSequenceInfo {
+    hash: Sha256Hash,
+    sequence_type: String,
+    length: i64,
+    asset_ref_id: Option<HashId>,
+}
+
+/// How many nodes' [`NodeSequenceInfo`] [`node_sequence_info`] keeps.
+const NODE_SEQUENCE_INFO_CAPACITY: usize = 65_536;
+
+/// [`NodeSequenceInfo`] by `(database path, node id)`. A node's sequence never changes once
+/// stored, so an entry stays valid for as long as the database at that path exists.
+static NODE_SEQUENCE_INFO: LazyLock<Mutex<SizedCache<(String, HashId), NodeSequenceInfo>>> =
+    LazyLock::new(|| Mutex::new(SizedCache::with_size(NODE_SEQUENCE_INFO_CAPACITY)));
+
+/// Look up `node_id`'s [`NodeSequenceInfo`], cached per database file. `length` and
+/// `asset_ref_id` come after the sequence text in a `sequences` row, so reading them walks past
+/// the whole stored sequence; for a chromosome-length node that is most of what a viewer spends
+/// fetching a short slice. In-memory databases have no path to key on and are never cached.
+fn node_sequence_info(
+    conn: &GraphConnection,
+    node_id: HashId,
+) -> Result<Option<NodeSequenceInfo>, SequenceError> {
+    let cache_key = conn
+        .path()
+        .filter(|path| !path.is_empty() && *path != ":memory:")
+        .map(|path| (path.to_string(), node_id));
+    if let Some(key) = &cache_key {
+        let mut cache = NODE_SEQUENCE_INFO
+            .lock()
+            .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?;
+        if let Some(info) = cache.cache_get(key) {
+            return Ok(Some(info.clone()));
+        }
+    }
+    let info = conn
+        .query_row(
+            "SELECT sequences.hash, sequences.sequence_type, sequences.length,
+                    sequences.asset_ref_id
+             FROM nodes JOIN sequences ON sequences.hash = nodes.sequence_hash
+             WHERE nodes.id = ?1",
+            params![node_id],
+            |row| {
+                Ok(NodeSequenceInfo {
+                    hash: row.get(0)?,
+                    sequence_type: row.get(1)?,
+                    length: row.get(2)?,
+                    asset_ref_id: row.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    if let (Some(key), Some(info)) = (cache_key, &info) {
+        NODE_SEQUENCE_INFO
+            .lock()
+            .map_err(|err| SequenceError::CachePoisoned(err.to_string()))?
+            .cache_set(key, info.clone());
+    }
+    Ok(info)
+}
+
 #[cfg(test)]
 mod tests {
     use capnp::message::TypedBuilder;
