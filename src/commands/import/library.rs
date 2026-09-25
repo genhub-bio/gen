@@ -17,6 +17,9 @@ pub struct Command {
     /// The name of the library
     #[clap(index = 1)]
     library_name: String,
+    /// Override the Dolt commit message
+    #[arg(short = 'm', long)]
+    message: Option<String>,
     /// The path to the combinatorial library parts fasta file
     #[clap(index = 2)]
     parts: Option<String>,
@@ -84,6 +87,10 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     ) {
         Ok(operation_summary) => {
             conn.execute("END TRANSACTION", [])?;
+            let mut operation_summary = operation_summary;
+            if let Some(message) = cmd.message {
+                operation_summary.summary = message;
+            }
             match commit_operation(context, &operation_summary) {
                 Ok(_) => {
                     println!("Imported library file {library_path} and parts file {parts_path}");

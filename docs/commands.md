@@ -13,6 +13,14 @@ Operations for a given branch can be found via `gen operations -b branch_name`. 
 from a given branch, use `gen apply commit_id`. The changes will be applied to the current state of
 the database and recorded as a new operation.
 
+Import and update commands accept `--message` or `-m` to set the operation message used for the
+commit and operation metadata. If omitted, the command uses its default operation summary.
+
+```sh
+gen import fasta reference.fa --sample reference -m "Import reference genome"
+gen update vcf variants.vcf --sample sample1 --message "Apply sample variants"
+```
+
 # Branches
 
 Creating a new branch can be accomplished via `gen branch --create branch_name`.

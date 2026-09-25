@@ -11,6 +11,9 @@ use crate::{
 /// Update with library files
 #[derive(Debug, Args, Clone)]
 pub struct Command {
+    /// Override the Dolt commit message
+    #[arg(short = 'm', long)]
+    message: Option<String>,
     /// The name of the collection to update
     #[arg(short = 'c', long)]
     collection: Option<String>,
@@ -63,6 +66,10 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
     ) {
         Ok(operation_summary) => {
             conn.execute("END TRANSACTION", [])?;
+            let mut operation_summary = operation_summary;
+            if let Some(message) = cmd.message {
+                operation_summary.summary = message;
+            }
             match commit_operation(context, &operation_summary) {
                 Ok(_) | Err(OperationError::NoChanges) => {}
                 Err(err) => return Err(err.into()),
