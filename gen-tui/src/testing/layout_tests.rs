@@ -2021,32 +2021,28 @@ fn cycle_pinned_source() {
 }
 
 #[test]
-fn viewport_grid_window_of_whole_shells() {
-    // A grid where every inner node has two predecessors and two successors: (layer, row) leads
-    // to (layer + 1, row) and (layer + 1, row + 1). From a central anchor the shells hold 4, 8,
-    // 12, ... nodes, so a budget of 25 is met exactly by three whole shells, far below the
-    // cutoff, and every node on the outer shell shows doors toward the rest of the grid.
-    const LAYERS: usize = 15;
-    const ROWS: usize = 9;
-    const NODE_BUDGET: usize = 25;
+fn viewport_lattice_window_from_its_root() {
+    // A triangular lattice: layer `l` has `l + 1` nodes and (l, i) leads to (l + 1, i) and
+    // (l + 1, i + 1), so neighbouring nodes share one child. From the root every shell is one
+    // whole layer, and a budget of 21 claims layers 0 to 5.
+    const LAYERS: usize = 12;
+    const NODE_BUDGET: usize = 21;
 
     let mut domain_graph = MockDomainGraph::new();
     let nodes: Vec<Vec<NodeIndex>> = (0..LAYERS)
-        .map(|_| (0..ROWS).map(|_| domain_graph.add_node(())).collect())
+        .map(|layer| (0..=layer).map(|_| domain_graph.add_node(())).collect())
         .collect();
     for layer in 0..LAYERS - 1 {
-        for row in 0..ROWS {
-            domain_graph.add_edge(nodes[layer][row], nodes[layer + 1][row], ());
-            if row + 1 < ROWS {
-                domain_graph.add_edge(nodes[layer][row], nodes[layer + 1][row + 1], ());
-            }
+        for (index, &node) in nodes[layer].iter().enumerate() {
+            domain_graph.add_edge(node, nodes[layer + 1][index], ());
+            domain_graph.add_edge(node, nodes[layer + 1][index + 1], ());
         }
     }
-    let anchor = nodes[LAYERS / 2][ROWS / 2];
+    let root = nodes[0][0];
     let mut engine = crate::layout_engine::LayoutEngine::new(domain_graph);
     engine
-        .activate_batch_containing(anchor, NODE_BUDGET)
-        .expect("should build the grid window");
+        .activate_batch_containing(root, NODE_BUDGET)
+        .expect("should build the lattice window");
     assert_eq!(
         engine
             .active_world()
@@ -2054,7 +2050,7 @@ fn viewport_grid_window_of_whole_shells() {
             .members()
             .count(),
         NODE_BUDGET,
-        "three whole shells should meet the budget exactly"
+        "six whole layers should meet the budget exactly"
     );
 
     let mut visual = crate::testing::mocks::MockVisual::new(
@@ -2063,7 +2059,7 @@ fn viewport_grid_window_of_whole_shells() {
     );
     visual.detail = VisualDetail::Minimal;
     let mut state = crate::graph_view::GraphViewState::default();
-    state.go_to_node(anchor, (0.5, 0.5));
+    state.go_to_node(root, (0.5, 0.5));
     state.hide_cursor();
     let mut terminal = create_test_terminal(100, 40);
     terminal
@@ -2075,11 +2071,11 @@ fn viewport_grid_window_of_whole_shells() {
                 &mut state,
             );
         })
-        .expect("should render the grid window");
+        .expect("should render the lattice window");
 
     assert_eq!(state.frame.ids().count(), NODE_BUDGET);
     insta::assert_snapshot!(
-        "grid_window_of_whole_shells",
+        "lattice_window_from_its_root",
         terminal.backend().to_string()
     );
 }
