@@ -209,13 +209,7 @@ impl GraphSource<GenGraph> for SqlGraphSource {
 
     /// A best-effort no-op on a connection or query failure - the nodes simply stay frontier,
     /// since gen-tui's `GraphSource` contract has no error channel of its own.
-    fn expand_frontier(
-        &mut self,
-        graph: &mut GenGraph,
-        frontier: &[GraphNode],
-        direction: Direction,
-        budget: usize,
-    ) {
+    fn expand_frontier(&mut self, graph: &mut GenGraph, frontier: &[GraphNode]) {
         let connection_slot = self
             .connection
             .get_mut()
@@ -226,9 +220,7 @@ impl GraphSource<GenGraph> for SqlGraphSource {
         let Some(conn) = connection_slot.as_ref() else {
             return;
         };
-        let _ = self
-            .crawler
-            .expand(conn, graph, frontier, direction, budget);
+        let _ = self.crawler.complete(conn, graph, frontier);
         let is_circular = *self
             .is_circular
             .get_or_insert_with(|| block_group_is_circular(conn, &self.block_group_id));
@@ -260,16 +252,10 @@ impl GraphSource<GenGraph> for EagerOrSqlSource {
         }
     }
 
-    fn expand_frontier(
-        &mut self,
-        graph: &mut GenGraph,
-        frontier: &[GraphNode],
-        direction: Direction,
-        budget: usize,
-    ) {
+    fn expand_frontier(&mut self, graph: &mut GenGraph, frontier: &[GraphNode]) {
         match self {
-            Self::Eager(source) => source.expand_frontier(graph, frontier, direction, budget),
-            Self::Sql(source) => source.expand_frontier(graph, frontier, direction, budget),
+            Self::Eager(source) => source.expand_frontier(graph, frontier),
+            Self::Sql(source) => source.expand_frontier(graph, frontier),
         }
     }
 }
@@ -403,17 +389,17 @@ pub(crate) mod tests {
     /// Expand every node that is still frontier on either side until none is left.
     fn crawl_everything(source: &mut SqlGraphSource, graph: &mut GenGraph) {
         loop {
-            let frontier: Vec<(GraphNode, Direction)> = graph
+            let frontier: Vec<GraphNode> = graph
                 .nodes()
-                .flat_map(|node| [(node, Direction::Outgoing), (node, Direction::Incoming)])
-                .filter(|(node, direction)| source.is_frontier(*node, *direction))
+                .filter(|node| {
+                    source.is_frontier(*node, Direction::Outgoing)
+                        || source.is_frontier(*node, Direction::Incoming)
+                })
                 .collect();
             if frontier.is_empty() {
                 return;
             }
-            for (node, direction) in frontier {
-                source.expand_frontier(graph, &[node], direction, 0);
-            }
+            source.expand_frontier(graph, &frontier);
         }
     }
 
@@ -430,8 +416,7 @@ pub(crate) mod tests {
         assert!(source.is_frontier(anchor, Direction::Outgoing));
         assert!(source.is_frontier(anchor, Direction::Incoming));
 
-        source.expand_frontier(&mut graph, &[anchor], Direction::Outgoing, 0);
-        source.expand_frontier(&mut graph, &[anchor], Direction::Incoming, 0);
+        source.expand_frontier(&mut graph, &[anchor]);
 
         assert!(graph.contains_edge(graph_node("x"), anchor));
         assert!(graph.contains_edge(anchor, graph_node("z")));
@@ -439,7 +424,7 @@ pub(crate) mod tests {
         assert!(!source.is_frontier(anchor, Direction::Incoming));
         assert!(
             source.is_frontier(graph_node("z"), Direction::Outgoing),
-            "a zero budget should stop at y's own neighbours"
+            "completing y should stop at its own neighbours"
         );
     }
 

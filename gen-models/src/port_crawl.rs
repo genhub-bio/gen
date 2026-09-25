@@ -129,6 +129,24 @@ impl PortCrawler {
         self.materialized.contains(&Port::of(node, direction))
     }
 
+    /// Complete every node in `nodes` on both sides, without walking any further.
+    pub fn complete(
+        &mut self,
+        conn: &GraphConnection,
+        graph: &mut GenGraph,
+        nodes: &[GraphNode],
+    ) -> Result<(), EdgeError> {
+        for node in nodes {
+            for direction in [Direction::Outgoing, Direction::Incoming] {
+                let port = Port::of(node, direction);
+                if !self.materialized.contains(&port) {
+                    self.materialize(conn, graph, port)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Complete `frontier` on its `direction` side, then keep walking that way breadth-first,
     /// completing up to `budget` further nodes. A walk stops at any node that was already
     /// complete before this call, since everything past it is either loaded or its own frontier.
