@@ -32,7 +32,7 @@ use crate::views::{
         active_neighborhood_node_ids, load_block_group_graph, teleport_through_wormhole,
     },
     gen_graph_widget::{
-        self, AnnotationLabels, NodeAnnotationLayer, OverlayInputs, ZoomLevels,
+        self, AnnotationLabels, AnnotationStarts, NodeAnnotationLayer, OverlayInputs, ZoomLevels,
         create_annotated_gen_graph_engine_lazy, draw_annotation_connectors, draw_annotation_labels,
         reapply_overlays, update_node_annotations,
     },
@@ -97,6 +97,10 @@ pub struct GenGraphController<'a> {
     /// Annotation flags drawn under nodes at full detail. Only filled when a viewer draws with
     /// [`AnnotationDisplay::FlagsUnderNodes`].
     node_annotations: NodeAnnotationLayer,
+    /// Where annotations start on each loaded node, for the `w`/`b` keys. Rebuilt with the
+    /// highlights whatever the annotation display, so the stops don't depend on flags being
+    /// drawn.
+    annotation_starts: AnnotationStarts,
     /// `None` until a block group is opened.
     block_group: Option<BlockGroup>,
     /// Fetched once per block group; a batch change only reloads their annotations for the
@@ -157,6 +161,7 @@ impl<'a> GenGraphController<'a> {
             view_state,
             dimming: GraphDimming::default(),
             node_annotations,
+            annotation_starts: AnnotationStarts::default(),
             block_group: None,
             annotation_group_entries: Vec::new(),
             annotation_groups_world: None,
@@ -346,12 +351,11 @@ impl<'a> GenGraphController<'a> {
             KeyCode::Char(key_char @ ('w' | 'b')) if self.detail_level() == VisualDetail::Full => {
                 // Reaching the edge of the loaded batch leaves the cursor where it is, like an
                 // arrow key with nothing beyond it.
-                let node_annotations = &self.node_annotations;
+                let annotation_starts = &self.annotation_starts;
                 match self
                     .view_state
-                    .move_cursor_to_stop(key_char == 'w', |node| {
-                        node_annotations.annotation_starts(&node)
-                    }) {
+                    .move_cursor_to_stop(key_char == 'w', |node| annotation_starts.on(&node))
+                {
                     Ok(()) => GraphKeyOutcome::Redraw,
                     Err(_) => GraphKeyOutcome::Ignore,
                 }
@@ -482,6 +486,7 @@ impl<'a> GenGraphController<'a> {
                 &mut self.overlays,
                 &mut self.annotation_colors,
             );
+            self.annotation_starts = AnnotationStarts::new(&self.engine, &self.overlays);
             // Names with no room under their node fall back to floating labels.
             self.floating_overlays = match annotation_display {
                 AnnotationDisplay::FlagsUnderNodes => Some(update_node_annotations(
@@ -866,6 +871,68 @@ mod tests {
                 sequence_row(rect),
                 "a click should land on the sequence row"
             );
+        }
+
+        /// Whether the cursor's node was drawn inside the viewport on the last draw.
+        fn cursor_on_screen(controller: &GenGraphController) -> bool {
+            let view_state = controller.view_state();
+            let (rect, row) = cursor_rect_and_row(controller);
+            let column = rect.point_at_fraction(view_state.cursor.fractional).x;
+            view_state.screen_to_terminal(column, row).is_some()
+        }
+
+        #[test]
+        fn test_annotation_jumps_reach_starts_off_screen() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+            // The inline widget floats every name; the full-screen viewer draws flags.
+            for display in [
+                AnnotationDisplay::FloatingLabels,
+                AnnotationDisplay::FlagsUnderNodes,
+            ] {
+                let mut terminal =
+                    Terminal::new(TestBackend::new(20, 12)).expect("should create a test terminal");
+                let mut controller =
+                    full_detail_chain(&conn, &workspace, &block_group_id, &mut terminal, display);
+                let chain = active_chain(&controller);
+                let (near, far) = (chain[1], chain[chain.len() - 3]);
+                annotate(&mut controller, &[near, far]);
+                draw(&mut controller, &mut terminal, display);
+                assert!(
+                    !controller
+                        .view_state()
+                        .frame
+                        .visible_ids()
+                        .any(|node| node == far),
+                    "the far annotation should start off screen"
+                );
+
+                let mut stops = Vec::new();
+                while controller.handle_key(press(KeyCode::Char('w'))) == GraphKeyOutcome::Redraw {
+                    draw(&mut controller, &mut terminal, display);
+                    assert!(
+                        cursor_on_screen(&controller),
+                        "{display:?}: the camera should follow the cursor"
+                    );
+                    stops.push(controller.view_state().cursor.node);
+                }
+                assert_eq!(stops, vec![Some(near), Some(far)], "{display:?}: w");
+
+                stops.clear();
+                while controller.handle_key(press(KeyCode::Char('b'))) == GraphKeyOutcome::Redraw {
+                    draw(&mut controller, &mut terminal, display);
+                    assert!(
+                        cursor_on_screen(&controller),
+                        "{display:?}: the camera should follow the cursor"
+                    );
+                    stops.push(controller.view_state().cursor.node);
+                }
+                assert_eq!(stops, vec![Some(near)], "{display:?}: b");
+            }
         }
     }
 }
