@@ -10,7 +10,9 @@ use crate::layout::VisualDetail;
 #[cfg(test)]
 use crate::testing::create_test_terminal;
 #[cfg(test)]
-use crate::testing::mocks::{FixedNodeSizer, MockDomainGraph, TestGraphs, TestRenderers};
+use crate::testing::mocks::{
+    FixedNodeSizer, MockDomainGraph, TestGraphs, TestNodeSizers, TestRenderers,
+};
 
 #[cfg(test)]
 const TARGET_GAP_COMBINATIONS: [(u64, u64); 6] = [(0, 0), (1, 0), (4, 0), (0, 2), (1, 2), (4, 2)];
@@ -2016,4 +2018,68 @@ fn cycle_pinned_source() {
     // node 6 rather than at petgraph's default entry point.
     let snapshot = make_snapshot_pinned(cycle_graph(12), 80, 24, 6);
     insta::assert_snapshot!("cycle_pinned_source", snapshot);
+}
+
+#[test]
+fn viewport_grid_window_of_whole_shells() {
+    // A grid where every inner node has two predecessors and two successors: (layer, row) leads
+    // to (layer + 1, row) and (layer + 1, row + 1). From a central anchor the shells hold 4, 8,
+    // 12, ... nodes, so a budget of 25 is met exactly by three whole shells, far below the
+    // cutoff, and every node on the outer shell shows doors toward the rest of the grid.
+    const LAYERS: usize = 15;
+    const ROWS: usize = 9;
+    const NODE_BUDGET: usize = 25;
+
+    let mut domain_graph = MockDomainGraph::new();
+    let nodes: Vec<Vec<NodeIndex>> = (0..LAYERS)
+        .map(|_| (0..ROWS).map(|_| domain_graph.add_node(())).collect())
+        .collect();
+    for layer in 0..LAYERS - 1 {
+        for row in 0..ROWS {
+            domain_graph.add_edge(nodes[layer][row], nodes[layer + 1][row], ());
+            if row + 1 < ROWS {
+                domain_graph.add_edge(nodes[layer][row], nodes[layer + 1][row + 1], ());
+            }
+        }
+    }
+    let anchor = nodes[LAYERS / 2][ROWS / 2];
+    let mut engine = crate::layout_engine::LayoutEngine::new(domain_graph);
+    engine
+        .activate_batch_containing(anchor, NODE_BUDGET)
+        .expect("should build the grid window");
+    assert_eq!(
+        engine
+            .active_world()
+            .expect("should have an active world")
+            .members()
+            .count(),
+        NODE_BUDGET,
+        "three whole shells should meet the budget exactly"
+    );
+
+    let mut visual = crate::testing::mocks::MockVisual::new(
+        TestNodeSizers::fixed_1x1(),
+        TestRenderers::minimal(),
+    );
+    visual.detail = VisualDetail::Minimal;
+    let mut state = crate::graph_view::GraphViewState::default();
+    state.go_to_node(anchor, (0.5, 0.5));
+    state.hide_cursor();
+    let mut terminal = create_test_terminal(100, 40);
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            crate::graph_view::GraphView::new(&mut engine, &visual).render(
+                area,
+                frame.buffer_mut(),
+                &mut state,
+            );
+        })
+        .expect("should render the grid window");
+
+    assert_eq!(state.frame.ids().count(), NODE_BUDGET);
+    insta::assert_snapshot!(
+        "grid_window_of_whole_shells",
+        terminal.backend().to_string()
+    );
 }
