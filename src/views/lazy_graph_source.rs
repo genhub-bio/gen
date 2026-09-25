@@ -17,7 +17,7 @@ use gen_tui::crawl::{EagerSource, GraphSource};
 use petgraph::Direction;
 
 /// The fixed `(node_id, 0, 0)` value a `PATH_START`/`PATH_END` sentinel always carries (see
-/// `get_empty_graph` and how `Edge::create` records a `PATH_START`/`PATH_END` endpoint's own
+/// `GenGraphController::new` and how `Edge::create` records a `PATH_START`/`PATH_END` endpoint's own
 /// coordinate) - the same two values regardless of which graph, or how much of it is loaded
 /// so far, so naming them never needs a graph scan.
 fn end_sentinel() -> GraphNode {
@@ -94,8 +94,9 @@ fn discard_circular_marker_and_sentinels(graph: &mut GenGraph) {
 /// `LayoutEngine::default_anchor`).
 ///
 /// An ordinary (non-circular) block group seeds with just the `PATH_START` sentinel, same as
-/// [`get_empty_graph`](crate::views::block_group::get_empty_graph) - `set_preferred_initial_anchor`
-/// then opens the view there, and the crawl finds the rest from its one real outgoing edge.
+/// [`GenGraphController::new`](crate::views::gen_graph_controller::GenGraphController::new) -
+/// `set_preferred_initial_anchor` then opens the view there, and the crawl finds the rest from
+/// its one real outgoing edge.
 ///
 /// A circular block group cannot open on `PATH_START` the same way: once its attachment edges
 /// are discarded (see `discard_circular_marker_and_sentinels`, which every
