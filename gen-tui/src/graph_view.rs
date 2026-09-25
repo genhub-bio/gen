@@ -21,7 +21,7 @@ use crate::{
     crawl::{EagerSource, GraphSource},
     distribute_nodes::GapSizes,
     frame_index::{Direction, FrameIndex},
-    geometry::{Point, WorldRect},
+    geometry::{Point, WorldPos, WorldRect},
     graph_painter::{Camera, HighlightKind, Highlights, WindowScene, snap_camera},
     layout::NodeRole,
     layout_engine::{BatchId, LayoutEngine},
@@ -355,13 +355,15 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
 
     /// Handle a click at the given terminal coordinates.
     ///
-    /// - If a placed node occupies the clicked cell: places the cursor on that node,
+    /// - If a placed node occupies the clicked cell: places the cursor on that node (on its
+    ///   cursor row when the renderer restricts it to one, whichever row was clicked),
     ///   switches to cursor-anchored mode, and returns `true`.
     /// - Otherwise: switches to free-camera mode and returns `false`.
     pub fn handle_click(&mut self, terminal_x: u16, terminal_y: u16) -> bool {
         match self.node_hit(terminal_x, terminal_y) {
             Some((node, frac)) => {
                 self.cursor.set_node(node, frac);
+                self.cursor.hold_to_cursor_row(&self.frame);
                 self.show_cursor();
                 self.rebase_camera_to_cursor();
                 true
@@ -847,6 +849,18 @@ where
             });
         }
 
+        // Go-tos, door entries, the initial placement and zoom changes all choose the cursor's
+        // row without knowing how the renderer lays the node out; move it onto the renderer's
+        // cursor row before a go-to frames it.
+        if let Some(node) = state.cursor.node
+            && self.visual.is_visible(&node)
+            && let Some(row) = self.visual.cursor_row(&node)
+        {
+            let rect =
+                WorldRect::from_center_and_size(WorldPos::ZERO, self.visual.get_node_size(&node));
+            state.cursor.hold_to_row(rect, row);
+        }
+
         // A pending go-to centers the cursor's screen position so the anchor projection
         // lands the target exactly at (or snapped to an edge of) the requested spot.
         if state.go_to_pending {
@@ -969,6 +983,7 @@ where
                 state.cursor.set_node(branch, state.cursor.fractional);
             }
         }
+        state.cursor.hold_to_cursor_row(&frame);
         if let Some(overlay_fn) = self.overlay_fn {
             overlay_fn(buf, &frame);
         }
@@ -1830,6 +1845,189 @@ mod tests {
             let (boundary, target) = reached.expect("should reach a door within 20 presses");
             assert_eq!(boundary, junction);
             assert!(branches.contains(&target));
+        }
+    }
+
+    mod cursor_rows {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use petgraph::graph::NodeIndex;
+        use ratatui::{buffer::Buffer, layout::Rect};
+
+        use super::*;
+        use crate::{
+            graph_widget::NODE_GLYPH,
+            testing::mocks::{MockDomainGraph, TestGraphs},
+            viewport_state::WorldBuffer,
+        };
+
+        /// The row `RowHoldingVisual` holds the cursor to, off-center so it can't be mistaken
+        /// for the middle row the cursor defaults to.
+        const CURSOR_ROW: u64 = 3;
+
+        /// Draws every node 5x5 with decoration rows around the one row a cursor may sit on,
+        /// like a sequence row between annotation lanes.
+        struct RowHoldingVisual;
+
+        impl NodeRenderer<MockDomainGraph> for RowHoldingVisual {
+            fn get_node_size(&self, _node: &NodeIndex) -> (u64, u64) {
+                (5, 5)
+            }
+
+            fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, _node_id: &NodeIndex) {
+                buffer.set_char_styled(area.center(), NODE_GLYPH, Style::default());
+            }
+
+            fn cursor_row(&self, _node: &NodeIndex) -> Option<u64> {
+                Some(CURSOR_ROW)
+            }
+        }
+
+        const AREA: Rect = Rect::new(0, 0, 60, 30);
+
+        fn render(
+            engine: &mut LayoutEngine<MockDomainGraph>,
+            state: &mut GraphViewState<NodeIndex>,
+        ) -> Buffer {
+            let mut buffer = Buffer::empty(AREA);
+            GraphView::new(engine, &RowHoldingVisual).render(AREA, &mut buffer, state);
+            buffer
+        }
+
+        /// The cursor's row within its node, counted up from the node's bottom.
+        fn cursor_row(state: &GraphViewState<NodeIndex>) -> i64 {
+            let node = state.cursor.node.expect("should have a cursor node");
+            let rect = state
+                .frame
+                .rect_of(node)
+                .expect("should place the cursor node");
+            rect.point_at_fraction(state.cursor.fractional).y - rect.bottom()
+        }
+
+        fn press(state: &mut GraphViewState<NodeIndex>, code: KeyCode) {
+            state
+                .handle_key_event(KeyEvent::new(code, KeyModifiers::NONE))
+                .expect("should move the cursor");
+        }
+
+        #[test]
+        fn test_vertical_moves_jump_to_the_cursor_row_of_the_next_node() {
+            let mut engine = LayoutEngine::new(TestGraphs::domain_diamond());
+            let mut state = GraphViewState::default();
+            render(&mut engine, &mut state);
+            let branch = NodeIndex::new(1);
+            state.go_to_node(branch, (0.5, 0.5));
+            render(&mut engine, &mut state);
+
+            let (key, other_branch) = match state.frame.neighbor(branch, Direction::Up) {
+                Some(above) => (KeyCode::Up, above),
+                None => (
+                    KeyCode::Down,
+                    state
+                        .frame
+                        .neighbor(branch, Direction::Down)
+                        .expect("should stack the diamond's branches"),
+                ),
+            };
+            press(&mut state, key);
+            assert_eq!(
+                state.cursor.node,
+                Some(other_branch),
+                "one press should leave the node instead of moving onto its decoration rows"
+            );
+            assert_eq!(cursor_row(&state), CURSOR_ROW as i64);
+
+            let back = if key == KeyCode::Up {
+                KeyCode::Down
+            } else {
+                KeyCode::Up
+            };
+            press(&mut state, back);
+            assert_eq!(state.cursor.node, Some(branch));
+            assert_eq!(cursor_row(&state), CURSOR_ROW as i64);
+        }
+
+        #[test]
+        fn test_horizontal_moves_stay_on_the_cursor_row() {
+            let mut engine = LayoutEngine::new(TestGraphs::domain_simple_chain());
+            let mut state = GraphViewState::default();
+            render(&mut engine, &mut state);
+            let first = NodeIndex::new(0);
+            state.go_to_node(first, (0.0, 0.5));
+            render(&mut engine, &mut state);
+            // A cursor left on a decoration row (e.g. by a caller writing its fraction) is
+            // moved back onto the cursor row by the next move.
+            state.cursor.fractional.1 = 0.0;
+
+            press(&mut state, KeyCode::Right);
+            assert_eq!(state.cursor.node, Some(first));
+            assert_eq!(cursor_row(&state), CURSOR_ROW as i64);
+
+            for _ in 0..10 {
+                press(&mut state, KeyCode::Right);
+                if state.cursor.node != Some(first) {
+                    break;
+                }
+            }
+            assert_eq!(state.cursor.node, Some(NodeIndex::new(1)));
+            assert_eq!(cursor_row(&state), CURSOR_ROW as i64);
+        }
+
+        #[test]
+        fn test_click_on_a_decoration_row_selects_the_cursor_row() {
+            let mut engine = LayoutEngine::new(TestGraphs::domain_simple_chain());
+            let mut state = GraphViewState::default();
+            render(&mut engine, &mut state);
+            let target = NodeIndex::new(1);
+            let rect = state
+                .frame
+                .rect_of(target)
+                .expect("should place the target");
+            let (column, row) = state
+                .screen_to_terminal(rect.left() + 1, rect.bottom())
+                .expect("should draw the target's bottom row on screen");
+
+            assert!(state.handle_click(column, row));
+            assert_eq!(state.cursor.node, Some(target));
+            assert_eq!(cursor_row(&state), CURSOR_ROW as i64);
+            let clicked_column = rect.point_at_fraction(state.cursor.fractional).x;
+            assert_eq!(
+                clicked_column,
+                rect.left() + 1,
+                "should keep the clicked column"
+            );
+        }
+
+        #[test]
+        fn test_go_to_lands_and_draws_on_the_cursor_row() {
+            let mut engine = LayoutEngine::new(TestGraphs::domain_simple_chain());
+            let mut state = GraphViewState::default();
+            render(&mut engine, &mut state);
+            let target = NodeIndex::new(2);
+            // Door entries and go-tos ask for the middle or an edge row without knowing how the
+            // renderer lays a node out.
+            state.go_to_node(target, (0.5, 0.0));
+            let buffer = render(&mut engine, &mut state);
+
+            assert_eq!(state.cursor.node, Some(target));
+            assert_eq!(cursor_row(&state), CURSOR_ROW as i64);
+            let rect = state
+                .frame
+                .rect_of(target)
+                .expect("should place the target");
+            let cursor = rect.point_at_fraction(state.cursor.fractional);
+            let caret = state
+                .screen_to_terminal(cursor.x, cursor.y - 1)
+                .expect("should draw the caret on screen");
+            assert_eq!(
+                buffer[caret].symbol(),
+                "⌃",
+                "the caret should sit under the cursor row"
+            );
+            assert_eq!(
+                state.camera.map(|camera| camera.anchor_screen.1),
+                Some(cursor.y),
+                "the go-to should frame the cursor row itself"
+            );
         }
     }
 }

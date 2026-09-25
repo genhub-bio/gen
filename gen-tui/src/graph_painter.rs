@@ -270,7 +270,7 @@ impl WindowScene {
             highlights,
         );
         (
-            frame_index(&self.geometry, graph, offset, area),
+            frame_index(&self.geometry, graph, visual, offset, area),
             wormhole_index(&self.geometry, graph, offset),
         )
     }
@@ -493,16 +493,19 @@ fn resolve_node_lowlights<G: GraphBase + NodeIndexable>(
         .collect()
 }
 
-/// Build the `FrameIndex` over every placed Data node.
-fn frame_index<G>(
+/// Build the `FrameIndex` over every placed Data node, with the row `visual` holds a cursor to
+/// on each.
+fn frame_index<G, V>(
     geometry: &WindowGeometry,
     graph: &G,
+    visual: &V,
     offset: WorldPos,
     area: Rect,
 ) -> FrameIndex<G::NodeId>
 where
     G: GraphBase + NodeIndexable,
     G::NodeId: Copy + Eq + Hash,
+    V: NodeRenderer<G>,
 {
     let placed: Vec<PlacedNode<G::NodeId>> = geometry
         .graph
@@ -518,6 +521,7 @@ where
                 id: node_id,
                 rect,
                 layer: node.layer.unwrap_or_default(),
+                cursor_row: visual.cursor_row(&node_id),
             })
         })
         .collect();
