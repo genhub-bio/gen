@@ -392,6 +392,13 @@ fn start_end_node_size(node: &GraphNode) -> Option<(u64, u64)> {
     None
 }
 
+/// Whether a node is drawn. A zero-length slice is where an edit meets a node (a junction), so it
+/// is left for its edges to meet at instead; the zero-length start and end sentinels are drawn
+/// with their labels.
+fn is_drawn_node(node: &GraphNode) -> bool {
+    node.length() > 0 || is_start_node(node.node_id) || is_end_node(node.node_id)
+}
+
 /// Render start/end nodes with their fixed label; returns `true` if it did (nothing further
 /// to render for this node).
 fn render_start_end_node(buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) -> bool {
@@ -430,6 +437,10 @@ impl NodeRenderer<GenGraph> for GenGraphMinimalRenderer {
         }
         let text_style = Style::default().fg(theme[0x05]).bg(theme[0x00]);
         buffer.set_string_styled(area.left_center(), &NODE_GLYPH.to_string(), text_style);
+    }
+
+    fn is_visible(&self, node: &GraphNode) -> bool {
+        is_drawn_node(node)
     }
 }
 
@@ -472,6 +483,10 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
         let truncated = inner_truncation(&sequence, 13);
         buffer.set_string_styled(area.left_center(), &truncated, text_style);
     }
+
+    fn is_visible(&self, node: &GraphNode) -> bool {
+        is_drawn_node(node)
+    }
 }
 
 /// `NodeRenderer` for the highest GenGraph zoom levels: nodes show their complete genomic
@@ -509,6 +524,10 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphFullRenderer<S> {
         let sequence = fetch_cached_sequence(&self.source, &self.cache, node_id)
             .unwrap_or_else(|_| "Unknown Sequence".to_string());
         buffer.set_string_styled(area.left_center(), &sequence, text_style);
+    }
+
+    fn is_visible(&self, node: &GraphNode) -> bool {
+        is_drawn_node(node)
     }
 }
 
@@ -1146,6 +1165,10 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
             }
             self.render_flag(buffer, area, row, &flag);
         }
+    }
+
+    fn is_visible(&self, node: &GraphNode) -> bool {
+        is_drawn_node(node)
     }
 }
 
@@ -2952,6 +2975,46 @@ mod tests {
                 "annotation_connector_curves",
                 terminal.backend().to_string()
             );
+        }
+    }
+
+    #[test]
+    fn test_zero_length_slices_are_invisible_at_every_zoom_level() {
+        let junction = GraphNode {
+            node_id: HashId::convert_str("zero-length-junction"),
+            sequence_start: 3,
+            sequence_end: 3,
+        };
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let end = GraphNode {
+            node_id: PATH_END_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let content = GraphNode {
+            node_id: HashId::convert_str("content"),
+            sequence_start: 0,
+            sequence_end: 5,
+        };
+
+        let plain = build_zoom_levels(SyntheticSequenceSource);
+        let annotated =
+            build_annotated_zoom_levels(SyntheticSequenceSource, NodeAnnotationLayer::new());
+        for (detail_level, renderer, _) in plain.iter().chain(annotated.iter()) {
+            assert!(
+                !renderer.is_visible(&junction),
+                "a zero-length slice should be a junction at {detail_level:?}"
+            );
+            for node in [start, end, content] {
+                assert!(
+                    renderer.is_visible(&node),
+                    "{node:?} should be drawn at {detail_level:?}"
+                );
+            }
         }
     }
 }
