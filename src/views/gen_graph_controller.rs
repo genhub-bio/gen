@@ -289,11 +289,6 @@ impl<'a> GenGraphController<'a> {
         )
     }
 
-    /// Register every overlay's highlight again before the next draw.
-    pub fn mark_overlays_dirty(&mut self) {
-        self.overlays_dirty = true;
-    }
-
     /// The annotation groups currently drawn.
     pub fn loaded_annotation_groups(&self) -> impl Iterator<Item = &str> {
         self.overlays
