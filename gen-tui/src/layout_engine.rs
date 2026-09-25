@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -33,11 +34,20 @@ struct Batch<NodeId> {
     members: Vec<NodeId>,
 }
 
-/// One batch's immutable structural world. Geometry is deliberately absent: each view clones
-/// `layout` and applies its own renderer, gaps, area, and camera every frame.
+/// Source of [`LoadedWorld::revision`]. Process-wide rather than per engine, so a view state
+/// that outlives its engine (a viewer switching block groups) never mistakes a new engine's
+/// world for the one it last built geometry from.
+static NEXT_WORLD_REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// One batch's immutable structural world. Geometry is deliberately absent: each view applies
+/// its own renderer and gaps to `layout` and caches the result against `revision` (see
+/// `GraphViewState`), then places it with its own area and camera every frame.
 #[derive(Clone)]
 pub struct LoadedWorld<NodeId> {
     batch: BatchId,
+    /// Unique to this build of the world. A batch evicted from the cache and rebuilt later gets
+    /// a new revision, since its wormhole doors may prefer different neighbours by then.
+    revision: u64,
     anchor: NodeId,
     members: HashSet<NodeId>,
     external_edges: Vec<(NodeId, NodeId)>,
@@ -48,6 +58,11 @@ impl<NodeId: Copy + Eq + Hash> LoadedWorld<NodeId> {
     /// The batch this world renders.
     pub fn batch(&self) -> BatchId {
         self.batch
+    }
+
+    /// Identifies this build of the world: equal revisions always mean an identical `layout`.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The node the batch's crawl started from.
@@ -65,7 +80,7 @@ impl<NodeId: Copy + Eq + Hash> LoadedWorld<NodeId> {
         self.members.iter().copied()
     }
 
-    /// Return the neutral assembled layout cloned by renderers each frame.
+    /// Return the neutral assembled layout views build their geometry from.
     pub fn layout(&self) -> &AssembledLayout {
         &self.layout
     }
@@ -378,6 +393,7 @@ where
 
         self.world_cache.push(LoadedWorld {
             batch,
+            revision: NEXT_WORLD_REVISION.fetch_add(1, Ordering::Relaxed),
             anchor,
             members: subgraph.nodes.iter().copied().collect(),
             external_edges: subgraph

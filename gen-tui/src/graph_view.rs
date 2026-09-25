@@ -21,7 +21,7 @@ use crate::{
     crawl::{EagerSource, GraphSource},
     distribute_nodes::GapSizes,
     frame_index::{Direction, FrameIndex},
-    graph_painter::{Camera, GraphPainter, HighlightKind, Highlights, snap_camera},
+    graph_painter::{Camera, HighlightKind, Highlights, WindowScene, snap_camera},
     layout::NodeRole,
     layout_engine::{BatchId, LayoutEngine},
     navigator::{CursorOverlay, CursorState, Navigator},
@@ -30,6 +30,16 @@ use crate::{
 };
 
 const DEFAULT_HARD_ZONE: u16 = 2;
+
+/// Everything a [`WindowScene`] depends on besides the camera: which build of which world,
+/// the zoom step (standing in for its `GapSizes`, whose function pointers can't be compared),
+/// and the renderer's node sizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SceneKey {
+    world_revision: u64,
+    zoom_index: usize,
+    size_generation: u64,
+}
 
 /// A domain node's local (pre-offset) position within an already-assembled window, if it's
 /// present as a `NodeRole::Data` node there. Used by the `go_to_node_framed` go-to path to
@@ -174,6 +184,11 @@ pub struct GraphViewState<N> {
     /// Set by `go_to_node_framed`: selects an independent camera anchor inside the active world
     /// while the cursor node is framed at the requested screen position.
     go_to_frame_anchor: Option<N>,
+    /// The active world's routed geometry, reused until its key changes so panning, cursor
+    /// moves, highlights, and resizes only re-place and repaint it.
+    scene: Option<(SceneKey, WindowScene)>,
+    /// How many scenes this view has built. See `geometry_revision`.
+    geometry_revision: u64,
 }
 
 impl<N> Default for GraphViewState<N> {
@@ -194,6 +209,8 @@ impl<N> Default for GraphViewState<N> {
             last_batch: None,
             go_to_previous_cursor: None,
             center_world_on_change: false,
+            scene: None,
+            geometry_revision: 0,
         }
     }
 }
@@ -213,6 +230,13 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
 
     pub fn last_batch(&self) -> Option<BatchId> {
         self.last_batch
+    }
+
+    /// Changes exactly when a render routed and compacted the window anew: the active world,
+    /// the zoom step, or the renderer's `size_generation` changed. Anything placed relative to
+    /// the geometry rather than the camera only needs recomputing when this moves.
+    pub fn geometry_revision(&self) -> u64 {
+        self.geometry_revision
     }
 
     /// Discard per-frame products so this state can be reused as an independent view of the
@@ -719,7 +743,8 @@ where
             state.wormhole.clear();
             return;
         };
-        let window = active_world.layout().clone();
+        let window = active_world.layout();
+        let world_revision = active_world.revision();
         let structural_anchor = active_world.anchor();
         let half_height = inner_area.height as i64 / 2;
 
@@ -734,7 +759,7 @@ where
             }
             let (fraction, screen_x) = if use_main_initial_framing {
                 let anchor_screen_x =
-                    node_rank_in_window(&window, self.engine.graph(), structural_anchor)
+                    node_rank_in_window(window, self.engine.graph(), structural_anchor)
                         .and_then(|anchor_rank| {
                             let min_rank = window
                                 .graph
@@ -742,7 +767,7 @@ where
                                 .filter_map(|node| node.layer)
                                 .min()?;
                             let width_by_rank =
-                                rank_widths(&window, self.engine.graph(), self.visual);
+                                rank_widths(window, self.engine.graph(), self.visual);
                             Some(
                                 DEFAULT_HARD_ZONE as i64
                                     + content_width_left_of_rank(
@@ -800,9 +825,8 @@ where
                     // Frame one active-world node while retaining another as the independent
                     // camera anchor.
                     Some(camera_anchor) => {
-                        let placed =
-                            node_pos_in_window(&window, self.engine.graph(), camera_anchor)
-                                .zip(node_pos_in_window(&window, self.engine.graph(), frame_node));
+                        let placed = node_pos_in_window(window, self.engine.graph(), camera_anchor)
+                            .zip(node_pos_in_window(window, self.engine.graph(), frame_node));
                         camera.anchor = camera_anchor;
                         camera.anchor_fraction = (0.5, 0.5);
                         camera.anchor_screen = match placed {
@@ -818,7 +842,7 @@ where
                         // rank at the viewport's left edge.
                         let frac_x = state.cursor.fractional.0;
                         let adjusted_col_x =
-                            node_rank_in_window(&window, self.engine.graph(), frame_node)
+                            node_rank_in_window(window, self.engine.graph(), frame_node)
                                 .and_then(|frame_rank| {
                                     let min_rank = window
                                         .graph
@@ -826,7 +850,7 @@ where
                                         .filter_map(|node| node.layer)
                                         .min()?;
                                     let width_by_rank =
-                                        rank_widths(&window, self.engine.graph(), self.visual);
+                                        rank_widths(window, self.engine.graph(), self.visual);
                                     let own_width =
                                         width_by_rank.get(&frame_rank).copied().unwrap_or(1) as i64;
                                     let left_of_col_x =
@@ -858,8 +882,27 @@ where
         };
 
         let graph = self.engine.graph();
-        let painter = GraphPainter::new(window, graph, self.visual).spacing(&state.gaps);
-        let (frame, wormhole) = painter.render(inner_area, buf, &camera, &state.highlights);
+        let key = SceneKey {
+            world_revision,
+            zoom_index: state.zoom_index,
+            size_generation: self.visual.size_generation(),
+        };
+        let scene = match &mut state.scene {
+            Some((cached_key, scene)) if *cached_key == key => scene,
+            slot => {
+                state.geometry_revision += 1;
+                let scene = WindowScene::new(window.clone(), graph, self.visual, &state.gaps);
+                &mut slot.insert((key, scene)).1
+            }
+        };
+        let (frame, wormhole) = scene.paint(
+            graph,
+            self.visual,
+            inner_area,
+            buf,
+            &camera,
+            &state.highlights,
+        );
         if let Some(overlay_fn) = self.overlay_fn {
             overlay_fn(buf, &frame);
         }
@@ -871,7 +914,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{cell::Cell, collections::HashSet};
 
     use ratatui::layout::Rect;
 
@@ -1168,6 +1211,68 @@ mod tests {
 
         assert_eq!(engine.active_batch(), Some(key));
         assert_eq!(engine.structural_build_counts(), counts);
+    }
+
+    /// Node widths follow a mutable generation, like a renderer whose annotation lanes change.
+    struct GenerationalVisual {
+        generation: Cell<u64>,
+    }
+
+    impl NodeRenderer<MockDomainGraph> for GenerationalVisual {
+        fn get_node_size(&self, _node: &NodeIndex) -> (u64, u64) {
+            (3 + self.generation.get(), 1)
+        }
+
+        fn render_node(
+            &self,
+            buffer: &mut crate::viewport_state::WorldBuffer,
+            area: crate::geometry::WorldRect,
+            _node_id: &NodeIndex,
+        ) {
+            buffer.set_string_styled(area.left_center(), "x", Style::default());
+        }
+
+        fn size_generation(&self) -> u64 {
+            self.generation.get()
+        }
+    }
+
+    #[test]
+    fn test_pan_cursor_and_resize_reuse_geometry_until_zoom_or_sizes_change() {
+        let mut engine = LayoutEngine::new(TestGraphs::domain_complex_dag());
+        let visual = GenerationalVisual {
+            generation: Cell::new(0),
+        };
+        let mut state = GraphViewState::default();
+        let area = Rect::new(0, 0, 60, 18);
+        let mut render = |state: &mut GraphViewState<NodeIndex>, area: Rect| {
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            GraphView::new(&mut engine, &visual).render(area, &mut buffer, state);
+        };
+        render(&mut state, area);
+        let first_revision = state.geometry_revision();
+
+        state.show_cursor();
+        let _ = state.handle_key_event(KeyEvent::from(KeyCode::Right));
+        render(&mut state, area);
+        state.move_by_terminal(3, -1);
+        state.rebase_camera_to_closest_node();
+        render(&mut state, area);
+        if let Some(node) = state.cursor.node {
+            state.set_node_highlight(node, PathStyle::new(Color::Red));
+        }
+        render(&mut state, Rect::new(0, 0, 42, 12));
+        assert_eq!(state.geometry_revision(), first_revision);
+
+        state.zoom_index += 1;
+        render(&mut state, area);
+        assert_eq!(state.geometry_revision(), first_revision + 1);
+        render(&mut state, area);
+        assert_eq!(state.geometry_revision(), first_revision + 1);
+
+        visual.generation.set(1);
+        render(&mut state, area);
+        assert_eq!(state.geometry_revision(), first_revision + 2);
     }
 
     #[test]
