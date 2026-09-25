@@ -30,7 +30,7 @@ use r#gen::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource, PathMembership,
             remove_path_overlay, set_path_overlay,
         },
-        lazy_graph_source::{BlockGroupBounds, SqlGraphSource, seed_block_group_graph},
+        lazy_graph_source::{SqlGraphSource, seed_block_group_graph},
     },
 };
 use gen_annotations::projection::annotation_segments;
@@ -280,9 +280,6 @@ struct GraphPage {
     name: String,
     db_path: PathBuf,
     pub(crate) block_group_id: Option<HashId>,
-    /// Where the block group starts and ends, resolved once when the page is built so
-    /// annotation loading never needs the whole graph to tell.
-    block_group_bounds: BlockGroupBounds,
     engine: LayoutEngine<GenGraph, SqlGraphSource>,
     zoom_levels: SendSyncZoomLevels,
     view_state: GraphViewState<GraphNode>,
@@ -374,7 +371,6 @@ impl GraphPage {
         show_history: bool,
     ) -> Self {
         let seed = seed_block_group_graph(conn, &block_group_id);
-        let block_group_bounds = BlockGroupBounds::load(conn, &block_group_id);
         let graph_source = if show_history {
             SqlGraphSource::new(db_path.clone(), block_group_id)
         } else {
@@ -392,7 +388,6 @@ impl GraphPage {
             name,
             db_path,
             block_group_id: Some(block_group_id),
-            block_group_bounds,
             engine,
             zoom_levels,
             view_state,
@@ -444,7 +439,6 @@ impl GraphPage {
             history_ref: None,
             entry: &entry,
             projection_graph: self.engine.graph(),
-            bounds: &self.block_group_bounds,
             node_ids: &node_ids,
         })?;
         Ok(AnnotationTrack::new(group.to_string(), spans))

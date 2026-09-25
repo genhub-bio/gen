@@ -39,9 +39,7 @@ use crate::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
             replace_track_overlays,
         },
-        lazy_graph_source::{
-            BlockGroupBounds, EagerOrSqlSource, SqlGraphSource, seed_block_group_graph,
-        },
+        lazy_graph_source::{EagerOrSqlSource, SqlGraphSource, seed_block_group_graph},
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
             RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
@@ -290,7 +288,6 @@ struct AnnotationToggleContext<'a, S: GraphSource<GenGraph>> {
     collection_name: &'a str,
     current_block_group: Option<&'a BlockGroup>,
     graph_engine: &'a LayoutEngine<GenGraph, S>,
-    block_group_bounds: &'a BlockGroupBounds,
     explorer: &'a CollectionExplorer,
 }
 
@@ -366,7 +363,6 @@ fn handle_annotation_toggle_requests<S: GraphSource<GenGraph>>(
                         history_ref: ctx.history_ref,
                         entry,
                         projection_graph: ctx.graph_engine.graph(),
-                        bounds: ctx.block_group_bounds,
                         node_ids: &node_ids,
                     })
                 }) {
@@ -788,7 +784,6 @@ pub fn view_block_group<'a>(
                                 focus_zone = requested_zone;
                                 explorer_state.focus_change_requested = None;
                             }
-                            let block_group_bounds = controller.block_group_bounds().clone();
                             let (graph_engine, overlays) = controller.engine_and_overlays_mut();
                             handle_annotation_toggle_requests(
                                 &AnnotationToggleContext {
@@ -798,7 +793,6 @@ pub fn view_block_group<'a>(
                                     collection_name,
                                     current_block_group: current_block_group.as_ref(),
                                     graph_engine,
-                                    block_group_bounds: &block_group_bounds,
                                     explorer: &explorer,
                                 },
                                 &mut explorer_state,
@@ -890,7 +884,6 @@ pub fn view_block_group<'a>(
                         focus_zone = requested_zone;
                         explorer_state.focus_change_requested = None;
                     }
-                    let block_group_bounds = controller.block_group_bounds().clone();
                     let (graph_engine, overlays) = controller.engine_and_overlays_mut();
                     handle_annotation_toggle_requests(
                         &AnnotationToggleContext {
@@ -900,7 +893,6 @@ pub fn view_block_group<'a>(
                             collection_name,
                             current_block_group: current_block_group.as_ref(),
                             graph_engine,
-                            block_group_bounds: &block_group_bounds,
                             explorer: &explorer,
                         },
                         &mut explorer_state,
