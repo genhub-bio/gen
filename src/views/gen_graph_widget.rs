@@ -749,24 +749,6 @@ impl NodeAnnotationLayer {
             .collect()
     }
 
-    /// Node-local columns where an annotation starts on `node`, in reading direction: the
-    /// first column of a forward or unstranded annotation's first piece, and the last column
-    /// of a reverse-strand annotation's last piece. These are the stops the viewer's `w`/`b`
-    /// keys move the cursor between.
-    pub fn annotation_starts(&self, node: &GraphNode) -> Vec<i64> {
-        let mut starts: Vec<i64> = self
-            .flags(node)
-            .iter()
-            .filter_map(|flag| match flag.strand {
-                Strand::Reverse => (!flag.continues_right).then_some(flag.bar_end - 1),
-                _ => (!flag.continues_left).then_some(flag.bar_start),
-            })
-            .collect();
-        starts.sort_unstable();
-        starts.dedup();
-        starts
-    }
-
     /// Every flag, grouped by annotation and ordered by piece, with the node each is on.
     fn pieces(&self) -> Vec<Vec<(GraphNode, AnnotationFlag)>> {
         let mut by_id: HashMap<HashId, Vec<(GraphNode, AnnotationFlag)>> = HashMap::new();
@@ -800,11 +782,69 @@ impl NodeAnnotationLayer {
     }
 }
 
+/// Where annotations start on each loaded node, whether or not their flags are drawn: the
+/// stops the viewers' `w`/`b` keys move the cursor between. Built from the overlays against
+/// the loaded graph, the same way [`update_node_annotations`] builds the flags, so every loaded
+/// node of the active batch has its stops, on screen or not.
+#[derive(Clone, Debug, Default)]
+pub struct AnnotationStarts(HashMap<GraphNode, Vec<i64>>);
+
+impl AnnotationStarts {
+    pub fn new<S: GraphSource<GenGraph>>(
+        engine: &LayoutEngine<GenGraph, S>,
+        overlays: &[GraphOverlay],
+    ) -> Self {
+        Self(
+            annotation_flags_by_node(engine, overlays)
+                .into_iter()
+                .map(|(node, flags)| (node, flag_starts(&flags)))
+                .collect(),
+        )
+    }
+
+    /// Node-local columns where an annotation starts on `node`, in reading direction: the
+    /// first column of a forward or unstranded annotation's first piece, and the last column
+    /// of a reverse-strand annotation's last piece.
+    pub fn on(&self, node: &GraphNode) -> Vec<i64> {
+        self.0.get(node).cloned().unwrap_or_default()
+    }
+}
+
+/// The sorted, distinct start columns of one node's flags; see [`AnnotationStarts::on`].
+fn flag_starts(flags: &[AnnotationFlag]) -> Vec<i64> {
+    let mut starts: Vec<i64> = flags
+        .iter()
+        .filter_map(|flag| match flag.strand {
+            Strand::Reverse => (!flag.continues_right).then_some(flag.bar_end - 1),
+            _ => (!flag.continues_left).then_some(flag.bar_start),
+        })
+        .collect();
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
 /// Refill `layer` from the span overlays, using the colors [`reapply_overlays`] settled on
-/// (so call it after that pass). Every segment of a span becomes a flag on its own node;
-/// the direction cap is only drawn on the segment that is the feature's true end, which is
-/// what `continues_left`/`continues_right` record. Returns the overlays whose name found no
-/// room under their node, for the caller to hand to [`draw_annotation_labels`].
+/// (so call it after that pass). Returns the overlays whose name found no room under their
+/// node, for the caller to hand to [`draw_annotation_labels`].
+pub fn update_node_annotations<S: GraphSource<GenGraph>>(
+    layer: &NodeAnnotationLayer,
+    engine: &LayoutEngine<GenGraph, S>,
+    overlays: &[GraphOverlay],
+) -> Vec<GraphOverlay> {
+    layer.replace(annotation_flags_by_node(engine, overlays));
+    let floating = layer.floating_span_ids();
+    overlays
+        .iter()
+        .filter(|overlay| {
+            overlay
+                .span()
+                .is_some_and(|span| floating.contains(&span.id))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Join consecutive slices of a locus that continue each other on the same node, such as the
 /// parts of a GenBank `join(541..546,547..564)` location, so they are drawn as one bar. Parts
 /// that don't meet stay separate: the two halves of a feature wrapping a circular sequence's
@@ -830,11 +870,14 @@ fn join_touching_slices(slices: &[GraphNodeSlice]) -> Vec<GraphNodeSlice> {
     joined
 }
 
-pub fn update_node_annotations<S: GraphSource<GenGraph>>(
-    layer: &NodeAnnotationLayer,
+/// Every span overlay's flags, unpacked, on the loaded nodes it covers. Every piece of a span
+/// (its segments, with touching ones joined by [`join_touching_slices`]) becomes a flag on its
+/// own node; the direction cap is only drawn on the piece that is the feature's true end,
+/// which is what `continues_left`/`continues_right` record.
+fn annotation_flags_by_node<S: GraphSource<GenGraph>>(
     engine: &LayoutEngine<GenGraph, S>,
     overlays: &[GraphOverlay],
-) -> Vec<GraphOverlay> {
+) -> HashMap<GraphNode, Vec<AnnotationFlag>> {
     let theme = current_theme();
     let loaded = LoadedNodeSlices::new(engine.graph());
     let mut flags_by_node: HashMap<GraphNode, Vec<AnnotationFlag>> = HashMap::new();
@@ -882,17 +925,7 @@ pub fn update_node_annotations<S: GraphSource<GenGraph>>(
                 });
         }
     }
-    layer.replace(flags_by_node);
-    let floating = layer.floating_span_ids();
-    overlays
-        .iter()
-        .filter(|overlay| {
-            overlay
-                .span()
-                .is_some_and(|span| floating.contains(&span.id))
-        })
-        .cloned()
-        .collect()
+    flags_by_node
 }
 
 /// Braille dot bit for a dot at sub-cell `(column, row)` of a 2×4 braille cell.
@@ -2626,8 +2659,8 @@ mod tests {
         use super::{RepeatingSequenceSource, span_overlay};
         use crate::views::{
             gen_graph_widget::{
-                AnnotationLabels, FULL_ZOOM_LEVEL, NodeAnnotationLayer, apply_zoom_level,
-                create_annotated_gen_graph_engine, draw_annotation_connectors,
+                AnnotationLabels, AnnotationStarts, FULL_ZOOM_LEVEL, NodeAnnotationLayer,
+                apply_zoom_level, create_annotated_gen_graph_engine, draw_annotation_connectors,
                 draw_annotation_labels, draw_braille_curve, reapply_overlays,
                 update_node_annotations,
             },
@@ -2689,14 +2722,14 @@ mod tests {
             render_view(graph, overlays, zoom_level, size, focused).0
         }
 
-        /// `render`, also returning the annotation layer and view state it rendered with.
+        /// `render`, also returning the annotation starts and view state it rendered with.
         fn render_view(
             graph: GenGraph,
             mut overlays: Vec<GraphOverlay>,
             zoom_level: usize,
             size: (u16, u16),
             focused: Option<HashId>,
-        ) -> (String, NodeAnnotationLayer, GraphViewState<GraphNode>) {
+        ) -> (String, AnnotationStarts, GraphViewState<GraphNode>) {
             let layer = NodeAnnotationLayer::new();
             let (mut engine, zoom_levels, mut view_state) =
                 create_annotated_gen_graph_engine(graph, RepeatingSequenceSource, layer.clone());
@@ -2736,7 +2769,8 @@ mod tests {
                     })
                     .expect("should render annotations");
             }
-            (terminal.backend().to_string(), layer, view_state)
+            let starts = AnnotationStarts::new(&engine, &overlays);
+            (terminal.backend().to_string(), starts, view_state)
         }
 
         #[test]
@@ -2897,7 +2931,7 @@ mod tests {
         #[test]
         fn test_annotation_start_jumps_across_a_fork() {
             let (graph, overlays) = branching_spans();
-            let (_, layer, mut view_state) =
+            let (_, annotation_starts, mut view_state) =
                 render_view(graph, overlays, FULL_ZOOM_LEVEL, (110, 31), None);
             let (first, upper, lower, merge) = (
                 node("first", 16),
@@ -2907,12 +2941,12 @@ mod tests {
             );
             // Forward and unstranded spans start at their first column; reverse-strand spans
             // (`nested`, and `reverse` on `merge`) start at their last column.
-            assert_eq!(layer.annotation_starts(&first), vec![6]);
-            assert_eq!(layer.annotation_starts(&upper), vec![17]);
-            assert_eq!(layer.annotation_starts(&lower), vec![5]);
-            assert_eq!(layer.annotation_starts(&merge), vec![5, 11]);
+            assert_eq!(annotation_starts.on(&first), vec![6]);
+            assert_eq!(annotation_starts.on(&upper), vec![17]);
+            assert_eq!(annotation_starts.on(&lower), vec![5]);
+            assert_eq!(annotation_starts.on(&merge), vec![5, 11]);
 
-            let starts = |node: GraphNode| layer.annotation_starts(&node);
+            let starts = |node: GraphNode| annotation_starts.on(&node);
             let branch_start = |branch: GraphNode| {
                 let column = if branch == upper { 17 } else { 5 };
                 (branch, column)
