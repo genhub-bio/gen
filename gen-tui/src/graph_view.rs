@@ -21,7 +21,7 @@ use crate::{
     crawl::{EagerSource, GraphSource},
     distribute_nodes::GapSizes,
     frame_index::{Direction, FrameIndex},
-    geometry::WorldRect,
+    geometry::{Point, WorldRect},
     graph_painter::{Camera, HighlightKind, Highlights, WindowScene, snap_camera},
     layout::NodeRole,
     layout_engine::{BatchId, LayoutEngine},
@@ -168,6 +168,10 @@ pub struct GraphViewState<N> {
     pub wormhole: Vec<(crate::geometry::WorldRect, N, N)>,
     pub cursor: CursorState<N>,
     pub camera: Option<Camera<N>>,
+    /// How far `move_by_terminal` has panned `camera.anchor_screen` since `frame` was painted,
+    /// in screen space. Maps a position on the next frame back onto `frame`, whose rects still
+    /// sit where the last render put them.
+    pan_since_render: (i64, i64),
     pub zoom_index: usize,
     /// Minimum inter-node gap for each axis - the current zoom level's target distance,
     /// enforced by compaction (see `distribute_nodes::compact_layout`).
@@ -203,6 +207,7 @@ impl<N> Default for GraphViewState<N> {
             wormhole: Vec::new(),
             cursor: CursorState::default(),
             camera: None,
+            pan_since_render: (0, 0),
             zoom_index: 0,
             gaps: GapSizes::default(),
             highlights: Highlights::default(),
@@ -250,6 +255,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         self.frame = FrameIndex::empty();
         self.wormhole.clear();
         self.camera = None;
+        self.pan_since_render = (0, 0);
         self.last_batch = None;
         self.center_world_on_change = true;
     }
@@ -319,6 +325,8 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         if let Some(camera) = &mut self.camera {
             camera.anchor_screen.0 += world_dx;
             camera.anchor_screen.1 += world_dy;
+            self.pan_since_render.0 += world_dx;
+            self.pan_since_render.1 += world_dy;
         }
     }
 
@@ -365,30 +373,33 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         }
     }
 
-    /// Rebase a free camera onto the closest visible node without moving the hidden cursor.
+    /// Rebase a free camera onto the closest visible node without moving the hidden cursor or
+    /// the content, so a drag keeps the anchor on a node that is still on screen.
     ///
-    /// `anchor_screen` stays at the query position the caller actually panned to - only the
-    /// fraction is derived from a rect-clamped point. Snapping `anchor_screen` itself into the
-    /// closest node's rect would undo the pan whenever that node stays closest across the move
-    /// (e.g. a drag small enough to stay within one wide node's rect never escapes it).
+    /// `frame` still holds the last render's positions, so the camera's anchor pixel is looked
+    /// up there by undoing the pan since that render. The closest node's nearest cell to it
+    /// becomes the new anchor, pinned where the pan will draw that cell, which keeps the
+    /// content moving exactly with the pointer however many drags arrive between renders.
     pub fn rebase_camera_to_closest_node(&mut self) {
         let Some(camera) = self.camera else {
             return;
         };
-        let query = crate::geometry::Point::new(camera.anchor_screen.0, camera.anchor_screen.1);
+        let (pan_x, pan_y) = self.pan_since_render;
+        let query = Point::new(
+            camera.anchor_screen.0 - pan_x,
+            camera.anchor_screen.1 - pan_y,
+        );
         let Some(node) = self.frame.closest(query) else {
             return;
         };
         let Some(rect) = self.frame.rect_of(node) else {
             return;
         };
-        let clamped_x = query.x.clamp(rect.left(), rect.right());
-        let clamped_y = query.y.clamp(rect.bottom(), rect.top());
-        let frac = rect.fraction_of(crate::geometry::Point::new(clamped_x, clamped_y));
+        let pinned = rect.find_closest_cell(query);
         self.camera = Some(Camera {
             anchor: node,
-            anchor_fraction: frac,
-            anchor_screen: camera.anchor_screen,
+            anchor_fraction: rect.fraction_of(pinned),
+            anchor_screen: (pinned.x + pan_x, pinned.y + pan_y),
             hard_zone: camera.hard_zone,
         });
     }
@@ -568,6 +579,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
             .map(|c| c.hard_zone)
             .unwrap_or(DEFAULT_HARD_ZONE);
         let anchor_screen = snap_camera(screen, self.last_area, screen, hard_zone);
+        self.pan_since_render = (0, 0);
         self.camera = Some(Camera {
             anchor: node,
             anchor_fraction: self.cursor.fractional,
@@ -725,6 +737,9 @@ where
             area
         };
         state.last_area = inner_area;
+        // Every path below either repaints `frame` at the camera's current position or empties
+        // it, so no pan is outstanding against it afterwards.
+        state.pan_since_render = (0, 0);
 
         let node_budget = self
             .engine
@@ -1262,6 +1277,67 @@ mod tests {
 
         assert_eq!(engine.active_batch(), Some(key));
         assert_eq!(engine.structural_build_counts(), counts);
+    }
+
+    /// Drag the view one cell at a time in `steps`, `drags_per_render` drag events per
+    /// rendered frame (the event loops drain every pending event before drawing), and check
+    /// that the initial cursor node follows the pointer exactly.
+    fn assert_drag_follows_pointer(steps: &[(i16, i16)], drags_per_render: usize) {
+        let mut engine = LayoutEngine::new(TestGraphs::domain_complex_dag());
+        let visual = FixedSizeVisual;
+        let mut state = GraphViewState::default();
+        let area = Rect::new(0, 0, 60, 18);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
+        let node = state.cursor.node.expect("should initialize the cursor");
+
+        for (frame_number, frame_steps) in steps.chunks(drags_per_render).enumerate() {
+            let before = state
+                .frame
+                .rect_of(node)
+                .expect("should place the node")
+                .center();
+            for &(terminal_dx, terminal_dy) in frame_steps {
+                state.move_by_terminal(terminal_dx, terminal_dy);
+                state.rebase_camera_to_closest_node();
+            }
+            GraphView::new(&mut engine, &visual).render(area, &mut buffer, &mut state);
+            let after = state
+                .frame
+                .rect_of(node)
+                .expect("should place the node")
+                .center();
+
+            let pointer_dx: i64 = frame_steps.iter().map(|step| step.0 as i64).sum();
+            let pointer_dy: i64 = frame_steps.iter().map(|step| step.1 as i64).sum();
+            // Terminal rows grow downward; screen space grows upward.
+            assert_eq!(
+                (after.x - before.x, after.y - before.y),
+                (pointer_dx, -pointer_dy),
+                "frame {frame_number}: content should move exactly as far as the pointer"
+            );
+        }
+    }
+
+    #[test]
+    fn test_drag_moves_content_with_pointer() {
+        let steps: Vec<(i16, i16)> = [(-1, 0); 15]
+            .into_iter()
+            .chain([(0, 1); 8])
+            .chain([(1, 0); 20])
+            .chain([(0, -1); 12])
+            .collect();
+        assert_drag_follows_pointer(&steps, 1);
+    }
+
+    #[test]
+    fn test_drag_events_drained_before_one_render_move_content_with_pointer() {
+        let steps: Vec<(i16, i16)> = [(-1, 0); 16]
+            .into_iter()
+            .chain([(1, 1); 8])
+            .chain([(2, 0); 12])
+            .collect();
+        assert_drag_follows_pointer(&steps, 4);
     }
 
     /// Node widths follow a mutable generation, like a renderer whose annotation lanes change.
