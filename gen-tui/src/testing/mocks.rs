@@ -75,6 +75,11 @@ where
         self.renderer
             .render_node(buffer, area, node_id, self.detail);
     }
+
+    /// Sizes follow `detail`, which tests switch in place between renders.
+    fn size_generation(&self) -> u64 {
+        self.detail as u64
+    }
 }
 
 /// Collection of standardized test graphs for consistent testing
