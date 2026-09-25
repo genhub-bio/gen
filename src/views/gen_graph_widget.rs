@@ -805,6 +805,31 @@ impl NodeAnnotationLayer {
 /// the direction cap is only drawn on the segment that is the feature's true end, which is
 /// what `continues_left`/`continues_right` record. Returns the overlays whose name found no
 /// room under their node, for the caller to hand to [`draw_annotation_labels`].
+/// Join consecutive slices of a locus that continue each other on the same node, such as the
+/// parts of a GenBank `join(541..546,547..564)` location, so they are drawn as one bar. Parts
+/// that don't meet stay separate: the two halves of a feature wrapping a circular sequence's
+/// origin sit at opposite ends of its node, one running off the end and one starting at the
+/// start.
+fn join_touching_slices(slices: &[GraphNodeSlice]) -> Vec<GraphNodeSlice> {
+    let mut joined: Vec<GraphNodeSlice> = Vec::with_capacity(slices.len());
+    for slice in slices {
+        if let Some(previous) = joined.last_mut()
+            && previous.block == slice.block
+            && previous.strand == slice.strand
+            && match slice.strand {
+                Strand::Reverse => slice.end == previous.start,
+                _ => previous.end == slice.start,
+            }
+        {
+            previous.start = previous.start.min(slice.start);
+            previous.end = previous.end.max(slice.end);
+            continue;
+        }
+        joined.push(*slice);
+    }
+    joined
+}
+
 pub fn update_node_annotations<S: GraphSource<GenGraph>>(
     layer: &NodeAnnotationLayer,
     engine: &LayoutEngine<GenGraph, S>,
@@ -824,14 +849,14 @@ pub fn update_node_annotations<S: GraphSource<GenGraph>>(
             Color::Reset => theme[0x06],
             other => other,
         };
-        let last = locus.slices.len().saturating_sub(1);
-        let widest = locus
-            .slices
+        let slices = join_touching_slices(&locus.slices);
+        let last = slices.len().saturating_sub(1);
+        let widest = slices
             .iter()
             .enumerate()
             .max_by_key(|(index, slice)| (slice.end - slice.start, -(*index as i64)))
             .map_or(0, |(index, _)| index);
-        for (index, slice) in locus.slices.iter().enumerate() {
+        for (index, slice) in slices.iter().enumerate() {
             let width = slice.block.length();
             let bar_start = (slice.start as i64).clamp(0, width);
             let bar_end = (slice.end as i64).clamp(0, width);
@@ -3016,5 +3041,141 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_join_touching_slices_joins_only_parts_that_meet() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("plasmid"),
+            sequence_start: 0,
+            sequence_end: 100,
+        };
+        let other = GraphNode {
+            node_id: HashId::convert_str("other"),
+            sequence_start: 0,
+            sequence_end: 100,
+        };
+        let slice = |block: GraphNode, start: usize, end: usize, strand: Strand| GraphNodeSlice {
+            block,
+            start,
+            end,
+            strand,
+        };
+
+        assert_eq!(
+            join_touching_slices(&[
+                slice(node, 40, 46, Strand::Forward),
+                slice(node, 46, 64, Strand::Forward),
+                slice(node, 64, 71, Strand::Forward),
+            ]),
+            vec![slice(node, 40, 71, Strand::Forward)],
+            "forward parts meeting end to end should join"
+        );
+        assert_eq!(
+            join_touching_slices(&[
+                slice(node, 60, 70, Strand::Reverse),
+                slice(node, 50, 60, Strand::Reverse),
+            ]),
+            vec![slice(node, 50, 70, Strand::Reverse)],
+            "reverse parts meeting end to end should join"
+        );
+        let wrapping_origin = [
+            slice(node, 90, 100, Strand::Forward),
+            slice(node, 0, 10, Strand::Forward),
+        ];
+        assert_eq!(
+            join_touching_slices(&wrapping_origin),
+            wrapping_origin.to_vec(),
+            "the halves of a feature wrapping the origin don't meet"
+        );
+        let apart = [
+            slice(node, 0, 10, Strand::Forward),
+            slice(node, 11, 20, Strand::Forward),
+            slice(other, 20, 30, Strand::Forward),
+            slice(other, 30, 40, Strand::Reverse),
+        ];
+        assert_eq!(
+            join_touching_slices(&apart),
+            apart.to_vec(),
+            "gaps, other nodes and other strands should stay separate"
+        );
+    }
+
+    /// A GenBank `join(...)` whose parts meet end to end is drawn as one bar in one lane, and a
+    /// feature wrapping the origin is drawn as two capless pieces at the node's ends with one
+    /// name between them.
+    #[test]
+    fn test_node_annotations_join_touching_parts_and_wrap_the_origin() {
+        let start = GraphNode {
+            node_id: PATH_START_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let plasmid = GraphNode {
+            node_id: HashId::convert_str("plasmid"),
+            sequence_start: 0,
+            sequence_end: 100,
+        };
+        let end = GraphNode {
+            node_id: PATH_END_NODE_ID,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(start, plasmid, Vec::new());
+        graph.add_edge(plasmid, end, Vec::new());
+        let overlays = vec![
+            // Ends exactly where the promoter below starts, like pUC19's AmpR promoter.
+            span_overlay("neighbour", vec![(plasmid, 30, 40, Strand::Forward)]),
+            span_overlay(
+                "promoter",
+                vec![
+                    (plasmid, 40, 46, Strand::Forward),
+                    (plasmid, 46, 64, Strand::Forward),
+                    (plasmid, 64, 71, Strand::Forward),
+                ],
+            ),
+            span_overlay(
+                "ori",
+                vec![
+                    (plasmid, 90, 100, Strand::Forward),
+                    (plasmid, 0, 10, Strand::Forward),
+                ],
+            ),
+        ];
+        let layer = NodeAnnotationLayer::new();
+        let (engine, _, _) =
+            create_annotated_gen_graph_engine(graph, RepeatingSequenceSource, layer.clone());
+
+        update_node_annotations(&layer, &engine, &overlays);
+
+        let flags = layer.flags(&plasmid);
+        let named = |name: &str| {
+            let mut named: Vec<&AnnotationFlag> =
+                flags.iter().filter(|flag| flag.name == name).collect();
+            named.sort_by_key(|flag| flag.piece);
+            named
+        };
+        let promoter = named("promoter");
+        assert_eq!(
+            promoter.len(),
+            1,
+            "the promoter's parts should join into one bar"
+        );
+        assert_eq!((promoter[0].bar_start, promoter[0].bar_end), (40, 71));
+        assert!(!promoter[0].continues_left && !promoter[0].continues_right);
+        assert!(promoter[0].show_label);
+
+        let ori = named("ori");
+        assert_eq!(ori.len(), 2, "the halves of ori should stay two bars");
+        assert_eq!((ori[0].bar_start, ori[0].bar_end), (90, 100));
+        assert!(!ori[0].continues_left && ori[0].continues_right);
+        assert_eq!((ori[1].bar_start, ori[1].bar_end), (0, 10));
+        assert!(ori[1].continues_left && !ori[1].continues_right);
+        assert_eq!(
+            ori.iter().filter(|flag| flag.show_label).count(),
+            1,
+            "ori should be named once"
+        );
     }
 }
