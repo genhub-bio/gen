@@ -438,9 +438,10 @@ where
 }
 
 /// How far past its node budget a batch may grow to take the whole of its last shell. Cutting a
-/// shell leaves doors between nodes that are one hop apart, so a shell is only cut when taking it
-/// whole would grow the batch past this multiple of the budget.
-pub(crate) const SHELL_CUTOFF_FACTOR: usize = 2;
+/// shell leaves doors between nodes that are one hop apart, so this is only a safety limit for a
+/// port with a very large number of edges: shells in ordinary graphs grow by a few nodes per
+/// hop and never come near it.
+pub(crate) const SHELL_CUTOFF_FACTOR: usize = 10;
 
 /// Grow breadth-first shells around `anchor` until the batch holds at least `node_budget` nodes
 /// or the graph is exhausted. Each shell is loaded on both sides in one request to the source
@@ -808,18 +809,21 @@ mod tests {
 
     #[test]
     fn test_neighborhood_cuts_only_a_shell_past_the_cutoff_keeping_both_sides() {
-        // 0 -> 1 and 1 -> {2, ..., 9}: anchor 1's first shell holds nine nodes, more than the
-        // five that fit under the cutoff (twice the budget of 3). The cut takes the predecessor
-        // first and fills the rest with the lowest successors, so both sides still grow.
+        // 0 -> 1 and 1 -> {2, 3, ...}: anchor 1's first shell holds more nodes than fit under the
+        // cutoff. The cut takes the predecessor first and fills the rest with the lowest
+        // successors, so both sides still grow.
+        const BUDGET: usize = 3;
+        let cutoff = BUDGET * SHELL_CUTOFF_FACTOR;
+        let last_successor = cutoff as i32 + 5;
         let mut graph = make_test_graph(
             std::iter::once((0, 1))
-                .chain((2..=9).map(|successor| (1, successor)))
+                .chain((2..=last_successor).map(|successor| (1, successor)))
                 .collect(),
         );
 
         let subgraph = neighborhood(
             TestNode(1),
-            3,
+            BUDGET,
             &mut GraphCursor::new(&mut graph, &mut EagerSource),
             &|_| false,
             &HashMap::new(),
@@ -828,7 +832,7 @@ mod tests {
 
         assert_eq!(
             subgraph.nodes,
-            (0..=5).map(TestNode).collect::<Vec<_>>(),
+            (0..cutoff as i64).map(TestNode).collect::<Vec<_>>(),
             "the cut shell should fill exactly up to the cutoff, predecessor included"
         );
         assert_eq!(
@@ -837,7 +841,7 @@ mod tests {
                 .iter()
                 .map(|edge| (edge.boundary, edge.target))
                 .collect::<Vec<_>>(),
-            vec![(TestNode(1), TestNode(6))],
+            vec![(TestNode(1), TestNode(cutoff as i64))],
             "the successors left out collapse into one door on the anchor"
         );
     }
@@ -1021,12 +1025,19 @@ mod tests {
 
     #[test]
     fn neighborhood_never_disconnects_a_downstream_branch() {
-        // R -> M -> {P, Q, S, T, U}; anchor M's first shell is wider than the cutoff (twice the
-        // budget of 2), so it is cut to R, P and Q, leaving S, T and U outside.
-        let mut graph = make_test_graph(vec![(9, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]);
+        // R -> M -> {1, 2, ...}; anchor M's first shell is wider than the cutoff, so it is cut to
+        // R and the lowest successors, leaving the rest of the downstream branches outside.
+        const BUDGET: usize = 2;
+        let cutoff = BUDGET * SHELL_CUTOFF_FACTOR;
+        let root = cutoff as i32 + 10;
+        let mut graph = make_test_graph(
+            std::iter::once((root, 0))
+                .chain((1..root).map(|successor| (0, successor)))
+                .collect(),
+        );
         let subgraph = neighborhood(
             TestNode(0),
-            2,
+            BUDGET,
             &mut GraphCursor::new(&mut graph, &mut EagerSource),
             &|_| false,
             &HashMap::new(),
@@ -1036,8 +1047,11 @@ mod tests {
         let windowed: HashSet<TestNode> = subgraph.nodes.iter().copied().collect();
         assert_eq!(
             windowed,
-            HashSet::from([TestNode(0), TestNode(1), TestNode(2), TestNode(9)]),
-            "M, P, Q, and R should all stay in the window"
+            (0..cutoff as i64 - 1)
+                .map(TestNode)
+                .chain([TestNode(root as i64)])
+                .collect::<HashSet<_>>(),
+            "M, R, and the lowest successors should all stay in the window"
         );
         // Every windowed node must be reachable from every other, undirected - i.e. connected.
         let mut adjacency: HashMap<TestNode, Vec<TestNode>> = HashMap::new();
