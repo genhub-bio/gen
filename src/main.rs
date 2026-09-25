@@ -22,7 +22,7 @@ use r#gen::{
     updates::gaf::transform_csv_to_fasta,
     views::{
         block_group::{BlockGroupViewOptions, view_block_group},
-        block_group_inline::{show_inline_block_group_widget, show_inline_gen_graph_widget},
+        block_group_inline::show_inline_block_group_widget,
         diff::{view_diff, view_diff_graph},
         operations::view_operations,
         patch::view_patch,
