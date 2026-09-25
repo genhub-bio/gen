@@ -541,6 +541,7 @@ fn test_layer_coordinate_alignment_and_ordering() {
                 }
                 _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
             },
+            |_| true,
         )
     };
     let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
@@ -744,6 +745,7 @@ fn test_skip_layer_edges_carry_bundles() {
                 }
                 _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
             },
+            |_| true,
         )
     };
     let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
@@ -1330,6 +1332,7 @@ fn test_grid_disperse_zoom_preserves_spacing() {
                     }
                     _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
                 },
+                |_| true,
             )
         };
         let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);

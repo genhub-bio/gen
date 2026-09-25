@@ -91,6 +91,12 @@ where
     /// Render a node in its allocated world area.
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId);
 
+    /// Whether `node` is drawn. An invisible node is still placed in the layout, so its edges
+    /// meet at it, but it is drawn as a junction of those edges rather than as a node.
+    fn is_visible(&self, _node: &G::NodeId) -> bool {
+        true
+    }
+
     /// A counter that changes whenever `get_node_size` or `get_dummy_size` may answer
     /// differently than before. Views reuse a window's routed geometry until it changes, so a
     /// renderer whose sizes depend on mutable state (e.g. annotation lanes under each node) must
@@ -118,6 +124,10 @@ where
         (**self).render_node(buffer, area, node_id);
     }
 
+    fn is_visible(&self, node: &G::NodeId) -> bool {
+        (**self).is_visible(node)
+    }
+
     fn size_generation(&self) -> u64 {
         (**self).size_generation()
     }
@@ -139,6 +149,10 @@ where
 
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
         (**self).render_node(buffer, area, node_id);
+    }
+
+    fn is_visible(&self, node: &G::NodeId) -> bool {
+        (**self).is_visible(node)
     }
 
     fn size_generation(&self) -> u64 {
