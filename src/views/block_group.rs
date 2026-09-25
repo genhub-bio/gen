@@ -48,7 +48,9 @@ use crate::{
             group_track_key, has_path_overlay, remove_path_overlay, remove_track_overlays,
             replace_track_overlays, set_path_overlay,
         },
-        lazy_graph_source::{EagerOrSqlSource, SqlGraphSource, seed_block_group_graph},
+        lazy_graph_source::{
+            BlockGroupBounds, EagerOrSqlSource, SqlGraphSource, seed_block_group_graph,
+        },
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
             RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
@@ -277,16 +279,49 @@ pub(crate) fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
     (window.0.saturating_sub(span), window.1.saturating_add(span))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "keeps the neighborhood loader's database and view state explicit"
-)]
+/// The viewed block group's bounds, resolved the first time annotation groups load for it and
+/// reused until the viewer switches to another block group.
+#[derive(Default)]
+struct BlockGroupBoundsCache {
+    resolved: Option<(HashId, BlockGroupBounds)>,
+}
+
+impl BlockGroupBoundsCache {
+    fn get(
+        &mut self,
+        conn: &GraphConnection,
+        graph: &GenGraph,
+        block_group_id: &HashId,
+        history_ref: Option<&str>,
+    ) -> &BlockGroupBounds {
+        if self
+            .resolved
+            .as_ref()
+            .is_none_or(|(resolved_id, _)| resolved_id != block_group_id)
+        {
+            let bounds = BlockGroupBounds::for_view(conn, graph, block_group_id, history_ref);
+            self.resolved = Some((*block_group_id, bounds));
+        }
+        let (_, bounds) = self
+            .resolved
+            .as_ref()
+            .expect("should have resolved the block group bounds just above");
+        bounds
+    }
+}
+
+/// What the annotation groups of the active neighborhood are projected onto.
+struct GroupProjection<'a> {
+    graph: &'a GenGraph,
+    bounds: &'a BlockGroupBounds,
+    node_ids: &'a HashSet<HashId>,
+}
+
 fn load_annotation_groups_for_neighborhood(
     conn: &GraphConnection,
-    workspace: &Workspace,
     history_ref: Option<&str>,
     block_group: &BlockGroup,
-    node_ids: &HashSet<HashId>,
+    projection: &GroupProjection,
     explorer_state: &mut CollectionExplorerState,
     overlays: &mut Vec<GraphOverlay>,
     messages: &mut crate::views::messages::MessageBuffer,
@@ -294,11 +329,11 @@ fn load_annotation_groups_for_neighborhood(
     for entry in load_annotation_group_entries(conn, block_group, history_ref) {
         let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
             conn,
-            workspace,
             history_ref,
-            current_block_group: block_group,
             entry: &entry,
-            node_ids,
+            projection_graph: projection.graph,
+            bounds: projection.bounds,
+            node_ids: projection.node_ids,
         }) {
             Ok(spans) => spans,
             Err(err) => {
@@ -343,6 +378,7 @@ fn handle_annotation_toggle_requests<S: GraphSource<GenGraph>>(
     overlays: &mut Vec<GraphOverlay>,
     annotation_file_index_available: &mut HashMap<HashId, bool>,
     annotation_file_loaded_windows: &mut HashMap<HashId, (i64, i64)>,
+    block_group_bounds: &mut BlockGroupBoundsCache,
     messages: &mut crate::views::messages::MessageBuffer,
 ) {
     if let Some(toggled_id) = explorer_state.annotation_file_toggle_requested.take() {
@@ -399,13 +435,20 @@ fn handle_annotation_toggle_requests<S: GraphSource<GenGraph>>(
             if let Some(block_group) = ctx.current_block_group {
                 let node_ids = active_neighborhood_node_ids(ctx.graph_engine);
                 let entry = ctx.explorer.annotation_group_entry(&toggled_group);
+                let projection_graph = ctx.graph_engine.graph();
+                let bounds = block_group_bounds.get(
+                    ctx.conn,
+                    projection_graph,
+                    &block_group.id,
+                    ctx.history_ref,
+                );
                 let spans = match entry.map(|entry| {
                     load_annotations_for_group(&AnnotationGroupTrackRequest {
                         conn: ctx.conn,
-                        workspace: ctx.workspace,
                         history_ref: ctx.history_ref,
-                        current_block_group: block_group,
                         entry,
+                        projection_graph,
+                        bounds,
                         node_ids: &node_ids,
                     })
                 }) {
@@ -634,6 +677,7 @@ pub fn view_block_group(
     // only needed when it changes (block group switch, wormhole teleport into a
     // different world) - not on every pan/zoom within the same neighborhood.
     let mut annotation_groups_world: Option<BatchId> = None;
+    let mut block_group_bounds = BlockGroupBoundsCache::default();
 
     // Setup terminal
     let mut session = TuiSession::enter()?;
@@ -918,6 +962,7 @@ pub fn view_block_group(
                                 &mut overlays,
                                 &mut annotation_file_index_available,
                                 &mut annotation_file_loaded_windows,
+                                &mut block_group_bounds,
                                 &mut messages,
                             );
                         }
@@ -1015,6 +1060,7 @@ pub fn view_block_group(
                         &mut overlays,
                         &mut annotation_file_index_available,
                         &mut annotation_file_loaded_windows,
+                        &mut block_group_bounds,
                         &mut messages,
                     );
                 }
@@ -1627,12 +1673,22 @@ pub fn view_block_group(
                     |o| !matches!(&o.source, OverlaySource::Track(k) if k.starts_with("group:")),
                 );
                 explorer_state.active_annotation_groups.clear();
+                let projection_graph = graph_engine.graph();
+                let projection = GroupProjection {
+                    graph: projection_graph,
+                    bounds: block_group_bounds.get(
+                        conn,
+                        projection_graph,
+                        &block_group.id,
+                        history_ref,
+                    ),
+                    node_ids: &node_ids,
+                };
                 load_annotation_groups_for_neighborhood(
                     conn,
-                    workspace,
                     history_ref,
                     block_group,
-                    &node_ids,
+                    &projection,
                     &mut explorer_state,
                     &mut overlays,
                     &mut messages,
