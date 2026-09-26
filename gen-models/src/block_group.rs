@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
 
@@ -67,13 +67,123 @@ pub(crate) enum SpanSide {
 }
 
 /// The routes an edit connects to at one end of its span.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SpanRoutes {
     /// Stored-edge endpoints to connect: route sources at a span's start, route targets at its
     /// end.
     pub positions: Vec<(HashId, i64)>,
-    /// A position inside a block, which a same-coordinate marker splits.
-    pub split: Option<(HashId, i64)>,
+    /// Positions inside a block, which a same-coordinate marker splits.
+    pub splits: Vec<(HashId, i64)>,
+    /// Where the span ends on this side, whatever routes meet there.
+    pub anchors: Vec<(HashId, i64)>,
+}
+
+/// One node's stored edges, indexed by the coordinates they touch the node at.
+#[derive(Debug, Default)]
+struct NodeRoutes {
+    /// Every coordinate an edge starts or ends at on this node.
+    coordinates: BTreeSet<i64>,
+    /// The sources of the jumps arriving at each coordinate.
+    arriving: HashMap<i64, Vec<(HashId, i64)>>,
+    /// The targets of the jumps leaving each coordinate.
+    leaving: HashMap<i64, Vec<(HashId, i64)>>,
+}
+
+impl NodeRoutes {
+    fn load(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_id: HashId,
+    ) -> Result<Self, BlockGroupError> {
+        let mut routes = NodeRoutes::default();
+        for augmented_edge in
+            Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id], None)?
+        {
+            let edge = augmented_edge.edge;
+            let source = (edge.source_node_id, edge.source_coordinate);
+            let target = (edge.target_node_id, edge.target_coordinate);
+            for (endpoint_node_id, coordinate) in [source, target] {
+                if endpoint_node_id == node_id {
+                    routes.coordinates.insert(coordinate);
+                }
+            }
+            // Continuity markers join the two sides of one coordinate rather than jumping.
+            if source == target {
+                continue;
+            }
+            if target.0 == node_id {
+                routes.arriving.entry(target.1).or_default().push(source);
+            }
+            if source.0 == node_id {
+                routes.leaving.entry(source.1).or_default().push(target);
+            }
+        }
+        Ok(routes)
+    }
+}
+
+/// Stored edges per (block group, node), read the first time an edit touches the node and then
+/// reused. Changes planned through one cache all see the graph as it was before the first of
+/// them, so a batch of changes, such as a VCF, is a set of edits to one parent graph rather than
+/// a chain of edits on edits, however it is split into chunks.
+#[derive(Debug, Default)]
+pub struct RouteCache {
+    nodes: HashMap<(HashId, HashId), NodeRoutes>,
+}
+
+impl RouteCache {
+    fn node(
+        &mut self,
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        node_id: HashId,
+    ) -> Result<&NodeRoutes, BlockGroupError> {
+        let key = (*block_group_id, node_id);
+        #[expect(
+            clippy::map_entry,
+            reason = "entry API doesn't work with ? error propagation"
+        )]
+        if !self.nodes.contains_key(&key) {
+            self.nodes
+                .insert(key, NodeRoutes::load(conn, block_group_id, node_id)?);
+        }
+        Ok(&self.nodes[&key])
+    }
+}
+
+/// The edges one change writes, and where it attaches, so the changes of a batch that meet can
+/// be joined afterwards (see `BlockGroup::combine_batch`).
+#[derive(Clone, Debug, Default)]
+pub struct PlannedEdit {
+    pub edges: Vec<AugmentedEdgeData>,
+    block_group_id: HashId,
+    /// Where the change's span starts and ends, whatever routes meet there.
+    starts: Vec<(HashId, i64)>,
+    ends: Vec<(HashId, i64)>,
+    /// The routes it attaches to at each end.
+    sources: Vec<(HashId, i64)>,
+    targets: Vec<(HashId, i64)>,
+    /// The block it inserts, as its node, start and end; `None` for a deletion.
+    inserted: Option<(HashId, i64, i64)>,
+    chromosome_index: i64,
+    phased: i64,
+}
+
+impl PlannedEdit {
+    /// Whether the change spans no sequence on either side of a point, as an insertion does.
+    fn is_point(&self) -> bool {
+        self.starts == self.ends
+    }
+}
+
+/// State one batch of changes shares across the chunks it is applied in: interval trees, the
+/// routes of the graph as it was before the batch, and the batch's planned edits, which
+/// `BlockGroup::combine_batch` joins once every chunk is written.
+#[derive(Debug, Default)]
+pub struct EditBatch {
+    trees: IntervalTreeCache,
+    routes: RouteCache,
+    edits: Vec<PlannedEdit>,
 }
 
 /// The coordinate within `block`'s node of path position `path_position`.
@@ -753,38 +863,38 @@ impl BlockGroup {
         Ok(accession)
     }
 
-    #[cfg_attr(
-        feature = "profiling",
-        tracing::instrument(skip(conn, changes, tree_map))
-    )]
+    /// Write `changes` as part of `batch`. Every change is planned against the graph as it was
+    /// before the batch's first change; call `combine_batch` once all of them are written to join
+    /// the ones that meet.
+    #[cfg_attr(feature = "profiling", tracing::instrument(skip(conn, changes, batch)))]
     pub fn insert_changes(
         conn: &GraphConnection,
         workspace: &Workspace,
         changes: &[BlockGroupChange],
-        tree_map: Option<&mut IntervalTreeCache>,
+        batch: &mut EditBatch,
     ) -> Result<(), BlockGroupError> {
         let mut new_augmented_edges_by_block_group =
             HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
         let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
-        let mut local_tree_map = HashMap::new();
-        let tree_map = match tree_map {
-            Some(tree_map) => tree_map,
-            None => &mut local_tree_map,
-        };
         for change in changes {
             let cache_key = change.region.intervaltree_cache_key();
             #[expect(
                 clippy::map_entry,
                 reason = "entry API doesn't work with ? error propagation"
             )]
-            if !tree_map.contains_key(&cache_key) {
-                tree_map.insert(
+            if !batch.trees.contains_key(&cache_key) {
+                batch.trees.insert(
                     cache_key,
                     IntervalTreeSource::intervaltree(&change.region, conn, workspace)?,
                 );
             }
-            let tree = tree_map.get(&cache_key);
-            let new_augmented_edges = change.region.plan_edges(conn, workspace, change, tree)?;
+            let tree = batch.trees.get(&cache_key);
+            let mut planned =
+                change
+                    .region
+                    .plan_edges(conn, workspace, change, tree, &mut batch.routes)?;
+            let new_augmented_edges = std::mem::take(&mut planned.edges);
+            batch.edits.push(planned);
             new_augmented_edges_by_block_group
                 .entry(change.region.block_group.id)
                 .and_modify(|new_edge_data| new_edge_data.extend(new_augmented_edges.clone()))
@@ -805,12 +915,106 @@ impl BlockGroup {
         )
     }
 
+    /// Join the changes of `batch` that meet: a change starting where another ends continues
+    /// the routes through that one, including through chains of deletions. The changes are
+    /// taken as fully combinatorial.
+    // TODO: with phasing information, join only changes on the same chromosome index.
+    pub fn combine_batch(conn: &GraphConnection, batch: EditBatch) -> Result<(), BlockGroupError> {
+        Self::persist_insert_changes(conn, Self::batch_combinations(&batch.edits), HashMap::new())
+    }
+
+    fn batch_combinations(edits: &[PlannedEdit]) -> HashMap<HashId, Vec<AugmentedEdgeData>> {
+        let mut ending_at: HashMap<(HashId, (HashId, i64)), Vec<usize>> = HashMap::new();
+        for (index, edit) in edits.iter().enumerate() {
+            for end in &edit.ends {
+                ending_at
+                    .entry((edit.block_group_id, *end))
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let mut combinations: HashMap<HashId, Vec<AugmentedEdgeData>> = HashMap::new();
+        for (index, edit) in edits.iter().enumerate() {
+            // The points a route leaves from after passing through at least one other change of
+            // the batch that ends where this one starts: an insertion's end, or, through a
+            // deletion, whatever reached that deletion.
+            let mut arrivals = vec![];
+            let mut visited = edit.starts.iter().copied().collect::<HashSet<_>>();
+            let mut pending = edit.starts.clone();
+            while let Some(point) = pending.pop() {
+                for &other in ending_at
+                    .get(&(edit.block_group_id, point))
+                    .into_iter()
+                    .flatten()
+                {
+                    let previous = &edits[other];
+                    // Insertions at the same point are alternatives to each other, not a
+                    // sequence; joining them both ways would loop.
+                    if other == index || (edit.is_point() && previous.is_point()) {
+                        continue;
+                    }
+                    match previous.inserted {
+                        Some((node_id, _, end)) => arrivals.push((node_id, end)),
+                        None => {
+                            arrivals.extend(previous.sources.iter().copied());
+                            for start in &previous.starts {
+                                if visited.insert(*start) {
+                                    pending.push(*start);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            arrivals.sort_unstable();
+            arrivals.dedup();
+            let targets = match edit.inserted {
+                Some((node_id, start, _)) => vec![(node_id, start)],
+                None => edit.targets.clone(),
+            };
+            for &source in &arrivals {
+                if edit
+                    .inserted
+                    .is_some_and(|(node_id, _, _)| node_id == source.0)
+                {
+                    continue;
+                }
+                for &target in &targets {
+                    let loops_back =
+                        edit.inserted.is_none() && source.0 == target.0 && target.1 < source.1;
+                    if loops_back {
+                        continue;
+                    }
+                    combinations
+                        .entry(edit.block_group_id)
+                        .or_default()
+                        .push(AugmentedEdgeData {
+                            edge_data: EdgeData {
+                                source_node_id: source.0,
+                                source_coordinate: source.1,
+                                source_strand: Strand::Forward,
+                                target_node_id: target.0,
+                                target_coordinate: target.1,
+                                target_strand: Strand::Forward,
+                            },
+                            chromosome_index: edit.chromosome_index,
+                            phased: edit.phased,
+                        });
+                }
+            }
+        }
+        combinations
+    }
+
     pub fn insert_change(
         conn: &GraphConnection,
         workspace: &Workspace,
         change: &BlockGroupChange,
     ) -> Result<(), BlockGroupError> {
-        let new_augmented_edges = change.region.plan_edges(conn, workspace, change, None)?;
+        let new_augmented_edges = change
+            .region
+            .plan_edges(conn, workspace, change, None, &mut RouteCache::default())?
+            .edges;
         let mut new_augmented_edges_by_block_group = HashMap::new();
         new_augmented_edges_by_block_group
             .insert(change.region.block_group.id, new_augmented_edges.clone());
@@ -895,7 +1099,8 @@ impl BlockGroup {
         conn: &GraphConnection,
         change: &BlockGroupChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
+        routes: &mut RouteCache,
+    ) -> Result<PlannedEdit, BlockGroupError> {
         let start_blocks: Vec<&NodeIntervalBlock> = tree
             .query_point(change.region.start)
             .map(|x| &x.value)
@@ -949,7 +1154,7 @@ impl BlockGroup {
         if change.region.start == change.region.end
             && change.block.sequence_start == change.block.sequence_end
         {
-            return Ok(vec![]);
+            return Ok(PlannedEdit::default());
         }
         // The span starts at the first edited base, or at the insertion point. Past the end of the
         // path there is no base, so the span starts where the last block ends.
@@ -970,13 +1175,13 @@ impl BlockGroup {
             source_coordinate(change.region.end, end_block),
         );
         let block_group_id = change.region.block_group.id;
-        let starts = Self::span_routes(conn, &block_group_id, span_start, SpanSide::Start)?;
-        let ends = Self::span_routes(conn, &block_group_id, span_end, SpanSide::End)?;
+        let starts = Self::span_routes(routes, conn, &block_group_id, span_start, SpanSide::Start)?;
+        let ends = Self::span_routes(routes, conn, &block_group_id, span_end, SpanSide::End)?;
         Ok(Self::span_edges(change, &starts, &ends))
     }
 
     /// The routes an edit's span connects to at one end, read from the block group's stored
-    /// edges at `position` (a node and coordinate).
+    /// edges at `position` (a node and coordinate), through `routes`.
     ///
     /// Inside a block, the span connects to that position alone, which then needs a
     /// same-coordinate marker to split the block. At a block boundary nothing is split: a span's
@@ -985,103 +1190,55 @@ impl BlockGroup {
     /// combinations with earlier edits there are written as edges rather than left to a
     /// zero-width junction.
     pub(crate) fn span_routes(
+        routes: &mut RouteCache,
         conn: &GraphConnection,
         block_group_id: &HashId,
         position: (HashId, i64),
         side: SpanSide,
     ) -> Result<SpanRoutes, BlockGroupError> {
-        let node_id = position.0;
-        let inside_block = SpanRoutes {
+        let (node_id, coordinate) = position;
+        let attached_here = |splits: Vec<(HashId, i64)>| SpanRoutes {
             positions: vec![position],
-            split: (!is_terminal(node_id)).then_some(position),
+            splits,
+            anchors: vec![position],
         };
         if is_terminal(node_id) {
-            return Ok(SpanRoutes {
-                split: None,
-                ..inside_block
-            });
+            return Ok(attached_here(vec![]));
         }
-        let edges = Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id], None)?;
-        let is_position = |edge_node_id: HashId, edge_coordinate: i64| {
-            (edge_node_id, edge_coordinate) == position
-        };
-        let at_boundary = edges.iter().any(|augmented_edge| {
-            let edge = &augmented_edge.edge;
-            is_position(edge.source_node_id, edge.source_coordinate)
-                || is_position(edge.target_node_id, edge.target_coordinate)
-        });
-        if !at_boundary {
-            return Ok(inside_block);
+        let node = routes.node(conn, block_group_id, node_id)?;
+        if !node.coordinates.contains(&coordinate) {
+            return Ok(attached_here(vec![position]));
         }
-        let is_continuity = |edge: &Edge| {
-            edge.source_node_id == edge.target_node_id
-                && edge.source_coordinate == edge.target_coordinate
-        };
         // Blocks are cut at every coordinate an edge touches, so the node has sequence ending at
         // the position when an edge touches it anywhere before, and sequence starting there when
         // an edge touches it anywhere after. A node start has none before and a node end none
         // after; there routes meet only through edges from elsewhere.
-        let node_coordinates = edges
-            .iter()
-            .flat_map(|augmented_edge| {
-                let edge = &augmented_edge.edge;
-                [
-                    (edge.source_node_id, edge.source_coordinate),
-                    (edge.target_node_id, edge.target_coordinate),
-                ]
-            })
-            .filter(|(edge_node_id, _)| *edge_node_id == node_id)
-            .map(|(_, edge_coordinate)| edge_coordinate)
-            .collect::<Vec<_>>();
-        let mut positions = match side {
-            SpanSide::Start => {
-                let sequence_ends_here = node_coordinates.iter().any(|&other| other < position.1);
-                sequence_ends_here
-                    .then_some(position)
-                    .into_iter()
-                    .chain(
-                        edges
-                            .iter()
-                            .map(|augmented_edge| &augmented_edge.edge)
-                            .filter(|edge| {
-                                !is_continuity(edge)
-                                    && is_position(edge.target_node_id, edge.target_coordinate)
-                            })
-                            .map(|edge| (edge.source_node_id, edge.source_coordinate)),
-                    )
-                    .collect::<Vec<_>>()
-            }
-            SpanSide::End => {
-                let sequence_starts_here = node_coordinates.iter().any(|&other| other > position.1);
-                sequence_starts_here
-                    .then_some(position)
-                    .into_iter()
-                    .chain(
-                        edges
-                            .iter()
-                            .map(|augmented_edge| &augmented_edge.edge)
-                            .filter(|edge| {
-                                !is_continuity(edge)
-                                    && is_position(edge.source_node_id, edge.source_coordinate)
-                            })
-                            .map(|edge| (edge.target_node_id, edge.target_coordinate)),
-                    )
-                    .collect::<Vec<_>>()
-            }
+        let (has_sequence, jumps) = match side {
+            SpanSide::Start => (
+                node.coordinates.range(..coordinate).next().is_some(),
+                node.arriving.get(&coordinate),
+            ),
+            SpanSide::End => (
+                node.coordinates.range(coordinate + 1..).next().is_some(),
+                node.leaving.get(&coordinate),
+            ),
         };
+        let mut positions = has_sequence
+            .then_some(position)
+            .into_iter()
+            .chain(jumps.into_iter().flatten().copied())
+            .collect::<Vec<_>>();
         positions.sort_unstable();
         positions.dedup();
         // Nothing meets the boundary on this side, so the edit is left attached to the position
         // itself; a marker there would only make a node-end edge.
         if positions.is_empty() {
-            return Ok(SpanRoutes {
-                split: None,
-                ..inside_block
-            });
+            return Ok(attached_here(vec![]));
         }
         Ok(SpanRoutes {
             positions,
-            split: None,
+            splits: vec![],
+            anchors: vec![position],
         })
     }
 
@@ -1091,7 +1248,7 @@ impl BlockGroup {
         change: &BlockGroupChange,
         starts: &SpanRoutes,
         ends: &SpanRoutes,
-    ) -> Vec<AugmentedEdgeData> {
+    ) -> PlannedEdit {
         let marker_chromosome_index = if change.preserve_edge {
             0
         } else {
@@ -1134,9 +1291,9 @@ impl BlockGroup {
             .filter(|position| !is_inserted_node(position) && !loops_back(position))
             .collect::<Vec<_>>();
         let mut new_edges = starts
-            .split
+            .splits
             .iter()
-            .chain(&ends.split)
+            .chain(&ends.splits)
             .map(|&position| edge(position, position, marker_chromosome_index, 0))
             .collect::<Vec<_>>();
         if change.block.sequence_start == change.block.sequence_end {
@@ -1165,7 +1322,21 @@ impl BlockGroup {
                 ));
             }
         }
-        new_edges
+        PlannedEdit {
+            edges: new_edges,
+            block_group_id: change.region.block_group.id,
+            starts: starts.anchors.clone(),
+            ends: ends.anchors.clone(),
+            sources: sources.into_iter().copied().collect(),
+            targets: targets.into_iter().copied().collect(),
+            inserted: (change.block.sequence_start != change.block.sequence_end).then_some((
+                change.block.node_id,
+                change.block.sequence_start,
+                change.block.sequence_end,
+            )),
+            chromosome_index: change.chromosome_index,
+            phased: change.phased,
+        }
     }
 
     pub fn intervaltree_for(

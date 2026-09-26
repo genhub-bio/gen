@@ -4,9 +4,9 @@ use std::{
     io, str,
 };
 
-use gen_core::{HashId, NodeIntervalBlock, PathBlock, Strand};
+use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupChange, BlockGroupData, PathCache},
+    block_group::{BlockGroup, BlockGroupChange, BlockGroupData, EditBatch, PathCache},
     db::{DbContext, GraphConnection},
     errors::{BlockGroupError, NodeError, OperationError, PathError, SampleError, SequenceError},
     file_types::FileTypes,
@@ -18,7 +18,6 @@ use gen_models::{
     sample::Sample,
     sequence::Sequence,
 };
-use intervaltree::IntervalTree;
 use noodles::{
     vcf,
     vcf::variant::{
@@ -666,8 +665,9 @@ pub fn update_with_vcf(
     ));
     bar.set_message("Changes applied");
     let mut summary: HashMap<String, HashMap<String, i64>> = HashMap::new();
-    let mut tree_map: HashMap<(HashId, ResolvedRegionKind), IntervalTree<i64, NodeIntervalBlock>> =
-        HashMap::new();
+    // One batch for the whole file: every chunk is planned against the graph as it was before
+    // the file, and the variants that meet are joined once all of them are written.
+    let mut batch = EditBatch::default();
     for ((path, sample_name), path_changes) in changes {
         for chunk in path_changes.chunks(VCF_CHANGE_APPLY_CHUNK_SIZE) {
             if in_place {
@@ -691,12 +691,11 @@ pub fn update_with_vcf(
                     conn,
                     context.workspace(),
                     &in_place_changes,
-                    Some(&mut tree_map),
+                    &mut batch,
                 )
                 .unwrap();
             } else {
-                BlockGroup::insert_changes(conn, context.workspace(), chunk, Some(&mut tree_map))
-                    .unwrap();
+                BlockGroup::insert_changes(conn, context.workspace(), chunk, &mut batch).unwrap();
             }
             bar.inc(chunk.len() as u64);
         }
@@ -706,6 +705,7 @@ pub fn update_with_vcf(
             .entry(path.name)
             .or_insert_with(|| path_changes.len() as i64);
     }
+    BlockGroup::combine_batch(conn, batch)?;
     bar.finish();
     for ((path, accession_name), (acc_start, acc_end)) in accession_cache.iter() {
         BlockGroup::add_accession(

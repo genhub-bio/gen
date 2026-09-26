@@ -1,6 +1,6 @@
 pub use gen_core::region::Region;
 use gen_core::{
-    HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_terminal,
+    HashId, NodeIntervalBlock, Strand, Workspace, is_terminal,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
 use gen_graph::{GraphNode, GraphNodePosition, GraphNodeSlice};
@@ -11,11 +11,10 @@ use crate::{
     accession::{Accession, AccessionError},
     annotations::{Annotation, AnnotationError},
     block_group::{
-        BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource, SpanRoutes, SpanSide,
+        BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource, PlannedEdit, RouteCache,
+        SpanRoutes, SpanSide,
     },
-    block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
-    edge::EdgeData,
     errors::PathError,
     locus::GraphLocus,
     path::Path,
@@ -712,7 +711,8 @@ impl ResolvedGenRegion {
         workspace: &Workspace,
         change: &BlockGroupChange,
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-    ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
+        routes: &mut RouteCache,
+    ) -> Result<PlannedEdit, BlockGroupError> {
         match self.kind {
             ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
                 let local_tree;
@@ -723,7 +723,7 @@ impl ResolvedGenRegion {
                         &local_tree
                     }
                 };
-                return BlockGroup::set_up_new_edges(conn, change, tree);
+                return BlockGroup::set_up_new_edges(conn, change, tree, routes);
             }
             ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {}
         };
@@ -770,52 +770,29 @@ impl ResolvedGenRegion {
             };
         // Deleting nothing changes nothing; see `BlockGroup::set_up_new_edges`.
         if self.start == self.end && change.block.sequence_start == change.block.sequence_end {
-            return Ok(vec![]);
+            return Ok(PlannedEdit::default());
         }
-        let routes = |positions: &[GraphNodePosition], side| {
-            let mut routes = SpanRoutes {
-                positions: vec![],
-                split: None,
-            };
-            let mut splits = vec![];
+        let mut span_routes = |positions: &[GraphNodePosition], side| {
+            let mut merged = SpanRoutes::default();
             for position in positions {
                 let position_routes = BlockGroup::span_routes(
+                    routes,
                     conn,
                     &self.block_group.id,
                     (position.graph_node.node_id, position.coordinate()),
                     side,
                 )?;
-                routes.positions.extend(position_routes.positions);
-                splits.extend(position_routes.split);
+                merged.positions.extend(position_routes.positions);
+                merged.splits.extend(position_routes.splits);
+                merged.anchors.extend(position_routes.anchors);
             }
-            routes.positions.sort_unstable();
-            routes.positions.dedup();
-            Ok::<_, BlockGroupError>((routes, splits))
+            merged.positions.sort_unstable();
+            merged.positions.dedup();
+            Ok::<_, BlockGroupError>(merged)
         };
-        let (starts, start_splits) = routes(&start_positions, SpanSide::Start)?;
-        let (ends, end_splits) = routes(&end_positions, SpanSide::End)?;
-        let mut new_edges = BlockGroup::span_edges(change, &starts, &ends);
-        // A marker at each position inside a block, which splits it.
-        let marker_chromosome_index = if change.preserve_edge {
-            0
-        } else {
-            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-        };
-        new_edges.extend(start_splits.into_iter().chain(end_splits).map(
-            |(node_id, coordinate)| AugmentedEdgeData {
-                edge_data: EdgeData {
-                    source_node_id: node_id,
-                    source_coordinate: coordinate,
-                    source_strand: Strand::Forward,
-                    target_node_id: node_id,
-                    target_coordinate: coordinate,
-                    target_strand: Strand::Forward,
-                },
-                chromosome_index: marker_chromosome_index,
-                phased: 0,
-            },
-        ));
-        Ok(new_edges)
+        let starts = span_routes(&start_positions, SpanSide::Start)?;
+        let ends = span_routes(&end_positions, SpanSide::End)?;
+        Ok(BlockGroup::span_edges(change, &starts, &ends))
     }
 }
 
