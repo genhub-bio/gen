@@ -12,7 +12,7 @@ use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
 use petgraph::Direction;
-use rusqlite::{OptionalExtension, ToSql, named_params, params, types::Value};
+use rusqlite::{ToSql, named_params, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -192,15 +192,6 @@ impl GroupBlock {
             panic!("Sequence or external sequence is not set.")
         }
     }
-}
-
-/// The edges of one block group that leave or arrive at a single `(node, coordinate)` port.
-#[derive(Clone, Debug, Default)]
-pub struct PortEdges {
-    /// Edges whose source endpoint is the port.
-    pub leaving: Vec<AugmentedEdge>,
-    /// Edges whose target endpoint is the port.
-    pub arriving: Vec<AugmentedEdge>,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -418,99 +409,126 @@ impl Edge {
         Ok(edges)
     }
 
-    /// The edges in `block_group_id` with an endpoint at `coordinate` on `node_id`.
+    /// The edges in `block_group_id` that leave (`Direction::Outgoing`) or arrive at
+    /// (`Direction::Incoming`) the port at `coordinate` on `node_id`.
     ///
     /// A lazily crawled viewer uses this to learn one port at a time instead of every edge that
     /// touches a node, which for a chromosome-length node carrying a VCF can be hundreds of
-    /// thousands. Both lookups are served by the `(node_id, coordinate)` edge indexes; the
+    /// thousands. The lookup is served by the `(node_id, coordinate)` edge indexes; the
     /// `CROSS JOIN` keeps SQLite from starting at `block_group_edges`, which would scan the
     /// whole block group.
-    pub fn edges_at_port(
-        conn: &GraphConnection,
-        block_group_id: &HashId,
-        node_id: HashId,
-        coordinate: i64,
-    ) -> Result<PortEdges, EdgeError> {
-        let query_for_side = |side: &str| {
-            format!(
-                "\
-                SELECT
-                    e.id,
-                    e.source_node_id,
-                    e.source_coordinate,
-                    e.source_strand,
-                    e.target_node_id,
-                    e.target_coordinate,
-                    e.target_strand,
-                    bge.chromosome_index,
-                    bge.phased,
-                    bge.created_on
-                FROM {edges} e
-                CROSS JOIN {block_group_edges} bge
-                WHERE e.{side}_node_id = :node_id
-                  AND e.{side}_coordinate = :coordinate
-                  AND bge.block_group_id = :block_group_id
-                  AND bge.edge_id = e.id;",
-                edges = Self::table_name_with_history_ref(None),
-                block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
-            )
-        };
-        let mut port_edges = PortEdges::default();
-        for (side, edges) in [
-            ("source", &mut port_edges.leaving),
-            ("target", &mut port_edges.arriving),
-        ] {
-            let mut stmt = conn.prepare_cached(&query_for_side(side))?;
-            let rows = stmt.query_map(
-                named_params! {
-                    ":node_id": node_id,
-                    ":coordinate": coordinate,
-                    ":block_group_id": block_group_id,
-                },
-                |row| {
-                    Ok(AugmentedEdge {
-                        edge: Edge {
-                            id: row.get(0)?,
-                            source_node_id: row.get(1)?,
-                            source_coordinate: row.get(2)?,
-                            source_strand: row.get(3)?,
-                            target_node_id: row.get(4)?,
-                            target_coordinate: row.get(5)?,
-                            target_strand: row.get(6)?,
-                        },
-                        chromosome_index: row.get(7)?,
-                        phased: row.get(8)?,
-                        created_on: row.get(9)?,
-                    })
-                },
-            )?;
-            for row in rows {
-                edges.push(row?);
-            }
-        }
-        Ok(port_edges)
-    }
-
-    /// The nearest coordinate on `node_id` past `coordinate` where an edge of `block_group_id`
-    /// leaves or arrives: the next higher one for `Direction::Outgoing`, the next lower one for
-    /// `Direction::Incoming`. Neighboring coordinates are what bound the slices on either side
-    /// of a port, so a lazy crawl can carve exact blocks without reading the rest of the node.
-    pub fn adjacent_edge_coordinate(
+    pub fn edges_at_port_direction(
         conn: &GraphConnection,
         block_group_id: &HashId,
         node_id: HashId,
         coordinate: i64,
         direction: Direction,
-    ) -> Result<Option<i64>, EdgeError> {
-        let (comparison, order) = match direction {
-            Direction::Outgoing => (">", "ASC"),
-            Direction::Incoming => ("<", "DESC"),
+    ) -> Result<Vec<AugmentedEdge>, EdgeError> {
+        let side = match direction {
+            Direction::Outgoing => "source",
+            Direction::Incoming => "target",
         };
-        let mut nearest: Option<i64> = None;
-        for side in ["source", "target"] {
-            let query = format!(
-                "\
-                SELECT e.{side}_coordinate
+        let query = format!(
+            "\
+            SELECT
+                e.id,
+                e.source_node_id,
+                e.source_coordinate,
+                e.source_strand,
+                e.target_node_id,
+                e.target_coordinate,
+                e.target_strand,
+                bge.chromosome_index,
+                bge.phased,
+                bge.created_on
+            FROM {edges} e
+            CROSS JOIN {block_group_edges} bge
+            WHERE e.{side}_node_id = :node_id
+              AND e.{side}_coordinate = :coordinate
+              AND bge.block_group_id = :block_group_id
+              AND bge.edge_id = e.id;",
+            edges = Self::table_name_with_history_ref(None),
+            block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+        );
+        let mut statement = conn.prepare_cached(&query)?;
+        let rows = statement.query_map(
+            named_params! {
+                ":node_id": node_id,
+                ":coordinate": coordinate,
+                ":block_group_id": block_group_id,
+            },
+            |row| {
+                Ok(AugmentedEdge {
+                    edge: Edge {
+                        id: row.get(0)?,
+                        source_node_id: row.get(1)?,
+                        source_coordinate: row.get(2)?,
+                        source_strand: row.get(3)?,
+                        target_node_id: row.get(4)?,
+                        target_coordinate: row.get(5)?,
+                        target_strand: row.get(6)?,
+                    },
+                    chromosome_index: row.get(7)?,
+                    phased: row.get(8)?,
+                    created_on: row.get(9)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(EdgeError::from)
+    }
+
+    /// Find the closing port of a slide. A jump may land directly on a junction;
+    /// a continuity edge leaving that junction must advance past its own port.
+    ///
+    /// Only a slide whose nearest port is its own landing port needs junction
+    /// classification, so ordinary slides stay a single nearest-group lookup.
+    pub(crate) fn slide_edge_group(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        port: (HashId, i64),
+        direction: Direction,
+        include_landing: bool,
+    ) -> Result<Vec<AugmentedEdge>, EdgeError> {
+        let edges =
+            Self::nearest_edge_group(conn, block_group_id, port, direction, include_landing)?;
+        let closes_at_landing = include_landing
+            && edges.first().is_some_and(|edge| {
+                let coordinate = match direction {
+                    Direction::Outgoing => edge.edge.source_coordinate,
+                    Direction::Incoming => edge.edge.target_coordinate,
+                };
+                coordinate == port.1
+            });
+        if !closes_at_landing
+            || Self::is_landing_junction(conn, block_group_id, port, direction, &edges)?
+        {
+            return Ok(edges);
+        }
+        // The landing port is not a junction, so the block runs on to the next port. With
+        // no further port, the landing group itself closes the slide.
+        let beyond = Self::nearest_edge_group(conn, block_group_id, port, direction, false)?;
+        Ok(if beyond.is_empty() { edges } else { beyond })
+    }
+
+    /// Every edge at the nearest port on `port`'s node in `direction`, optionally counting
+    /// `port` itself.
+    fn nearest_edge_group(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        port: (HashId, i64),
+        direction: Direction,
+        include_landing: bool,
+    ) -> Result<Vec<AugmentedEdge>, EdgeError> {
+        let (side, comparison, order) = match (direction, include_landing) {
+            (Direction::Outgoing, false) => ("source", ">", "ASC"),
+            (Direction::Outgoing, true) => ("source", ">=", "ASC"),
+            (Direction::Incoming, false) => ("target", "<", "DESC"),
+            (Direction::Incoming, true) => ("target", "<=", "DESC"),
+        };
+        let query = format!(
+            "\
+            WITH next_coordinate AS (
+                SELECT e.{side}_coordinate AS coordinate
                 FROM {edges} e
                 CROSS JOIN {block_group_edges} bge
                 WHERE e.{side}_node_id = :node_id
@@ -518,28 +536,123 @@ impl Edge {
                   AND bge.block_group_id = :block_group_id
                   AND bge.edge_id = e.id
                 ORDER BY e.{side}_coordinate {order}
-                LIMIT 1;",
-                edges = Self::table_name_with_history_ref(None),
-                block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
-            );
-            let mut stmt = conn.prepare_cached(&query)?;
-            let found: Option<i64> = stmt
-                .query_row(
-                    named_params! {
-                        ":node_id": node_id,
-                        ":coordinate": coordinate,
-                        ":block_group_id": block_group_id,
+                LIMIT 1
+            )
+            SELECT
+                e.id,
+                e.source_node_id,
+                e.source_coordinate,
+                e.source_strand,
+                e.target_node_id,
+                e.target_coordinate,
+                e.target_strand,
+                bge.chromosome_index,
+                bge.phased,
+                bge.created_on
+            FROM {edges} e
+            CROSS JOIN {block_group_edges} bge
+            WHERE e.{side}_node_id = :node_id
+              AND e.{side}_coordinate = (SELECT coordinate FROM next_coordinate)
+              AND bge.block_group_id = :block_group_id
+              AND bge.edge_id = e.id;",
+            edges = Self::table_name_with_history_ref(None),
+            block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+        );
+        let mut statement = conn.prepare_cached(&query)?;
+        let rows = statement.query_map(
+            named_params! {
+                ":node_id": port.0,
+                ":coordinate": port.1,
+                ":block_group_id": block_group_id,
+            },
+            |row| {
+                Ok(AugmentedEdge {
+                    edge: Edge {
+                        id: row.get(0)?,
+                        source_node_id: row.get(1)?,
+                        source_coordinate: row.get(2)?,
+                        source_strand: row.get(3)?,
+                        target_node_id: row.get(4)?,
+                        target_coordinate: row.get(5)?,
+                        target_strand: row.get(6)?,
                     },
-                    |row| row.get(0),
-                )
-                .optional()?;
-            nearest = match (nearest, found, direction) {
-                (Some(current), Some(found), Direction::Outgoing) => Some(current.min(found)),
-                (Some(current), Some(found), Direction::Incoming) => Some(current.max(found)),
-                (current, found, _) => current.or(found),
-            };
-        }
-        Ok(nearest)
+                    chromosome_index: row.get(7)?,
+                    phased: row.get(8)?,
+                    created_on: row.get(9)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(EdgeError::from)
+    }
+
+    /// Whether a slide landing on `port` closes there as a zero-width junction, given the
+    /// `landing_edges` leaving it in `direction`. Mirrors `get_block_intervals`: a same-node
+    /// jump meeting another same-node jump from the opposite side, or an outer junction
+    /// with no edge on the node before `port`.
+    fn is_landing_junction(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        port: (HashId, i64),
+        direction: Direction,
+        landing_edges: &[AugmentedEdge],
+    ) -> Result<bool, EdgeError> {
+        let (opposite_side, outer_comparison) = match direction {
+            Direction::Outgoing => ("target", "<"),
+            Direction::Incoming => ("source", ">"),
+        };
+        let query = format!(
+            "\
+            SELECT
+                EXISTS (
+                    SELECT 1 FROM {edges} opposite
+                    CROSS JOIN {block_group_edges} opposite_group
+                    WHERE opposite.{opposite_side}_node_id = :node_id
+                      AND opposite.{opposite_side}_coordinate = :coordinate
+                      AND opposite.source_node_id = opposite.target_node_id
+                      AND opposite.source_coordinate != opposite.target_coordinate
+                      AND opposite_group.block_group_id = :block_group_id
+                      AND opposite_group.edge_id = opposite.id
+                ),
+                EXISTS (
+                    SELECT 1 FROM {edges} earlier_source
+                    CROSS JOIN {block_group_edges} earlier_source_group
+                    WHERE earlier_source.source_node_id = :node_id
+                      AND earlier_source.source_coordinate {outer_comparison} :coordinate
+                      AND earlier_source_group.block_group_id = :block_group_id
+                      AND earlier_source_group.edge_id = earlier_source.id
+                ),
+                EXISTS (
+                    SELECT 1 FROM {edges} earlier_target
+                    CROSS JOIN {block_group_edges} earlier_target_group
+                    WHERE earlier_target.target_node_id = :node_id
+                      AND earlier_target.target_coordinate {outer_comparison} :coordinate
+                      AND earlier_target_group.block_group_id = :block_group_id
+                      AND earlier_target_group.edge_id = earlier_target.id
+                );",
+            edges = Self::table_name_with_history_ref(None),
+            block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
+        );
+        let mut statement = conn.prepare_cached(&query)?;
+        let (has_opposite_jump, has_earlier_source, has_earlier_target) = statement.query_row(
+            named_params! {
+                ":node_id": port.0,
+                ":coordinate": port.1,
+                ":block_group_id": block_group_id,
+            },
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )?;
+        let leaves_by_same_node_jump = landing_edges.iter().any(|edge| {
+            edge.edge.source_node_id == edge.edge.target_node_id
+                && edge.edge.source_coordinate != edge.edge.target_coordinate
+        });
+        Ok((leaves_by_same_node_jump && has_opposite_jump)
+            || (!has_earlier_source && !has_earlier_target))
     }
 
     /// Converts input edge coordinates for one backing node into the sequence slices represented

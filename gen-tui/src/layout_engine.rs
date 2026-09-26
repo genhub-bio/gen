@@ -94,10 +94,10 @@ impl<NodeId: Copy + Eq + Hash> LoadedWorld<NodeId> {
 }
 
 /// Nodes per viewport column in the budget for the breadth-first crawl that claims a new batch
-/// (see `crawl::crawl_batch`). At the most zoomed-out level a node takes a single cell, so the
-/// batch needs a few nodes per column before its boundary doors fall off screen. A smaller
-/// viewport claims smaller batches.
-const NEIGHBORHOOD_NODES_PER_COLUMN: usize = 2;
+/// (see `crawl::crawl_batch`). One node per column keeps a batch roughly a screen wide at the
+/// most zoomed-out level, where a node takes a single cell. A smaller viewport claims smaller
+/// batches.
+const NEIGHBORHOOD_NODES_PER_COLUMN: usize = 1;
 /// Floor under the derived budget, so a momentarily zero-width (uninitialized) viewport still
 /// produces a usable window instead of degenerating to just the anchor node.
 const MIN_NEIGHBORHOOD_NODE_BUDGET: usize = 10;

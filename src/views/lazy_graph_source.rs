@@ -41,9 +41,15 @@ fn start_sentinel() -> GraphNode {
 /// lookup answers this for the whole block group, independent of which part of it a crawl has
 /// loaded so far.
 fn block_group_is_circular(conn: &GraphConnection, block_group_id: &HashId) -> bool {
-    Edge::edges_at_port(conn, block_group_id, PATH_START_NODE_ID, 0).is_ok_and(|port_edges| {
-        port_edges
-            .arriving
+    Edge::edges_at_port_direction(
+        conn,
+        block_group_id,
+        PATH_START_NODE_ID,
+        0,
+        Direction::Incoming,
+    )
+    .is_ok_and(|arriving| {
+        arriving
             .iter()
             .any(|augmented_edge| augmented_edge.edge.source_node_id == PATH_END_NODE_ID)
     })
