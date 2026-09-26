@@ -248,6 +248,30 @@ impl SqlGraphSource {
     pub fn with_branch(self, branch: Option<String>) -> Self {
         Self { branch, ..self }
     }
+
+    /// The block of `node_id` holding `coordinate`, added to `graph` as frontier if the crawl
+    /// hasn't reached it yet (see `PortCrawler::locate`). `None` on a connection or query
+    /// failure too, since the viewer then simply can't go there.
+    pub fn locate(
+        &mut self,
+        graph: &mut GenGraph,
+        node_id: HashId,
+        coordinate: i64,
+    ) -> Option<GraphNode> {
+        let connection_slot = self
+            .connection
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if connection_slot.is_none() {
+            *connection_slot =
+                get_connection_for_branch(&self.db_path, self.branch.as_deref()).ok();
+        }
+        let conn = connection_slot.as_ref()?;
+        self.crawler
+            .locate(conn, graph, node_id, coordinate)
+            .ok()
+            .flatten()
+    }
 }
 
 impl GraphSource<GenGraph> for SqlGraphSource {
@@ -289,6 +313,27 @@ impl GraphSource<GenGraph> for SqlGraphSource {
 pub enum EagerOrSqlSource {
     Eager(EagerSource),
     Sql(Box<SqlGraphSource>),
+}
+
+impl EagerOrSqlSource {
+    /// The loaded block of `node_id` holding `coordinate`, or, for a lazily crawled graph, the
+    /// one the crawl would carve there, added as frontier.
+    pub fn locate(
+        &mut self,
+        graph: &mut GenGraph,
+        node_id: HashId,
+        coordinate: i64,
+    ) -> Option<GraphNode> {
+        let loaded = graph.nodes().find(|node| {
+            node.node_id == node_id
+                && node.sequence_start <= coordinate
+                && coordinate < node.sequence_end
+        });
+        match self {
+            Self::Eager(_) => loaded,
+            Self::Sql(source) => loaded.or_else(|| source.locate(graph, node_id, coordinate)),
+        }
+    }
 }
 
 impl GraphSource<GenGraph> for EagerOrSqlSource {

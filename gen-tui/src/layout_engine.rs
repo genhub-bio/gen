@@ -248,6 +248,12 @@ where
         &self.source
     }
 
+    /// The source and the graph it grows, for a caller that adds a node the crawl hasn't
+    /// reached yet (e.g. a position gone to directly) so a batch can then be claimed around it.
+    pub fn source_and_graph_mut(&mut self) -> (&mut S, &mut G) {
+        (&mut self.source, &mut self.graph)
+    }
+
     /// The node budget for a new batch claimed while the viewport is the given width
     /// (columns). See `NEIGHBORHOOD_NODES_PER_COLUMN`.
     pub fn neighborhood_node_budget(&self, viewport_width: usize) -> usize {
