@@ -185,7 +185,6 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use gen_core::NO_CHROMOSOME_INDEX;
-    use gen_graph::GraphNode;
     use gen_models::{
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
@@ -196,7 +195,7 @@ mod tests {
         region::{ResolvedGenRegion, resolve_annotation},
         sample_lineage::SampleLineage,
     };
-    use petgraph::Direction;
+    use petgraph::algo::is_cyclic_directed;
 
     use super::*;
     use crate::{
@@ -870,31 +869,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_iterative_deletion_at_combinatorial_part_start_preserves_connectivity() {
-        let context = setup_gen();
-        let conn = context.graph().conn();
-        let collection = "test".to_string();
-        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-        let parts_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/parts.fa");
-        let library_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/combinatorial_design.csv");
-        let fasta_path = fasta_path.to_str().unwrap().to_string();
-        let parts_path = parts_path.to_str().unwrap().to_string();
-        let library_path = library_path.to_str().unwrap().to_string();
+    const LIBRARY_PARTS: [&str; 3] = ["AAAA", "CAAC", "TAAT"];
 
+    /// Puts the combinatorial library of `parts.fa` and `combinatorial_design.csv` into
+    /// `m123:7-20` of `simple.fa` as sample "design": each of the three parts is followed by each
+    /// of `cds1` (`ATGATAA`), `cds2` and `cds3`, so three routes arrive at the start of `cds1`.
+    fn import_library_design(context: &DbContext, collection: &str) {
+        let collection = &collection.to_string();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fixture = |name: &str| fixtures.join(name).to_str().unwrap().to_string();
+        let parts_path = fixture("parts.fa");
+        let library_path = fixture("combinatorial_design.csv");
         import_fasta(
-            &context,
-            &fasta_path,
-            &collection,
+            context,
+            &fixture("simple.fa"),
+            collection,
             Sample::DEFAULT_NAME,
             false,
             &[],
         )
         .unwrap();
         add_annotation(
-            &context,
-            &collection,
+            context,
+            collection,
             "SITE",
             None,
             Sample::DEFAULT_NAME,
@@ -902,8 +899,8 @@ mod tests {
         )
         .unwrap();
         update_with_library(
-            &context,
-            &collection,
+            context,
+            collection,
             Sample::DEFAULT_NAME,
             "design",
             "SITE",
@@ -912,112 +909,137 @@ mod tests {
             Some(&library_path),
         )
         .unwrap();
+    }
+
+    /// The sequences `sample` spells.
+    fn sample_sequences(context: &DbContext, collection: &str, sample: &str) -> HashSet<String> {
+        let block_group = get_sample_bg(context.graph().conn(), collection, sample);
+        BlockGroup::get_all_sequences(
+            context.graph().conn(),
+            context.workspace(),
+            &block_group.id,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// `m123` with the library site holding each of the three parts followed by `coding`.
+    fn after_every_part(coding: &str) -> HashSet<String> {
+        LIBRARY_PARTS
+            .iter()
+            .map(|part| format!("ATCGATC{part}{coding}GGAACACACAGAGA"))
+            .collect()
+    }
+
+    /// Deleting the first base of `cds1`, where the three parts arrive, applies to all three.
+    #[test]
+    fn test_deletion_at_a_node_start_applies_to_every_route_into_it() {
+        let context = setup_gen();
+        let collection = "test";
+        import_library_design(&context, collection);
+        update_with_sequence(
+            &context, collection, "design", "deleted", "cds1:0-1", "", false,
+        )
+        .unwrap();
+
+        let mut expected = sample_sequences(&context, collection, "design");
+        expected.extend(after_every_part("TGATAA"));
+        assert_eq!(sample_sequences(&context, collection, "deleted"), expected);
+    }
+
+    /// Deleting the first base of a block applies to every route arriving at it, the same as at
+    /// the start of a node. After `GG` is inserted at `cds1:3`, both the rest of `cds1` and `GG`
+    /// arrive at `cds1:3`, so deleting `cds1:3-4` drops that base after either.
+    #[test]
+    fn test_deletion_at_a_block_start_applies_to_every_route_into_it() {
+        let context = setup_gen();
+        let collection = "test";
+        import_library_design(&context, collection);
+        update_with_sequence(
+            &context, collection, "design", "inserted", "cds1:3-3", "GG", false,
+        )
+        .unwrap();
+        let mut inserted = sample_sequences(&context, collection, "design");
+        inserted.extend(after_every_part("ATGGGATAA"));
+        assert_eq!(sample_sequences(&context, collection, "inserted"), inserted);
+
         update_with_sequence(
             &context,
-            &collection,
-            "design",
-            "deleted",
-            "cds1:0-1",
+            collection,
+            "inserted",
+            "inserted_deleted",
+            "cds1:3-4",
             "",
             false,
         )
         .unwrap();
 
-        let block_group = get_sample_bg(conn, &collection, "deleted");
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            None,
-        )
-        .unwrap();
-        let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
-        let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
-        let rendered_sequence = |node: GraphNode| {
-            sequences[&node.node_id]
-                .get_sequence(node.sequence_start, node.sequence_end)
-                .unwrap()
-        };
-        let deleted_target = graph
-            .nodes()
-            .find(|node| rendered_sequence(*node) == "TGATAA")
-            .expect("should contain the remainder of cds1");
-        let original_first_base = graph
-            .nodes()
-            .find(|node| node.node_id == deleted_target.node_id && rendered_sequence(*node) == "A")
-            .expect("should contain the deleted first base of cds1");
-        let deletion_boundary = graph
-            .nodes()
-            .find(|node| {
-                node.node_id == deleted_target.node_id
-                    && node.sequence_start == 0
-                    && node.sequence_end == 0
-            })
-            .expect("should contain a zero-width block at the deletion boundary");
-        let upstream_parts = graph
-            .neighbors_directed(deletion_boundary, Direction::Incoming)
-            .collect::<Vec<_>>();
+        let mut expected = inserted;
+        expected.extend(after_every_part("ATGTAA"));
+        expected.extend(after_every_part("ATGGGTAA"));
+        assert_eq!(
+            sample_sequences(&context, collection, "inserted_deleted"),
+            expected
+        );
+    }
 
-        assert_eq!(upstream_parts.len(), 3);
-        assert!(graph.contains_edge(deletion_boundary, original_first_base));
-        assert!(graph.contains_edge(deletion_boundary, deleted_target));
-
+    /// Deleting the first base of `cds1`, then the next one, keeps every combination: either
+    /// base alone or both, after each of the three parts.
+    #[test]
+    fn test_iterative_deletion_at_combinatorial_part_start_preserves_connectivity() {
+        let context = setup_gen();
+        let collection = "test";
+        import_library_design(&context, collection);
         update_with_sequence(
-            &context,
-            &collection,
-            "deleted",
-            "deleted2",
-            "cds1:1-2",
-            "",
-            false,
+            &context, collection, "design", "deleted", "cds1:0-1", "", false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context, collection, "deleted", "deleted2", "cds1:1-2", "", false,
         )
         .unwrap();
 
-        let block_group = get_sample_bg(conn, &collection, "deleted2");
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            None,
-        )
-        .unwrap();
-        let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
-        let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
-        let rendered_sequence = |node: GraphNode| {
-            sequences[&node.node_id]
-                .get_sequence(node.sequence_start, node.sequence_end)
-                .unwrap()
-        };
-        let upstream_part = graph
-            .nodes()
-            .find(|node| rendered_sequence(*node) == "TAAT")
-            .expect("should contain the upstream combinatorial part");
-        let first_deletion_boundary = graph
-            .nodes()
-            .find(|node| {
-                node.node_id == deleted_target.node_id
-                    && node.sequence_start == 0
-                    && node.sequence_end == 0
-            })
-            .expect("should retain the first deletion boundary");
-        let second_deletion_boundary = graph
-            .nodes()
-            .find(|node| {
-                node.node_id == deleted_target.node_id
-                    && node.sequence_start == 1
-                    && node.sequence_end == 1
-            })
-            .expect("should contain a junction between adjacent deletions");
-        let second_deleted_target = graph
-            .nodes()
-            .find(|node| {
-                node.node_id == deleted_target.node_id && rendered_sequence(*node) == "GATAA"
-            })
-            .expect("should contain the remainder after both deletions");
+        let mut expected = sample_sequences(&context, collection, "design");
+        expected.extend(after_every_part("TGATAA"));
+        expected.extend(after_every_part("AGATAA"));
+        expected.extend(after_every_part("GATAA"));
+        assert_eq!(sample_sequences(&context, collection, "deleted2"), expected);
+    }
 
-        assert!(graph.contains_edge(upstream_part, first_deletion_boundary));
-        assert!(graph.contains_edge(first_deletion_boundary, second_deletion_boundary));
-        assert!(graph.contains_edge(second_deletion_boundary, second_deleted_target));
+    /// Inserting at the start or the end of `cds3` puts the insertion on every route through
+    /// that end: after each of the three parts arriving at its start, and before the rest of
+    /// `m123` after its end. The graph stays acyclic.
+    #[test]
+    fn test_insertion_at_a_node_start_or_end_applies_to_every_route_through_it() {
+        for (region, spelled) in [("cds3:0-0", "GGATGCTAA"), ("cds3:7-7", "ATGCTAAGG")] {
+            let context = setup_gen();
+            let collection = "test";
+            import_library_design(&context, collection);
+            update_with_sequence(
+                &context, collection, "design", "inserted", region, "GG", false,
+            )
+            .unwrap();
+
+            let block_group = get_sample_bg(context.graph().conn(), collection, "inserted");
+            let graph = BlockGroup::get_graph(
+                context.graph().conn(),
+                context.workspace(),
+                &block_group.id,
+                None,
+            )
+            .unwrap();
+            assert!(
+                !is_cyclic_directed(&graph),
+                "{region} should leave the graph acyclic"
+            );
+            let mut expected = sample_sequences(&context, collection, "design");
+            expected.extend(after_every_part(spelled));
+            assert_eq!(
+                sample_sequences(&context, collection, "inserted"),
+                expected,
+                "{region}"
+            );
+        }
     }
 
     fn import_simple_fixture(context: &gen_models::db::DbContext, collection: &str) {
