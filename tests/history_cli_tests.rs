@@ -3804,3 +3804,57 @@ mod remotes {
         );
     }
 }
+
+#[test]
+fn test_vcf_update_exports_sample_in_default_collection() {
+    let repository = tempdir().expect("should create temporary repository");
+    fs::write(
+        repository.path().join("U00096.3.fa"),
+        ">U00096.3\nACGTACGT\n",
+    )
+    .expect("should write reference FASTA");
+    fs::write(
+        repository.path().join("random_snps.vcf"),
+        "##fileformat=VCFv4.3\n##contig=<ID=U00096.3,length=8>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample_001\nU00096.3\t2\t.\tC\tT\t.\t.\t.\tGT\t1/1\nU00096.3\t3\t.\tG\tA\t.\t.\t.\tGT\t1/1\n",
+    )
+    .expect("should write VCF with adjacent variants");
+    for arguments in [
+        vec!["init"],
+        vec!["import", "fasta", "--reference", "reference", "U00096.3.fa"],
+        vec![
+            "update",
+            "vcf",
+            "--parent-samples",
+            "reference",
+            "random_snps.vcf",
+        ],
+        vec!["export", "fasta", "--sample", "sample_001", "0001.fa"],
+    ] {
+        assert_success(
+            &run_gen(repository.path(), &arguments),
+            "VCF export workflow should succeed",
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(repository.path().join("0001.fa")).expect("should read exported sample"),
+        ">U00096.3\nATATACGT\n",
+    );
+    let missing = run_gen(
+        repository.path(),
+        &["export", "fasta", "--sample", "sample_0001", "0001.fa"],
+    );
+    assert!(
+        !missing.status.success(),
+        "missing sample should not report export success"
+    );
+    let error = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        error.contains("sample_0001") && error.contains("default"),
+        "error should identify the selection: {error}"
+    );
+    assert_eq!(
+        fs::read_to_string(repository.path().join("0001.fa"))
+            .expect("should preserve exported sample"),
+        ">U00096.3\nATATACGT\n",
+    );
+}
