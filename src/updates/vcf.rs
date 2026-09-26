@@ -1117,6 +1117,51 @@ mod tests {
         );
     }
 
+    /// Two deletions on one haplotype that meet at a coordinate, applied from the same VCF,
+    /// combine into a route that skips both: bases 10-11 and 12-13 of `m123` are both gone.
+    #[test]
+    fn test_adjacent_deletions_in_one_vcf_combine() {
+        let context = setup_gen();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fixtures.join("simple.fa").to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &fixtures
+                .join("simple_adjacent_deletions.vcf")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "adjacent").id,
+                false
+            )
+            .unwrap(),
+            HashSet::from(["ATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
     #[test]
     fn test_parses_cnvs() {
         let context = setup_gen();
