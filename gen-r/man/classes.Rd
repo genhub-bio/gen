@@ -9,7 +9,7 @@ HashId(hash_id)
 GenPlot(
   db_path,
   sequence_graph_id,
-  detail = "normal",
+  detail = NULL,
   rows = NULL,
   cols = NULL
 )

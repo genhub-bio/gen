@@ -14,7 +14,6 @@ use gen_models::{block_group::BlockGroup, db::GraphConnection};
 use gen_tui::{
     crawl::{EagerSource, GraphSource},
     graph_view::GraphViewState,
-    layout::VisualDetail,
     layout_engine::LayoutEngine,
     theme::current_theme,
 };
@@ -35,11 +34,14 @@ use crate::{
         },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_controller::{AnnotationDisplay, GenGraphController, GraphKeyOutcome, WorldSync},
+        gen_graph_widget::starting_zoom_level,
         graph_overlay::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
             replace_track_overlays,
         },
-        lazy_graph_source::{EagerOrSqlSource, SqlGraphSource, seed_block_group_graph},
+        lazy_graph_source::{
+            EagerOrSqlSource, SqlGraphSource, probe_block_group_start, seed_block_group_graph,
+        },
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
             RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
@@ -189,31 +191,49 @@ enum PanelMode {
     Messages,
 }
 
-/// Load `block_group_id`'s graph and the source its `LayoutEngine` should crawl through.
+/// A block group's graph as a viewer opens it.
+pub(crate) struct BlockGroupGraph {
+    /// The full graph for a historical view, otherwise just the seed the crawl grows from.
+    pub graph: GenGraph,
+    /// What the viewer's `LayoutEngine` crawls through.
+    pub source: EagerOrSqlSource,
+    /// The zoom level the viewer opens at (see `starting_zoom_level`).
+    pub zoom_index: usize,
+}
+
+/// Load `block_group_id`'s graph, the source its `LayoutEngine` should crawl through, and the
+/// zoom level to open it at.
 ///
 /// A historical view (`history_ref: Some(_)`) always eager-loads the full graph up front:
 /// the port queries the lazy path below is built on can only answer for the live graph.
 /// Otherwise, the graph is seeded with just its `PATH_START` sentinel and grown lazily from
 /// SQLite as the viewer's crawl pushes past its frontier - see `SqlGraphSource`, which is what
 /// turns opening a large block group from a full-graph-materializing stall into an
-/// near-instant open.
+/// near-instant open. The seed can't tell how many nodes there are, so the zoom level comes
+/// from a small probe crawl of the start instead.
 pub(crate) fn load_block_group_graph(
     conn: &GraphConnection,
     workspace: &Workspace,
-    block_group_id: &gen_core::HashId,
+    block_group_id: &HashId,
     history_ref: Option<&str>,
-) -> Result<(GenGraph, EagerOrSqlSource), Box<dyn Error>> {
+) -> Result<BlockGroupGraph, Box<dyn Error>> {
     if history_ref.is_some() {
         let graph = BlockGroup::get_graph(conn, workspace, block_group_id, history_ref)?;
-        return Ok((graph, EagerOrSqlSource::Eager(EagerSource)));
+        return Ok(BlockGroupGraph {
+            zoom_index: starting_zoom_level(&graph),
+            graph,
+            source: EagerOrSqlSource::Eager(EagerSource),
+        });
     }
     let db_path = conn
         .path()
         .map(PathBuf::from)
         .ok_or("graph database has no file path")?;
-    let source = SqlGraphSource::new(db_path, *block_group_id);
-    let seed = seed_block_group_graph(conn, block_group_id);
-    Ok((seed, EagerOrSqlSource::Sql(Box::new(source))))
+    Ok(BlockGroupGraph {
+        graph: seed_block_group_graph(conn, block_group_id),
+        source: EagerOrSqlSource::Sql(Box::new(SqlGraphSource::new(db_path, *block_group_id))),
+        zoom_index: starting_zoom_level(&probe_block_group_start(conn, block_group_id, false)),
+    })
 }
 
 /// Node IDs in the currently active crawled neighborhood (excluding terminal start/end
@@ -563,7 +583,6 @@ pub fn view_block_group<'a>(
 
     // Create the graph controller and initial graph
     let bar = progress_bar.add(get_time_elapsed_bar());
-    let _ = progress_bar.println("Pre-computing layout in chunks");
 
     // TODO: Handle origin positioning - not directly supported in new widget yet
     if position.is_some() {
@@ -1380,27 +1399,12 @@ pub fn view_block_group<'a>(
 
                 // At full detail annotations are drawn as flags under their nodes, so only the
                 // names that found no room there still float.
-                let any_hidden = controller.render(
+                controller.render(
                     frame,
                     main_canvas_area,
                     AnnotationDisplay::FlagsUnderNodes,
                     canvas_style,
                 );
-                if any_hidden {
-                    let note = if controller.detail_level() == VisualDetail::Full {
-                        " some annotations hidden due to space constraints "
-                    } else {
-                        " some annotations hidden in truncated view "
-                    };
-                    let note_style =
-                        Style::default().fg(current_theme()[0x09]).bg(current_theme()[0x00]);
-                    frame.buffer_mut().set_string(
-                        main_canvas_area.x,
-                        main_canvas_area.bottom().saturating_sub(1),
-                        note,
-                        note_style,
-                    );
-                }
             }
 
             // Panel

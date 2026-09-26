@@ -165,30 +165,6 @@ fn locus_is_single_node(locus: &GraphLocus) -> bool {
     }
 }
 
-/// Return `true` if the annotation `span` should be kept in the inline overlay
-/// at `Truncated` detail level.
-///
-/// An annotation that crosses a node boundary, or that covers the full width
-/// of the single node it lies on, is kept. This way you avoid pileups of many
-/// small annotations that lie within the truncated sequence, but still show
-/// the annotations that get interrupted by variants since those are relevant.
-pub fn span_should_show_in_truncated(span: &AnnotationSpan, loaded: &LoadedNodeSlices) -> bool {
-    graph_locus_from_annotation_span(span, loaded)
-        .as_ref()
-        .is_none_or(locus_should_show_in_truncated)
-}
-
-/// [`span_should_show_in_truncated`] for a span already mapped onto the graph.
-pub fn locus_should_show_in_truncated(locus: &GraphLocus) -> bool {
-    if !locus_is_single_node(locus) {
-        return true;
-    }
-    let Some(first) = locus.slices.first() else {
-        return true;
-    };
-    first.start == 0 && first.end as i64 >= first.block.length()
-}
-
 /// Return `true` if every segment of `span` at `idx` is fully contained within
 /// at least one segment from a later span (higher index = shorter = painted on top).
 /// Used to count annotations that are completely obscured by other highlights.
@@ -510,84 +486,5 @@ mod tests {
             ],
         };
         assert!(!span_is_single_node(&span, &LoadedNodeSlices::new(&graph)));
-    }
-
-    #[test]
-    fn test_span_should_show_in_truncated_false_for_partial_single_node_span() {
-        let node = make_node("n1", 0, 20);
-        let graph = make_graph(&[node]);
-        let span = AnnotationSpan {
-            id: HashId::convert_str("x"),
-            name: "x".into(),
-            segments: vec![make_segment("n1", 5, 10, Strand::Forward)],
-        };
-        assert!(!span_should_show_in_truncated(
-            &span,
-            &LoadedNodeSlices::new(&graph)
-        ));
-    }
-
-    #[test]
-    fn test_span_should_show_in_truncated_true_for_full_width_single_node_span() {
-        let node = make_node("n1", 0, 20);
-        let graph = make_graph(&[node]);
-        let span = AnnotationSpan {
-            id: HashId::convert_str("x"),
-            name: "x".into(),
-            segments: vec![make_segment("n1", 0, 20, Strand::Forward)],
-        };
-        assert!(span_should_show_in_truncated(
-            &span,
-            &LoadedNodeSlices::new(&graph)
-        ));
-    }
-
-    #[test]
-    fn test_span_should_show_in_truncated_true_for_multi_node_span() {
-        let node_1 = make_node("n1", 0, 20);
-        let node_2 = make_node("n2", 0, 20);
-        let graph = make_graph(&[node_1, node_2]);
-        let span = AnnotationSpan {
-            id: HashId::convert_str("x"),
-            name: "x".into(),
-            segments: vec![
-                make_segment("n1", 5, 20, Strand::Forward),
-                make_segment("n2", 0, 5, Strand::Forward),
-            ],
-        };
-        assert!(span_should_show_in_truncated(
-            &span,
-            &LoadedNodeSlices::new(&graph)
-        ));
-    }
-
-    /// Regression test: an annotation spanning a variant bubble must stay visible in
-    /// `Truncated`, even though its segments share one `node_id`.
-    #[test]
-    fn test_span_should_show_in_truncated_true_for_bubble_span() {
-        let node_id = HashId::convert_str("split-node");
-        let before_bubble = GraphNode {
-            node_id,
-            sequence_start: 0,
-            sequence_end: 10,
-        };
-        let after_bubble = GraphNode {
-            node_id,
-            sequence_start: 10,
-            sequence_end: 20,
-        };
-        let graph = make_graph(&[before_bubble, after_bubble]);
-        let span = AnnotationSpan {
-            id: HashId::convert_str("ori"),
-            name: "ori".into(),
-            segments: vec![
-                make_segment("split-node", 5, 10, Strand::Forward),
-                make_segment("split-node", 10, 15, Strand::Forward),
-            ],
-        };
-        assert!(span_should_show_in_truncated(
-            &span,
-            &LoadedNodeSlices::new(&graph)
-        ));
     }
 }

@@ -34,7 +34,7 @@ use crate::views::{
     gen_graph_widget::{
         self, AnnotationLabels, AnnotationStarts, NodeAnnotationLayer, OverlayInputs, ZoomLevels,
         create_annotated_gen_graph_engine_lazy, draw_annotation_connectors, draw_annotation_labels,
-        reapply_overlays, update_node_annotations,
+        reapply_overlays, starting_zoom_level, update_node_annotations,
     },
     graph_dimming::GraphDimming,
     graph_overlay::{
@@ -150,11 +150,13 @@ impl<'a> GenGraphController<'a> {
             sequence_end: 0,
         });
         let node_annotations = NodeAnnotationLayer::new();
+        let zoom_index = starting_zoom_level(&graph);
         let (engine, zoom_levels, view_state) = create_annotated_gen_graph_engine_lazy(
             graph,
             EagerOrSqlSource::Eager(EagerSource),
             (conn, workspace),
             node_annotations.clone(),
+            zoom_index,
         );
         Self {
             conn,
@@ -192,17 +194,19 @@ impl<'a> GenGraphController<'a> {
         Ok(controller)
     }
 
-    /// Replace the graph with `block_group_id`'s, starting over from its seed at the default
-    /// zoom level with no overlays, paths or annotation groups loaded.
+    /// Replace the graph with `block_group_id`'s, starting over from its seed at its starting
+    /// zoom level (see `starting_zoom_level`) with no overlays, paths or annotation groups
+    /// loaded.
     pub fn open_block_group(&mut self, block_group_id: &HashId) -> Result<(), Box<dyn Error>> {
         let block_group = BlockGroup::get_by_id(self.conn, block_group_id, self.history_ref)?;
-        let (graph, source) =
+        let loaded =
             load_block_group_graph(self.conn, self.workspace, block_group_id, self.history_ref)?;
         (self.engine, self.zoom_levels, self.view_state) = create_annotated_gen_graph_engine_lazy(
-            graph,
-            source,
+            loaded.graph,
+            loaded.source,
             (self.conn, self.workspace),
             self.node_annotations.clone(),
+            loaded.zoom_index,
         );
         self.dimming = GraphDimming::default();
         self.annotation_group_entries =
@@ -466,15 +470,14 @@ impl<'a> GenGraphController<'a> {
         reload
     }
 
-    /// Draw the graph and its annotation names into `area`, returning whether any name was
-    /// left out for lack of room.
+    /// Draw the graph and its annotation names into `area`.
     pub fn render(
         &mut self,
         frame: &mut Frame,
         area: Rect,
         annotation_display: AnnotationDisplay,
         style: Style,
-    ) -> bool {
+    ) {
         // Re-register overlay highlights and refill the node annotation flags only when the
         // overlay set, the zoom level, the loaded graph, or how annotations are drawn changed
         // since they were last registered.
@@ -540,7 +543,7 @@ impl<'a> GenGraphController<'a> {
             area,
             &self.view_state,
             &self.annotation_labels,
-        )
+        );
     }
 
     /// Draw the graph alone into `area`, without the cursor or annotation names.
@@ -573,7 +576,8 @@ mod tests {
 
     use super::{AnnotationDisplay, GenGraphController, GraphKeyOutcome};
     use crate::views::{
-        gen_graph_widget::DEFAULT_ZOOM_LEVEL, graph_overlay::has_path_overlay,
+        gen_graph_widget::{FULL_ZOOM_LEVEL, MINIMAL_ZOOM_LEVEL},
+        graph_overlay::has_path_overlay,
         lazy_graph_source::tests::setup_labelled_chain_block_group,
     };
 
@@ -691,8 +695,24 @@ mod tests {
 
         assert!(controller.engine().graph().node_count() <= 2);
         assert_eq!(controller.engine().active_batch(), None);
-        assert_eq!(controller.view_state().zoom_index, DEFAULT_ZOOM_LEVEL);
+        assert_eq!(controller.view_state().zoom_index, MINIMAL_ZOOM_LEVEL);
         assert!(controller.overlays().is_empty());
+    }
+
+    #[test]
+    fn test_block_group_with_one_node_opens_at_full_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &["x"]);
+        let conn = get_connection(&db_path).unwrap();
+        let workspace = Workspace::from_current_dir();
+
+        let controller =
+            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
+                .expect("should load the block group");
+
+        assert_eq!(controller.view_state().zoom_index, FULL_ZOOM_LEVEL);
+        assert!(controller.engine().graph().node_count() <= 2);
     }
 
     /// A chain of five-base nodes at full detail with annotations on some of them, the way
