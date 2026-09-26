@@ -10,6 +10,7 @@ pub mod diff_graph;
 pub mod dot_export;
 pub mod gen_graph_controller;
 pub mod gen_graph_widget;
+pub mod graph_database;
 pub mod graph_dimming;
 pub mod graph_overlay;
 pub mod helpers;
