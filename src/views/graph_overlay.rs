@@ -166,6 +166,13 @@ pub enum OverlaySource {
     Path,
 }
 
+impl OverlaySource {
+    /// Whether this overlay is an annotation, as opposed to a search result or a path.
+    pub fn is_annotation(&self) -> bool {
+        matches!(self, Self::Track(_) | Self::Annotation(_) | Self::Adhoc)
+    }
+}
+
 /// What a `GraphOverlay` paints.
 ///
 /// An annotation span supplies bars, connectors, and labels; a path highlights the loaded

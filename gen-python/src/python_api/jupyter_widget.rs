@@ -18,14 +18,14 @@ use r#gen::{
             self, AnnotationLabels, NodeAnnotationLayer, OverlayInputs, PathSequenceSource,
             SendSyncZoomLevels, create_send_sync_annotated_gen_graph_engine_lazy,
             draw_annotation_connectors, draw_annotation_labels, locus_midpoint, reapply_overlays,
-            update_node_annotations,
+            starting_zoom_level, update_node_annotations,
         },
         graph_dimming::GraphDimming,
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource, PathMembership,
             remove_path_overlay, set_path_overlay,
         },
-        lazy_graph_source::{SqlGraphSource, seed_block_group_graph},
+        lazy_graph_source::{SqlGraphSource, probe_block_group_start, seed_block_group_graph},
     },
 };
 use gen_annotations::projection::annotation_segments;
@@ -355,7 +355,8 @@ impl GraphPage {
     /// `SqlGraphSource::new_pruned`, so pruned/retired edit-site edges never enter the
     /// crawled graph in the first place; `show_history=True` uses the plain source and relies
     /// on `GraphDimming` (synced every render - see `Self::dimming`) to dim them
-    /// instead of hiding them.
+    /// instead of hiding them. The page opens at `starting_zoom_level`, judged from a probe
+    /// crawl of the start since the seed alone can't tell how many nodes there are.
     fn new(
         name: String,
         db_path: PathBuf,
@@ -364,6 +365,11 @@ impl GraphPage {
         show_history: bool,
     ) -> Self {
         let seed = seed_block_group_graph(conn, &block_group_id);
+        let zoom_index = starting_zoom_level(&probe_block_group_start(
+            conn,
+            &block_group_id,
+            !show_history,
+        ));
         let graph_source = if show_history {
             SqlGraphSource::new(db_path.clone(), block_group_id)
         } else {
@@ -376,6 +382,7 @@ impl GraphPage {
             graph_source,
             sequence_source,
             node_annotations.clone(),
+            zoom_index,
         );
         Self {
             name,
@@ -661,23 +668,7 @@ impl GraphPage {
                 self.focused_annotation,
             );
         }
-        let any_hidden =
-            draw_annotation_labels(buf, graph_area, &self.view_state, &self.annotation_labels);
-        if any_hidden {
-            let note = if detail_level == VisualDetail::Full {
-                " some annotations hidden due to space constraints "
-            } else {
-                " some annotations hidden in truncated view "
-            };
-            let theme = current_theme();
-            let note_style = Style::default().fg(theme[0x09]).bg(theme[0x00]);
-            buf.set_string(
-                graph_area.x,
-                graph_area.bottom().saturating_sub(1),
-                note,
-                note_style,
-            );
-        }
+        draw_annotation_labels(buf, graph_area, &self.view_state, &self.annotation_labels);
 
         Ok(())
     }
@@ -761,7 +752,7 @@ impl GraphPage {
     ///
     /// Parameters
     /// detail : {"normal", "full", "minimal"}
-    ///     ``"normal"`` shows truncated labels (default); ``"full"`` shows
+    ///     ``"normal"`` shows truncated labels; ``"full"`` shows
     ///     complete labels; ``"minimal"`` shows the smallest representation.
     pub fn set_detail(&mut self, detail: &str) -> PyResult<()> {
         let level = match detail {
@@ -1436,7 +1427,7 @@ impl PyGraphController {
     ///
     /// Parameters
     /// detail : {"normal", "full", "minimal"}
-    ///     ``"normal"`` shows truncated labels (default); ``"full"`` shows
+    ///     ``"normal"`` shows truncated labels; ``"full"`` shows
     ///     complete labels; ``"minimal"`` shows the smallest representation.
     pub fn set_detail(&mut self, detail: &str) -> PyResult<()> {
         self.active()?.set_detail(detail)

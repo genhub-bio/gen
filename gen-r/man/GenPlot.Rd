@@ -7,7 +7,7 @@
 GenPlot(
   db_path,
   sequence_graph_id,
-  detail = "normal",
+  detail = NULL,
   rows = NULL,
   cols = NULL,
   colors = NULL
@@ -18,8 +18,9 @@ GenPlot(
 
 \item{sequence_graph_id}{Character or \code{gen_hash_id}. Sequence graph to render.}
 
-\item{detail}{Character. Level of node detail: \code{"normal"} (default) or
-\code{"compressed"}.}
+\item{detail}{Character or \code{NULL}. Level of node detail: \code{"normal"},
+\code{"full"}, or \code{"minimal"}. \code{NULL} (default) opens a graph with a
+single sequence at \code{"full"} and any other graph at \code{"minimal"}.}
 
 \item{rows}{Integer or \code{NULL}. Canvas height in terminal rows (default 24).}
 

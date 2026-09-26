@@ -175,9 +175,10 @@ impl PySequenceGraph {
     /// cols : int, optional
     ///     Initial viewport width in terminal columns.
     /// detail : {"normal", "full", "minimal"}, optional
-    ///     Initial level of node detail.  ``"normal"`` (default) shows
-    ///     truncated labels; ``"full"`` shows complete labels; ``"minimal"``
-    ///     shows the smallest representation.
+    ///     Initial level of node detail.  ``"normal"`` shows truncated
+    ///     labels; ``"full"`` shows complete labels; ``"minimal"`` shows the
+    ///     smallest representation.  When omitted, a graph with a single
+    ///     sequence opens at ``"full"`` and any other graph at ``"minimal"``.
     /// colors : callable | dict | list, optional
     ///     Controls how annotation group entries are coloured when they are
     ///     auto-loaded from the repository.

@@ -29,9 +29,8 @@ use ratatui::{
 
 use crate::views::{
     annotation_track::{
-        AnnotationSpan, LoadedNodeSlices, graph_locus_from_annotation_span,
-        locus_should_show_in_truncated, span_covered_by_later, span_label_text,
-        span_should_show_in_truncated,
+        AnnotationSpan, LoadedNodeSlices, graph_locus_from_annotation_span, span_covered_by_later,
+        span_label_text,
     },
     graph_dimming::GraphDimming,
     graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
@@ -42,8 +41,8 @@ use crate::views::{
 /// [`build_zoom_levels`] to form the actual zoom table. Graph-agnostic - kept separate from
 /// the renderer so tests can pair the same gap progression with mock renderers.
 ///
-/// The first two steps use minimal/near-zero gaps (matched with the glyph-only renderer,
-/// which has nothing to protect). The rest floor `data_data_y` at the layout's own suggested
+/// The first step uses minimal/near-zero gaps (matched with the glyph-only renderer, which
+/// has nothing to protect). The rest floor `data_data_y` at the layout's own suggested
 /// gap (`y.max(1)`) but fix `data_data_x` to a flat constant rather than flooring the
 /// suggested gap - the x-axis suggestion from the upstream Brandes-Köpf pass carries
 /// averaging artifacts/dead space (see the module doc) that a floor alone can't compact
@@ -55,7 +54,7 @@ use crate::views::{
 /// Lives outside gen-tui deliberately: gen-tui only exposes the primitives (the public
 /// `gaps` field, `zoom_index`) and has no notion of which concrete levels exist or their
 /// gaps - that policy belongs to the widget.
-pub const ZOOM_GAP_SIZES: [GapSizes; 6] = [
+pub const ZOOM_GAP_SIZES: [GapSizes; 5] = [
     GapSizes {
         data_data_x: |_| 1,
         data_data_y: |_| 0,
@@ -63,14 +62,6 @@ pub const ZOOM_GAP_SIZES: [GapSizes; 6] = [
         data_routing_y: |_| 0,
         routing_routing_x: |_| 0,
         routing_routing_y: |_| 0,
-    },
-    GapSizes {
-        data_data_x: |_| 1,
-        data_data_y: |y| y.max(1),
-        data_routing_x: |_| 1,
-        data_routing_y: |y| y,
-        routing_routing_x: |_| 1,
-        routing_routing_y: |y| y,
     },
     GapSizes {
         data_data_x: |_| 2,
@@ -106,17 +97,34 @@ pub const ZOOM_GAP_SIZES: [GapSizes; 6] = [
     },
 ];
 
-/// Index of the canonical `Minimal` step - used by callers exposing a named "minimal detail"
-/// action (e.g. the Jupyter widget's `minimize_sequences`) rather than raw zoom in/out.
-pub const MINIMAL_ZOOM_LEVEL: usize = 1;
+/// Index of the `Minimal` step, the most zoomed-out level. A graph with more than one data
+/// node opens here (see [`starting_zoom_level`]).
+pub const MINIMAL_ZOOM_LEVEL: usize = 0;
 
-/// Index into a zoom table matching a widget's initial `Truncated` / default-gap state -
-/// the third entry built by [`build_zoom_levels`] (index 2: after the two `Minimal` steps).
-pub const DEFAULT_ZOOM_LEVEL: usize = 2;
+/// Index of the first `Full` step. A graph with a single data node opens here (see
+/// [`starting_zoom_level`]).
+pub const FULL_ZOOM_LEVEL: usize = 2;
 
-/// Index of the canonical `Full` step - used by callers exposing a named "full detail"
-/// action rather than raw zoom in/out.
-pub const FULL_ZOOM_LEVEL: usize = 3;
+/// The zoom level a viewer opens `graph` at: [`FULL_ZOOM_LEVEL`] when it holds exactly one
+/// node besides the start and end sentinels, since its whole sequence is all there is to see,
+/// and [`MINIMAL_ZOOM_LEVEL`] otherwise, so the shape of the graph comes first.
+///
+/// A lazily loaded graph must be judged from [`probe_block_group_start`]'s probe rather than
+/// its seed, which holds only the start.
+///
+/// [`probe_block_group_start`]: crate::views::lazy_graph_source::probe_block_group_start
+pub fn starting_zoom_level(graph: &GenGraph) -> usize {
+    let data_nodes = graph
+        .nodes()
+        .filter(|node| !is_start_node(node.node_id) && !is_end_node(node.node_id))
+        .take(2)
+        .count();
+    if data_nodes == 1 {
+        FULL_ZOOM_LEVEL
+    } else {
+        MINIMAL_ZOOM_LEVEL
+    }
+}
 
 /// A widget/event-loop-owned table of `(renderer, gap sizes)` pairs, one per zoom step.
 /// `GraphViewState::zoom_index` is an index into this table; nothing about which renderer
@@ -130,7 +138,7 @@ pub const FULL_ZOOM_LEVEL: usize = 3;
 /// widget) that needs the stronger bound.
 pub type ZoomLevels<'a> = Vec<(VisualDetail, Arc<dyn NodeRenderer<GenGraph> + 'a>, GapSizes)>;
 
-/// The six `(VisualDetail, GapSizes)` gap-size steps paired with fresh renderer instances,
+/// The five `(VisualDetail, GapSizes)` gap-size steps paired with fresh renderer instances,
 /// tightest to loosest - shared by [`build_zoom_levels`] and [`build_send_sync_zoom_levels`].
 /// The truncated and full renderers each get their own instance (sharing one sequence cache
 /// across the three full-detail entries via `Arc`, not cloning it) so a cache warmed at one
@@ -138,18 +146,17 @@ pub type ZoomLevels<'a> = Vec<(VisualDetail, Arc<dyn NodeRenderer<GenGraph> + 'a
 macro_rules! zoom_entries {
     ($minimal:expr, $truncated:expr, $full:expr) => {
         vec![
-            (VisualDetail::Minimal, $minimal.clone(), ZOOM_GAP_SIZES[0]),
-            (VisualDetail::Minimal, $minimal, ZOOM_GAP_SIZES[1]),
-            (VisualDetail::Truncated, $truncated, ZOOM_GAP_SIZES[2]),
+            (VisualDetail::Minimal, $minimal, ZOOM_GAP_SIZES[0]),
+            (VisualDetail::Truncated, $truncated, ZOOM_GAP_SIZES[1]),
+            (VisualDetail::Full, $full.clone(), ZOOM_GAP_SIZES[2]),
             (VisualDetail::Full, $full.clone(), ZOOM_GAP_SIZES[3]),
-            (VisualDetail::Full, $full.clone(), ZOOM_GAP_SIZES[4]),
-            (VisualDetail::Full, $full, ZOOM_GAP_SIZES[5]),
+            (VisualDetail::Full, $full, ZOOM_GAP_SIZES[4]),
         ]
     };
 }
 
-/// Build the standard six-step zoom table for a GenGraph sequence source: two minimal-glyph
-/// steps, one truncated-sequence step, and three full-sequence steps at increasing gaps.
+/// Build the standard five-step zoom table for a GenGraph sequence source: one minimal-glyph
+/// step, one truncated-sequence step, and three full-sequence steps at increasing gaps.
 pub fn build_zoom_levels<'a, S>(source: S) -> ZoomLevels<'a>
 where
     S: SequenceSource + Clone + 'a,
@@ -1263,8 +1270,9 @@ pub fn inner_truncation(s: &str, target_length: u32) -> String {
 /// standard theme and settings.
 ///
 /// This is the standard way to initialize a `GraphView` for GenGraph visualization: it dims
-/// pruned edges and the nodes only they lead into (see [`GraphDimming`]), starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
-/// free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
+/// pruned edges and the nodes only they lead into (see [`GraphDimming`]), starts at the
+/// [`starting_zoom_level`] for `graph`, and starts in free-camera mode (cursor hidden until the
+/// user clicks a node or uses keyboard nav).
 ///
 /// # Arguments
 /// * `graph` - The GenGraph to visualize
@@ -1336,8 +1344,9 @@ type GraphEngineSetup<R> = (
 );
 
 /// Shared body of [`create_gen_graph_engine`]/[`create_send_sync_gen_graph_engine`]: dims
-/// pruned edges and the nodes only they lead into, starts at [`DEFAULT_ZOOM_LEVEL`], and starts in
-/// free-camera mode (cursor hidden until the user clicks a node or uses keyboard nav).
+/// pruned edges and the nodes only they lead into, starts at the [`starting_zoom_level`] for
+/// `graph`, and starts in free-camera mode (cursor hidden until the user clicks a node or uses
+/// keyboard nav).
 ///
 /// Cycle safety (including a circular genome's `PATH_END -> PATH_START` closure) is left
 /// entirely to `LayoutEngine`'s own per-window cycle detection (`crawl::build_window_graph`)
@@ -1353,12 +1362,12 @@ fn build_gen_graph_engine<R>(
     let mut view_state = GraphViewState::default();
     // The graph never grows, so one sync decides all of its dimming.
     GraphDimming::default().sync(&graph, &EagerSource, &mut view_state);
+    apply_zoom_level(&mut view_state, starting_zoom_level(&graph), &levels);
     let mut engine = LayoutEngine::new(graph);
     if let Some(start_node) = start_node {
         engine.set_preferred_initial_anchor(start_node);
     }
 
-    apply_zoom_level(&mut view_state, DEFAULT_ZOOM_LEVEL, &levels);
     view_state.hide_cursor();
 
     (engine, levels, view_state)
@@ -1372,13 +1381,15 @@ type GraphEngineSetupLazy<R, S> = (
 
 /// Like [`build_gen_graph_engine`], but for a `graph` that is only seeded (e.g. just its
 /// starting anchor) and grows lazily through `source` as the crawl reaches unloaded nodes -
-/// see [`crate::views::lazy_graph_source::SqlGraphSource`]. The view state starts undimmed:
-/// callers keep a [`GraphDimming`] and sync it whenever the crawl may have grown
-/// `engine.graph()`, which any render can do.
+/// see [`crate::views::lazy_graph_source::SqlGraphSource`]. The seed can't tell how many nodes
+/// the graph has, so the caller picks `zoom_index` (see [`starting_zoom_level`]). The view
+/// state starts undimmed: callers keep a [`GraphDimming`] and sync it whenever the crawl may
+/// have grown `engine.graph()`, which any render can do.
 fn build_gen_graph_engine_lazy<R, S>(
     graph: GenGraph,
     source: S,
     levels: Vec<(VisualDetail, R, GapSizes)>,
+    zoom_index: usize,
 ) -> GraphEngineSetupLazy<R, S>
 where
     S: GraphSource<GenGraph>,
@@ -1390,19 +1401,21 @@ where
         engine.set_preferred_initial_anchor(start_node);
     }
 
-    apply_zoom_level(&mut view_state, DEFAULT_ZOOM_LEVEL, &levels);
+    apply_zoom_level(&mut view_state, zoom_index, &levels);
     view_state.hide_cursor();
 
     (engine, levels, view_state)
 }
 
-/// Like [`create_annotated_gen_graph_engine`], but for a lazily-loaded `graph`/`source` pair -
-/// see [`build_gen_graph_engine_lazy`], including how the caller keeps it dimmed.
+/// Like [`create_annotated_gen_graph_engine`], but for a lazily-loaded `graph`/`source` pair
+/// opened at `zoom_index` - see [`build_gen_graph_engine_lazy`], including how the caller keeps
+/// it dimmed.
 pub fn create_annotated_gen_graph_engine_lazy<'a, Src, Seq>(
     graph: GenGraph,
     source: Src,
     sequence_source: Seq,
     layer: NodeAnnotationLayer,
+    zoom_index: usize,
 ) -> (
     LayoutEngine<GenGraph, Src>,
     ZoomLevels<'a>,
@@ -1416,16 +1429,19 @@ where
         graph,
         source,
         build_annotated_zoom_levels(sequence_source, layer),
+        zoom_index,
     )
 }
 
 /// Like [`create_send_sync_annotated_gen_graph_engine`], but for a lazily-loaded `graph`/`source`
-/// pair - see [`build_gen_graph_engine_lazy`], including how the caller keeps it dimmed.
+/// pair opened at `zoom_index` - see [`build_gen_graph_engine_lazy`], including how the caller
+/// keeps it dimmed.
 pub fn create_send_sync_annotated_gen_graph_engine_lazy<Src, Seq>(
     graph: GenGraph,
     source: Src,
     sequence_source: Seq,
     layer: NodeAnnotationLayer,
+    zoom_index: usize,
 ) -> (
     LayoutEngine<GenGraph, Src>,
     SendSyncZoomLevels,
@@ -1439,6 +1455,7 @@ where
         graph,
         source,
         build_send_sync_annotated_zoom_levels(sequence_source, layer),
+        zoom_index,
     )
 }
 
@@ -1661,27 +1678,13 @@ pub fn reapply_overlays<R, S>(
     let graph = engine.graph();
     let loaded = LoadedNodeSlices::new(graph);
 
-    // DB-loaded tracks are too busy to paint at minimal detail; a span confined to a
-    // partial slice of a single node is also dropped at truncated detail, mirroring the
-    // label suppression below.
+    // Only spans drawn at this detail level take part in colouring, the same ones the labels
+    // below draw.
     let mut span_indices: Vec<usize> = overlays
         .iter()
         .enumerate()
-        .filter_map(|(idx, overlay)| {
-            overlay
-                .span()
-                .filter(|_| {
-                    !matches!(
-                        (detail_level, &overlay.source),
-                        (VisualDetail::Minimal, OverlaySource::Track(_))
-                    )
-                })
-                .filter(|span| {
-                    detail_level != VisualDetail::Truncated
-                        || span_should_show_in_truncated(span, &loaded)
-                })
-                .map(|_| idx)
-        })
+        .filter(|(_, overlay)| overlay_shows_at(overlay, detail_level))
+        .filter_map(|(idx, overlay)| overlay.span().map(|_| idx))
         .collect();
     span_indices.sort_by_key(|&idx| {
         let span = overlays[idx]
@@ -1790,15 +1793,13 @@ struct PendingLabel {
 }
 
 /// The floating labels for a set of overlays at one detail level, mapped onto the loaded graph
-/// and with covered or truncated-away spans already dropped. Only placement depends on the
-/// camera, so a viewer rebuilds this when its overlays, zoom level, or loaded batch change and
-/// hands it to [`draw_annotation_labels`] every frame.
+/// and with covered spans already dropped. Only placement depends on the camera, so a viewer
+/// rebuilds this when its overlays, zoom level, or loaded batch change and hands it to
+/// [`draw_annotation_labels`] every frame.
 #[derive(Clone)]
 pub struct AnnotationLabels {
     detail_level: VisualDetail,
     labels: Vec<PendingLabel>,
-    /// Whether a labelled span was dropped before placement, which counts as hidden.
-    any_suppressed: bool,
 }
 
 impl Default for AnnotationLabels {
@@ -1806,7 +1807,6 @@ impl Default for AnnotationLabels {
         Self {
             detail_level: VisualDetail::Minimal,
             labels: Vec::new(),
-            any_suppressed: false,
         }
     }
 }
@@ -1815,21 +1815,17 @@ impl AnnotationLabels {
     /// Resolve the labels of `overlays` at `detail_level` against `graph`.
     ///
     /// Overlays are labelled longest-first so the covered-by-later check matches highlight
-    /// paint order. A label is suppressed when its span is fully covered by a shorter overlay
-    /// on top, or when it collapses into a truncated node.
+    /// paint order. A label is dropped when its span is fully covered by a shorter overlay on
+    /// top. Annotations are not labelled at truncated detail, where a node's sequence is cut
+    /// short and most spans would land on its ellipsis.
     pub fn new(graph: &GenGraph, detail_level: VisualDetail, overlays: &[GraphOverlay]) -> Self {
         let mut labeled: Vec<(&AnnotationSpan, PathStyle)> = overlays
             .iter()
+            .filter(|overlay| overlay_shows_at(overlay, detail_level))
             .filter_map(|overlay| {
                 overlay
                     .span()
                     .filter(|span| !span.name.is_empty())
-                    .filter(|_| {
-                        !matches!(
-                            (detail_level, &overlay.source),
-                            (VisualDetail::Minimal, OverlaySource::Track(_))
-                        )
-                    })
                     .map(|span| (span, overlay.style))
             })
             .collect();
@@ -1855,11 +1851,7 @@ impl AnnotationLabels {
             let Some(locus) = graph_locus_from_annotation_span(span, &loaded) else {
                 continue;
             };
-            if span_covered_by_later(span, idx, &span_refs)
-                || (detail_level == VisualDetail::Truncated
-                    && !locus_should_show_in_truncated(&locus))
-            {
-                result.any_suppressed = true;
+            if span_covered_by_later(span, idx, &span_refs) {
                 continue;
             }
             let color = match style.color {
@@ -1876,29 +1868,36 @@ impl AnnotationLabels {
     }
 }
 
-/// Draw `labels` near their spans after the graph has been rendered into `buf`.
-///
-/// A label is hidden when no free cell is found near its span. Returns `true` if any label
-/// was hidden here or suppressed when `labels` was built, so the caller can show a single
-/// "some annotations hidden" hint.
+/// Whether `overlay`'s span is drawn at `detail_level`. Annotation tracks are too busy to
+/// draw at minimal detail, and no annotation is drawn at truncated detail. Search highlights
+/// are drawn at every level.
+fn overlay_shows_at(overlay: &GraphOverlay, detail_level: VisualDetail) -> bool {
+    match detail_level {
+        VisualDetail::Minimal => !matches!(overlay.source, OverlaySource::Track(_)),
+        VisualDetail::Truncated => !overlay.source.is_annotation(),
+        VisualDetail::Full => true,
+    }
+}
+
+/// Draw `labels` near their spans after the graph has been rendered into `buf`. A label with
+/// no free cell near its span is left out.
 pub fn draw_annotation_labels(
     buf: &mut Buffer,
     area: Rect,
     view_state: &GraphViewState<GraphNode>,
     labels: &AnnotationLabels,
-) -> bool {
+) {
     let max_distance = if labels.detail_level == VisualDetail::Minimal {
         10
     } else {
         5
     };
-    let mut any_hidden = labels.any_suppressed;
     for label in &labels.labels {
         let Some(bounds) = locus_label_bounds(&label.locus, &view_state.frame, labels.detail_level)
         else {
             continue;
         };
-        if draw_label_near_pos(
+        draw_label_near_pos(
             buf,
             area,
             bounds,
@@ -1906,13 +1905,8 @@ pub fn draw_annotation_labels(
             label.color,
             view_state,
             max_distance,
-        )
-        .is_none()
-        {
-            any_hidden = true;
-        }
+        );
     }
-    any_hidden
 }
 
 #[cfg(test)]
@@ -1938,6 +1932,9 @@ mod tests {
         test_helpers::setup_gen,
         views::{annotation_track::AnnotationSegment, graph_overlay::OverlayContent},
     };
+
+    /// The truncated-sequence step, which the snapshots of whole graphs are drawn at.
+    const TRUNCATED_ZOOM_LEVEL: usize = 1;
 
     const ZOOM_SNAPSHOT_SEQUENCES: [&str; 10] = [
         "A",
@@ -2020,16 +2017,15 @@ mod tests {
     }
 
     /// Mirrors [`ZOOM_GAP_SIZES`] paired with the mock renderers above, so
-    /// `complex_dag_at_each_zoom_level` exercises the same six-step progression the
+    /// `complex_dag_at_each_zoom_level` exercises the same five-step progression the
     /// production `build_zoom_levels` builds for a real GenGraph.
     fn zoom_snapshot_table() -> Vec<(Box<dyn NodeRenderer<MockDomainGraph>>, GapSizes)> {
         vec![
             (Box::new(ZoomSnapshotMinimal), ZOOM_GAP_SIZES[0]),
-            (Box::new(ZoomSnapshotMinimal), ZOOM_GAP_SIZES[1]),
-            (Box::new(ZoomSnapshotTruncated), ZOOM_GAP_SIZES[2]),
+            (Box::new(ZoomSnapshotTruncated), ZOOM_GAP_SIZES[1]),
+            (Box::new(ZoomSnapshotFull), ZOOM_GAP_SIZES[2]),
             (Box::new(ZoomSnapshotFull), ZOOM_GAP_SIZES[3]),
             (Box::new(ZoomSnapshotFull), ZOOM_GAP_SIZES[4]),
-            (Box::new(ZoomSnapshotFull), ZOOM_GAP_SIZES[5]),
         ]
     }
 
@@ -2243,6 +2239,7 @@ mod tests {
             Sample::get_graph(conn, context.workspace(), collection, "SAMPLE1", None).unwrap();
         let (mut engine, zoom_levels, mut view_state) =
             create_gen_graph_engine(gen_graph, (conn, context.workspace()));
+        apply_zoom_level(&mut view_state, TRUNCATED_ZOOM_LEVEL, &zoom_levels);
         let visual = &zoom_levels[view_state.zoom_index].1;
 
         let mut terminal = create_test_terminal(132, 43);
@@ -2287,6 +2284,7 @@ mod tests {
             source,
             (conn, context.workspace()),
             NodeAnnotationLayer::new(),
+            TRUNCATED_ZOOM_LEVEL,
         );
         let visual = &zoom_levels[view_state.zoom_index].1;
 
@@ -2525,6 +2523,93 @@ mod tests {
                 merge_glyphs: true,
             },
         }
+    }
+
+    /// A graph holding the start and end sentinels and one 30-base node per name, unconnected.
+    fn sentinels_and_nodes(names: &[&str]) -> GenGraph {
+        let mut graph = GenGraph::new();
+        for node_id in [PATH_START_NODE_ID, PATH_END_NODE_ID] {
+            graph.add_node(GraphNode {
+                node_id,
+                sequence_start: 0,
+                sequence_end: 0,
+            });
+        }
+        for name in names {
+            graph.add_node(GraphNode {
+                node_id: HashId::convert_str(name),
+                sequence_start: 0,
+                sequence_end: 30,
+            });
+        }
+        graph
+    }
+
+    #[test]
+    fn test_starting_zoom_level_is_full_only_for_a_single_data_node() {
+        assert_eq!(
+            starting_zoom_level(&sentinels_and_nodes(&["a"])),
+            FULL_ZOOM_LEVEL
+        );
+        assert_eq!(
+            starting_zoom_level(&sentinels_and_nodes(&["a", "b"])),
+            MINIMAL_ZOOM_LEVEL
+        );
+        assert_eq!(
+            starting_zoom_level(&sentinels_and_nodes(&[])),
+            MINIMAL_ZOOM_LEVEL
+        );
+    }
+
+    #[test]
+    fn test_zoom_table_has_one_minimal_step_before_truncated() {
+        let levels = build_zoom_levels(SyntheticSequenceSource);
+        let details: Vec<VisualDetail> = levels.iter().map(|(detail, _, _)| *detail).collect();
+        assert_eq!(
+            details,
+            [
+                VisualDetail::Minimal,
+                VisualDetail::Truncated,
+                VisualDetail::Full,
+                VisualDetail::Full,
+                VisualDetail::Full,
+            ]
+        );
+        assert_eq!(details[MINIMAL_ZOOM_LEVEL], VisualDetail::Minimal);
+        assert_eq!(details[FULL_ZOOM_LEVEL], VisualDetail::Full);
+        assert_eq!(details[FULL_ZOOM_LEVEL - 1], VisualDetail::Truncated);
+    }
+
+    #[test]
+    fn test_annotation_labels_leave_out_annotations_at_truncated_detail() {
+        let graph = sentinels_and_nodes(&["a"]);
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("a"),
+            sequence_start: 0,
+            sequence_end: 30,
+        };
+        // Each span is shorter than the one before, so none is covered by a later one.
+        let track = span_overlay("track", vec![(node_a, 0, 30, Strand::Unknown)]);
+        let mut keyed = span_overlay("keyed", vec![(node_a, 0, 25, Strand::Unknown)]);
+        keyed.source = OverlaySource::Annotation("keyed".to_string());
+        let mut adhoc = span_overlay("adhoc", vec![(node_a, 0, 20, Strand::Unknown)]);
+        adhoc.source = OverlaySource::Adhoc;
+        let mut search = span_overlay("match", vec![(node_a, 0, 10, Strand::Unknown)]);
+        search.source = OverlaySource::Search;
+        let overlays = vec![track, keyed, adhoc, search];
+
+        let label_texts = |detail_level| -> Vec<String> {
+            AnnotationLabels::new(&graph, detail_level, &overlays)
+                .labels
+                .into_iter()
+                .map(|label| label.text)
+                .collect()
+        };
+        assert_eq!(label_texts(VisualDetail::Truncated), ["match"]);
+        assert_eq!(
+            label_texts(VisualDetail::Full),
+            ["track", "keyed", "adhoc", "match"]
+        );
     }
 
     /// A linear start → a → b → c → end graph with annotations covering every flag case:
@@ -2993,7 +3078,7 @@ mod tests {
         #[test]
         fn test_annotation_branching_spans() {
             let (graph, overlays) = branching_spans();
-            for zoom_level in [FULL_ZOOM_LEVEL, 5] {
+            for zoom_level in [FULL_ZOOM_LEVEL, 4] {
                 let snapshot = render(graph.clone(), overlays.clone(), zoom_level, (110, 31), None);
                 for label in ["coding", "reverse", "nested", "site", "tail"] {
                     assert_eq!(

@@ -72,12 +72,7 @@ use gen_tui::{
     plotter::PathStyle,
     theme::current_theme,
 };
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
-    widgets::StatefulWidget,
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
 use rusqlite::{Connection, types::ValueRef};
 use serde::{Deserialize, Serialize};
 use serde_json::from_str as json_from_str;
@@ -706,11 +701,14 @@ fn load_annotation_file_as_track(
     AnnotationTrack::new(display_name.to_string(), spans)
 }
 
-fn visual_detail(detail: &str) -> std::result::Result<VisualDetail, String> {
+/// The detail level R asked for, or `None` for an empty string, which keeps the level the
+/// graph opens at (see `starting_zoom_level`).
+fn visual_detail(detail: &str) -> std::result::Result<Option<VisualDetail>, String> {
     match detail {
-        "normal" => Ok(VisualDetail::Truncated),
-        "full" => Ok(VisualDetail::Full),
-        "minimal" => Ok(VisualDetail::Minimal),
+        "" => Ok(None),
+        "normal" => Ok(Some(VisualDetail::Truncated)),
+        "full" => Ok(Some(VisualDetail::Full)),
+        "minimal" => Ok(Some(VisualDetail::Minimal)),
         other => Err(format!(
             "detail must be \"normal\", \"full\", or \"minimal\"; got {other:?}"
         )),
@@ -2086,11 +2084,9 @@ impl Repository {
         let graph =
             BlockGroup::get_graph(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
         let (mut engine, zoom_levels, mut view_state) = create_gen_graph_engine(graph, conn);
-        set_detail_level(
-            &mut view_state,
-            &zoom_levels,
-            visual_detail(&detail).map_err(Error::Other)?,
-        );
+        if let Some(detail) = visual_detail(&detail).map_err(Error::Other)? {
+            set_detail_level(&mut view_state, &zoom_levels, detail);
+        }
         view_state.hide_cursor();
 
         let area = Rect::new(0, 0, cols as u16, rows as u16);
@@ -2151,21 +2147,10 @@ impl Repository {
         let view = GraphView::new(&mut engine, active_renderer);
         view.render(area, &mut buf, &mut view_state);
 
-        // Draw floating labels after the graph, then a single hint if any were hidden.
+        // Draw floating labels after the graph.
         let detail_level = zoom_levels[view_state.zoom_index].0;
         let labels = AnnotationLabels::new(engine.graph(), detail_level, &overlays);
-        let any_hidden = draw_annotation_labels(&mut buf, area, &view_state, &labels);
-        if any_hidden {
-            let note = if detail_level == VisualDetail::Full {
-                " some annotations hidden due to space constraints "
-            } else {
-                " some annotations hidden in truncated view "
-            };
-            let note_style = Style::default()
-                .fg(current_theme()[0x09])
-                .bg(current_theme()[0x00]);
-            buf.set_string(area.x, area.bottom().saturating_sub(1), note, note_style);
-        }
+        draw_annotation_labels(&mut buf, area, &view_state, &labels);
 
         serde_json::to_string(&serialize_buffer(&buf, cols as u16, rows as u16))
             .map_err(|err| Error::Other(err.to_string()))
@@ -2184,11 +2169,9 @@ impl Repository {
         let graph =
             BlockGroup::get_graph(conn, &bg_id, None).map_err(|e| Error::Other(e.to_string()))?;
         let (mut engine, zoom_levels, mut view_state) = create_gen_graph_engine(graph, conn);
-        set_detail_level(
-            &mut view_state,
-            &zoom_levels,
-            visual_detail(&detail).map_err(Error::Other)?,
-        );
+        if let Some(detail) = visual_detail(&detail).map_err(Error::Other)? {
+            set_detail_level(&mut view_state, &zoom_levels, detail);
+        }
         view_state.hide_cursor();
         apply_graph_ops(&mut engine, &mut view_state, &zoom_levels, &ops).map_err(Error::Other)?;
         Ok(view_state.handle_click(col as u16, row as u16))
