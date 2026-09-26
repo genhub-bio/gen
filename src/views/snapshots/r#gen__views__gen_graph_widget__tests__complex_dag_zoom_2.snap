@@ -21,7 +21,7 @@ expression: terminal.backend()
 "                                                                                                                        "
 "         ╭────TTAC───╮                                                                                                  "
 "    ╭─CG─┴─╮       ╭─┴─CCGTAAGCT──╮                                                                                     "
-"  A─┤      ├─ACGTA─┤              ├─ACGTT...GTAGC──GCTAA...ATGTA                                                        "
+"  A─┤      ├─ACGTA─┤              ├─ACGTTGCAACGTAGC──GCTAACGTTAGGCCATGTA                                                "
 "    ╰─GAT─┬╯       ╰┬─TTAACCGGATC─╯                                                                                     "
 "          ╰─GATTACA─╯                                                                                                   "
 "                                                                                                                        "

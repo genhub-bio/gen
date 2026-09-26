@@ -131,8 +131,9 @@ print.gen_locus <- function(x, ...) {
 #'
 #' @param db_path Character. Path to the Gen graph SQLite database.
 #' @param sequence_graph_id Character or \code{gen_hash_id}. Sequence graph to render.
-#' @param detail Character. Level of node detail: \code{"normal"} (default) or
-#'   \code{"compressed"}.
+#' @param detail Character or \code{NULL}. Level of node detail: \code{"normal"},
+#'   \code{"full"}, or \code{"minimal"}. \code{NULL} (default) opens a graph with a
+#'   single sequence at \code{"full"} and any other graph at \code{"minimal"}.
 #' @param rows Integer or \code{NULL}. Canvas height in terminal rows (default 24).
 #' @param cols Integer or \code{NULL}. Canvas width in terminal columns (default 72).
 #' @param colors Annotation colors. Three forms are accepted:
@@ -163,7 +164,7 @@ print.gen_locus <- function(x, ...) {
 #'     \item{\code{go_to(annotation)}}{Navigate to an annotation returned by \code{list_annotations()}. Sets detail to \code{"full"}. Returns self invisibly.}
 #'   }
 #' @export
-GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, cols = NULL, colors = NULL) {
+GenPlot <- function(db_path, sequence_graph_id, detail = NULL, rows = NULL, cols = NULL, colors = NULL) {
   ctrl <- new.env(parent = emptyenv())
   ctrl$repo <- .RepositoryClass$new(dirname(dirname(db_path)))
   ctrl$sequence_graph_id <- if (inherits(sequence_graph_id, "gen_hash_id")) sequence_graph_id$hash_id else as.character(sequence_graph_id)
@@ -212,7 +213,7 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
     if (is.null(ctrl$color_map_json)) {
       ctrl$color_map_json <- ctrl$.build_color_map_json()
     }
-    ctrl$repo$render_frame(ctrl$sequence_graph_id, ctrl$detail, as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE), ctrl$color_map_json)
+    ctrl$repo$render_frame(ctrl$sequence_graph_id, ctrl$detail %||% "", as.integer(cols), as.integer(rows), paste(ctrl$ops, collapse = ";"), jsonlite::toJSON(ctrl$track_specs, auto_unbox = TRUE), ctrl$color_map_json)
   }
 
   ctrl$add_track_group <- function(group) {
@@ -240,7 +241,7 @@ GenPlot <- function(db_path, sequence_graph_id, detail = "normal", rows = NULL, 
   ctrl$handle_click <- function(col, row) {
     clicked <- ctrl$repo$handle_click(
       ctrl$sequence_graph_id,
-      ctrl$detail,
+      ctrl$detail %||% "",
       paste(ctrl$ops, collapse = ";"),
       as.integer(col),
       as.integer(row)
@@ -534,7 +535,7 @@ get_node_sequence <- function(obj, node) {
 }
 
 #' @export
-plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = "normal", colors = NULL, ...) {
+plot.SequenceGraph <- function(x, rows = NULL, cols = NULL, detail = NULL, colors = NULL, ...) {
   GenPlot(x$db_path(), x$id(), detail = detail, rows = rows, cols = cols, colors = colors)
 }
 

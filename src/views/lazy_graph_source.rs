@@ -139,6 +139,39 @@ pub fn seed_block_group_graph(conn: &GraphConnection, block_group_id: &HashId) -
     seed
 }
 
+/// Crawl just far enough from `block_group_id`'s start to tell whether it has more than one
+/// data node, for [`starting_zoom_level`](crate::views::gen_graph_widget::starting_zoom_level).
+/// A viewer's seed holds only the start, and the full graph may be too large to load.
+///
+/// Loads the start's successors, and when there is exactly one, completes both of its sides.
+/// The probe then holds a second data node whenever the block group has one reachable from the
+/// start, since it either follows the start directly or attaches to the only node that does.
+/// `prune` matches the viewer's source (see [`SqlGraphSource::new_pruned`]), so edges it would
+/// never load don't carve the node. At most three port lookups, whatever the graph's size.
+pub fn probe_block_group_start(
+    conn: &GraphConnection,
+    block_group_id: &HashId,
+    prune: bool,
+) -> GenGraph {
+    let start = start_sentinel();
+    let mut probe = GenGraph::new();
+    probe.add_node(start);
+    let mut crawler = PortCrawler::new(*block_group_id, prune);
+    if crawler
+        .expand(conn, &mut probe, &[start], Direction::Outgoing, 0)
+        .is_err()
+    {
+        return probe;
+    }
+    let successors: Vec<GraphNode> = probe
+        .neighbors_directed(start, Direction::Outgoing)
+        .collect();
+    if let [only] = successors[..] {
+        let _ = crawler.complete(conn, &mut probe, &[only]);
+    }
+    probe
+}
+
 /// Grows a block group's `GenGraph` from SQLite as a crawl pushes past its frontier, one port
 /// at a time (see [`PortCrawler`]).
 ///
@@ -282,6 +315,9 @@ pub(crate) mod tests {
     use gen_tui::layout_engine::LayoutEngine;
 
     use super::*;
+    use crate::views::gen_graph_widget::{
+        FULL_ZOOM_LEVEL, MINIMAL_ZOOM_LEVEL, starting_zoom_level,
+    };
 
     /// Build a tiny on-disk `start -> x -> y -> z -> end` block group and return its id, so
     /// `SqlGraphSource` can be exercised against a real SQLite file (`SqlGraphSource` opens its
@@ -441,15 +477,23 @@ pub(crate) mod tests {
     /// which is the marker that should be dropped. Also returns the linear chain's edge ids in
     /// order, ready to store as a path.
     pub(crate) fn setup_circular_block_group(db_path: &std::path::Path) -> (HashId, Vec<HashId>) {
-        let (block_group_id, chain_edge_ids) =
-            setup_labelled_chain_block_group(db_path, &["x", "y", "z"]);
+        setup_circular_labelled_chain_block_group(db_path, &["x", "y", "z"])
+    }
+
+    /// [`setup_labelled_chain_block_group`] closed into a circle: a real edge from the last
+    /// node back to the first, plus the `PATH_END -> PATH_START` circular marker.
+    fn setup_circular_labelled_chain_block_group(
+        db_path: &std::path::Path,
+        labels: &[&str],
+    ) -> (HashId, Vec<HashId>) {
+        let (block_group_id, chain_edge_ids) = setup_labelled_chain_block_group(db_path, labels);
         let conn = get_connection(db_path).unwrap();
         let real_closure = Edge::create(
             &conn,
-            HashId::convert_str("z"),
+            HashId::convert_str(labels.last().expect("should have at least one label")),
             5,
             Strand::Forward,
-            HashId::convert_str("x"),
+            HashId::convert_str(labels[0]),
             0,
             Strand::Forward,
         )
@@ -592,5 +636,67 @@ pub(crate) mod tests {
             data_nodes, 5,
             "start, x, y, z, end should all be crawled in"
         );
+    }
+
+    /// The zoom level `starting_zoom_level` picks from the probe of a block group's start.
+    fn probed_zoom_level(db_path: &std::path::Path, block_group_id: &HashId) -> usize {
+        let conn = get_connection(db_path).unwrap();
+        starting_zoom_level(&probe_block_group_start(&conn, block_group_id, false))
+    }
+
+    #[test]
+    fn test_probe_block_group_start_finds_a_single_data_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &["x"]);
+        assert_eq!(
+            probed_zoom_level(&db_path, &block_group_id),
+            FULL_ZOOM_LEVEL
+        );
+    }
+
+    #[test]
+    fn test_probe_block_group_start_finds_a_single_circular_data_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let (block_group_id, _) = setup_circular_labelled_chain_block_group(&db_path, &["x"]);
+        assert_eq!(
+            probed_zoom_level(&db_path, &block_group_id),
+            FULL_ZOOM_LEVEL
+        );
+    }
+
+    #[test]
+    fn test_probe_block_group_start_finds_a_second_data_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &["x", "y"]);
+        assert_eq!(
+            probed_zoom_level(&db_path, &block_group_id),
+            MINIMAL_ZOOM_LEVEL
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let (block_group_id, _) = setup_circular_block_group(&db_path);
+        assert_eq!(
+            probed_zoom_level(&db_path, &block_group_id),
+            MINIMAL_ZOOM_LEVEL
+        );
+    }
+
+    #[test]
+    fn test_probe_block_group_start_stays_near_the_start_of_a_long_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("graph.db");
+        let labels: Vec<String> = (0..80).map(|index| format!("n{index}")).collect();
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &label_refs);
+        let conn = get_connection(&db_path).unwrap();
+
+        let probe = probe_block_group_start(&conn, &block_group_id, false);
+
+        assert_eq!(probe.node_count(), 3, "should hold start, n0 and n1 only");
+        assert_eq!(starting_zoom_level(&probe), MINIMAL_ZOOM_LEVEL);
     }
 }

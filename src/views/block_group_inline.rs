@@ -3,7 +3,6 @@ use std::{io, panic, time::Duration};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use gen_core::{HashId, Workspace};
 use gen_models::{db::GraphConnection, path::Path};
-use gen_tui::{layout::VisualDetail, theme::current_theme};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     prelude::*,
@@ -232,20 +231,13 @@ fn render_inline(frame: &mut Frame, controller: &mut GenGraphController) {
     // Render the border and content
     frame.render_widget(block, main_layout[0]);
 
-    let any_hidden = controller.render(
+    controller.render(
         frame,
         inner_area,
         AnnotationDisplay::FloatingLabels,
         Style::default(),
     );
-    let hidden_legend = any_hidden.then(|| {
-        if controller.detail_level() == VisualDetail::Full {
-            "* some annotations hidden due to space constraints"
-        } else {
-            "* zoom in for more features"
-        }
-    });
-    draw_controls_help(frame, main_layout[1], controller, hidden_legend);
+    draw_controls_help(frame, main_layout[1], controller);
 }
 
 /// Draw the final plot after the widget is done
@@ -255,43 +247,19 @@ fn render_final(frame: &mut Frame, controller: &mut GenGraphController) {
     controller.render_plain(frame, area);
 }
 
-/// Draw the bottom controls line. When `hidden_legend` is set, it's right-aligned on the
-/// same line and the path-visibility shortcut is dropped to make room for it.
-fn draw_controls_help(
-    frame: &mut Frame,
-    area: Rect,
-    controller: &GenGraphController,
-    hidden_legend: Option<&str>,
-) {
-    let help_text = if hidden_legend.is_some() {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | q: Exit".to_string()
-    } else if has_path_overlay(controller.overlays()) {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit".to_string()
+/// Draw the bottom controls line.
+fn draw_controls_help(frame: &mut Frame, area: Rect, controller: &GenGraphController) {
+    let help_text = if has_path_overlay(controller.overlays()) {
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Hide Path | q: Exit"
     } else {
-        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit".to_string()
+        "←→↑↓: Nav | +/-: Zoom | f: Full window | p: Show Path | q: Exit"
     };
-
-    let buf = frame.buffer_mut();
-    buf.set_string(
+    frame.buffer_mut().set_string(
         area.x,
         area.y,
-        &help_text,
+        help_text,
         Style::default().fg(Color::Yellow),
     );
-
-    if let Some(legend) = hidden_legend {
-        let help_width = help_text.chars().count() as u16;
-        let legend_width = legend.chars().count() as u16;
-        let legend_x = area.right().saturating_sub(legend_width);
-        if legend_x > area.x + help_width {
-            buf.set_string(
-                legend_x,
-                area.y,
-                legend,
-                Style::default().fg(current_theme()[0x09]),
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -305,7 +273,7 @@ mod tests {
 
     use super::*;
     use crate::views::{
-        gen_graph_widget::DEFAULT_ZOOM_LEVEL,
+        gen_graph_widget::MINIMAL_ZOOM_LEVEL,
         lazy_graph_source::tests::{setup_circular_block_group, setup_labelled_chain_block_group},
     };
 
@@ -349,7 +317,7 @@ mod tests {
         let mut controller =
             GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
                 .expect("should load the block group");
-        assert_eq!(controller.view_state().zoom_index, DEFAULT_ZOOM_LEVEL);
+        assert_eq!(controller.view_state().zoom_index, MINIMAL_ZOOM_LEVEL);
         assert!(controller.engine().graph().node_count() <= 2);
 
         assert!(!run_script(&mut controller, 12, Vec::new()));
