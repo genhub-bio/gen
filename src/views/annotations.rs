@@ -92,6 +92,17 @@ fn clip_segments_to_graph(
     clipped
 }
 
+/// True for a feature the viewers leave out: a GenBank or GFF `source` feature describes the
+/// whole record (organism, molecule type) rather than a region of it, so drawing it only buries
+/// the features under it. Every viewer loads group annotations through
+/// [`load_annotations_for_group`], so skipping them there also keeps them out of the `w`/`b`
+/// annotation stops.
+fn is_hidden_feature(annotation: &Annotation) -> bool {
+    annotation
+        .feature_type()
+        .is_some_and(|feature_type| feature_type.eq_ignore_ascii_case("source"))
+}
+
 pub fn load_annotations_for_group(
     request: &AnnotationGroupTrackRequest<'_>,
 ) -> Result<Vec<AnnotationSpan>, AnnotationError> {
@@ -119,6 +130,7 @@ pub fn load_annotations_for_group(
     // branch, with a gap wherever an edit spliced in unrelated sequence.
     Ok(annotations
         .into_iter()
+        .filter(|annotation| !is_hidden_feature(annotation))
         .filter_map(|annotation| {
             let select = Accession::select(conn).with_ref(history_ref);
             let _ = select
@@ -813,7 +825,10 @@ mod tests {
     use gen_core::{HashId, PATH_START_NODE_ID, Sha256Hash, Strand};
     use gen_graph::{GenGraph, GraphNode};
     use gen_models::{
-        annotations::{AnnotationFileChecksumOverrides, add_annotation, add_annotation_file},
+        annotations::{
+            Annotation, AnnotationExtra, AnnotationFileChecksumOverrides, GenBankExtra, GffExtra,
+            add_annotation, add_annotation_file,
+        },
         block_group::BlockGroup,
         db::GraphConnection,
         file_types::FileTypes,
@@ -827,8 +842,8 @@ mod tests {
 
     use super::{
         AnnotationFileTrackRequest, AnnotationGroupTrackRequest, annotation_index_is_tabix,
-        load_annotation_file_track, load_annotations_for_group, load_indexed_annotation_bytes,
-        parse_translated_bed, remote_annotation_cache_path,
+        is_hidden_feature, load_annotation_file_track, load_annotations_for_group,
+        load_indexed_annotation_bytes, parse_translated_bed, remote_annotation_cache_path,
     };
     use crate::{
         graphs::combinatorial_library::parse_library,
@@ -994,10 +1009,10 @@ mod tests {
         assert_eq!(segments[1].end, 2686);
     }
 
-    /// pUC19's `source 1..2686` feature spans the whole plasmid and `ori` wraps its origin; both
-    /// are shown like any other feature.
+    /// pUC19's `source 1..2686` feature describes the whole record and is hidden by its type,
+    /// while `ori`, which wraps the origin, and the other features are shown.
     #[test]
-    fn test_load_annotations_for_group_shows_puc19_whole_plasmid_and_origin_features() {
+    fn test_load_annotations_for_group_hides_puc19_source_and_shows_origin_feature() {
         use std::{fs::File, io::BufReader, path::PathBuf};
 
         use gen_models::{
@@ -1067,8 +1082,8 @@ mod tests {
 
             let names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
             assert!(
-                names.contains(&"source"),
-                "the whole-plasmid `source` feature should be shown, got {names:?}"
+                !names.contains(&"source"),
+                "the `source` feature should be hidden, got {names:?}"
             );
             let ori = spans
                 .iter()
@@ -1285,6 +1300,103 @@ mod tests {
             compared_span_count > 0,
             "some annotation should land on the loaded nodes"
         );
+    }
+
+    /// Only the feature type decides what is hidden, in any case, whether it came from GenBank
+    /// or GFF; an annotation without a type is always shown.
+    #[test]
+    fn test_is_hidden_feature_matches_source_type_case_insensitively() {
+        let annotation = |extra: Option<AnnotationExtra>| Annotation {
+            id: HashId::convert_str("annotation"),
+            name: "source".to_string(),
+            group: "group".to_string(),
+            accession_id: HashId::convert_str("accession"),
+            extra,
+        };
+        let genbank = |kind: &str| {
+            Some(AnnotationExtra {
+                genbank: Some(GenBankExtra {
+                    kind: kind.to_string(),
+                    ..GenBankExtra::default()
+                }),
+                ..AnnotationExtra::default()
+            })
+        };
+        let gff = |ty: &str| {
+            Some(AnnotationExtra {
+                gff: Some(GffExtra {
+                    ty: ty.to_string(),
+                    ..GffExtra::default()
+                }),
+                ..AnnotationExtra::default()
+            })
+        };
+
+        assert!(is_hidden_feature(&annotation(genbank("source"))));
+        assert!(is_hidden_feature(&annotation(genbank("Source"))));
+        assert!(is_hidden_feature(&annotation(gff("SOURCE"))));
+        assert!(!is_hidden_feature(&annotation(genbank("CDS"))));
+        assert!(!is_hidden_feature(&annotation(gff("region"))));
+        assert!(
+            !is_hidden_feature(&annotation(None)),
+            "an annotation named `source` without a feature type is shown"
+        );
+    }
+
+    /// An annotation covering the whole sequence end to end is shown when its type is not
+    /// `source`.
+    #[test]
+    fn test_load_annotations_for_group_shows_whole_length_non_source_annotation() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/simple.fa")
+            .to_str()
+            .unwrap()
+            .to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        add_annotation(
+            &context,
+            &collection,
+            "WHOLE",
+            None,
+            Sample::DEFAULT_NAME,
+            "m123:0-34",
+        )
+        .unwrap();
+
+        let block_group = Sample::get_block_groups(conn, &collection, Sample::DEFAULT_NAME, None)
+            .into_iter()
+            .find(|block_group| block_group.name == "m123")
+            .expect("should contain the m123 block group");
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        let node_ids: HashSet<HashId> = graph.nodes().map(|node| node.node_id).collect();
+
+        let names: Vec<String> = load_annotation_group_entries(conn, &block_group, None)
+            .iter()
+            .flat_map(|entry| {
+                load_annotations_for_group(&AnnotationGroupTrackRequest {
+                    conn,
+                    history_ref: None,
+                    entry,
+                    projection_graph: &graph,
+                    node_ids: &node_ids,
+                })
+                .unwrap()
+            })
+            .map(|span| span.name)
+            .collect();
+        assert_eq!(names, vec!["WHOLE".to_string()]);
     }
 
     #[test]
