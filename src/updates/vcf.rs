@@ -1354,6 +1354,104 @@ mod tests {
         );
     }
 
+    /// Applying a VCF grows linearly with its variants, including once it spans more than one
+    /// chunk of changes: 8,000 variants on a synthetic 2 Mb reference take at most ten times as
+    /// long as 2,000. Each edit is planned against the routes cached before the file, not against
+    /// every edge the earlier chunks stored.
+    #[test]
+    #[cfg(feature = "benchmark")]
+    #[ignore = "manual benchmark; timing depends on the machine and its load"]
+    fn test_vcf_update_scales_linearly_with_variant_count() {
+        use std::io::Write;
+
+        let reference_length = 2_000_000usize;
+        let mut state = 12345u64;
+        let mut next_random = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let bases = *b"ACGT";
+        let reference: Vec<u8> = (0..reference_length)
+            .map(|_| bases[(next_random() % 4) as usize])
+            .collect();
+        let mut seconds = vec![];
+        for variant_count in [2_000usize, 8_000] {
+            let directory = tempfile::tempdir().unwrap();
+            let fasta_path = directory.path().join("reference.fa");
+            let mut fasta = std::fs::File::create(&fasta_path).unwrap();
+            writeln!(fasta, ">chr1").unwrap();
+            fasta.write_all(&reference).unwrap();
+            writeln!(fasta).unwrap();
+            let vcf_path = directory.path().join("variants.vcf");
+            let mut vcf = std::fs::File::create(&vcf_path).unwrap();
+            writeln!(
+                vcf,
+                "##fileformat=VCFv4.1\n##contig=<ID=chr1,length={reference_length}>\n\
+                 ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample"
+            )
+            .unwrap();
+            // A SNP, a one-base deletion and a two-base insertion in turn, 100 bases apart.
+            for index in 0..variant_count {
+                let position = 100 + index * 100;
+                let base = reference[position - 1] as char;
+                let (reference_allele, alternative_allele) = match index % 3 {
+                    0 => (
+                        base.to_string(),
+                        if base == 'A' { "C" } else { "A" }.to_string(),
+                    ),
+                    1 => (
+                        format!("{base}{}", reference[position] as char),
+                        base.to_string(),
+                    ),
+                    _ => (base.to_string(), format!("{base}GG")),
+                };
+                writeln!(
+                    vcf,
+                    "chr1\t{position}\t.\t{reference_allele}\t{alternative_allele}\t60\t.\t.\tGT\t1"
+                )
+                .unwrap();
+            }
+            drop(vcf);
+
+            let context = setup_gen();
+            let collection = "test".to_string();
+            import_fasta(
+                &context,
+                &fasta_path.to_str().unwrap().to_string(),
+                &collection,
+                Sample::DEFAULT_NAME,
+                false,
+                &[],
+            )
+            .unwrap();
+            let started = time::Instant::now();
+            update_with_vcf(
+                &context,
+                &vcf_path.to_str().unwrap().to_string(),
+                &collection,
+                "".to_string(),
+                None,
+                vec![Sample::DEFAULT_NAME.to_string()],
+                false,
+            )
+            .unwrap();
+            seconds.push(started.elapsed().as_secs_f64());
+        }
+        println!(
+            "2,000 variants: {:.2} s; 8,000 variants: {:.2} s",
+            seconds[0], seconds[1]
+        );
+        assert!(
+            seconds[1] <= seconds[0] * 10.0,
+            "8,000 variants took {:.2} s against {:.2} s for 2,000",
+            seconds[1],
+            seconds[0]
+        );
+    }
+
     #[test]
     fn test_creates_accession_nodes() {
         let context = setup_gen();
