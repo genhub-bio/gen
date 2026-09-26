@@ -10,7 +10,9 @@ use thiserror::Error;
 use crate::{
     accession::{Accession, AccessionError},
     annotations::{Annotation, AnnotationError},
-    block_group::{BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource},
+    block_group::{
+        BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource, SpanRoutes, SpanSide,
+    },
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
     edge::EdgeData,
@@ -721,7 +723,7 @@ impl ResolvedGenRegion {
                         &local_tree
                     }
                 };
-                return BlockGroup::set_up_new_edges(change, tree);
+                return BlockGroup::set_up_new_edges(conn, change, tree);
             }
             ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {}
         };
@@ -766,79 +768,53 @@ impl ResolvedGenRegion {
                     resolved.end_anchors.expect("should have end anchors"),
                 )
             };
-        let preserve_chromosome_index = if change.preserve_edge {
+        // Deleting nothing changes nothing; see `BlockGroup::set_up_new_edges`.
+        if self.start == self.end && change.block.sequence_start == change.block.sequence_end {
+            return Ok(vec![]);
+        }
+        let routes = |positions: &[GraphNodePosition], side| {
+            let mut routes = SpanRoutes {
+                positions: vec![],
+                split: None,
+            };
+            let mut splits = vec![];
+            for position in positions {
+                let position_routes = BlockGroup::span_routes(
+                    conn,
+                    &self.block_group.id,
+                    (position.graph_node.node_id, position.coordinate()),
+                    side,
+                )?;
+                routes.positions.extend(position_routes.positions);
+                splits.extend(position_routes.split);
+            }
+            routes.positions.sort_unstable();
+            routes.positions.dedup();
+            Ok::<_, BlockGroupError>((routes, splits))
+        };
+        let (starts, start_splits) = routes(&start_positions, SpanSide::Start)?;
+        let (ends, end_splits) = routes(&end_positions, SpanSide::End)?;
+        let mut new_edges = BlockGroup::span_edges(change, &starts, &ends);
+        // A marker at each position inside a block, which splits it.
+        let marker_chromosome_index = if change.preserve_edge {
             0
         } else {
             PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
         };
-        let mut new_edges = vec![];
-
-        for position in start_positions.iter().chain(end_positions.iter()) {
-            if !is_terminal(position.graph_node.node_id) {
-                let coordinate = position.coordinate();
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: position.graph_node.node_id,
-                        source_coordinate: coordinate,
-                        source_strand: Strand::Forward,
-                        target_node_id: position.graph_node.node_id,
-                        target_coordinate: coordinate,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: preserve_chromosome_index,
-                    phased: 0,
-                });
-            }
-        }
-
-        if change.block.sequence_start == change.block.sequence_end {
-            for start_position in &start_positions {
-                for end_position in &end_positions {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: start_position.graph_node.node_id,
-                            source_coordinate: start_position.coordinate(),
-                            source_strand: Strand::Forward,
-                            target_node_id: end_position.graph_node.node_id,
-                            target_coordinate: end_position.coordinate(),
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: change.chromosome_index,
-                        phased: change.phased,
-                    });
-                }
-            }
-        } else {
-            for start_position in &start_positions {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: start_position.graph_node.node_id,
-                        source_coordinate: start_position.coordinate(),
-                        source_strand: Strand::Forward,
-                        target_node_id: change.block.node_id,
-                        target_coordinate: change.block.sequence_start,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-            }
-            for end_position in &end_positions {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: change.block.node_id,
-                        source_coordinate: change.block.sequence_end,
-                        source_strand: Strand::Forward,
-                        target_node_id: end_position.graph_node.node_id,
-                        target_coordinate: end_position.coordinate(),
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-            }
-        }
-
+        new_edges.extend(start_splits.into_iter().chain(end_splits).map(
+            |(node_id, coordinate)| AugmentedEdgeData {
+                edge_data: EdgeData {
+                    source_node_id: node_id,
+                    source_coordinate: coordinate,
+                    source_strand: Strand::Forward,
+                    target_node_id: node_id,
+                    target_coordinate: coordinate,
+                    target_strand: Strand::Forward,
+                },
+                chromosome_index: marker_chromosome_index,
+                phased: 0,
+            },
+        ));
         Ok(new_edges)
     }
 }

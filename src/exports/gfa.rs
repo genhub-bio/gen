@@ -346,7 +346,6 @@ mod tests {
         region::ResolvedGenRegion,
         sequence::Sequence,
     };
-    use petgraph::Direction;
     use tempfile::tempdir;
 
     use super::*;
@@ -554,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn test_front_deletion_in_combinatorial_library_exports_junction_routes() {
+    fn test_front_deletion_in_combinatorial_library_exports_every_route() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let collection = "test";
@@ -632,27 +631,16 @@ mod tests {
             .nodes()
             .find(|node| node.node_id == deleted_target.node_id && rendered_sequence(*node) == "A")
             .expect("should contain the original first base of cds1");
-        let junction = graph
-            .nodes()
-            .find(|node| {
-                node.node_id == deleted_target.node_id
-                    && node.sequence_start == 0
-                    && node.sequence_end == 0
-            })
-            .expect("should contain the front-deletion junction");
         let upstream_parts = graph
-            .neighbors_directed(junction, Direction::Incoming)
+            .nodes()
+            .filter(|node| ["AAAA", "CAAC", "TAAT"].contains(&rendered_sequence(*node).as_str()))
             .collect::<Vec<_>>();
-        let upstream_sequences = upstream_parts
-            .iter()
-            .map(|node| rendered_sequence(*node))
-            .collect::<HashSet<_>>();
-
         assert_eq!(
-            upstream_sequences,
-            HashSet::from(["AAAA".to_string(), "TAAT".to_string(), "CAAC".to_string()]),
-            "all combinatorial prefixes should enter the junction"
+            upstream_parts.len(),
+            3,
+            "should contain every combinatorial prefix"
         );
+
         let temp_dir = tempdir().expect("should create a temporary directory");
         let gfa_path = temp_dir.path().join("front-deletion.gfa");
         export_gfa(
@@ -684,23 +672,21 @@ mod tests {
             )
         };
 
-        assert!(
-            gfa_lines.contains(&format!("S\t{}\t", segment_id(junction))),
-            "the exported links should have a zero-width junction segment as their endpoint"
-        );
         for upstream_part in upstream_parts {
             assert!(
-                gfa_lines.contains(&link_line(upstream_part, junction)),
-                "each combinatorial prefix should link to the exported junction"
+                gfa_lines.contains(&link_line(upstream_part, original_first_base)),
+                "each combinatorial prefix should link to the original first base"
+            );
+            assert!(
+                gfa_lines.contains(&link_line(upstream_part, deleted_target)),
+                "each combinatorial prefix should link past the deleted base"
             );
         }
         assert!(
-            gfa_lines.contains(&link_line(junction, original_first_base)),
-            "GFA export should retain the reference-healing route through the junction"
-        );
-        assert!(
-            gfa_lines.contains(&link_line(junction, deleted_target)),
-            "GFA export should retain the front-deletion route through the junction"
+            !gfa_lines
+                .iter()
+                .any(|line| line.starts_with("S\t") && line.split('\t').nth(2) == Some("")),
+            "the front deletion should export no empty segment"
         );
     }
 

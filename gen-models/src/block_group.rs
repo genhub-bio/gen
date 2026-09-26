@@ -59,6 +59,28 @@ pub struct SubgraphBoundary<'a> {
     pub sequence_coordinate: i64,
 }
 
+/// Which end of an edited span `BlockGroup::span_routes` reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SpanSide {
+    Start,
+    End,
+}
+
+/// The routes an edit connects to at one end of its span.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SpanRoutes {
+    /// Stored-edge endpoints to connect: route sources at a span's start, route targets at its
+    /// end.
+    pub positions: Vec<(HashId, i64)>,
+    /// A position inside a block, which a same-coordinate marker splits.
+    pub split: Option<(HashId, i64)>,
+}
+
+/// The coordinate within `block`'s node of path position `path_position`.
+fn source_coordinate(path_position: i64, block: &NodeIntervalBlock) -> i64 {
+    path_position - block.start + block.sequence_start
+}
+
 #[derive(Debug, Error, PartialEq)]
 pub enum BlockGroupError {
     #[error("Database error: {0}")]
@@ -870,6 +892,7 @@ impl BlockGroup {
 
     #[cfg_attr(feature = "profiling", tracing::instrument(skip(change, tree)))]
     pub fn set_up_new_edges(
+        conn: &GraphConnection,
         change: &BlockGroupChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
@@ -921,197 +944,228 @@ impl BlockGroup {
             )));
         }
 
-        let mut new_edges = vec![];
-
-        if change.block.sequence_start == change.block.sequence_end {
-            // Deletion
-            let source_coordinate =
-                change.region.start - start_block.start + start_block.sequence_start;
-            let target_coordinate = change.region.end - end_block.start + end_block.sequence_start;
-            let mut aug_edges = vec![];
-            let new_edge = EdgeData {
-                source_node_id: start_block.node_id,
-                source_coordinate,
-                source_strand: Strand::Forward,
-                target_node_id: end_block.node_id,
-                target_coordinate,
-                target_strand: Strand::Forward,
-            };
-            aug_edges.push(AugmentedEdgeData {
-                edge_data: new_edge,
-                chromosome_index: change.chromosome_index,
-                phased: change.phased,
-            });
-
-            // NOTE: If the deletion is happening at the very beginning of a path, we need to add
-            // an edge from the dedicated start node to the end of the deletion, to indicate it's
-            // another start point in the block group DAG.
-            if change.region.start == 0 {
-                let target_coordinate =
-                    change.region.end - end_block.start + end_block.sequence_start;
-                let new_beginning_edge = EdgeData {
-                    source_node_id: PATH_START_NODE_ID,
-                    source_coordinate: 0,
-                    source_strand: Strand::Forward,
-                    target_node_id: end_block.node_id,
-                    target_coordinate,
-                    target_strand: Strand::Forward,
-                };
-                aug_edges.push(AugmentedEdgeData {
-                    edge_data: new_beginning_edge,
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-                if !is_terminal(end_block.node_id) {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: end_block.node_id,
-                            source_coordinate: target_coordinate,
-                            source_strand: Strand::Forward,
-                            target_node_id: end_block.node_id,
-                            target_coordinate,
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
-                        phased: 0,
-                    });
-                }
-            } else {
-                if !is_terminal(start_block.node_id) {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: start_block.node_id,
-                            source_coordinate,
-                            source_strand: Strand::Forward,
-                            target_node_id: start_block.node_id,
-                            target_coordinate: source_coordinate,
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
-                        phased: 0,
-                    });
-                };
-                if !is_terminal(end_block.node_id) {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: end_block.node_id,
-                            source_coordinate: target_coordinate,
-                            source_strand: Strand::Forward,
-                            target_node_id: end_block.node_id,
-                            target_coordinate,
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: if change.preserve_edge {
-                            0
-                        } else {
-                            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                        },
-                        phased: 0,
-                    });
-                }
-            }
-            new_edges.extend(aug_edges);
-            // NOTE: If the deletion is happening at the very end of a path, we might add an edge
-            // from the beginning of the deletion to the dedicated end node, but in practice it
-            // doesn't affect sequence readouts, so it may not be worth it.
-        } else {
-            // Insertion/replacement
-            let insertion_start_coordinate =
-                change.region.start - start_block.start + start_block.sequence_start;
-            let new_start_edge = EdgeData {
-                source_node_id: start_block.node_id,
-                source_coordinate: insertion_start_coordinate,
-                source_strand: Strand::Forward,
-                target_node_id: change.block.node_id,
-                target_coordinate: change.block.sequence_start,
-                target_strand: Strand::Forward,
-            };
-            let new_augmented_start_edge = AugmentedEdgeData {
-                edge_data: new_start_edge,
-                chromosome_index: change.chromosome_index,
-                phased: change.phased,
-            };
-            let insertion_end_coordinate =
-                change.region.end - end_block.start + end_block.sequence_start;
-            let new_end_edge = EdgeData {
-                source_node_id: change.block.node_id,
-                source_coordinate: change.block.sequence_end,
-                source_strand: Strand::Forward,
-                target_node_id: end_block.node_id,
-                target_coordinate: insertion_end_coordinate,
-                target_strand: Strand::Forward,
-            };
-            let new_augmented_end_edge = AugmentedEdgeData {
-                edge_data: new_end_edge,
-                chromosome_index: change.chromosome_index,
-                phased: change.phased,
-            };
-
-            if change.region.start == 0 {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: PATH_START_NODE_ID,
-                        source_coordinate: 0,
-                        source_strand: Strand::Forward,
-                        target_node_id: change.block.node_id,
-                        target_coordinate: change.block.sequence_start,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: 0,
-                });
-            }
-
-            if !is_terminal(start_block.node_id) {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: start_block.node_id,
-                        source_coordinate: insertion_start_coordinate,
-                        source_strand: Strand::Forward,
-                        target_node_id: start_block.node_id,
-                        target_coordinate: insertion_start_coordinate,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: if change.preserve_edge {
-                        0
-                    } else {
-                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                    },
-                    phased: 0,
-                });
-            }
-            if !is_terminal(end_block.node_id) {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: end_block.node_id,
-                        source_coordinate: insertion_end_coordinate,
-                        source_strand: Strand::Forward,
-                        target_node_id: end_block.node_id,
-                        target_coordinate: insertion_end_coordinate,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: if change.preserve_edge {
-                        0
-                    } else {
-                        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                    },
-                    phased: 0,
-                });
-            }
-
-            new_edges.push(new_augmented_start_edge);
-            new_edges.push(new_augmented_end_edge);
+        // Deleting nothing changes nothing. Written out, it would join every route arriving at
+        // the point to every route leaving it, looping an edit made there back into itself.
+        if change.region.start == change.region.end
+            && change.block.sequence_start == change.block.sequence_end
+        {
+            return Ok(vec![]);
         }
+        // The span starts at the first edited base, or at the insertion point. Past the end of the
+        // path there is no base, so the span starts where the last block ends.
+        let first_block = start_blocks[0];
+        let span_start = if is_terminal(first_block.node_id) {
+            (
+                start_block.node_id,
+                source_coordinate(change.region.start, start_block),
+            )
+        } else {
+            (
+                first_block.node_id,
+                source_coordinate(change.region.start, first_block),
+            )
+        };
+        let span_end = (
+            end_block.node_id,
+            source_coordinate(change.region.end, end_block),
+        );
+        let block_group_id = change.region.block_group.id;
+        let starts = Self::span_routes(conn, &block_group_id, span_start, SpanSide::Start)?;
+        let ends = Self::span_routes(conn, &block_group_id, span_end, SpanSide::End)?;
+        Ok(Self::span_edges(change, &starts, &ends))
+    }
 
-        Ok(new_edges)
+    /// The routes an edit's span connects to at one end, read from the block group's stored
+    /// edges at `position` (a node and coordinate).
+    ///
+    /// Inside a block, the span connects to that position alone, which then needs a
+    /// same-coordinate marker to split the block. At a block boundary nothing is split: a span's
+    /// start connects to every route arriving there and its end to every route leaving. So an
+    /// edit at the start of a block reaches the same routes as one at the start of a node, and
+    /// combinations with earlier edits there are written as edges rather than left to a
+    /// zero-width junction.
+    pub(crate) fn span_routes(
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        position: (HashId, i64),
+        side: SpanSide,
+    ) -> Result<SpanRoutes, BlockGroupError> {
+        let node_id = position.0;
+        let inside_block = SpanRoutes {
+            positions: vec![position],
+            split: (!is_terminal(node_id)).then_some(position),
+        };
+        if is_terminal(node_id) {
+            return Ok(SpanRoutes {
+                split: None,
+                ..inside_block
+            });
+        }
+        let edges = Edge::edges_for_block_group_nodes(conn, block_group_id, &[node_id], None)?;
+        let is_position = |edge_node_id: HashId, edge_coordinate: i64| {
+            (edge_node_id, edge_coordinate) == position
+        };
+        let at_boundary = edges.iter().any(|augmented_edge| {
+            let edge = &augmented_edge.edge;
+            is_position(edge.source_node_id, edge.source_coordinate)
+                || is_position(edge.target_node_id, edge.target_coordinate)
+        });
+        if !at_boundary {
+            return Ok(inside_block);
+        }
+        let is_continuity = |edge: &Edge| {
+            edge.source_node_id == edge.target_node_id
+                && edge.source_coordinate == edge.target_coordinate
+        };
+        // Blocks are cut at every coordinate an edge touches, so the node has sequence ending at
+        // the position when an edge touches it anywhere before, and sequence starting there when
+        // an edge touches it anywhere after. A node start has none before and a node end none
+        // after; there routes meet only through edges from elsewhere.
+        let node_coordinates = edges
+            .iter()
+            .flat_map(|augmented_edge| {
+                let edge = &augmented_edge.edge;
+                [
+                    (edge.source_node_id, edge.source_coordinate),
+                    (edge.target_node_id, edge.target_coordinate),
+                ]
+            })
+            .filter(|(edge_node_id, _)| *edge_node_id == node_id)
+            .map(|(_, edge_coordinate)| edge_coordinate)
+            .collect::<Vec<_>>();
+        let mut positions = match side {
+            SpanSide::Start => {
+                let sequence_ends_here = node_coordinates.iter().any(|&other| other < position.1);
+                sequence_ends_here
+                    .then_some(position)
+                    .into_iter()
+                    .chain(
+                        edges
+                            .iter()
+                            .map(|augmented_edge| &augmented_edge.edge)
+                            .filter(|edge| {
+                                !is_continuity(edge)
+                                    && is_position(edge.target_node_id, edge.target_coordinate)
+                            })
+                            .map(|edge| (edge.source_node_id, edge.source_coordinate)),
+                    )
+                    .collect::<Vec<_>>()
+            }
+            SpanSide::End => {
+                let sequence_starts_here = node_coordinates.iter().any(|&other| other > position.1);
+                sequence_starts_here
+                    .then_some(position)
+                    .into_iter()
+                    .chain(
+                        edges
+                            .iter()
+                            .map(|augmented_edge| &augmented_edge.edge)
+                            .filter(|edge| {
+                                !is_continuity(edge)
+                                    && is_position(edge.source_node_id, edge.source_coordinate)
+                            })
+                            .map(|edge| (edge.target_node_id, edge.target_coordinate)),
+                    )
+                    .collect::<Vec<_>>()
+            }
+        };
+        positions.sort_unstable();
+        positions.dedup();
+        // Nothing meets the boundary on this side, so the edit is left attached to the position
+        // itself; a marker there would only make a node-end edge.
+        if positions.is_empty() {
+            return Ok(SpanRoutes {
+                split: None,
+                ..inside_block
+            });
+        }
+        Ok(SpanRoutes {
+            positions,
+            split: None,
+        })
+    }
+
+    /// The edges joining an edit's routes: every start route straight to every end route for a
+    /// deletion, or through the new block otherwise, plus a marker at each split position.
+    pub(crate) fn span_edges(
+        change: &BlockGroupChange,
+        starts: &SpanRoutes,
+        ends: &SpanRoutes,
+    ) -> Vec<AugmentedEdgeData> {
+        let marker_chromosome_index = if change.preserve_edge {
+            0
+        } else {
+            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+        };
+        let edge = |source: (HashId, i64), target: (HashId, i64), chromosome_index, phased| {
+            AugmentedEdgeData {
+                edge_data: EdgeData {
+                    source_node_id: source.0,
+                    source_coordinate: source.1,
+                    source_strand: Strand::Forward,
+                    target_node_id: target.0,
+                    target_coordinate: target.1,
+                    target_strand: Strand::Forward,
+                },
+                chromosome_index,
+                phased,
+            }
+        };
+        // A route leaving the span's end at a point before where a route arrives at its start, on
+        // the same node, leads back upstream: joining it would loop the edit into itself, as would
+        // an edit joining the node it inserts to itself (the same insertion made twice).
+        let inserts_node = change.block.sequence_start != change.block.sequence_end;
+        let is_inserted_node =
+            |position: &&(HashId, i64)| inserts_node && position.0 == change.block.node_id;
+        let loops_back = |target: &&(HashId, i64)| {
+            starts
+                .positions
+                .iter()
+                .any(|(node_id, arrival)| *node_id == target.0 && target.1 < *arrival)
+        };
+        let sources = starts
+            .positions
+            .iter()
+            .filter(|position| !is_inserted_node(position))
+            .collect::<Vec<_>>();
+        let targets = ends
+            .positions
+            .iter()
+            .filter(|position| !is_inserted_node(position) && !loops_back(position))
+            .collect::<Vec<_>>();
+        let mut new_edges = starts
+            .split
+            .iter()
+            .chain(&ends.split)
+            .map(|&position| edge(position, position, marker_chromosome_index, 0))
+            .collect::<Vec<_>>();
+        if change.block.sequence_start == change.block.sequence_end {
+            for &&source in &sources {
+                for &&target in &targets {
+                    new_edges.push(edge(source, target, change.chromosome_index, change.phased));
+                }
+            }
+        } else {
+            let block_start = (change.block.node_id, change.block.sequence_start);
+            let block_end = (change.block.node_id, change.block.sequence_end);
+            for &&source in &sources {
+                new_edges.push(edge(
+                    source,
+                    block_start,
+                    change.chromosome_index,
+                    change.phased,
+                ));
+            }
+            for &&target in &targets {
+                new_edges.push(edge(
+                    block_end,
+                    target,
+                    change.chromosome_index,
+                    change.phased,
+                ));
+            }
+        }
+        new_edges
     }
 
     pub fn intervaltree_for(
