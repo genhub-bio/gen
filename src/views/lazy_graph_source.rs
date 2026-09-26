@@ -285,7 +285,7 @@ impl GraphSource<GenGraph> for SqlGraphSource {
 /// regardless of which strategy any one graph actually used. [`SqlGraphSource`] only reads the
 /// live graph, so a historical view keeps using [`EagerSource`] over a fully materialized
 /// `BlockGroup::get_graph` instead.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum EagerOrSqlSource {
     Eager(EagerSource),
     Sql(Box<SqlGraphSource>),

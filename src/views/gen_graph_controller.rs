@@ -8,10 +8,13 @@
 //! from the inline widget to the full-screen viewer moves the controller over and reloads
 //! nothing.
 
-use std::{collections::HashSet, error::Error};
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use gen_core::{HashId, PATH_START_NODE_ID};
+use gen_core::{HashId, PATH_START_NODE_ID, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode};
 use gen_models::{block_group::BlockGroup, path::Path};
 use gen_tui::{
@@ -23,7 +26,13 @@ use gen_tui::{
     theme::current_theme,
 };
 use log::warn;
-use ratatui::{Frame, layout::Rect, style::Style};
+use ratatui::{
+    Frame,
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+    widgets::{Clear, StatefulWidget, Widget},
+};
 
 use crate::views::{
     annotation_groups::{AnnotationGroupEntry, load_annotation_group_entries},
@@ -33,15 +42,16 @@ use crate::views::{
     },
     gen_graph_widget::{
         self, AnnotationLabels, AnnotationStarts, NodeAnnotationLayer, OverlayInputs,
-        SendSyncZoomLevels, create_send_sync_annotated_gen_graph_engine_lazy,
-        draw_annotation_connectors, draw_annotation_labels, reapply_overlays, starting_zoom_level,
-        update_node_annotations,
+        SendSyncZoomLevels, build_send_sync_annotated_zoom_levels,
+        create_send_sync_annotated_gen_graph_engine_lazy, draw_annotation_connectors,
+        draw_annotation_labels, reapply_overlays, starting_zoom_level, update_node_annotations,
     },
     graph_database::GraphDatabase,
     graph_dimming::GraphDimming,
     graph_overlay::{
         AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership, group_track_key,
-        has_path_overlay, remove_path_overlay, replace_track_overlays, set_path_overlay,
+        has_path_overlay, remove_path_overlay, remove_track_overlays, replace_track_overlays,
+        set_path_overlay,
     },
     lazy_graph_source::EagerOrSqlSource,
 };
@@ -76,6 +86,17 @@ pub struct GroupReload {
     pub loaded: Vec<String>,
     /// One message for each group that failed to load.
     pub warnings: Vec<String>,
+}
+
+/// What a mouse click on the graph did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClickOutcome {
+    /// The click landed on a door and the cursor stepped through it into another batch.
+    EnteredDoor,
+    /// The cursor moved to the clicked node.
+    SelectedNode,
+    /// The click hit nothing; the cursor is hidden.
+    Missed,
 }
 
 /// What [`GenGraphController::sync_active_world`] brought up to date.
@@ -141,6 +162,52 @@ pub struct GenGraphController {
     /// against (`None` once the overlays are rebuilt).
     annotation_labels: AnnotationLabels,
     labelled_overlay_inputs: Option<(OverlayInputs, AnnotationDisplay)>,
+    /// The annotation whose pieces are joined by connectors at full detail, e.g. the one a
+    /// notebook's `show()` pointed at. Dropped once no overlay carries it any more.
+    focused_annotation: Option<HashId>,
+    /// Colors requested for annotation group annotations by id, applied whenever a batch's
+    /// groups are loaded: `Some` pins that color, `None` hides the annotation.
+    annotation_color_overrides: HashMap<HashId, Option<Color>>,
+    /// Annotation groups (by entry id) switched off, which batch reloads skip. Every other
+    /// group of the open block group is loaded for each batch.
+    disabled_annotation_groups: HashSet<String>,
+}
+
+/// A clone gets its own annotation flag layer and renderers, so drawing one never changes
+/// what the other draws, and its own database connection, opened on first use.
+impl Clone for GenGraphController {
+    fn clone(&self) -> Self {
+        let node_annotations = NodeAnnotationLayer::new();
+        let zoom_levels = build_send_sync_annotated_zoom_levels(
+            self.database.sequence_source(),
+            node_annotations.clone(),
+        );
+        Self {
+            database: self.database.clone(),
+            history_ref: self.history_ref.clone(),
+            prune_history: self.prune_history,
+            engine: self.engine.clone(),
+            zoom_levels,
+            view_state: self.view_state.clone(),
+            dimming: self.dimming.clone(),
+            node_annotations,
+            annotation_starts: self.annotation_starts.clone(),
+            block_group: self.block_group.clone(),
+            annotation_group_entries: self.annotation_group_entries.clone(),
+            annotation_groups_world: self.annotation_groups_world,
+            paths: self.paths.clone(),
+            overlays: self.overlays.clone(),
+            annotation_colors: self.annotation_colors.clone(),
+            overlays_dirty: true,
+            applied_overlay_inputs: None,
+            floating_overlays: None,
+            annotation_labels: AnnotationLabels::default(),
+            labelled_overlay_inputs: None,
+            focused_annotation: self.focused_annotation,
+            annotation_color_overrides: self.annotation_color_overrides.clone(),
+            disabled_annotation_groups: self.disabled_annotation_groups.clone(),
+        }
+    }
 }
 
 impl GenGraphController {
@@ -182,6 +249,9 @@ impl GenGraphController {
             floating_overlays: None,
             annotation_labels: AnnotationLabels::default(),
             labelled_overlay_inputs: None,
+            focused_annotation: None,
+            annotation_color_overrides: HashMap::new(),
+            disabled_annotation_groups: HashSet::new(),
         }
     }
 
@@ -233,8 +303,141 @@ impl GenGraphController {
         self.annotation_groups_world = None;
         self.paths.clear();
         self.overlays.clear();
+        self.focused_annotation = None;
         self.overlays_dirty = true;
         Ok(())
+    }
+
+    /// The database the open block group is read from, for callers that query it alongside
+    /// the view (e.g. listing a notebook graph's annotations).
+    pub fn database_mut(&mut self) -> &mut GraphDatabase {
+        &mut self.database
+    }
+
+    /// Color or hide annotation group annotations by id from the next load on: `Some` pins
+    /// that color, `None` hides the annotation. Groups already loaded for the active batch
+    /// are loaded again on the next sync.
+    pub fn set_annotation_color_overrides(&mut self, overrides: HashMap<HashId, Option<Color>>) {
+        self.annotation_color_overrides = overrides;
+        self.annotation_groups_world = None;
+    }
+
+    /// The open block group's annotation groups, whether or not they are switched on.
+    pub fn annotation_group_entries(&self) -> &[AnnotationGroupEntry] {
+        &self.annotation_group_entries
+    }
+
+    /// Switch annotation group `group_id` (an entry id) on or off. Switching it off removes
+    /// its overlays and keeps later batches from loading it; switching it on loads it for the
+    /// active batch at the next sync.
+    pub fn set_annotation_group_enabled(&mut self, group_id: &str, enabled: bool) {
+        if enabled {
+            if self.disabled_annotation_groups.remove(group_id) {
+                self.annotation_groups_world = None;
+            }
+        } else if self.disabled_annotation_groups.insert(group_id.to_string()) {
+            remove_track_overlays(&mut self.overlays, &group_track_key(group_id));
+            self.overlays_dirty = true;
+        }
+    }
+
+    /// The loaded graph's nodes other than the start and end sentinels.
+    pub fn loaded_node_ids(&self) -> HashSet<HashId> {
+        self.engine
+            .graph()
+            .nodes()
+            .map(|node| node.node_id)
+            .filter(|&node_id| !is_start_node(node_id) && !is_end_node(node_id))
+            .collect()
+    }
+
+    /// Pin `color` on the overlay span `id`, so automatic coloring never repaints it.
+    pub fn pin_annotation_color(&mut self, id: HashId, color: Color) {
+        self.annotation_colors.pin(id, color);
+        self.overlays_dirty = true;
+    }
+
+    /// Join the pieces of annotation `id` with connectors at full detail, or stop joining any.
+    pub fn set_focused_annotation(&mut self, id: Option<HashId>) {
+        self.focused_annotation = id;
+    }
+
+    pub fn focused_annotation(&self) -> Option<HashId> {
+        self.focused_annotation
+    }
+
+    /// Step one zoom level in.
+    pub fn zoom_in(&mut self) {
+        gen_graph_widget::zoom_in(&mut self.view_state, &self.zoom_levels);
+        self.overlays_dirty = true;
+    }
+
+    /// Step one zoom level out.
+    pub fn zoom_out(&mut self) {
+        gen_graph_widget::zoom_out(&mut self.view_state, &self.zoom_levels);
+        self.overlays_dirty = true;
+    }
+
+    /// Jump straight to the first zoom level drawing nodes at `detail`.
+    pub fn set_detail_level(&mut self, detail: VisualDetail) {
+        if let Some(index) = self
+            .zoom_levels
+            .iter()
+            .position(|(level, _, _)| *level == detail)
+        {
+            gen_graph_widget::apply_zoom_level(&mut self.view_state, index, &self.zoom_levels);
+            self.overlays_dirty = true;
+        }
+    }
+
+    /// Move the camera by a drag of `dx` by `dy` cells, following the pointer one to one.
+    pub fn pan(&mut self, dx: i16, dy: i16) {
+        self.view_state.move_by_terminal(dx, dy);
+        self.view_state.rebase_camera_to_closest_node();
+    }
+
+    /// Apply a click at a cell of the area last drawn: a door takes the cursor into the batch
+    /// behind it, a node takes the cursor, and anything else hides it.
+    pub fn click(&mut self, column: u16, row: u16) -> ClickOutcome {
+        if let Some((boundary, target)) = self.view_state.wormhole_hit(column, row) {
+            self.teleport_through_wormhole(boundary, target);
+            return ClickOutcome::EnteredDoor;
+        }
+        if self.view_state.handle_click(column, row) {
+            ClickOutcome::SelectedNode
+        } else {
+            ClickOutcome::Missed
+        }
+    }
+
+    /// Show `offset` into loaded node `node` at full detail, centred when `center` is set and
+    /// otherwise against the left edge, opening the batch that holds it. Returns whether the
+    /// node is loaded; one the crawl hasn't reached yet can't be shown.
+    pub fn go_to_node_offset(&mut self, node: GraphNode, offset: i64, center: bool) -> bool {
+        self.set_detail_level(VisualDetail::Full);
+        let node_budget = self
+            .engine
+            .neighborhood_node_budget(self.view_state.last_area_width() as usize);
+        if self
+            .engine
+            .activate_batch_containing(node, node_budget)
+            .is_err()
+        {
+            return false;
+        }
+        // The cursor is placed by fractions of the node's drawn width.
+        let node_length = node.length();
+        let fraction = if node_length > 1 {
+            offset as f64 / (node_length - 1) as f64
+        } else {
+            0.0
+        };
+        self.view_state.go_to_node(node, (fraction, 0.5));
+        if !center {
+            self.view_state.queue_snap_left();
+        }
+        self.view_state.hide_cursor();
+        true
     }
 
     /// The open block group, if any.
@@ -377,13 +580,11 @@ impl GenGraphController {
                 }
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                gen_graph_widget::zoom_in(&mut self.view_state, &self.zoom_levels);
-                self.overlays_dirty = true;
+                self.zoom_in();
                 GraphKeyOutcome::Redraw
             }
             KeyCode::Char('-') => {
-                gen_graph_widget::zoom_out(&mut self.view_state, &self.zoom_levels);
-                self.overlays_dirty = true;
+                self.zoom_out();
                 GraphKeyOutcome::Redraw
             }
             // Annotation starts are only known in screen columns where the annotations are
@@ -486,6 +687,9 @@ impl GenGraphController {
             |overlay| !matches!(&overlay.source, OverlaySource::Track(key) if key.starts_with("group:")),
         );
         for entry in &self.annotation_group_entries {
+            if self.disabled_annotation_groups.contains(&entry.id) {
+                continue;
+            }
             let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
                 conn,
                 history_ref: self.history_ref.as_deref(),
@@ -502,6 +706,17 @@ impl GenGraphController {
                     continue;
                 }
             };
+            let spans: Vec<_> = spans
+                .into_iter()
+                .filter(|span| match self.annotation_color_overrides.get(&span.id) {
+                    Some(None) => false,
+                    Some(Some(color)) => {
+                        self.annotation_colors.pin(span.id, *color);
+                        true
+                    }
+                    None => true,
+                })
+                .collect();
             if spans.is_empty() {
                 continue;
             }
@@ -519,6 +734,41 @@ impl GenGraphController {
         annotation_display: AnnotationDisplay,
         style: Style,
     ) {
+        self.render_to_buffer(frame.buffer_mut(), area, annotation_display, style);
+    }
+
+    /// Draw one finished frame into `buf` for a viewer that draws on request rather than in an
+    /// event loop (the notebook and R widgets): bring the loaded graph up to date, draw, and
+    /// draw again if drawing crawled in more of the graph, so the frame never shows stale
+    /// dimming or annotations.
+    pub fn render_settled(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        annotation_display: AnnotationDisplay,
+        style: Style,
+    ) -> WorldSync {
+        let before = self.sync_active_world();
+        self.render_to_buffer(buf, area, annotation_display, style);
+        let after = self.sync_active_world();
+        if after.changed {
+            Clear.render(area, buf);
+            self.render_to_buffer(buf, area, annotation_display, style);
+        }
+        WorldSync {
+            changed: before.changed || after.changed,
+            group_reload: after.group_reload.or(before.group_reload),
+        }
+    }
+
+    /// Draw the graph and its annotation names into `area` of `buf`.
+    pub fn render_to_buffer(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        annotation_display: AnnotationDisplay,
+        style: Style,
+    ) {
         // Re-register overlay highlights and refill the node annotation flags only when the
         // overlay set, the zoom level, the loaded graph, or how annotations are drawn changed
         // since they were last registered.
@@ -527,6 +777,14 @@ impl GenGraphController {
             annotation_display,
         );
         if self.overlays_dirty || self.applied_overlay_inputs != Some(overlay_inputs) {
+            if let Some(focused) = self.focused_annotation
+                && !self
+                    .overlays
+                    .iter()
+                    .any(|overlay| overlay.span().is_some_and(|span| span.id == focused))
+            {
+                self.focused_annotation = None;
+            }
             reapply_overlays(
                 &self.engine,
                 &mut self.view_state,
@@ -551,7 +809,7 @@ impl GenGraphController {
 
         let active_renderer = &self.zoom_levels[self.view_state.zoom_index].1;
         let view = GraphView::new(&mut self.engine, active_renderer).style(style);
-        frame.render_stateful_widget(view, area, &mut self.view_state);
+        StatefulWidget::render(view, area, buf, &mut self.view_state);
 
         // Resolve floating labels against the graph as drawn, which may have just grown. At
         // full detail with flags under nodes, only the names that found no room there float.
@@ -572,19 +830,14 @@ impl GenGraphController {
         }
         if flags_drawn {
             draw_annotation_connectors(
-                frame.buffer_mut(),
+                buf,
                 area,
                 &self.view_state.frame,
                 &self.node_annotations,
-                None,
+                self.focused_annotation,
             );
         }
-        draw_annotation_labels(
-            frame.buffer_mut(),
-            area,
-            &self.view_state,
-            &self.annotation_labels,
-        );
+        draw_annotation_labels(buf, area, &self.view_state, &self.annotation_labels);
     }
 
     /// Draw the graph alone into `area`, without the cursor or annotation names.
@@ -790,13 +1043,14 @@ mod tests {
             plotter::{LineStyle, PathStyle},
         };
         use petgraph::Direction;
-        use ratatui::style::Color;
+        use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
         use super::*;
         use crate::views::{
             annotation_track::{AnnotationSegment, AnnotationSpan},
+            gen_graph_controller::ClickOutcome,
             gen_graph_widget::{FULL_ZOOM_LEVEL, apply_zoom_level},
-            graph_overlay::{GraphOverlay, OverlayContent, OverlaySource},
+            graph_overlay::{GraphOverlay, OverlayContent, OverlaySource, group_track_key},
         };
 
         /// The active batch's nodes along the chain, in order from its start.
@@ -1073,6 +1327,115 @@ mod tests {
                 before,
                 "the world should move under a cursor jumping off screen"
             );
+        }
+
+        /// Draw the graph into a buffer the way the notebook and R widgets do.
+        fn render_text(controller: &mut GenGraphController, width: u16, height: u16) -> String {
+            let area = Rect::new(0, 0, width, height);
+            let mut buffer = Buffer::empty(area);
+            controller.render_settled(
+                &mut buffer,
+                area,
+                AnnotationDisplay::FlagsUnderNodes,
+                Style::default(),
+            );
+            buffer.content().iter().map(|cell| cell.symbol()).collect()
+        }
+
+        #[test]
+        fn test_clone_draws_its_own_annotation_flags() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let mut terminal =
+                Terminal::new(TestBackend::new(60, 16)).expect("should create a test terminal");
+            let mut original = full_detail_chain(
+                &conn,
+                &workspace,
+                &block_group_id,
+                &mut terminal,
+                AnnotationDisplay::FlagsUnderNodes,
+            );
+            assert!(!render_text(&mut original, 60, 16).contains('═'));
+
+            let mut clone = original.clone();
+            let nodes = active_chain(&clone);
+            annotate(&mut clone, &nodes);
+            assert!(render_text(&mut clone, 60, 16).contains('═'));
+
+            assert!(
+                !render_text(&mut original, 60, 16).contains('═'),
+                "flags packed for the clone should not show up in the original"
+            );
+        }
+
+        #[test]
+        fn test_disabled_annotation_group_loses_its_overlays() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let mut terminal =
+                Terminal::new(TestBackend::new(60, 16)).expect("should create a test terminal");
+            let mut controller = full_detail_chain(
+                &conn,
+                &workspace,
+                &block_group_id,
+                &mut terminal,
+                AnnotationDisplay::FlagsUnderNodes,
+            );
+            let nodes = active_chain(&controller);
+            annotate(&mut controller, &nodes);
+            for overlay in controller.overlays_mut() {
+                overlay.source = OverlaySource::Track(group_track_key("genes"));
+            }
+
+            controller.set_annotation_group_enabled("genes", false);
+
+            assert!(controller.overlays().is_empty());
+            assert!(!render_text(&mut controller, 60, 16).contains('═'));
+        }
+
+        #[test]
+        fn test_click_on_a_door_opens_the_batch_behind_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let mut terminal =
+                Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
+            let mut controller = full_detail_chain(
+                &conn,
+                &workspace,
+                &block_group_id,
+                &mut terminal,
+                AnnotationDisplay::FlagsUnderNodes,
+            );
+            let first_batch = controller.engine().active_batch();
+
+            // Pan right until a door onto the next batch is on screen.
+            let mut door_cell = None;
+            for _ in 0..400 {
+                render_text(&mut controller, 40, 12);
+                let view_state = controller.view_state();
+                door_cell = view_state.wormhole.iter().find_map(|(rect, _, _)| {
+                    let center = rect.center();
+                    view_state.screen_to_terminal(center.x, center.y)
+                });
+                if door_cell.is_some() {
+                    break;
+                }
+                controller.pan(-4, 0);
+            }
+            let (column, row) = door_cell.expect("should reach a door by panning right");
+
+            assert_eq!(controller.click(column, row), ClickOutcome::EnteredDoor);
+            render_text(&mut controller, 40, 12);
+            assert_ne!(controller.engine().active_batch(), first_batch);
         }
     }
 }

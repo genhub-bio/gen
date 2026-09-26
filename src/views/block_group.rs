@@ -32,7 +32,9 @@ use crate::{
             load_annotations_for_group,
         },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
-        gen_graph_controller::{AnnotationDisplay, GenGraphController, GraphKeyOutcome, WorldSync},
+        gen_graph_controller::{
+            AnnotationDisplay, ClickOutcome, GenGraphController, GraphKeyOutcome, WorldSync,
+        },
         gen_graph_widget::starting_zoom_level,
         graph_database::GraphDatabase,
         graph_overlay::{
@@ -954,29 +956,17 @@ pub fn view_block_group<'a>(
                         if let Some((last_x, last_y)) = mouse_last_pos {
                             let dx = mouse.column as i16 - last_x as i16;
                             let dy = mouse.row as i16 - last_y as i16;
-                            let graph_view_state = controller.view_state_mut();
-                            graph_view_state.move_by_terminal(dx, dy);
-                            graph_view_state.rebase_camera_to_closest_node();
+                            controller.pan(dx, dy);
                             mouse_is_dragging = true;
                         }
                         mouse_last_pos = Some((mouse.column, mouse.row));
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        if !mouse_is_dragging {
-                            match controller
-                                .view_state()
-                                .wormhole_hit(mouse.column, mouse.row)
-                            {
-                                Some((boundary, target)) => {
-                                    controller.teleport_through_wormhole(boundary, target);
-                                    entered_door = true;
-                                }
-                                None => {
-                                    controller
-                                        .view_state_mut()
-                                        .handle_click(mouse.column, mouse.row);
-                                }
-                            }
+                        if !mouse_is_dragging
+                            && controller.click(mouse.column, mouse.row)
+                                == ClickOutcome::EnteredDoor
+                        {
+                            entered_door = true;
                         }
                         mouse_last_pos = None;
                         mouse_is_dragging = false;
