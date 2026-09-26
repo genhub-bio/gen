@@ -59,6 +59,10 @@ pub enum AnnotationDisplay {
 pub enum GraphKeyOutcome {
     /// Something drawn may have changed.
     Redraw,
+    /// The cursor stepped through a door into another batch. Redraw, then discard the input
+    /// that queued up while the new batch loaded, so held or repeated keys don't carry the
+    /// cursor on past the door.
+    EnteredDoor,
     /// Nothing changed; the key is unbound or had nothing to act on.
     Ignore,
 }
@@ -363,7 +367,7 @@ impl<'a> GenGraphController<'a> {
             _ => match self.view_state.handle_key_event(key) {
                 Ok(Some((boundary, target))) => {
                     self.teleport_through_wormhole(boundary, target);
-                    GraphKeyOutcome::Redraw
+                    GraphKeyOutcome::EnteredDoor
                 }
                 // `handle_key_event` reports keys it doesn't bind the same way as a successful
                 // move, so only the navigation keys it binds are worth a redraw.
@@ -933,6 +937,54 @@ mod tests {
                 }
                 assert_eq!(stops, vec![Some(near)], "{display:?}: b");
             }
+        }
+
+        /// The cursor's screen column and row.
+        fn cursor_cell(controller: &GenGraphController) -> (i64, i64) {
+            let (rect, row) = cursor_rect_and_row(controller);
+            let column = rect
+                .point_at_fraction(controller.view_state().cursor.fractional)
+                .x;
+            (column, row)
+        }
+
+        #[test]
+        fn test_annotation_jump_off_screen_keeps_the_cursor_cell() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+            let display = AnnotationDisplay::FloatingLabels;
+            let mut terminal =
+                Terminal::new(TestBackend::new(20, 12)).expect("should create a test terminal");
+            let mut controller =
+                full_detail_chain(&conn, &workspace, &block_group_id, &mut terminal, display);
+            let chain = active_chain(&controller);
+            let (near, far) = (chain[1], chain[chain.len() - 3]);
+            annotate(&mut controller, &[near, far]);
+            draw(&mut controller, &mut terminal, display);
+
+            assert_eq!(
+                controller.handle_key(press(KeyCode::Char('w'))),
+                GraphKeyOutcome::Redraw
+            );
+            draw(&mut controller, &mut terminal, display);
+            assert_eq!(controller.view_state().cursor.node, Some(near));
+            let before = cursor_cell(&controller);
+
+            assert_eq!(
+                controller.handle_key(press(KeyCode::Char('w'))),
+                GraphKeyOutcome::Redraw
+            );
+            draw(&mut controller, &mut terminal, display);
+            assert_eq!(controller.view_state().cursor.node, Some(far));
+            assert_eq!(
+                cursor_cell(&controller),
+                before,
+                "the world should move under a cursor jumping off screen"
+            );
         }
     }
 }

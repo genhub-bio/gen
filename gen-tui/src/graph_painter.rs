@@ -15,7 +15,7 @@ use crate::{
     assembly::AssembledLayout,
     distribute_nodes::GapSizes,
     frame_index::{FrameIndex, PlacedNode},
-    geometry::{WorldPos, WorldRect, floor_half},
+    geometry::{LocalPos, WorldPos, WorldRect, floor_half},
     graph_widget::build_window_geometry,
     layout::{NodeRole, WindowGeometry},
     plotter::{
@@ -274,6 +274,39 @@ impl WindowScene {
             wormhole_index(&self.geometry, graph, offset),
         )
     }
+
+    /// Where `paint` would draw the point at `fraction` within `node` under `camera`, if the
+    /// scene places `node` as a data node. Lets a caller correct the camera before painting.
+    pub fn screen_point<G>(
+        &self,
+        graph: &G,
+        camera: &Camera<G::NodeId>,
+        node: G::NodeId,
+        fraction: (f64, f64),
+    ) -> Option<WorldPos>
+    where
+        G: GraphBase + NodeIndexable,
+    {
+        let node_index = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node));
+        let (pos, size) = data_node_placement(&self.geometry, node_index)?;
+        let local = WorldRect::from_center_and_size(pos.point(), size).point_at_fraction(fraction);
+        let offset = anchor_offset(&self.geometry, graph, camera);
+        Some(WorldPos::new(local.x + offset.x, local.y + offset.y))
+    }
+}
+
+/// The local position and size `geometry` gives the data node for `node_index`.
+fn data_node_placement(
+    geometry: &WindowGeometry,
+    node_index: NodeIndex,
+) -> Option<(LocalPos, (u64, u64))> {
+    geometry
+        .graph
+        .node_weights()
+        .find_map(|node| match node.role {
+            NodeRole::Data(data_index) if data_index == node_index => Some((node.pos, node.size)),
+            _ => None,
+        })
 }
 
 /// The translation from `geometry`'s local coordinate space to screen space such that the
@@ -285,15 +318,7 @@ where
     G: GraphBase + NodeIndexable,
 {
     let anchor_node_index = NodeIndex::new(<G as NodeIndexable>::to_index(graph, camera.anchor));
-    let anchor_layout = geometry
-        .graph
-        .node_weights()
-        .find_map(|node| match node.role {
-            NodeRole::Data(node_index) if node_index == anchor_node_index => {
-                Some((node.pos, node.size))
-            }
-            _ => None,
-        });
+    let anchor_layout = data_node_placement(geometry, anchor_node_index);
 
     // An invisible anchor was placed as the routing node its edges meet at.
     let Some((pos, size)) = anchor_layout.or_else(|| {
