@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -35,13 +34,12 @@ use crate::{
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
         gen_graph_controller::{AnnotationDisplay, GenGraphController, GraphKeyOutcome, WorldSync},
         gen_graph_widget::starting_zoom_level,
+        graph_database::GraphDatabase,
         graph_overlay::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
             replace_track_overlays,
         },
-        lazy_graph_source::{
-            EagerOrSqlSource, SqlGraphSource, probe_block_group_start, seed_block_group_graph,
-        },
+        lazy_graph_source::{EagerOrSqlSource, probe_block_group_start, seed_block_group_graph},
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
             RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
@@ -212,27 +210,35 @@ pub(crate) struct BlockGroupGraph {
 /// near-instant open. The seed can't tell how many nodes there are, so the zoom level comes
 /// from a small probe crawl of the start instead.
 pub(crate) fn load_block_group_graph(
-    conn: &GraphConnection,
-    workspace: &Workspace,
+    database: &mut GraphDatabase,
     block_group_id: &HashId,
     history_ref: Option<&str>,
+    prune_history: bool,
 ) -> Result<BlockGroupGraph, Box<dyn Error>> {
     if history_ref.is_some() {
-        let graph = BlockGroup::get_graph(conn, workspace, block_group_id, history_ref)?;
+        let workspace = database.workspace().clone();
+        let graph = BlockGroup::get_graph(
+            database.connection()?,
+            &workspace,
+            block_group_id,
+            history_ref,
+        )?;
         return Ok(BlockGroupGraph {
             zoom_index: starting_zoom_level(&graph),
             graph,
             source: EagerOrSqlSource::Eager(EagerSource),
         });
     }
-    let db_path = conn
-        .path()
-        .map(PathBuf::from)
-        .ok_or("graph database has no file path")?;
+    let source = database.graph_source(*block_group_id, prune_history);
+    let conn = database.connection()?;
     Ok(BlockGroupGraph {
         graph: seed_block_group_graph(conn, block_group_id),
-        source: EagerOrSqlSource::Sql(Box::new(SqlGraphSource::new(db_path, *block_group_id))),
-        zoom_index: starting_zoom_level(&probe_block_group_start(conn, block_group_id, false)),
+        source: EagerOrSqlSource::Sql(Box::new(source)),
+        zoom_index: starting_zoom_level(&probe_block_group_start(
+            conn,
+            block_group_id,
+            prune_history,
+        )),
     })
 }
 
@@ -486,7 +492,7 @@ pub struct BlockGroupViewOptions<'a> {
     pub history_ref: Option<&'a str>,
     /// A graph already on screen, such as the inline widget's, to keep drawing instead of
     /// loading the selected graph again.
-    pub controller: Option<Box<GenGraphController<'a>>>,
+    pub controller: Option<Box<GenGraphController>>,
 }
 
 /// The controller the full-screen viewer starts on: `handed_over` when given, otherwise a new
@@ -494,16 +500,19 @@ pub struct BlockGroupViewOptions<'a> {
 ///
 /// A handed-over controller keeps its loaded batches, overlays and annotation groups. Its
 /// camera was placed for the previous viewer's area, so it is reframed on the cursor node.
-fn starting_controller<'a>(
-    conn: &'a GraphConnection,
-    workspace: &'a Workspace,
-    history_ref: Option<&'a str>,
-    handed_over: Option<Box<GenGraphController<'a>>>,
+fn starting_controller(
+    conn: &GraphConnection,
+    workspace: &Workspace,
+    history_ref: Option<&str>,
+    handed_over: Option<Box<GenGraphController>>,
     selected: Option<&BlockGroup>,
-) -> Result<GenGraphController<'a>, Box<dyn Error>> {
+) -> Result<GenGraphController, Box<dyn Error>> {
     let mut controller = match handed_over {
         Some(controller) => *controller,
-        None => GenGraphController::new(conn, workspace, history_ref),
+        None => GenGraphController::new(
+            GraphDatabase::for_connection(conn, workspace)?,
+            history_ref.map(String::from),
+        ),
     };
     if let Some(selected) = selected
         && controller.block_group().map(|open| open.id) != Some(selected.id)
@@ -1625,6 +1634,7 @@ mod tests {
     };
     use crate::views::{
         gen_graph_controller::{AnnotationDisplay, GenGraphController},
+        graph_database::GraphDatabase,
         graph_overlay::has_path_overlay,
         lazy_graph_source::tests::setup_labelled_chain_block_group,
         region_search::{resolve_region_search_matches, search_request_fixture},
@@ -1803,9 +1813,13 @@ mod tests {
         let path = Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
         let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut inline =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut inline = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
         inline.view_state_mut().show_cursor();
         inline.add_path(&path);
         assert!(inline.toggle_path());
@@ -1858,9 +1872,13 @@ mod tests {
         )
         .unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut inline =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut inline = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
         draw_first_batch(&mut inline);
         assert!(inline.engine().graph().node_count() > 2);
 

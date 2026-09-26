@@ -12,6 +12,7 @@ use ratatui::{
 use crate::views::{
     block_group::discard_pending_input,
     gen_graph_controller::{AnnotationDisplay, GenGraphController, GraphKeyOutcome},
+    graph_database::GraphDatabase,
     graph_overlay::has_path_overlay,
 };
 
@@ -54,11 +55,11 @@ impl EventSource for CrosstermEventSource {
 }
 
 /// How the inline widget was left.
-pub enum InlineOutcome<'a> {
+pub enum InlineOutcome {
     /// The user closed the widget.
     Closed,
     /// The user asked for the full-screen viewer, which keeps drawing this controller.
-    OpenFullViewer(Box<GenGraphController<'a>>),
+    OpenFullViewer(Box<GenGraphController>),
 }
 
 /// What a key press asks of the event loop.
@@ -162,10 +163,16 @@ pub fn show_inline_block_group_widget<'a>(
     paths: Vec<Path>,
     height: u16,
     history_ref: Option<&'a str>,
-) -> io::Result<InlineOutcome<'a>> {
-    let mut controller =
-        GenGraphController::for_block_group(conn, workspace, &block_group_id, history_ref)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+) -> io::Result<InlineOutcome> {
+    let mut controller = GraphDatabase::for_connection(conn, workspace)
+        .and_then(|database| {
+            GenGraphController::for_block_group(
+                database,
+                &block_group_id,
+                history_ref.map(String::from),
+            )
+        })
+        .map_err(|error| io::Error::other(error.to_string()))?;
     // The inline widget follows the keyboard cursor from the start.
     controller.view_state_mut().show_cursor();
     for path in paths {
@@ -314,9 +321,13 @@ mod tests {
         let conn = get_connection(&db_path).unwrap();
         let workspace = Workspace::from_current_dir();
 
-        let mut controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
         assert_eq!(controller.view_state().zoom_index, MINIMAL_ZOOM_LEVEL);
         assert!(controller.engine().graph().node_count() <= 2);
 
@@ -337,9 +348,13 @@ mod tests {
         let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &label_refs);
         let conn = get_connection(&db_path).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
 
         let mut terminal =
             Terminal::new(TestBackend::new(12, 12)).expect("should create a test terminal");
@@ -370,9 +385,13 @@ mod tests {
         let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &label_refs);
         let conn = get_connection(&db_path).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
         controller.view_state_mut().show_cursor();
 
         let mut events = ScriptedEvents(vec![KeyCode::Right; 2000].into());
@@ -410,9 +429,13 @@ mod tests {
         let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &["x", "y", "z"]);
         let conn = get_connection(&db_path).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
 
         let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
         assert_eq!(
@@ -442,9 +465,13 @@ mod tests {
         let conn = get_connection(&db_path).unwrap();
         let path = Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
         controller.add_path(&path);
 
         run_script(&mut controller, 80, vec![KeyCode::Char('p')]);
@@ -461,9 +488,13 @@ mod tests {
         let conn = get_connection(&db_path).unwrap();
         let path = Path::create(&conn, "circle", &block_group_id, &edge_ids).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
         controller.add_path(&path);
 
         run_script(

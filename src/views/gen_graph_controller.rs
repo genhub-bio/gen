@@ -11,9 +11,9 @@
 use std::{collections::HashSet, error::Error};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use gen_core::{HashId, PATH_START_NODE_ID, Workspace};
+use gen_core::{HashId, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{block_group::BlockGroup, db::GraphConnection, path::Path};
+use gen_models::{block_group::BlockGroup, path::Path};
 use gen_tui::{
     crawl::EagerSource,
     graph_view::{GraphView, GraphViewState},
@@ -32,10 +32,12 @@ use crate::views::{
         active_neighborhood_node_ids, load_block_group_graph, teleport_through_wormhole,
     },
     gen_graph_widget::{
-        self, AnnotationLabels, AnnotationStarts, NodeAnnotationLayer, OverlayInputs, ZoomLevels,
-        create_annotated_gen_graph_engine_lazy, draw_annotation_connectors, draw_annotation_labels,
-        reapply_overlays, starting_zoom_level, update_node_annotations,
+        self, AnnotationLabels, AnnotationStarts, NodeAnnotationLayer, OverlayInputs,
+        SendSyncZoomLevels, create_send_sync_annotated_gen_graph_engine_lazy,
+        draw_annotation_connectors, draw_annotation_labels, reapply_overlays, starting_zoom_level,
+        update_node_annotations,
     },
+    graph_database::GraphDatabase,
     graph_dimming::GraphDimming,
     graph_overlay::{
         AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership, group_track_key,
@@ -86,14 +88,19 @@ pub struct WorldSync {
 }
 
 /// One block group's lazily loaded graph together with the view of it.
-pub struct GenGraphController<'a> {
-    conn: &'a GraphConnection,
-    workspace: &'a Workspace,
-    history_ref: Option<&'a str>,
+///
+/// It owns its database handle rather than borrowing a connection, so the Jupyter and R widgets,
+/// which can't hold a borrow, keep one the same way the terminal viewers do.
+pub struct GenGraphController {
+    database: GraphDatabase,
+    history_ref: Option<String>,
+    /// Whether opened block groups leave out the edges `BlockGroup::prune_graph` would remove,
+    /// instead of loading and dimming them.
+    prune_history: bool,
     /// Seeded with a block group's start and grown batch by batch from SQLite, so opening a
     /// large block group never materializes the whole graph.
     engine: LayoutEngine<GenGraph, EagerOrSqlSource>,
-    zoom_levels: ZoomLevels<'a>,
+    zoom_levels: SendSyncZoomLevels,
     view_state: GraphViewState<GraphNode>,
     /// Pruned edges and the nodes only they lead into, synced whenever a draw or a door may
     /// have grown the graph.
@@ -136,13 +143,9 @@ pub struct GenGraphController<'a> {
     labelled_overlay_inputs: Option<(OverlayInputs, AnnotationDisplay)>,
 }
 
-impl<'a> GenGraphController<'a> {
+impl GenGraphController {
     /// A controller with no block group open, showing just a `PATH_START` placeholder.
-    pub fn new(
-        conn: &'a GraphConnection,
-        workspace: &'a Workspace,
-        history_ref: Option<&'a str>,
-    ) -> Self {
+    pub fn new(database: GraphDatabase, history_ref: Option<String>) -> Self {
         let mut graph = GenGraph::new();
         graph.add_node(GraphNode {
             node_id: PATH_START_NODE_ID,
@@ -151,17 +154,17 @@ impl<'a> GenGraphController<'a> {
         });
         let node_annotations = NodeAnnotationLayer::new();
         let zoom_index = starting_zoom_level(&graph);
-        let (engine, zoom_levels, view_state) = create_annotated_gen_graph_engine_lazy(
+        let (engine, zoom_levels, view_state) = create_send_sync_annotated_gen_graph_engine_lazy(
             graph,
             EagerOrSqlSource::Eager(EagerSource),
-            (conn, workspace),
+            database.sequence_source(),
             node_annotations.clone(),
             zoom_index,
         );
         Self {
-            conn,
-            workspace,
+            database,
             history_ref,
+            prune_history: false,
             engine,
             zoom_levels,
             view_state,
@@ -184,33 +187,48 @@ impl<'a> GenGraphController<'a> {
 
     /// A controller with `block_group_id` open.
     pub fn for_block_group(
-        conn: &'a GraphConnection,
-        workspace: &'a Workspace,
+        database: GraphDatabase,
         block_group_id: &HashId,
-        history_ref: Option<&'a str>,
+        history_ref: Option<String>,
     ) -> Result<Self, Box<dyn Error>> {
-        let mut controller = Self::new(conn, workspace, history_ref);
+        let mut controller = Self::new(database, history_ref);
         controller.open_block_group(block_group_id)?;
         Ok(controller)
+    }
+
+    /// Leave out the edges `BlockGroup::prune_graph` would remove, and anything only they lead
+    /// to, from the block groups opened from now on, instead of loading and dimming them.
+    pub fn with_pruned_history(self, prune_history: bool) -> Self {
+        Self {
+            prune_history,
+            ..self
+        }
     }
 
     /// Replace the graph with `block_group_id`'s, starting over from its seed at its starting
     /// zoom level (see `starting_zoom_level`) with no overlays, paths or annotation groups
     /// loaded.
     pub fn open_block_group(&mut self, block_group_id: &HashId) -> Result<(), Box<dyn Error>> {
-        let block_group = BlockGroup::get_by_id(self.conn, block_group_id, self.history_ref)?;
-        let loaded =
-            load_block_group_graph(self.conn, self.workspace, block_group_id, self.history_ref)?;
-        (self.engine, self.zoom_levels, self.view_state) = create_annotated_gen_graph_engine_lazy(
-            loaded.graph,
-            loaded.source,
-            (self.conn, self.workspace),
-            self.node_annotations.clone(),
-            loaded.zoom_index,
-        );
+        let history_ref = self.history_ref.as_deref();
+        let block_group =
+            BlockGroup::get_by_id(self.database.connection()?, block_group_id, history_ref)?;
+        let loaded = load_block_group_graph(
+            &mut self.database,
+            block_group_id,
+            history_ref,
+            self.prune_history,
+        )?;
+        (self.engine, self.zoom_levels, self.view_state) =
+            create_send_sync_annotated_gen_graph_engine_lazy(
+                loaded.graph,
+                loaded.source,
+                self.database.sequence_source(),
+                self.node_annotations.clone(),
+                loaded.zoom_index,
+            );
         self.dimming = GraphDimming::default();
         self.annotation_group_entries =
-            load_annotation_group_entries(self.conn, &block_group, self.history_ref);
+            load_annotation_group_entries(self.database.connection()?, &block_group, history_ref);
         self.block_group = Some(block_group);
         self.annotation_groups_world = None;
         self.paths.clear();
@@ -236,7 +254,7 @@ impl<'a> GenGraphController<'a> {
         &mut self.view_state
     }
 
-    pub fn zoom_levels(&self) -> &ZoomLevels<'a> {
+    pub fn zoom_levels(&self) -> &SendSyncZoomLevels {
         &self.zoom_levels
     }
 
@@ -302,8 +320,14 @@ impl<'a> GenGraphController<'a> {
     /// Add a path the `p` key can highlight. Only its edge membership is fetched; the
     /// highlight itself is resolved against the loaded graph whenever the overlays reapply.
     pub fn add_path(&mut self, path: &Path) {
-        self.paths
-            .push(PathMembership::load(self.conn, &path.id, self.history_ref));
+        match self.database.connection() {
+            Ok(conn) => self.paths.push(PathMembership::load(
+                conn,
+                &path.id,
+                self.history_ref.as_deref(),
+            )),
+            Err(error) => warn!("Failed to open the graph database: {error}"),
+        }
     }
 
     /// Show or hide the highlight of the last added path, or of the block group's current
@@ -317,7 +341,15 @@ impl<'a> GenGraphController<'a> {
         if self.paths.is_empty()
             && let Some(block_group) = &self.block_group
         {
-            match BlockGroup::get_current_path(self.conn, &block_group.id, self.history_ref) {
+            let current_path = self
+                .database
+                .connection()
+                .map_err(|error| error.to_string())
+                .and_then(|conn| {
+                    BlockGroup::get_current_path(conn, &block_group.id, self.history_ref.as_deref())
+                        .map_err(|error| error.to_string())
+                });
+            match current_path {
                 Ok(path) => self.add_path(&path),
                 Err(error) => warn!("Failed to query path: {error}"),
             }
@@ -441,13 +473,22 @@ impl<'a> GenGraphController<'a> {
         if self.block_group.is_none() {
             return reload;
         }
+        let conn = match self.database.connection() {
+            Ok(conn) => conn,
+            Err(error) => {
+                reload
+                    .warnings
+                    .push(format!("Failed to open the graph database: {error}"));
+                return reload;
+            }
+        };
         self.overlays.retain(
             |overlay| !matches!(&overlay.source, OverlaySource::Track(key) if key.starts_with("group:")),
         );
         for entry in &self.annotation_group_entries {
             let spans = match load_annotations_for_group(&AnnotationGroupTrackRequest {
-                conn: self.conn,
-                history_ref: self.history_ref,
+                conn,
+                history_ref: self.history_ref.as_deref(),
                 entry,
                 projection_graph: self.engine.graph(),
                 node_ids,
@@ -577,6 +618,7 @@ mod tests {
     use super::{AnnotationDisplay, GenGraphController, GraphKeyOutcome};
     use crate::views::{
         gen_graph_widget::{FULL_ZOOM_LEVEL, MINIMAL_ZOOM_LEVEL},
+        graph_database::GraphDatabase,
         graph_overlay::has_path_overlay,
         lazy_graph_source::tests::setup_labelled_chain_block_group,
     };
@@ -596,15 +638,25 @@ mod tests {
     }
 
     #[test]
+    fn test_controller_can_be_held_by_the_python_and_r_widgets() {
+        fn assert_owned_and_shareable<T: Send + Sync + 'static>() {}
+        assert_owned_and_shareable::<GenGraphController>();
+    }
+
+    #[test]
     fn test_navigation_keys_do_not_reapply_overlays() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("graph.db");
         let (block_group_id, _) = setup_labelled_chain_block_group(&db_path, &["x", "y", "z"]);
         let conn = get_connection(&db_path).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
         let mut terminal =
             Terminal::new(TestBackend::new(80, 12)).expect("should create a test terminal");
         draw(
@@ -652,9 +704,13 @@ mod tests {
         let conn = get_connection(&db_path).unwrap();
         Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
 
         assert!(controller.toggle_path());
         assert!(has_path_overlay(controller.overlays()));
@@ -672,7 +728,11 @@ mod tests {
         let conn = get_connection(&db_path).unwrap();
         let path = Path::create(&conn, "chain", &block_group_id, &edge_ids).unwrap();
         let workspace = Workspace::from_current_dir();
-        let mut controller = GenGraphController::new(&conn, &workspace, None);
+        let mut controller = GenGraphController::new(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            None,
+        );
         assert!(controller.block_group().is_none());
         controller
             .open_block_group(&block_group_id)
@@ -707,9 +767,13 @@ mod tests {
         let conn = get_connection(&db_path).unwrap();
         let workspace = Workspace::from_current_dir();
 
-        let controller =
-            GenGraphController::for_block_group(&conn, &workspace, &block_group_id, None)
-                .expect("should load the block group");
+        let controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&conn, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
 
         assert_eq!(controller.view_state().zoom_index, FULL_ZOOM_LEVEL);
         assert!(controller.engine().graph().node_count() <= 2);
@@ -779,16 +843,20 @@ mod tests {
 
         /// A controller over an 80-node chain, zoomed to full detail and drawn once so its
         /// first batch is loaded.
-        fn full_detail_chain<'a>(
-            conn: &'a GraphConnection,
-            workspace: &'a Workspace,
+        fn full_detail_chain(
+            conn: &GraphConnection,
+            workspace: &Workspace,
             block_group_id: &HashId,
             terminal: &mut Terminal<TestBackend>,
             display: AnnotationDisplay,
-        ) -> GenGraphController<'a> {
-            let mut controller =
-                GenGraphController::for_block_group(conn, workspace, block_group_id, None)
-                    .expect("should load the block group");
+        ) -> GenGraphController {
+            let mut controller = GenGraphController::for_block_group(
+                GraphDatabase::for_connection(conn, workspace)
+                    .expect("should open the graph database"),
+                block_group_id,
+                None,
+            )
+            .expect("should load the block group");
             let zoom_levels = controller.zoom_levels().clone();
             apply_zoom_level(controller.view_state_mut(), FULL_ZOOM_LEVEL, &zoom_levels);
             draw(&mut controller, terminal, display);
