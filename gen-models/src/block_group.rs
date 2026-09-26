@@ -1849,7 +1849,8 @@ mod tests {
     fn test_get_graph_branched_graph() {
         // Branched graph: {AAA,GGG} → TTT → {CCC,ATC}
         // TTT has 2 incoming edges and 2 outgoing edges.
-        // There are explicitly no start/end nodes to ensure we can build graphs purely from coordinates
+        // There are explicitly no start/end nodes to ensure we can build graphs purely from
+        // coordinates; each loose end stands in for its node's whole sequence on that side.
         let conn = get_connection(None).unwrap();
         Collection::get_or_create(&conn, "test").unwrap();
         crate::sample::Sample::get_or_create(
@@ -1917,7 +1918,7 @@ mod tests {
             (
                 GraphNode {
                     node_id: n_aaa,
-                    sequence_start: 3,
+                    sequence_start: 0,
                     sequence_end: 3,
                 },
                 GraphNode {
@@ -1930,7 +1931,7 @@ mod tests {
             (
                 GraphNode {
                     node_id: n_ggg,
-                    sequence_start: 3,
+                    sequence_start: 0,
                     sequence_end: 3,
                 },
                 GraphNode {
@@ -1949,7 +1950,7 @@ mod tests {
                 GraphNode {
                     node_id: n_ccc,
                     sequence_start: 0,
-                    sequence_end: 0,
+                    sequence_end: 3,
                 },
                 e_ttt_ccc.id,
             ),
@@ -1962,7 +1963,7 @@ mod tests {
                 GraphNode {
                     node_id: n_atc,
                     sequence_start: 0,
-                    sequence_end: 0,
+                    sequence_end: 3,
                 },
                 e_ttt_atc.id,
             ),
@@ -4643,5 +4644,70 @@ mod tests {
                 ])
             );
         }
+    }
+
+    /// A whole-node deletion stored the way edits were written before they fanned out, as an
+    /// edge from the node's own first coordinate to its last, joins the routes around the node
+    /// without a zero-width block: both the deletion and the route through the node are spelled,
+    /// and the graph links the node before it straight to the node after it.
+    #[test]
+    fn test_whole_node_deletion_from_node_ends_joins_the_routes_around_it() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let path_edges = Path::edges_for_path(conn, &path.id, None);
+        let deleted_node_id = path_edges[1].target_node_id;
+        let deletion = Edge::create(
+            conn,
+            deleted_node_id,
+            0,
+            Strand::Forward,
+            deleted_node_id,
+            10,
+            Strand::Forward,
+        )
+        .unwrap();
+        BlockGroupEdge::bulk_create(
+            conn,
+            // Unassigned to a chromosome copy, like the edits `update sequence` writes, so pruning
+            // keeps both the deletion and the route through the node.
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: deletion.id,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+            }],
+        );
+
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(
+            sequences,
+            HashSet::from([
+                "AAAAAAAAAATTTTTTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                "AAAAAAAAAACCCCCCCCCCGGGGGGGGGG".to_string(),
+            ])
+        );
+
+        let graph = BlockGroup::get_graph(conn, test_workspace(), &block_group_id, None).unwrap();
+        assert!(
+            graph
+                .nodes()
+                .all(|node| is_terminal(node.node_id) || node.sequence_end > node.sequence_start),
+            "should make no zero-width block"
+        );
+        let node_before = path_edges[1].source_node_id;
+        let node_after = path_edges[2].target_node_id;
+        let bypass = graph
+            .all_edges()
+            .find(|(source, target, _)| {
+                source.node_id == node_before && target.node_id == node_after
+            })
+            .expect("should link the node before the deletion to the node after it");
+        assert!(
+            bypass
+                .2
+                .iter()
+                .any(|graph_edge| graph_edge.edge_id == deletion.id)
+        );
     }
 }
