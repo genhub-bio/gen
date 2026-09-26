@@ -1671,6 +1671,10 @@ fn accent_colors() -> [Color; 8] {
 /// mutually-overlapping annotations can still collide, but this makes collisions the
 /// exception rather than the default.
 ///
+/// Spans whose id is pinned in `color_cache` (explicit `show(color=…)` / `plot(colors=…)`
+/// choices) keep their pinned color verbatim and are never shifted for collision
+/// avoidance, while still occupying their cells so automatic colors steer clear of them.
+///
 /// `overlays` is written back with the colors used by annotation bars, connectors, and
 /// labels. Annotation spans leave sequence cells and graph edges in their normal colors.
 /// Callers run this after zoom or detail changes, or every frame in the live TUI viewers
@@ -1711,6 +1715,10 @@ pub fn reapply_overlays<R, S>(
     // Use mapped span extents to keep overlapping annotation colors distinct.
     let accents = accent_colors();
     let mut occupied: Vec<(CellRegion, Color)> = Vec::new();
+    // Resolve regions first so pinned spans occupy their cells before any automatic color is
+    // chosen; otherwise an automatic span earlier in longest-first order could claim the
+    // accent a later pinned span needs.
+    let mut prepared: Vec<(usize, HashId, Vec<CellRegion>, Option<Color>)> = Vec::new();
     for idx in span_indices {
         let span = overlays[idx]
             .span()
@@ -1723,6 +1731,17 @@ pub fn reapply_overlays<R, S>(
             .iter()
             .map(|slice| slice_region(detail_level, slice))
             .collect();
+        let pinned = color_cache.pinned_color(&span.id);
+        if let Some(pinned_color) = pinned {
+            occupied.extend(regions.iter().map(|region| (*region, pinned_color)));
+        }
+        prepared.push((idx, span.id, regions, pinned));
+    }
+    for (idx, span_id, regions, pinned) in prepared {
+        if let Some(pinned_color) = pinned {
+            overlays[idx].style.color = pinned_color;
+            continue;
+        }
         let used: Vec<Color> = occupied
             .iter()
             .filter(|(placed, _)| regions.iter().any(|region| regions_overlap(placed, region)))
@@ -1736,7 +1755,7 @@ pub fn reapply_overlays<R, S>(
         // something this span overlaps; only give up and accept a collision if every slot
         // is taken.
         let preferred = color_cache
-            .get(&span.id)
+            .get(&span_id)
             .unwrap_or_else(|| color_cache.next_color(&accents));
         let color = if used.contains(&preferred) {
             accents
@@ -1746,7 +1765,7 @@ pub fn reapply_overlays<R, S>(
         } else {
             preferred
         };
-        color_cache.set(span.id, color);
+        color_cache.set(span_id, color);
 
         for region in regions {
             occupied.push((region, color));
@@ -2621,6 +2640,42 @@ mod tests {
             label_texts(VisualDetail::Full),
             ["track", "keyed", "adhoc", "match"]
         );
+    }
+
+    /// An explicitly pinned color (e.g. `show(color="red")`) survives every
+    /// `reapply_overlays` verbatim, and an overlapping automatic span steers clear of it.
+    #[test]
+    fn test_reapply_overlays_keeps_pinned_color_and_avoids_it_elsewhere() {
+        let graph = sentinels_and_nodes(&["a"]);
+        let node_a = GraphNode {
+            node_id: HashId::convert_str("a"),
+            sequence_start: 0,
+            sequence_end: 30,
+        };
+        let pinned_color = accent_colors()[0];
+        // The automatic span is longer, so it is colored first and would take the first
+        // accent if the pinned span didn't occupy its cells beforehand.
+        let mut overlays = vec![
+            span_overlay("auto", vec![(node_a, 0, 30, Strand::Forward)]),
+            span_overlay("pinned", vec![(node_a, 5, 10, Strand::Forward)]),
+        ];
+        let (engine, zoom_levels, mut view_state) =
+            create_gen_graph_engine(graph, RepeatingSequenceSource);
+        apply_zoom_level(&mut view_state, FULL_ZOOM_LEVEL, &zoom_levels);
+        let mut colors = AnnotationColorCache::new();
+        colors.pin(HashId::convert_str("pinned"), pinned_color);
+
+        for _ in 0..2 {
+            reapply_overlays(
+                &engine,
+                &mut view_state,
+                &zoom_levels,
+                &mut overlays,
+                &mut colors,
+            );
+            assert_eq!(overlays[1].style.color, pinned_color);
+            assert_ne!(overlays[0].style.color, pinned_color);
+        }
     }
 
     /// A linear start → a → b → c → end graph with annotations covering every flag case:

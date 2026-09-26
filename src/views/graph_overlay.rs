@@ -26,6 +26,11 @@ pub struct AnnotationColorCache {
     /// annotation's id hash, means two never-conflicting annotations seen back to back
     /// reliably get different colors instead of occasionally landing on the same hash.
     next_index: usize,
+    /// Annotation ids with an explicitly requested color (e.g. `show(color="red")` or
+    /// the `colors` mapping of `plot()`). Pinned entries are used verbatim by
+    /// `reapply_overlays` and never shifted for collision avoidance, so an explicit
+    /// choice survives every re-render.
+    pinned: HashSet<HashId>,
 }
 
 impl AnnotationColorCache {
@@ -39,6 +44,21 @@ impl AnnotationColorCache {
 
     pub(crate) fn set(&mut self, id: HashId, color: Color) {
         self.colors.insert(id, color);
+    }
+
+    /// Record an explicitly requested color that `reapply_overlays` must keep verbatim.
+    pub fn pin(&mut self, id: HashId, color: Color) {
+        self.colors.insert(id, color);
+        self.pinned.insert(id);
+    }
+
+    /// Explicitly requested color for `id`, if any.
+    pub(crate) fn pinned_color(&self, id: &HashId) -> Option<Color> {
+        if self.pinned.contains(id) {
+            self.colors.get(id).copied()
+        } else {
+            None
+        }
     }
 
     /// The next color in rotation through `accents`, advancing the cursor so the color
