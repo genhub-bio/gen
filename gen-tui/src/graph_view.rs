@@ -31,6 +31,9 @@ use crate::{
 };
 
 const DEFAULT_HARD_ZONE: u16 = 2;
+/// Columns kept between a cursor entering through a door and the screen edge it enters from,
+/// so the door back stays in view.
+const DOOR_ENTRY_MARGIN: i64 = 5;
 
 /// Everything a [`WindowScene`] depends on besides the camera: which build of which world,
 /// the zoom step (standing in for its `GapSizes`, whose function pointers can't be compared),
@@ -300,8 +303,9 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         self.go_to_frame_anchor = Some(camera_anchor);
     }
 
-    /// Request that the next pending go-to snap left rather than center. Call immediately
-    /// after `go_to_node`.
+    /// Request that the next pending go-to snap left rather than center, keeping a visible
+    /// cursor `DOOR_ENTRY_MARGIN` columns in from the edge. Call immediately after
+    /// `go_to_node`.
     pub fn queue_snap_left(&mut self) {
         self.go_to_snap_left = true;
     }
@@ -559,28 +563,49 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         } else {
             Direction::Left
         };
+        let before = self.cursor_screen_point();
         Navigator::move_to_stop(&mut self.cursor, direction, &self.frame, stops)?;
-        self.rebase_camera_to_cursor();
+        // A stop off screen would leave the cursor pressed against the edge, where its label
+        // has no room. Pan the world under the cursor instead, by the cursor's own displacement.
+        match (before, self.cursor_screen_point()) {
+            (Some(before), Some(after)) if self.screen_to_terminal(after.x, after.y).is_none() => {
+                self.anchor_camera_on_cursor((before.x, before.y));
+            }
+            _ => self.rebase_camera_to_cursor(),
+        }
         Ok(())
+    }
+
+    /// The cursor's cell in the last render's screen space, if its node was placed.
+    fn cursor_screen_point(&self) -> Option<WorldPos> {
+        let rect = self.frame.rect_of(self.cursor.node?)?;
+        Some(rect.point_at_fraction(self.cursor.fractional))
     }
 
     /// Rebase the camera's anchor onto the cursor's current node, pinning it at the screen
     /// position the cursor already occupies (so nothing visually jumps), then let
     /// `snap_camera` push it back if the cursor has crossed into the hard zone.
     fn rebase_camera_to_cursor(&mut self) {
+        let Some(point) = self.cursor_screen_point() else {
+            return;
+        };
+        let screen = (point.x, point.y);
+        let hard_zone = self.hard_zone();
+        self.anchor_camera_on_cursor(snap_camera(screen, self.last_area, screen, hard_zone));
+    }
+
+    fn hard_zone(&self) -> u16 {
+        self.camera
+            .map(|camera| camera.hard_zone)
+            .unwrap_or(DEFAULT_HARD_ZONE)
+    }
+
+    /// Anchor the camera on the cursor's cell and draw that cell at `anchor_screen`.
+    fn anchor_camera_on_cursor(&mut self, anchor_screen: (i64, i64)) {
         let Some(node) = self.cursor.node else {
             return;
         };
-        let Some(rect) = self.frame.rect_of(node) else {
-            return;
-        };
-        let point = rect.point_at_fraction(self.cursor.fractional);
-        let screen = (point.x, point.y);
-        let hard_zone = self
-            .camera
-            .map(|c| c.hard_zone)
-            .unwrap_or(DEFAULT_HARD_ZONE);
-        let anchor_screen = snap_camera(screen, self.last_area, screen, hard_zone);
+        let hard_zone = self.hard_zone();
         self.pan_since_render = (0, 0);
         self.camera = Some(Camera {
             anchor: node,
@@ -862,21 +887,21 @@ where
         }
 
         // A pending go-to centers the cursor's screen position so the anchor projection
-        // lands the target exactly at (or snapped to an edge of) the requested spot.
+        // lands the target exactly at (or snapped to an edge of) the requested spot. A snapped
+        // visible cursor keeps `DOOR_ENTRY_MARGIN` columns to the edge (less on a screen too
+        // narrow for that) so the door it came through stays in view.
+        let mut framed_column = None;
         if state.go_to_pending {
+            let door_margin = DOOR_ENTRY_MARGIN.min((inner_area.width as i64 - 1) / 2);
             let col_x = if state.go_to_snap_left {
                 state.go_to_snap_left = false;
                 state.go_to_snap_right = false;
-                if state.cursor.visible {
-                    DEFAULT_HARD_ZONE as i64
-                } else {
-                    1
-                }
+                if state.cursor.visible { door_margin } else { 1 }
             } else if state.go_to_snap_right {
                 state.go_to_snap_right = false;
                 let right_edge = inner_area.width as i64 - 1;
                 if state.cursor.visible {
-                    right_edge - DEFAULT_HARD_ZONE as i64
+                    right_edge - door_margin
                 } else {
                     right_edge
                 }
@@ -887,8 +912,10 @@ where
             if let (Some(camera), Some(frame_node)) = (&mut state.camera, state.cursor.node) {
                 match frame_anchor {
                     // Frame one active-world node while retaining another as the independent
-                    // camera anchor.
+                    // camera anchor. The structural positions only approximate the routed
+                    // columns, so the column is corrected once the scene is built.
                     Some(camera_anchor) => {
+                        framed_column = Some(col_x);
                         let placed = node_pos_in_window(window, self.engine.graph(), camera_anchor)
                             .zip(node_pos_in_window(window, self.engine.graph(), frame_node));
                         camera.anchor = camera_anchor;
@@ -939,7 +966,7 @@ where
             state.go_to_previous_cursor = None;
         }
 
-        let Some(camera) = state.camera else {
+        let Some(mut camera) = state.camera else {
             state.frame = FrameIndex::empty();
             state.wormhole = Vec::new();
             return;
@@ -959,6 +986,13 @@ where
                 &mut slot.insert((key, scene)).1
             }
         };
+        if let Some(column) = framed_column
+            && let Some(node) = state.cursor.node
+            && let Some(point) = scene.screen_point(graph, &camera, node, state.cursor.fractional)
+        {
+            camera.anchor_screen.0 += column - point.x;
+            state.camera = Some(camera);
+        }
         let (frame, wormhole) = scene.paint(
             graph,
             self.visual,
@@ -2027,6 +2061,161 @@ mod tests {
                 state.camera.map(|camera| camera.anchor_screen.1),
                 Some(cursor.y),
                 "the go-to should frame the cursor row itself"
+            );
+        }
+    }
+
+    mod stop_and_door_framing {
+        use petgraph::graph::NodeIndex;
+        use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget as _};
+
+        use super::FixedSizeVisual;
+        use crate::{
+            geometry::WorldPos,
+            graph_view::{DOOR_ENTRY_MARGIN, GraphView, GraphViewState},
+            layout_engine::LayoutEngine,
+            testing::mocks::{MockDomainGraph, TestGraphs},
+        };
+
+        const AREA: Rect = Rect::new(0, 0, 30, 10);
+
+        fn render(
+            engine: &mut LayoutEngine<MockDomainGraph>,
+            state: &mut GraphViewState<NodeIndex>,
+        ) {
+            let mut buffer = Buffer::empty(AREA);
+            GraphView::new(engine, &FixedSizeVisual).render(AREA, &mut buffer, state);
+        }
+
+        fn cursor_point(state: &GraphViewState<NodeIndex>) -> WorldPos {
+            state
+                .cursor_screen_point()
+                .expect("should place the cursor node")
+        }
+
+        fn is_on_screen(point: WorldPos) -> bool {
+            (0..AREA.width as i64).contains(&point.x) && (0..AREA.height as i64).contains(&point.y)
+        }
+
+        /// A long chain rendered with its cursor on a visible node near the left of the screen.
+        fn chain_with_cursor() -> (LayoutEngine<MockDomainGraph>, GraphViewState<NodeIndex>) {
+            let mut engine = LayoutEngine::new(TestGraphs::domain_long_chain(40));
+            let mut state = GraphViewState::default();
+            render(&mut engine, &mut state);
+            state.go_to_node(NodeIndex::new(1), (0.0, 0.5));
+            state.queue_snap_left();
+            render(&mut engine, &mut state);
+            (engine, state)
+        }
+
+        /// The first chain node past the cursor whose stop column (its left edge) is on screen
+        /// or off screen, as asked.
+        fn stop_node(state: &GraphViewState<NodeIndex>, on_screen: bool) -> NodeIndex {
+            (2..40)
+                .map(NodeIndex::new)
+                .find(|&node| {
+                    state.frame.rect_of(node).is_some_and(|rect| {
+                        is_on_screen(WorldPos::new(rect.left(), rect.bottom())) == on_screen
+                    })
+                })
+                .expect("should place a node with a stop in the wanted place")
+        }
+
+        #[test]
+        fn test_stop_off_screen_pans_the_world_under_the_cursor() {
+            let (mut engine, mut state) = chain_with_cursor();
+            let before = cursor_point(&state);
+            let target = stop_node(&state, false);
+
+            state
+                .move_cursor_to_stop(true, |node| if node == target { vec![0] } else { vec![] })
+                .expect("should find the stop");
+            render(&mut engine, &mut state);
+
+            assert_eq!(state.cursor.node, Some(target));
+            assert_eq!(
+                cursor_point(&state),
+                before,
+                "the cursor should keep its screen position while the world moves"
+            );
+        }
+
+        #[test]
+        fn test_stop_on_screen_moves_the_cursor_not_the_world() {
+            let (mut engine, mut state) = chain_with_cursor();
+            let target = stop_node(&state, true);
+            let target_rect = state
+                .frame
+                .rect_of(target)
+                .expect("should place the target");
+
+            state
+                .move_cursor_to_stop(true, |node| if node == target { vec![0] } else { vec![] })
+                .expect("should find the stop");
+            render(&mut engine, &mut state);
+
+            assert_eq!(state.cursor.node, Some(target));
+            assert_eq!(
+                state.frame.rect_of(target),
+                Some(target_rect),
+                "the world should stay put for a stop already on screen"
+            );
+        }
+
+        /// Step through the first door of the rendered world that leads to a successor
+        /// (`forward`) or a predecessor, the way `teleport_through_wormhole` does, and render.
+        fn enter_door(
+            engine: &mut LayoutEngine<MockDomainGraph>,
+            state: &mut GraphViewState<NodeIndex>,
+            forward: bool,
+        ) -> NodeIndex {
+            let (_, _, target) = state
+                .wormhole
+                .iter()
+                .copied()
+                .find(|&(_, boundary, target)| (target.index() > boundary.index()) == forward)
+                .expect("should render a door in that direction");
+            engine
+                .activate_batch_containing(target, 4)
+                .expect("should claim the target's batch");
+            let anchor = engine
+                .active_world()
+                .expect("should have an active world")
+                .anchor();
+            let (fraction, snap_left) = if forward {
+                ((0.0, 0.5), true)
+            } else {
+                ((1.0, 0.5), false)
+            };
+            state.go_to_node_framed(anchor, target, fraction);
+            if snap_left {
+                state.queue_snap_left();
+            } else {
+                state.queue_snap_right();
+            }
+            render(engine, state);
+            target
+        }
+
+        #[test]
+        fn test_door_entry_keeps_a_margin_to_the_screen_edge() {
+            let mut engine = LayoutEngine::new(TestGraphs::domain_long_chain(40));
+            engine
+                .activate_batch_containing(NodeIndex::new(0), 4)
+                .expect("should claim the first batch");
+            let mut state = GraphViewState::default();
+            state.show_cursor();
+            render(&mut engine, &mut state);
+
+            let entered = enter_door(&mut engine, &mut state, true);
+            assert_eq!(state.cursor.node, Some(entered));
+            assert_eq!(cursor_point(&state).x, DOOR_ENTRY_MARGIN);
+
+            let entered = enter_door(&mut engine, &mut state, false);
+            assert_eq!(state.cursor.node, Some(entered));
+            assert_eq!(
+                cursor_point(&state).x,
+                AREA.width as i64 - 1 - DOOR_ENTRY_MARGIN
             );
         }
     }
