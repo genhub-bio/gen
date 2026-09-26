@@ -1,18 +1,8 @@
-//! Grows a block group's `GenGraph` one `(node, coordinate)` port at a time, for viewers that
-//! cannot afford to read every edge touching a node.
+//! Directional, lazy traversal of a block group's ports.
 //!
-//! A `GraphNode` is a slice of a backing node, and its incoming edges all arrive at its start
-//! port while its outgoing edges all leave from its end port. So the graph around a port is fully
-//! described by the edges at that port plus the nearest coordinates on either side of it, which
-//! bound the slices that end or start there. Each of those is an indexed lookup, independent of
-//! how many other edges the backing node carries.
-//!
-//! The crawler keeps two sets. A port is *loaded* once its edges and neighboring coordinates
-//! have been read; a port is *materialized* once every one of its edges is in the graph, which
-//! requires the far end of each edge to be loaded too, so the slice it lands on is known. A
-//! graph node is complete in a direction when the port on that side is materialized. Every other
-//! node in the graph is frontier on that side: its identity is exact, but some of its edges may
-//! be missing.
+//! Expanding a block consumes its closing port's edge group. Each jump opens a block at
+//! the far port; sliding closes it at the next active port and caches that port's edges.
+//! The closed block stays frontier until the viewer requests another expansion.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -26,10 +16,9 @@ use petgraph::Direction;
 use crate::{
     block_group_edge::AugmentedEdge,
     db::GraphConnection,
-    edge::{Edge, EdgeError, GroupBlock, PortEdges},
+    edge::{Edge, EdgeError, GroupBlock},
 };
 
-/// One edge endpoint position: a coordinate on a backing node.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Port {
     node_id: HashId,
@@ -37,81 +26,106 @@ struct Port {
 }
 
 impl Port {
-    /// The port on `direction`'s side of `node`: its end for outgoing edges, its start for
-    /// incoming ones. A junction or sentinel has the same port on both sides.
     fn of(node: &GraphNode, direction: Direction) -> Self {
-        let coordinate = match direction {
-            Direction::Outgoing => node.sequence_end,
-            Direction::Incoming => node.sequence_start,
-        };
-        Port {
+        Self {
             node_id: node.node_id,
-            coordinate,
+            coordinate: match direction {
+                Direction::Outgoing => node.sequence_end,
+                Direction::Incoming => node.sequence_start,
+            },
+        }
+    }
+
+    fn endpoint(edge: &Edge, direction: Direction) -> Self {
+        match direction {
+            Direction::Outgoing => Self {
+                node_id: edge.source_node_id,
+                coordinate: edge.source_coordinate,
+            },
+            Direction::Incoming => Self {
+                node_id: edge.target_node_id,
+                coordinate: edge.target_coordinate,
+            },
         }
     }
 }
 
-/// What the database says about one port.
-#[derive(Clone, Debug)]
-struct LoadedPort {
-    edges: PortEdges,
-    /// The nearest lower coordinate on the same node with an edge endpoint, if any.
-    previous: Option<i64>,
-    /// The nearest higher coordinate on the same node with an edge endpoint, if any.
-    next: Option<i64>,
+/// The blocks closed by sliding from one oriented port. A junction closes an arriving jump
+/// immediately. Its continuity edge can subsequently open a sequence block at the same
+/// oriented port without repeating the arriving jump.
+#[derive(Clone, Debug, Default)]
+struct PortSlides {
+    landing: Option<GraphNode>,
+    continuation: Option<GraphNode>,
 }
 
-impl LoadedPort {
-    /// Whether an edge between two different coordinates of this port's own node both leaves
-    /// and arrives here. `Edge::blocks_from_edges` turns such a coordinate into a zero-width
-    /// junction so the two jumps can chain.
-    fn is_jump_junction(&self, port: Port) -> bool {
-        let jumps_out = self.edges.leaving.iter().any(|augmented_edge| {
-            augmented_edge.edge.target_node_id == port.node_id
-                && augmented_edge.edge.target_coordinate != port.coordinate
-        });
-        let jumps_in = self.edges.arriving.iter().any(|augmented_edge| {
-            augmented_edge.edge.source_node_id == port.node_id
-                && augmented_edge.edge.source_coordinate != port.coordinate
-        });
-        jumps_out && jumps_in
-    }
-
-    /// The `(start, end)` slices of the backing node that end or start at `port`, carved the same
-    /// way `Edge::blocks_from_edges` carves them from the whole block group.
-    fn blocks(&self, port: Port) -> Vec<(i64, i64)> {
-        if is_terminal(port.node_id) {
-            return vec![(0, 0)];
-        }
-        let coordinate = port.coordinate;
-        // Mirrors `Edge::get_block_intervals`: a jump junction, or an outer junction where an
-        // edge leaves the node's first coordinate or arrives at its last one.
-        let has_junction = self.is_jump_junction(port)
-            || (self.previous.is_none() && !self.edges.leaving.is_empty())
-            || (self.next.is_none() && !self.edges.arriving.is_empty());
-        let mut blocks = Vec::with_capacity(3);
-        if let Some(previous) = self.previous {
-            blocks.push((previous, coordinate));
-        }
-        if has_junction {
-            blocks.push((coordinate, coordinate));
-        }
-        if let Some(next) = self.next {
-            blocks.push((coordinate, next));
-        }
-        blocks
-    }
-}
-
-/// Lazily grows one block group's graph from its ports. Owned by a viewer's graph source for as
-/// long as it keeps growing the same `GenGraph`, since what it records describes that graph.
+/// Lazily grows one block group's graph. Keep the crawler paired with the graph it describes.
 #[derive(Clone, Debug)]
 pub struct PortCrawler {
     block_group_id: HashId,
-    /// Leave out the edges `BlockGroup::prune_graph` would remove, deciding per source port.
     prune: bool,
-    loaded: HashMap<Port, LoadedPort>,
-    materialized: HashSet<Port>,
+    slide_cache: HashMap<(Port, Direction), PortSlides>,
+    /// Frontier edge batches are known before their far blocks have been opened and closed.
+    edge_groups: HashMap<(Port, Direction), Vec<AugmentedEdge>>,
+    visited_edges: HashSet<(HashId, Direction)>,
+    materialized: HashSet<(GraphNode, Direction)>,
+}
+
+/// A continuity edge joins the two sides of one coordinate rather than jumping elsewhere.
+fn is_continuity(edge: &Edge) -> bool {
+    edge.source_node_id == edge.target_node_id && edge.source_coordinate == edge.target_coordinate
+}
+
+/// Add the graph edges one stored edge projects between `source` and `target`. A junction
+/// already in the graph at either endpoint's coordinate takes part too, so a continuity edge
+/// connects through it the way the eager graph does.
+fn merge_fragment(
+    graph: &mut GenGraph,
+    augmented_edge: AugmentedEdge,
+    source: GraphNode,
+    target: GraphNode,
+) {
+    let mut endpoints = vec![source, target];
+    for (endpoint, coordinate) in [
+        (source, augmented_edge.edge.source_coordinate),
+        (target, augmented_edge.edge.target_coordinate),
+    ] {
+        let junction = GraphNode {
+            node_id: endpoint.node_id,
+            sequence_start: coordinate,
+            sequence_end: coordinate,
+        };
+        if graph.contains_node(junction) && !endpoints.contains(&junction) {
+            endpoints.push(junction);
+        }
+    }
+    let blocks: Vec<GroupBlock> = endpoints
+        .iter()
+        .enumerate()
+        .map(|(index, endpoint)| {
+            GroupBlock::without_sequence(
+                index as i64,
+                endpoint.node_id,
+                endpoint.sequence_start,
+                endpoint.sequence_end,
+            )
+        })
+        .collect();
+    let (fragment, _) = Edge::build_graph(&[augmented_edge], &blocks);
+    for (source, target, graph_edges) in fragment.all_edges() {
+        if let Some(existing) = graph.edge_weight_mut(source, target) {
+            for graph_edge in graph_edges {
+                if !existing
+                    .iter()
+                    .any(|present| present.edge_id == graph_edge.edge_id)
+                {
+                    existing.push(*graph_edge);
+                }
+            }
+        } else {
+            graph.add_edge(source, target, graph_edges.clone());
+        }
+    }
 }
 
 impl PortCrawler {
@@ -119,17 +133,19 @@ impl PortCrawler {
         Self {
             block_group_id,
             prune,
-            loaded: HashMap::new(),
+            slide_cache: HashMap::new(),
+            edge_groups: HashMap::new(),
+            visited_edges: HashSet::new(),
             materialized: HashSet::new(),
         }
     }
 
-    /// Whether the graph already carries every edge on `direction`'s side of `node`.
+    /// Whether every edge on this side of the block has been resolved.
     pub fn is_complete(&self, node: &GraphNode, direction: Direction) -> bool {
-        self.materialized.contains(&Port::of(node, direction))
+        self.materialized.contains(&(*node, direction))
     }
 
-    /// Complete every node in `nodes` on both sides, without walking any further.
+    /// Complete both sides of the requested blocks, leaving new neighbours as frontier.
     pub fn complete(
         &mut self,
         conn: &GraphConnection,
@@ -138,18 +154,16 @@ impl PortCrawler {
     ) -> Result<(), EdgeError> {
         for node in nodes {
             for direction in [Direction::Outgoing, Direction::Incoming] {
-                let port = Port::of(node, direction);
-                if !self.materialized.contains(&port) {
-                    self.materialize(conn, graph, port)?;
-                }
+                self.materialize(conn, graph, *node, direction)?;
             }
         }
         Ok(())
     }
 
     /// Complete `frontier` on its `direction` side, then keep walking that way breadth-first,
-    /// completing up to `budget` further nodes. A walk stops at any node that was already
-    /// complete before this call, since everything past it is either loaded or its own frontier.
+    /// completing up to `budget` further blocks. A walk stops at any block that was already
+    /// complete before this call, since everything past it is either loaded or its own
+    /// frontier. Requested blocks are queued first, so they are never cut off by the budget.
     pub fn expand(
         &mut self,
         conn: &GraphConnection,
@@ -160,7 +174,6 @@ impl PortCrawler {
     ) -> Result<(), EdgeError> {
         let mut queue: VecDeque<GraphNode> = frontier.iter().copied().collect();
         let mut visited: HashSet<GraphNode> = frontier.iter().copied().collect();
-        let mut materialized_here: HashSet<Port> = HashSet::new();
         let mut requested_remaining = frontier.len();
         let mut remaining_budget = budget;
         while let Some(node) = queue.pop_front() {
@@ -170,17 +183,13 @@ impl PortCrawler {
             } else if remaining_budget == 0 {
                 break;
             }
-            let port = Port::of(&node, direction);
-            if self.materialized.contains(&port) && !materialized_here.contains(&port) {
+            if self.is_complete(&node, direction) {
                 continue;
             }
             if !is_requested {
                 remaining_budget -= 1;
             }
-            if !self.materialized.contains(&port) {
-                self.materialize(conn, graph, port)?;
-                materialized_here.insert(port);
-            }
+            self.materialize(conn, graph, node, direction)?;
             for neighbor in graph.neighbors_directed(node, direction) {
                 if visited.insert(neighbor) {
                     queue.push_back(neighbor);
@@ -190,153 +199,188 @@ impl PortCrawler {
         Ok(())
     }
 
-    /// Read `port`'s edges and neighboring coordinates, once.
-    fn load(&mut self, conn: &GraphConnection, port: Port) -> Result<(), EdgeError> {
-        if self.loaded.contains_key(&port) {
-            return Ok(());
+    fn load_group(
+        &mut self,
+        conn: &GraphConnection,
+        port: Port,
+        direction: Direction,
+    ) -> Result<Vec<AugmentedEdge>, EdgeError> {
+        if let Some(edges) = self.edge_groups.get(&(port, direction)) {
+            return Ok(edges.clone());
         }
-        let edges = Edge::edges_at_port(conn, &self.block_group_id, port.node_id, port.coordinate)?;
-        let (previous, next) = if is_terminal(port.node_id) {
-            (None, None)
-        } else {
-            (
-                Edge::adjacent_edge_coordinate(
-                    conn,
-                    &self.block_group_id,
-                    port.node_id,
-                    port.coordinate,
-                    Direction::Incoming,
-                )?,
-                Edge::adjacent_edge_coordinate(
-                    conn,
-                    &self.block_group_id,
-                    port.node_id,
-                    port.coordinate,
-                    Direction::Outgoing,
-                )?,
-            )
-        };
-        self.loaded.insert(
-            port,
-            LoadedPort {
-                edges,
-                previous,
-                next,
-            },
-        );
-        Ok(())
+        let edges = Edge::edges_at_port_direction(
+            conn,
+            &self.block_group_id,
+            port.node_id,
+            port.coordinate,
+            direction,
+        )?;
+        self.edge_groups.insert((port, direction), edges.clone());
+        Ok(edges)
     }
 
-    /// Add every slice at `port` and every edge leaving or arriving there to `graph`.
+    /// Close the block opened at `port` and cache its closing port's edge group, which saves
+    /// the next expansion's lookup.
+    fn slide(
+        &mut self,
+        conn: &GraphConnection,
+        port: Port,
+        direction: Direction,
+        include_landing: bool,
+    ) -> Result<GraphNode, EdgeError> {
+        let cached = self.slide_cache.get(&(port, direction)).and_then(|slides| {
+            if include_landing {
+                slides.landing
+            } else {
+                slides.continuation
+            }
+        });
+        if let Some(node) = cached {
+            return Ok(node);
+        }
+        let edges = if is_terminal(port.node_id) {
+            Vec::new()
+        } else {
+            Edge::slide_edge_group(
+                conn,
+                &self.block_group_id,
+                (port.node_id, port.coordinate),
+                direction,
+                include_landing,
+            )?
+        };
+        let frontier = edges
+            .first()
+            .map_or(port, |edge| Port::endpoint(&edge.edge, direction));
+        let node = GraphNode {
+            node_id: port.node_id,
+            sequence_start: port.coordinate.min(frontier.coordinate),
+            sequence_end: port.coordinate.max(frontier.coordinate),
+        };
+        // A sentinel still needs an exact lookup when expanded. An advancing slide's
+        // closing group and an inclusive landing query are already complete.
+        if !is_terminal(port.node_id) && (frontier != port || include_landing) {
+            self.edge_groups.insert((frontier, direction), edges);
+        }
+        let slides = self.slide_cache.entry((port, direction)).or_default();
+        if include_landing {
+            // If no junction interrupted the slide, continuity takes the same route.
+            if frontier != port {
+                slides.continuation = Some(node);
+            }
+            slides.landing = Some(node);
+        } else {
+            slides.continuation = Some(node);
+        }
+        Ok(node)
+    }
+
+    fn land(
+        &mut self,
+        conn: &GraphConnection,
+        edge: &Edge,
+        direction: Direction,
+    ) -> Result<GraphNode, EdgeError> {
+        let port = Port::endpoint(edge, direction.opposite());
+        self.slide(conn, port, direction, !is_continuity(edge))
+    }
+
     fn materialize(
         &mut self,
         conn: &GraphConnection,
         graph: &mut GenGraph,
-        port: Port,
+        node: GraphNode,
+        direction: Direction,
     ) -> Result<(), EdgeError> {
-        self.load(conn, port)?;
-        let port_edges = self.loaded[&port].edges.clone();
-        let far_ports: Vec<Port> = port_edges
-            .leaving
-            .iter()
-            .map(|augmented_edge| Port {
-                node_id: augmented_edge.edge.target_node_id,
-                coordinate: augmented_edge.edge.target_coordinate,
-            })
-            .chain(port_edges.arriving.iter().map(|augmented_edge| Port {
-                node_id: augmented_edge.edge.source_node_id,
-                coordinate: augmented_edge.edge.source_coordinate,
-            }))
-            .collect();
-        for far_port in &far_ports {
-            self.load(conn, *far_port)?;
+        if self.is_complete(&node, direction) {
+            return Ok(());
         }
-
-        // A same-coordinate edge both leaves and arrives at its port; keep one copy.
-        let mut edge_ids: HashSet<HashId> = HashSet::new();
-        let edges: Vec<AugmentedEdge> = port_edges
-            .leaving
-            .iter()
-            .chain(port_edges.arriving.iter())
-            .filter(|augmented_edge| edge_ids.insert(augmented_edge.edge.id))
-            .filter(|augmented_edge| !self.prune || self.survives_pruning(augmented_edge))
-            .cloned()
-            .collect();
-
-        let mut ports: Vec<Port> = vec![port];
-        ports.extend(far_ports);
-        let mut seen_blocks: HashSet<(HashId, i64, i64)> = HashSet::new();
-        let mut blocks: Vec<GroupBlock> = vec![];
-        for block_port in ports {
-            for (start, end) in self.loaded[&block_port].blocks(block_port) {
-                if seen_blocks.insert((block_port.node_id, start, end)) {
-                    blocks.push(GroupBlock::without_sequence(
-                        blocks.len() as i64,
-                        block_port.node_id,
-                        start,
-                        end,
-                    ));
-                }
-            }
-        }
-
-        // Only the slices at `port` itself are added unconditionally: they are what this call
-        // completes. A slice at a far port enters the graph through the edges that reach it.
-        for (start, end) in self.loaded[&port].blocks(port) {
-            graph.add_node(GraphNode {
-                node_id: port.node_id,
-                sequence_start: start,
-                sequence_end: end,
-            });
-        }
-        let (fragment, _) = Edge::build_graph(&edges, &blocks);
-        for (source, target, graph_edges) in fragment.all_edges() {
-            match graph.edge_weight_mut(source, target) {
-                Some(existing) => {
-                    for graph_edge in graph_edges {
-                        if !existing
-                            .iter()
-                            .any(|present| present.edge_id == graph_edge.edge_id)
-                        {
-                            existing.push(*graph_edge);
-                        }
+        let edges = self.load_group(conn, Port::of(&node, direction), direction)?;
+        let port = Port::of(&node, direction);
+        let junction = GraphNode {
+            node_id: port.node_id,
+            sequence_start: port.coordinate,
+            sequence_end: port.coordinate,
+        };
+        let (has_continuity, has_jump) =
+            edges
+                .iter()
+                .fold((false, false), |(has_continuity, has_jump), edge| {
+                    if is_continuity(&edge.edge) {
+                        (true, has_jump)
+                    } else {
+                        (has_continuity, true)
                     }
-                }
-                None => {
-                    graph.add_edge(source, target, graph_edges.clone());
-                }
-            }
+                });
+        // An arbitrary viewer anchor can expose the sequence side of a junction before
+        // any jump has discovered it. Resolve that ambiguity only for mixed edge groups.
+        if node != junction
+            && !graph.contains_node(junction)
+            && has_continuity
+            && has_jump
+            && self.slide(conn, port, direction.opposite(), true)? == junction
+        {
+            graph.add_node(junction);
         }
-        self.materialized.insert(port);
+        for augmented_edge in edges {
+            let key = (augmented_edge.edge.id, direction);
+            let same_coordinate = is_continuity(&augmented_edge.edge);
+            let enters_junction = node != junction && graph.contains_node(junction);
+            if enters_junction && !same_coordinate {
+                // Non-continuity edges belong to the junction's frontier, not the
+                // sequence block ending here. Expanding that junction executes them.
+                continue;
+            }
+            // One continuity edge can project to both sequence -> junction and
+            // junction -> sequence. The slide cache prevents repeating its database work.
+            if self.visited_edges.contains(&key) && !same_coordinate {
+                continue;
+            }
+            if self.prune && !self.survives_pruning(conn, &augmented_edge)? {
+                self.visited_edges.insert(key);
+                continue;
+            }
+            let far_node = if enters_junction {
+                junction
+            } else {
+                self.land(conn, &augmented_edge.edge, direction)?
+            };
+            let (source, target) = match direction {
+                Direction::Outgoing => (node, far_node),
+                Direction::Incoming => (far_node, node),
+            };
+            merge_fragment(graph, augmented_edge, source, target);
+            self.visited_edges.insert(key);
+        }
+        self.materialized.insert((node, direction));
         Ok(())
     }
 
-    /// Whether `BlockGroup::prune_graph` keeps `augmented_edge`: an edit-site marker never
-    /// survives, an edge with no chromosome index always does, and otherwise only the newest
-    /// edge per chromosome index leaving the same source port is kept. The source port is always
-    /// loaded by the time this runs, because it is either the port being materialized or the
-    /// far end of one of its edges.
-    fn survives_pruning(&self, augmented_edge: &AugmentedEdge) -> bool {
+    /// Reverse pruning needs the source's outgoing siblings; forward crawling already cached them.
+    fn survives_pruning(
+        &mut self,
+        conn: &GraphConnection,
+        augmented_edge: &AugmentedEdge,
+    ) -> Result<bool, EdgeError> {
         let chromosome_index = augmented_edge.chromosome_index;
         if chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
-            return false;
+            return Ok(false);
         }
         if chromosome_index == NO_CHROMOSOME_INDEX
             || chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
         {
-            return true;
+            return Ok(true);
         }
-        let source_port = Port {
-            node_id: augmented_edge.edge.source_node_id,
-            coordinate: augmented_edge.edge.source_coordinate,
-        };
-        self.loaded[&source_port]
-            .edges
-            .leaving
+        let edges = self.load_group(
+            conn,
+            Port::endpoint(&augmented_edge.edge, Direction::Outgoing),
+            Direction::Outgoing,
+        )?;
+        Ok(edges
             .iter()
             .filter(|sibling| sibling.chromosome_index == chromosome_index)
             .max_by_key(|sibling| (sibling.created_on, sibling.edge.id))
-            .is_some_and(|newest| newest.edge.id == augmented_edge.edge.id)
+            .is_some_and(|newest| newest.edge.id == augmented_edge.edge.id))
     }
 }
 
@@ -344,18 +388,336 @@ impl PortCrawler {
 mod tests {
     use std::collections::BTreeSet;
 
-    use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
+    use gen_core::{
+        HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
+        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand,
+    };
+    use gen_graph::{GenGraph, GraphNode};
+    use petgraph::Direction;
 
-    use super::*;
+    use super::{Port, PortCrawler};
     use crate::{
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
+        db::GraphConnection,
+        edge::Edge,
         node::Node,
         sample::{NewSample, Sample},
         sequence::Sequence,
         test_helpers::{get_connection, test_workspace},
     };
+
+    fn block(label: &str, start: i64, end: i64) -> GraphNode {
+        GraphNode {
+            node_id: node_id_for(label),
+            sequence_start: start,
+            sequence_end: end,
+        }
+    }
+
+    #[test]
+    fn test_linear_crawl_stops_at_the_frontier_in_both_directions() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC"), ("c", "GGGG")],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("a", 4, "b", 0, 0),
+                ("b", 4, "c", 0, 0),
+                ("c", 4, "end", 0, 0),
+            ],
+        );
+        for direction in [Direction::Outgoing, Direction::Incoming] {
+            let mut crawler = PortCrawler::new(block_group_id, false);
+            let mut graph = GenGraph::new();
+            let anchor = if direction == Direction::Outgoing {
+                start_sentinel()
+            } else {
+                block("end", 0, 0)
+            };
+            graph.add_node(anchor);
+            crawler
+                .expand(&conn, &mut graph, &[anchor], direction, 2)
+                .unwrap();
+            let frontier = if direction == Direction::Outgoing {
+                block("c", 0, 4)
+            } else {
+                block("a", 0, 4)
+            };
+            assert!(
+                graph.contains_node(frontier),
+                "the budgeted walk should reach the last block"
+            );
+            assert!(
+                !crawler.is_complete(&frontier, direction),
+                "the last block should stay frontier"
+            );
+            crawler
+                .expand(&conn, &mut graph, &[frontier], direction, 0)
+                .unwrap();
+            assert!(
+                crawler.is_complete(&frontier, direction),
+                "expanding the frontier should complete it"
+            );
+        }
+    }
+
+    #[test]
+    fn test_branching_convergence_reuses_slides_and_visits_edges_in_both_directions() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[
+                ("a", "AAAA"),
+                ("b", "CCCC"),
+                ("joined", "GGGG"),
+                ("tail", "TTTT"),
+            ],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("start", 0, "b", 0, 1),
+                ("a", 4, "joined", 0, 0),
+                ("b", 4, "joined", 0, 0),
+                ("joined", 4, "tail", 0, 0),
+                ("tail", 4, "end", 0, 0),
+            ],
+        );
+        let mut crawler = PortCrawler::new(block_group_id, false);
+        let mut graph = GenGraph::new();
+        graph.add_node(start_sentinel());
+        crawler
+            .expand(
+                &conn,
+                &mut graph,
+                &[start_sentinel()],
+                Direction::Outgoing,
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            graph.neighbors(start_sentinel()).count(),
+            2,
+            "the start sentinel should fan out to both branches"
+        );
+        crawler
+            .expand(
+                &conn,
+                &mut graph,
+                &[block("a", 0, 4), block("b", 0, 4)],
+                Direction::Outgoing,
+                0,
+            )
+            .unwrap();
+        assert!(
+            !crawler.is_complete(&block("joined", 0, 4), Direction::Outgoing),
+            "the converged block should stay frontier"
+        );
+        crawler
+            .expand(
+                &conn,
+                &mut graph,
+                &[block("joined", 0, 4)],
+                Direction::Outgoing,
+                10,
+            )
+            .unwrap();
+        let forward_shape = shape(&graph);
+        crawler
+            .expand(
+                &conn,
+                &mut graph,
+                &[block("end", 0, 0)],
+                Direction::Incoming,
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            shape(&graph),
+            forward_shape,
+            "a reverse crawl should add nothing to the forward graph"
+        );
+        assert_eq!(
+            crawler.visited_edges.len(),
+            12,
+            "each of the six edges should be visited once per direction"
+        );
+        assert!(
+            crawler.slide_cache.contains_key(&(
+                Port {
+                    node_id: node_id_for("joined"),
+                    coordinate: 0
+                },
+                Direction::Outgoing
+            )),
+            "both branches land on the same cached slide"
+        );
+    }
+
+    #[test]
+    fn test_outer_junction_and_continuity_match_eager_graph_in_both_directions() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("ref", "AAAAAAAAAA")],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 0, "ref", 0, 0),
+                ("ref", 0, "ref", 3, 1),
+                ("ref", 3, "ref", 3, 0),
+                ("ref", 3, "ref", 6, 1),
+                ("ref", 6, "ref", 6, 0),
+                ("ref", 6, "ref", 10, 1),
+                ("ref", 10, "ref", 10, 0),
+                ("ref", 10, "end", 0, 0),
+            ],
+        );
+        let eager = BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+        for anchor in [start_sentinel(), block("end", 0, 0)] {
+            let mut crawler = PortCrawler::new(block_group_id, false);
+            let mut graph = GenGraph::new();
+            graph.add_node(anchor);
+            crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
+            assert_eq!(
+                connected_shape(&graph),
+                connected_shape(&eager),
+                "the lazy crawl should match the eager graph"
+            );
+        }
+    }
+
+    #[test]
+    fn test_jump_closes_at_junction_before_following_its_edge_batch() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("ref", "AAAAAAAAAA")],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 3, "ref", 6, 0),
+                ("ref", 6, "ref", 9, 0),
+                ("ref", 9, "end", 0, 0),
+            ],
+        );
+        let mut crawler = PortCrawler::new(block_group_id, false);
+        let mut graph = GenGraph::new();
+        graph.add_node(start_sentinel());
+        crawler
+            .expand(
+                &conn,
+                &mut graph,
+                &[start_sentinel()],
+                Direction::Outgoing,
+                1,
+            )
+            .unwrap();
+        assert!(
+            graph.contains_node(block("ref", 6, 6)),
+            "the jump should close at the landing junction"
+        );
+        assert!(
+            !graph.contains_node(block("ref", 9, 9)),
+            "the junction's own jump should not be followed yet"
+        );
+        assert!(
+            !crawler.is_complete(&block("ref", 6, 6), Direction::Outgoing),
+            "the landing junction should stay frontier"
+        );
+    }
+
+    #[test]
+    fn test_continuity_stops_at_junction_without_expanding_it() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("ref", "AAAAAAAAAA")],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 0, "ref", 0, 0),
+                ("ref", 0, "ref", 3, 1),
+                ("ref", 3, "ref", 3, 0),
+                ("ref", 3, "ref", 6, 1),
+                ("ref", 6, "end", 0, 0),
+            ],
+        );
+        let mut crawler = PortCrawler::new(block_group_id, false);
+        let mut graph = GenGraph::new();
+        graph.add_node(start_sentinel());
+        crawler
+            .expand(
+                &conn,
+                &mut graph,
+                &[start_sentinel()],
+                Direction::Outgoing,
+                1,
+            )
+            .unwrap();
+        crawler
+            .expand(
+                &conn,
+                &mut graph,
+                &[block("ref", 0, 3)],
+                Direction::Outgoing,
+                0,
+            )
+            .unwrap();
+        assert!(
+            graph.contains_edge(block("ref", 0, 3), block("ref", 3, 3)),
+            "continuity should connect the block to its junction"
+        );
+        assert!(
+            !graph.contains_node(block("ref", 3, 6)),
+            "the junction should not be expanded past"
+        );
+        assert!(
+            !graph.contains_node(block("ref", 6, 6)),
+            "the junction's jump should not be followed"
+        );
+        crawler
+            .expand(
+                &conn,
+                &mut graph,
+                &[block("ref", 3, 3)],
+                Direction::Outgoing,
+                0,
+            )
+            .unwrap();
+        assert!(
+            graph.contains_edge(block("ref", 3, 3), block("ref", 3, 6)),
+            "expanding the junction should open the next block"
+        );
+    }
+
+    #[test]
+    fn test_outer_continuity_and_internal_cross_node_ports_match_eager_graph() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("ref", "AAAAAAAAAA"), ("insert", "CCCC")],
+            &[
+                ("start", 0, "ref", 0, 0),
+                ("ref", 0, "ref", 0, 0),
+                ("ref", 3, "ref", 3, 0),
+                ("ref", 3, "insert", 0, 1),
+                ("insert", 4, "ref", 3, 1),
+                ("ref", 10, "ref", 10, 0),
+                ("ref", 10, "end", 0, 0),
+            ],
+        );
+        let eager = BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+        for anchor in [start_sentinel(), block("end", 0, 0)] {
+            let mut crawler = PortCrawler::new(block_group_id, false);
+            let mut graph = GenGraph::new();
+            graph.add_node(anchor);
+            crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
+            assert_eq!(
+                connected_shape(&graph),
+                connected_shape(&eager),
+                "the lazy crawl should match the eager graph"
+            );
+        }
+    }
 
     /// One stored edge: `(source label, source coordinate, target label, target coordinate,
     /// chromosome index)`, where the labels "start" and "end" name the path sentinels.
