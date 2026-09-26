@@ -8,13 +8,11 @@ use std::{path::PathBuf, sync::Mutex};
 
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID};
 use gen_graph::{GenGraph, GraphNode};
-use gen_models::{
-    db::{GraphConnection, get_connection},
-    edge::Edge,
-    port_crawl::PortCrawler,
-};
+use gen_models::{db::GraphConnection, edge::Edge, port_crawl::PortCrawler};
 use gen_tui::crawl::{EagerSource, GraphSource};
 use petgraph::Direction;
+
+use crate::get_connection_for_branch;
 
 /// The fixed `(node_id, 0, 0)` value a `PATH_START`/`PATH_END` sentinel always carries (see
 /// `GenGraphController::new` and how `Edge::create` records a `PATH_START`/`PATH_END` endpoint's own
@@ -186,6 +184,9 @@ pub fn probe_block_group_start(
 #[derive(Debug)]
 pub struct SqlGraphSource {
     db_path: PathBuf,
+    /// The branch the connection is opened on. A fresh connection starts on the repository's
+    /// default branch, so a viewer plotting a graph from another branch must pin it here.
+    branch: Option<String>,
     block_group_id: HashId,
     /// Which ports of this block group are already in the graph. It describes the one
     /// `GenGraph` this source grows, which is why a `LayoutEngine` owns and clones the two
@@ -212,6 +213,7 @@ impl Clone for SqlGraphSource {
     fn clone(&self) -> Self {
         Self {
             db_path: self.db_path.clone(),
+            branch: self.branch.clone(),
             block_group_id: self.block_group_id,
             crawler: self.crawler.clone(),
             is_circular: self.is_circular,
@@ -224,6 +226,7 @@ impl SqlGraphSource {
     pub fn new(db_path: PathBuf, block_group_id: HashId) -> Self {
         Self {
             db_path,
+            branch: None,
             block_group_id,
             crawler: PortCrawler::new(block_group_id, false),
             is_circular: None,
@@ -240,6 +243,11 @@ impl SqlGraphSource {
             ..Self::new(db_path, block_group_id)
         }
     }
+
+    /// Open this source's connection on `branch` rather than the default branch.
+    pub fn with_branch(self, branch: Option<String>) -> Self {
+        Self { branch, ..self }
+    }
 }
 
 impl GraphSource<GenGraph> for SqlGraphSource {
@@ -255,7 +263,8 @@ impl GraphSource<GenGraph> for SqlGraphSource {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if connection_slot.is_none() {
-            *connection_slot = get_connection(&self.db_path).ok();
+            *connection_slot =
+                get_connection_for_branch(&self.db_path, self.branch.as_deref()).ok();
         }
         let Some(conn) = connection_slot.as_ref() else {
             return;
@@ -307,6 +316,7 @@ pub(crate) mod tests {
         block_group::{BlockGroup, NewBlockGroup},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         collection::Collection,
+        db::get_connection,
         edge::Edge,
         node::Node,
         sample::{NewSample, Sample},

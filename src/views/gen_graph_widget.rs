@@ -27,14 +27,17 @@ use ratatui::{
     style::{Color, Style},
 };
 
-use crate::views::{
-    annotation_track::{
-        AnnotationSpan, LoadedNodeSlices, graph_locus_from_annotation_span, span_covered_by_later,
-        span_label_text,
+use crate::{
+    get_connection_for_branch,
+    views::{
+        annotation_track::{
+            AnnotationSpan, LoadedNodeSlices, graph_locus_from_annotation_span,
+            span_covered_by_later, span_label_text,
+        },
+        graph_dimming::GraphDimming,
+        graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
+        inline_label_placement::draw_label_near_pos,
     },
-    graph_dimming::GraphDimming,
-    graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
-    inline_label_placement::draw_label_near_pos,
 };
 
 /// Ordered `+`/`-` zoom gap-size steps, tightest to loosest, paired with a `NodeRenderer` in
@@ -317,6 +320,8 @@ impl<'a> SequenceSource for (&'a GraphConnection, &'a Workspace) {
 /// (`Connection` isn't `Clone`); the clone reopens lazily on its own first use.
 pub struct PathSequenceSource {
     db_path: PathBuf,
+    /// The branch the connection is opened on; see `SqlGraphSource`'s field of the same name.
+    branch: Option<String>,
     conn: std::sync::Mutex<Option<GraphConnection>>,
 }
 
@@ -324,14 +329,20 @@ impl PathSequenceSource {
     pub fn new(db_path: PathBuf) -> Self {
         Self {
             db_path,
+            branch: None,
             conn: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Open this source's connection on `branch` rather than the default branch.
+    pub fn with_branch(self, branch: Option<String>) -> Self {
+        Self { branch, ..self }
     }
 }
 
 impl Clone for PathSequenceSource {
     fn clone(&self) -> Self {
-        Self::new(self.db_path.clone())
+        Self::new(self.db_path.clone()).with_branch(self.branch.clone())
     }
 }
 
@@ -351,7 +362,7 @@ impl SequenceSource for PathSequenceSource {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if conn.is_none() {
             *conn = Some(
-                crate::get_connection(self.db_path.clone())
+                get_connection_for_branch(self.db_path.clone(), self.branch.as_deref())
                     .map_err(|e| SequenceError::Io(e.to_string()))?,
             );
         }

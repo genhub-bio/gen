@@ -6,7 +6,7 @@ use std::{
 };
 
 use r#gen::{
-    get_connection,
+    get_connection_for_branch,
     views::{
         annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
@@ -279,6 +279,9 @@ fn sort_key_longest_first(span: &AnnotationSpan) -> i64 {
 struct GraphPage {
     name: String,
     db_path: PathBuf,
+    /// The branch the plotted graph lives on. Every connection this page opens is pinned to
+    /// it, since a fresh connection starts on the default branch.
+    branch: Option<String>,
     pub(crate) block_group_id: Option<HashId>,
     engine: LayoutEngine<GenGraph, SqlGraphSource>,
     zoom_levels: SendSyncZoomLevels,
@@ -331,6 +334,7 @@ struct FileTrack {
 struct PageRef {
     name: String,
     db_path: PathBuf,
+    branch: Option<String>,
     block_group_id: HashId,
     /// Mirrors `plot(show_history=...)` - see `GraphPage::new`.
     show_history: bool,
@@ -367,6 +371,7 @@ impl GraphPage {
     fn new(
         name: String,
         db_path: PathBuf,
+        branch: Option<String>,
         conn: &GraphConnection,
         block_group_id: HashId,
         show_history: bool,
@@ -381,8 +386,9 @@ impl GraphPage {
             SqlGraphSource::new(db_path.clone(), block_group_id)
         } else {
             SqlGraphSource::new_pruned(db_path.clone(), block_group_id)
-        };
-        let sequence_source = PathSequenceSource::new(db_path.clone());
+        }
+        .with_branch(branch.clone());
+        let sequence_source = PathSequenceSource::new(db_path.clone()).with_branch(branch.clone());
         let node_annotations = NodeAnnotationLayer::new();
         let (engine, zoom_levels, view_state) = create_send_sync_annotated_gen_graph_engine_lazy(
             seed,
@@ -394,6 +400,7 @@ impl GraphPage {
         Self {
             name,
             db_path,
+            branch,
             block_group_id: Some(block_group_id),
             engine,
             zoom_levels,
@@ -414,7 +421,8 @@ impl GraphPage {
     }
 
     fn open_conn(&self) -> PyResult<GraphConnection> {
-        get_connection(&self.db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        get_connection_for_branch(&self.db_path, self.branch.as_deref())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     fn all_node_ids(&self) -> HashSet<HashId> {
@@ -1273,9 +1281,11 @@ fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> P
         .path()
         .map(PathBuf::from)
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
+    let branch = active_branch(graph_conn).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(GraphPage::new(
         sg.name.clone(),
         db_path,
+        Some(branch),
         graph_conn,
         sg.id,
         show_history,
@@ -1290,15 +1300,16 @@ fn page_ref_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyRe
             "plot() requires a Repository context; obtain SequenceGraphs via Repository by query or id.",
         )
     })?;
-    let db_path = context
-        .graph()
-        .conn()
+    let graph_conn = context.graph().conn();
+    let db_path = graph_conn
         .path()
         .map(PathBuf::from)
         .ok_or_else(|| PyRuntimeError::new_err("graph DB has no file path"))?;
+    let branch = active_branch(graph_conn).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(PageRef {
         name: sg.name.clone(),
         db_path,
+        branch: Some(branch),
         block_group_id: sg.id,
         show_history,
     })
@@ -1342,6 +1353,7 @@ impl PyGraphController {
             pages: vec![Page::Loaded(Box::new(GraphPage::new(
                 String::new(),
                 db_path,
+                None,
                 conn,
                 block_group_id,
                 true,
@@ -1385,11 +1397,12 @@ impl PyGraphController {
     fn active(&mut self) -> PyResult<&mut GraphPage> {
         let page = &mut self.pages[self.current_index];
         if let Page::Pending(page_ref) = page {
-            let conn = get_connection(&page_ref.db_path)
+            let conn = get_connection_for_branch(&page_ref.db_path, page_ref.branch.as_deref())
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let loaded = GraphPage::new(
                 page_ref.name.clone(),
                 page_ref.db_path.clone(),
+                page_ref.branch.clone(),
                 &conn,
                 page_ref.block_group_id,
                 page_ref.show_history,
@@ -1812,6 +1825,19 @@ mod tests {
         sample_controller
             .annotations()
             .expect("should load a pending page from its original branch");
+        graph_controller
+            .render_frame(100, 30)
+            .expect("should render the graph from its original branch");
+        let page = graph_controller
+            .active()
+            .expect("should have an active page");
+        assert!(
+            page.engine
+                .graph()
+                .nodes()
+                .any(|node| !is_start_node(node.node_id) && !is_end_node(node.node_id)),
+            "the crawl should load the plotted graph's nodes from its original branch"
+        );
         assert_eq!(
             active_branch(context.graph().conn()).expect("should read repository branch"),
             "main",
