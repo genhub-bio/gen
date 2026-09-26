@@ -34,7 +34,7 @@ use crate::{
             load_annotations_for_group,
         },
         collection::{CollectionExplorer, CollectionExplorerState, FocusZone},
-        gen_graph_controller::{AnnotationDisplay, GenGraphController, WorldSync},
+        gen_graph_controller::{AnnotationDisplay, GenGraphController, GraphKeyOutcome, WorldSync},
         graph_overlay::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
             replace_track_overlays,
@@ -441,6 +441,17 @@ pub(crate) fn teleport_through_wormhole<S: GraphSource<GenGraph>>(
     }
 }
 
+/// Read and drop every input event already waiting, returning whether one was a resize. The
+/// viewers call it after drawing the world a door led into, since input that queued up while
+/// that world loaded was aimed at the screen the user left.
+pub(crate) fn discard_pending_input() -> std::io::Result<bool> {
+    let mut resized = false;
+    while event::poll(Duration::ZERO)? {
+        resized |= matches!(event::read()?, event::Event::Resize(..));
+    }
+    Ok(resized)
+}
+
 /// Initial graph selection and navigation for the full-screen viewer.
 pub struct BlockGroupViewOptions<'a> {
     /// Graph to select when opening the viewer.
@@ -590,9 +601,12 @@ pub fn view_block_group<'a>(
     // Mouse capture reports every pointer movement; only events that can change the screen
     // earn a redraw.
     let mut needs_redraw = true;
+    // Set when a key or click takes a door. Input after it is left unread until the new world
+    // is drawn, then discarded.
+    let mut entered_door = false;
     loop {
         // Drain ALL pending input events before doing any work
-        while crossterm::event::poll(Duration::from_millis(0))? {
+        while !entered_door && crossterm::event::poll(Duration::from_millis(0))? {
             let input = event::read()?;
             if !matches!(
                 input,
@@ -763,7 +777,8 @@ pub fn view_block_group<'a>(
                             // Zoom, the path toggle, annotation stops and navigation
                             // behave the same in every viewer.
                             _ => {
-                                controller.handle_key(key);
+                                entered_door =
+                                    controller.handle_key(key) == GraphKeyOutcome::EnteredDoor;
                             }
                         },
                         FocusZone::Panel => match key.code {
@@ -925,7 +940,8 @@ pub fn view_block_group<'a>(
                                 .wormhole_hit(mouse.column, mouse.row)
                             {
                                 Some((boundary, target)) => {
-                                    controller.teleport_through_wormhole(boundary, target)
+                                    controller.teleport_through_wormhole(boundary, target);
+                                    entered_door = true;
                                 }
                                 None => {
                                     controller
@@ -1567,6 +1583,15 @@ pub fn view_block_group<'a>(
         if changed_after_draw {
             needs_redraw = true;
             continue;
+        }
+
+        // The door's world is fully drawn; drop what was typed or clicked while it loaded.
+        if entered_door {
+            entered_door = false;
+            needs_redraw = discard_pending_input()?;
+            if needs_redraw {
+                continue;
+            }
         }
 
         // Rendering is event-driven (no animation to advance): block indefinitely until the
