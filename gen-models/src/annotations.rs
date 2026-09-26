@@ -281,6 +281,19 @@ impl Annotation {
         HashId(calculate_hash(&format!("{name}:{group}:{accession_id}",)))
     }
 
+    /// The feature type the annotation was imported with: a GenBank feature key (`CDS`,
+    /// `source`, ...) or a GFF type column. `None` for annotations without one, such as BED
+    /// records or annotations added by region.
+    pub fn feature_type(&self) -> Option<&str> {
+        let extra = self.extra.as_ref()?;
+        extra
+            .genbank
+            .as_ref()
+            .map(|genbank| genbank.kind.as_str())
+            .or_else(|| extra.gff.as_ref().map(|gff| gff.ty.as_str()))
+            .filter(|feature_type| !feature_type.is_empty())
+    }
+
     pub fn create(
         conn: &GraphConnection,
         group: &str,
