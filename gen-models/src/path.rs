@@ -283,9 +283,12 @@ impl Path {
                     second_edge.source_node_id
                 )));
             }
-            if first_edge.target_coordinate >= second_edge.source_coordinate {
+            // Equal coordinates traverse a zero-length junction without consuming
+            // sequence. Graphs use these to connect adjacent edits; stored paths
+            // must preserve the same traversal. Only backward movement is invalid.
+            if first_edge.target_coordinate > second_edge.source_coordinate {
                 return Err(PathError::Invalid(format!(
-                    "source coordinate {} for edge {} is not after target coordinate {} for edge {}",
+                    "source coordinate {} for edge {} is before target coordinate {} for edge {}",
                     second_edge.source_coordinate,
                     second_edge.id_hash(),
                     first_edge.target_coordinate,
@@ -1549,6 +1552,52 @@ mod tests {
             Path::edge_ids_for_path(conn, &path.id, Some(&history_ref)),
             expected_edge_ids
         );
+    }
+
+    #[test]
+    fn test_validate_edges_allows_junctions_but_rejects_backward_traversal() {
+        let into_junction = EdgeData {
+            source_node_id: HashId::convert_str("first variant"),
+            source_coordinate: 1,
+            source_strand: Strand::Forward,
+            target_node_id: HashId::convert_str("parent"),
+            target_coordinate: 4,
+            target_strand: Strand::Forward,
+        };
+        let out_of_junction = EdgeData {
+            source_node_id: into_junction.target_node_id,
+            source_coordinate: 4,
+            source_strand: Strand::Forward,
+            target_node_id: HashId::convert_str("second variant"),
+            target_coordinate: 0,
+            target_strand: Strand::Forward,
+        };
+        let edges = [into_junction, out_of_junction];
+        let edge_ids = edges.map(|edge| edge.id_hash());
+        Path::validate_edges_in_memory(&edge_ids, &edges)
+            .expect("should allow a zero-length junction between variants");
+
+        for invalid_edge in [
+            EdgeData {
+                source_coordinate: 3,
+                ..out_of_junction
+            },
+            EdgeData {
+                source_node_id: HashId::convert_str("other node"),
+                ..out_of_junction
+            },
+            EdgeData {
+                source_strand: Strand::Reverse,
+                ..out_of_junction
+            },
+        ] {
+            let edges = [into_junction, invalid_edge];
+            let edge_ids = edges.map(|edge| edge.id_hash());
+            assert!(matches!(
+                Path::validate_edges_in_memory(&edge_ids, &edges),
+                Err(PathError::Invalid(_))
+            ));
+        }
     }
 
     #[test]
@@ -4551,7 +4600,7 @@ mod tests {
     #[test]
     #[should_panic]
     // Panic message is something like "Source coordinate 2 for edge 2 is before target coordinate 4 for edge 1"
-    fn test_consecutive_edges_must_have_different_coordinates_on_a_node() {
+    fn test_consecutive_edges_must_not_traverse_backward_on_a_node() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);

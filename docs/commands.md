@@ -60,6 +60,28 @@ repository copy; remote assets remain remote. Supply known FASTA indices with a
 repeatable `--index <path-or-uri>` option. For example, a BGZF FASTA can use both
 `--index reference.fa.gz.fai` and `--index reference.fa.gz.gzi`.
 
+# VCF update
+
+When `gen update vcf` creates a sample block group with a single forward parent
+path, it records the sample sequence in the inherited path if every genotype has
+one distinct, known allele and the variant records do not conflict. Haploid and
+homozygous calls qualify; heterozygous and missing calls do not. Substitutions,
+insertions, and deletions are applied in parent coordinates, keeping the path name.
+Reference-only samples retain the inherited path.
+
+Automatic path inference currently skips existing block groups, `--inplace`,
+multiple parent block groups or paths, and unsupported alleles. In these cases,
+the update retains its existing graph behavior and inherited paths; an inherited
+path should not be interpreted as a resolved sample sequence.
+
+Path inference reuses existing block-group edges without adding connections. If
+those edges cannot form a valid path, inference is skipped. Adjacent variants can
+connect through zero-length parent junctions without requiring new edges.
+
+Use the exact sample name from the VCF header with `gen export fasta --sample`.
+FASTA export reports an error if the selection matches no block groups and leaves
+any existing output file untouched.
+
 # View diff
 
 Compare one sequence graph between two samples with:
