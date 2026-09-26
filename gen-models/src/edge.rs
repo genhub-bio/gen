@@ -512,7 +512,7 @@ impl Edge {
 
     /// Every edge at the nearest port on `port`'s node in `direction`, optionally counting
     /// `port` itself.
-    fn nearest_edge_group(
+    pub(crate) fn nearest_edge_group(
         conn: &GraphConnection,
         block_group_id: &HashId,
         port: (HashId, i64),

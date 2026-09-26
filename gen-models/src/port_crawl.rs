@@ -199,6 +199,60 @@ impl PortCrawler {
         Ok(())
     }
 
+    /// The block of `node_id` holding `coordinate`, carved the way a crawl reaching it would
+    /// carve it, and added to `graph` as frontier if it isn't there yet. This lets a viewer go
+    /// to a position the crawl hasn't reached. `None` when no edge of this block group opens a
+    /// block of `node_id` at or before `coordinate`.
+    ///
+    /// The block opens at the nearest incoming port at or before `coordinate` and closes where
+    /// a slide from there closes. Where that block ends before `coordinate`, the next one opens
+    /// at its end as a continuity would, until one holds `coordinate`.
+    pub fn locate(
+        &mut self,
+        conn: &GraphConnection,
+        graph: &mut GenGraph,
+        node_id: HashId,
+        coordinate: i64,
+    ) -> Result<Option<GraphNode>, EdgeError> {
+        if is_terminal(node_id) {
+            return Ok(None);
+        }
+        let opening_edges = Edge::nearest_edge_group(
+            conn,
+            &self.block_group_id,
+            (node_id, coordinate),
+            Direction::Incoming,
+            true,
+        )?;
+        let Some(first) = opening_edges.first() else {
+            return Ok(None);
+        };
+        let mut port = Port {
+            node_id,
+            coordinate: first.edge.target_coordinate,
+        };
+        // A jump lands on its port; a continuity only continues through it.
+        let mut include_landing = opening_edges
+            .iter()
+            .any(|augmented_edge| !is_continuity(&augmented_edge.edge));
+        let mut previous = None;
+        loop {
+            let block = self.slide(conn, port, Direction::Outgoing, include_landing)?;
+            if block.sequence_start <= coordinate && coordinate < block.sequence_end {
+                if !graph.contains_node(block) {
+                    graph.add_node(block);
+                }
+                return Ok(Some(block));
+            }
+            if previous == Some(block) || block.sequence_end > coordinate {
+                return Ok(None);
+            }
+            previous = Some(block);
+            port.coordinate = block.sequence_end;
+            include_landing = false;
+        }
+    }
+
     fn load_group(
         &mut self,
         conn: &GraphConnection,
@@ -302,22 +356,19 @@ impl PortCrawler {
             sequence_start: port.coordinate,
             sequence_end: port.coordinate,
         };
-        let (has_continuity, has_jump) =
-            edges
-                .iter()
-                .fold((false, false), |(has_continuity, has_jump), edge| {
-                    if is_continuity(&edge.edge) {
-                        (true, has_jump)
-                    } else {
-                        (has_continuity, true)
-                    }
-                });
-        // An arbitrary viewer anchor can expose the sequence side of a junction before
-        // any jump has discovered it. Resolve that ambiguity only for mixed edge groups.
+        let has_continuity = edges.iter().any(|edge| is_continuity(&edge.edge));
+        let has_jump = edges.iter().any(|edge| !is_continuity(&edge.edge));
+        let has_same_node_jump = edges.iter().any(|edge| {
+            !is_continuity(&edge.edge) && edge.edge.source_node_id == edge.edge.target_node_id
+        });
+        // An arbitrary viewer anchor (a door, or a position gone to directly) can expose the
+        // sequence side of a junction before any jump has discovered it. Only a group mixing
+        // continuity with jumps, or leaving by a same-node jump that another same-node jump may
+        // meet, can end at a junction, so only those pay for the check.
         if node != junction
             && !graph.contains_node(junction)
-            && has_continuity
             && has_jump
+            && (has_continuity || has_same_node_jump)
             && self.slide(conn, port, direction.opposite(), true)? == junction
         {
             graph.add_node(junction);
@@ -390,7 +441,7 @@ mod tests {
 
     use gen_core::{
         HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
-        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand,
+        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, is_terminal,
     };
     use gen_graph::{GenGraph, GraphNode};
     use petgraph::Direction;
@@ -901,6 +952,82 @@ mod tests {
         crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
 
         assert_eq!(connected_shape(&graph), connected_shape(&eager));
+    }
+
+    /// Every coordinate of every block a full crawl carves locates to that block from a fresh
+    /// crawler, and crawling on from the located block alone rebuilds the same graph, so a
+    /// viewer that jumps somewhere first never carves a node differently.
+    #[test]
+    fn test_locate_finds_the_block_a_crawl_carves() {
+        let fixtures: [fn(&GraphConnection) -> HashId; 2] = [junction_heavy_block_group, |conn| {
+            setup_block_group(
+                conn,
+                &[("plain", "AAAAAAAAAA"), ("inserted", "CCCC")],
+                &[
+                    ("start", 0, "plain", 0, 0),
+                    ("plain", 0, "plain", 0, 0),
+                    ("plain", 3, "plain", 3, 0),
+                    ("plain", 3, "inserted", 0, 1),
+                    ("inserted", 4, "plain", 3, 1),
+                    ("plain", 10, "plain", 10, 0),
+                    ("plain", 10, "end", 0, 0),
+                ],
+            )
+        }];
+        for setup in fixtures {
+            let conn = get_connection(None).unwrap();
+            let block_group_id = setup(&conn);
+            let mut crawler = PortCrawler::new(block_group_id, false);
+            let mut crawled = GenGraph::new();
+            crawled.add_node(start_sentinel());
+            crawl_to_exhaustion(&conn, &mut crawler, &mut crawled);
+            let expected = connected_shape(&crawled);
+            for block in expected.0.iter().filter(|block| {
+                !is_terminal(block.node_id) && block.sequence_end > block.sequence_start
+            }) {
+                for coordinate in block.sequence_start..block.sequence_end {
+                    let mut crawler = PortCrawler::new(block_group_id, false);
+                    let mut graph = GenGraph::new();
+                    let located = crawler
+                        .locate(&conn, &mut graph, block.node_id, coordinate)
+                        .unwrap();
+                    assert_eq!(located, Some(*block), "coordinate {coordinate}");
+                    crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
+                    let (nodes, edges) = connected_shape(&graph);
+                    assert!(
+                        nodes == expected.0 && edges == expected.1,
+                        "crawling on from {block:?} at {coordinate}: extra nodes {:?}, missing \
+                         nodes {:?}, extra edges {:?}, missing edges {:?}",
+                        nodes.difference(&expected.0).collect::<Vec<_>>(),
+                        expected.0.difference(&nodes).collect::<Vec<_>>(),
+                        edges.difference(&expected.1).collect::<Vec<_>>(),
+                        expected.1.difference(&edges).collect::<Vec<_>>(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_locate_finds_nothing_off_the_block_group() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = junction_heavy_block_group(&conn);
+        let mut crawler = PortCrawler::new(block_group_id, false);
+        let mut graph = GenGraph::new();
+
+        assert_eq!(
+            crawler
+                .locate(&conn, &mut graph, node_id_for("unrelated"), 2)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            crawler
+                .locate(&conn, &mut graph, PATH_START_NODE_ID, 0)
+                .unwrap(),
+            None
+        );
+        assert_eq!(graph.node_count(), 0);
     }
 
     #[test]

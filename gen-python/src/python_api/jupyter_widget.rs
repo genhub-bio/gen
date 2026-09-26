@@ -514,8 +514,12 @@ impl GraphPage {
     }
 
     fn go_to_pos(&mut self, pos: &PyGraphPos, center: bool) {
-        self.controller
-            .go_to_node_offset(pos.inner.block, pos.inner.offset as i64, center);
+        let block = pos.inner.block;
+        self.controller.go_to_coordinate(
+            block.node_id,
+            block.sequence_start + pos.inner.offset as i64,
+            center,
+        );
     }
 
     /// Highlight the path of nodes covered by `match_obj` in the given colour.

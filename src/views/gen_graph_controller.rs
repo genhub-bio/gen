@@ -410,11 +410,20 @@ impl GenGraphController {
         }
     }
 
-    /// Show `offset` into loaded node `node` at full detail, centred when `center` is set and
-    /// otherwise against the left edge, opening the batch that holds it. Returns whether the
-    /// node is loaded; one the crawl hasn't reached yet can't be shown.
-    pub fn go_to_node_offset(&mut self, node: GraphNode, offset: i64, center: bool) -> bool {
+    /// Show `coordinate` of node `node_id` at full detail, centred when `center` is set and
+    /// otherwise against the left edge. The block holding it is located even where the crawl
+    /// hasn't reached yet, and the batch around it opened. Returns whether the block group has
+    /// that position at all.
+    ///
+    /// Taking a node coordinate rather than a block keeps positions from elsewhere (a search
+    /// result, an annotation) usable, since each graph carves its blocks by its own edges.
+    pub fn go_to_coordinate(&mut self, node_id: HashId, coordinate: i64, center: bool) -> bool {
         self.set_detail_level(VisualDetail::Full);
+        let (source, graph) = self.engine.source_and_graph_mut();
+        let Some(node) = source.locate(graph, node_id, coordinate) else {
+            return false;
+        };
+        let offset = coordinate - node.sequence_start;
         let node_budget = self
             .engine
             .neighborhood_node_budget(self.view_state.last_area_width() as usize);
@@ -1436,6 +1445,45 @@ mod tests {
             assert_eq!(controller.click(column, row), ClickOutcome::EnteredDoor);
             render_text(&mut controller, 40, 12);
             assert_ne!(controller.engine().active_batch(), first_batch);
+        }
+
+        #[test]
+        fn test_go_to_reaches_a_node_the_crawl_has_not() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let mut terminal =
+                Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
+            let mut controller = full_detail_chain(
+                &conn,
+                &workspace,
+                &block_group_id,
+                &mut terminal,
+                AnnotationDisplay::FlagsUnderNodes,
+            );
+            let far_node_id = HashId::convert_str("n75");
+            assert!(
+                !controller
+                    .engine()
+                    .graph()
+                    .nodes()
+                    .any(|node| node.node_id == far_node_id),
+                "the first batch should not reach the end of the chain"
+            );
+
+            assert!(controller.go_to_coordinate(far_node_id, 2, true));
+            render_text(&mut controller, 40, 12);
+
+            let active: Vec<GraphNode> = controller
+                .engine()
+                .active_world()
+                .expect("should have an active batch")
+                .members()
+                .collect();
+            assert!(active.iter().any(|node| node.node_id == far_node_id));
+            assert!(!controller.go_to_coordinate(HashId::convert_str("elsewhere"), 2, true));
         }
     }
 }
