@@ -879,7 +879,7 @@ impl Path {
         // Creates a new path from the current one by replacing all edges between path_start and
         // path_end with the input edges that are to and from a new node
         let tree = self.intervaltree(conn)?;
-        let block_with_start = tree.query_point(path_start).next().unwrap().value;
+        let block_with_start = Path::block_before_position(&tree, path_start);
         let block_with_end = tree.query_point(path_end).next().unwrap().value;
 
         let edges = Path::edges_for_path(conn, &self.id, None);
@@ -900,7 +900,9 @@ impl Path {
                 .unwrap();
             Some(edge)
         };
-        let edge_after_new_node = if edge_from_new_node.target_node_id == PATH_END_NODE_ID {
+        let edge_after_new_node = if edge_from_new_node.target_node_id == PATH_END_NODE_ID
+            || block_with_end.node_id == PATH_END_NODE_ID
+        {
             None
         } else {
             let edge = edges_by_source
@@ -941,6 +943,104 @@ impl Path {
         Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids)
     }
 
+    /// Returns the edges into and out of `new_node_id` that splice it into this path in place
+    /// of `path_start..path_end`, for passing to [`Path::new_path_with`].
+    ///
+    /// An edit at a block boundary writes one edge per route arriving at, or leaving, that
+    /// boundary, so the new node can have several entry and exit edges. Only the entry edge
+    /// leaving this path's own block before the edit, and the exit edge reaching its block
+    /// after the edit, keep the path on its route; any other would pull a different route
+    /// (such as sequence this path deleted) into the splice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PathError::Query`] when either edge does not exist.
+    pub fn splice_edges_for_node(
+        &self,
+        conn: &GraphConnection,
+        new_node_id: HashId,
+        path_start: i64,
+        path_end: i64,
+    ) -> Result<(Edge, Edge), PathError> {
+        let tree = self.intervaltree(conn)?;
+        let (source_node_id, source_coordinate) = Path::leg_ending_at(&tree, path_start);
+        let (target_node_id, target_coordinate) = Path::leg_starting_at(&tree, path_end);
+
+        let edge_to_new_node = Edge::select(conn)
+            .source_node_id(source_node_id)
+            .source_coordinate(source_coordinate)
+            .target_node_id(new_node_id)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                PathError::Query(QueryError::ResultsNotFound(format!(
+                    "No edge found from node {source_node_id}:{source_coordinate} to node {new_node_id}"
+                )))
+            })?;
+        let edge_from_new_node = Edge::select(conn)
+            .source_node_id(new_node_id)
+            .target_node_id(target_node_id)
+            .target_coordinate(target_coordinate)
+            .load()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                PathError::Query(QueryError::ResultsNotFound(format!(
+                    "No edge found from node {new_node_id} to node {target_node_id}:{target_coordinate}"
+                )))
+            })?;
+        Ok((edge_to_new_node, edge_from_new_node))
+    }
+
+    /// Returns the block an edit starting at `position` attaches to.
+    ///
+    /// At an exact block boundary the position is a junction between two blocks. Edit planning
+    /// (`BlockGroup::set_up_new_edges`) attaches the change to the previous (left) block, so path
+    /// splicing resolves against that block too. Otherwise it would look for a path edge the
+    /// written entry edge does not connect to.
+    fn block_before_position(
+        tree: &IntervalTree<i64, NodeIntervalBlock>,
+        position: i64,
+    ) -> NodeIntervalBlock {
+        let block = tree
+            .query_point(position)
+            .next()
+            .expect("should find a path block at every position")
+            .value;
+        if position > 0
+            && block.start == position
+            && let Some(previous) = tree.query_point(position - 1).next()
+        {
+            return previous.value;
+        }
+        block
+    }
+
+    /// Returns the graph node and coordinate this path leaves from when an edit starts at
+    /// `position`. An edit at zero has no block before it, so it leaves from the start node.
+    fn leg_ending_at(tree: &IntervalTree<i64, NodeIntervalBlock>, position: i64) -> (HashId, i64) {
+        if position == 0 {
+            return (PATH_START_NODE_ID, 0);
+        }
+        let block = Path::block_before_position(tree, position);
+        (block.node_id, position - block.start + block.sequence_start)
+    }
+
+    /// Returns the graph node and coordinate this path rejoins when an edit ends at `position`.
+    /// At the path length this is the end node.
+    fn leg_starting_at(
+        tree: &IntervalTree<i64, NodeIntervalBlock>,
+        position: i64,
+    ) -> (HashId, i64) {
+        let block = tree
+            .query_point(position)
+            .next()
+            .expect("should find a path block at every position")
+            .value;
+        (block.node_id, position - block.start + block.sequence_start)
+    }
+
     pub fn new_path_with_deletion(
         &self,
         conn: &GraphConnection,
@@ -950,22 +1050,21 @@ impl Path {
         // Creates a new path from the current one by replacing all edges between deletion_start and
         // deletion_end with a single edge spanning the deletion.
         let tree = self.intervaltree(conn)?;
-        let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
+        let block_with_start = Path::block_before_position(&tree, deletion_start);
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
 
-        let node_deletion_start = deletion_start - block_with_start.start;
-        let node_deletion_end = deletion_end - block_with_end.start;
+        let (source_node_id, source_coordinate) = Path::leg_ending_at(&tree, deletion_start);
+        let (target_node_id, target_coordinate) = Path::leg_starting_at(&tree, deletion_end);
         let deletion_edge_result = Edge::select(conn)
-            .source_node_id(block_with_start.node_id)
-            .source_coordinate(node_deletion_start)
-            .target_node_id(block_with_end.node_id)
-            .target_coordinate(node_deletion_end)
+            .source_node_id(source_node_id)
+            .source_coordinate(source_coordinate)
+            .target_node_id(target_node_id)
+            .target_coordinate(target_coordinate)
             .load()?;
 
         if deletion_edge_result.is_empty() {
             let error_string = format!(
-                "No edge found from node {}:{node_deletion_start} to node {}:{node_deletion_end}",
-                block_with_start.node_id, block_with_end.node_id
+                "No edge found from node {source_node_id}:{source_coordinate} to node {target_node_id}:{target_coordinate}"
             );
             return Err(PathError::Query(QueryError::ResultsNotFound(error_string)));
         }
@@ -981,29 +1080,42 @@ impl Path {
             .iter()
             .map(|edge| ((edge.target_node_id, edge.target_coordinate), edge))
             .collect::<HashMap<(_, i64), &Edge>>();
-        let edge_before_deletion = edges_by_target
-            .get(&(block_with_start.node_id, block_with_start.sequence_start))
-            .unwrap();
-        let edge_after_deletion = edges_by_source
-            .get(&(block_with_end.node_id, block_with_end.sequence_end))
-            .unwrap();
+        let edge_before_deletion = if deletion_start == 0 {
+            None
+        } else {
+            let edge = edges_by_target
+                .get(&(block_with_start.node_id, block_with_start.sequence_start))
+                .unwrap();
+            Some(*edge)
+        };
+        let edge_after_deletion = if block_with_end.node_id == PATH_END_NODE_ID {
+            None
+        } else {
+            let edge = edges_by_source
+                .get(&(block_with_end.node_id, block_with_end.sequence_end))
+                .unwrap();
+            Some(*edge)
+        };
 
         let mut new_edge_ids = vec![];
-        let mut before_deletion = true;
+        let mut before_deletion = edge_before_deletion.is_some();
         let mut after_deletion = false;
         for edge in &edges {
             if before_deletion {
                 new_edge_ids.push(edge.id);
-                if edge.id == edge_before_deletion.id {
+                if Some(edge.id) == edge_before_deletion.map(|before| before.id) {
                     before_deletion = false;
                     new_edge_ids.push(deletion_edge.id);
                 }
             } else if after_deletion {
                 new_edge_ids.push(edge.id);
-            } else if edge.id == edge_after_deletion.id {
+            } else if Some(edge.id) == edge_after_deletion.map(|after| after.id) {
                 after_deletion = true;
                 new_edge_ids.push(edge.id);
             }
+        }
+        if edge_before_deletion.is_none() {
+            new_edge_ids.insert(0, deletion_edge.id);
         }
 
         let new_name = format!(

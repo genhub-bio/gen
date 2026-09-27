@@ -4,7 +4,6 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
-    edge::Edge,
     file_types::FileTypes,
     node::Node,
     operations::{OperationFile, OperationInfo, OperationSummary},
@@ -180,18 +179,12 @@ pub fn update_with_fasta(
             && let Some(path) = state.path
         {
             if node_id == HashId::convert_str("") {
-                let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
+                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
             } else {
-                let edge_to_new_node = Edge::select(conn)
-                    .target_node_id(node_id)
-                    .load()
-                    .expect("should load edge to inserted node")[0]
-                    .clone();
-                let edge_from_new_node = Edge::select(conn)
-                    .source_node_id(node_id)
-                    .load()
-                    .expect("should load edge from inserted node")[0]
-                    .clone();
+                // The new node can have an edge from every route meeting the edit's
+                // boundaries; splice in only the pair that continues the selected path.
+                let (edge_to_new_node, edge_from_new_node) =
+                    path.splice_edges_for_node(conn, node_id, start_coordinate, end_coordinate)?;
                 path.new_path_with(
                     conn,
                     start_coordinate,
