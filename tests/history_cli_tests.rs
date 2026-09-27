@@ -7,9 +7,9 @@ use std::{
 };
 
 use r#gen::{
-    core::Workspace,
+    core::{Workspace, is_terminal},
     diff::{
-        graph::DiffChangeKind,
+        graph::{DiffChangeKind, DiffGraphNode},
         operations::{DiffRange, collect_operation_diff},
     },
     get_connection, get_connection_for_branch,
@@ -106,8 +106,9 @@ mod diff_views {
     use std::io::Write;
 
     use super::{
-        DiffChangeKind, DiffRange, DoltHistoryStore, HashSet, HistoryStore, Node, Path, PathBuf,
-        Workspace, assert_success, collect_operation_diff, fs, get_connection, run_gen, tempdir,
+        DiffChangeKind, DiffGraphNode, DiffRange, DoltHistoryStore, HashSet, HistoryStore, Node,
+        Path, PathBuf, Workspace, assert_success, collect_operation_diff, fs, get_connection,
+        is_terminal, run_gen, tempdir,
     };
 
     fn maybe_export_diff_graph_debug(graph: &gen_diff::graph::DiffGenGraph, export_path: &Path) {
@@ -379,21 +380,43 @@ mod diff_views {
             added_sequences.contains("AGA"),
             "vcf diff should include the inserted AGA node among added delta nodes: {added_sequences:?}"
         );
-        let added_deletion_bypass_edges = unknown_diff
+        // The deletion is a node of its own: the route skipping the G enters it from the base
+        // before and leaves it for the base after, and both edges are new.
+        let added_deletion_nodes = unknown_diff
             .graph
-            .all_edges()
-            .filter(|(source, target, edges)| {
-                source.node.node_id == target.node.node_id
-                    && source.node.sequence_end == 3
-                    && target.node.sequence_start == 4
-                    && edges
+            .nodes()
+            .filter(|node| {
+                node.change.kind == DiffChangeKind::Added
+                    && !is_terminal(node.node.node_id)
+                    && node.node.sequence_start == node.node.sequence_end
+            })
+            .collect::<Vec<_>>();
+        let added_edge = |source: &DiffGraphNode, target: &DiffGraphNode| {
+            unknown_diff
+                .graph
+                .edge_weight(*source, *target)
+                .is_some_and(|edges| {
+                    edges
                         .iter()
                         .any(|edge| edge.change.kind == DiffChangeKind::Added)
-            })
-            .count();
+                })
+        };
+        let deletion_routes =
+            added_deletion_nodes
+                .iter()
+                .filter(|deletion| {
+                    let enters_after_base_3 = unknown_diff.graph.nodes().any(|source| {
+                        source.node.sequence_end == 3 && added_edge(&source, deletion)
+                    });
+                    let leaves_for_base_4 = unknown_diff.graph.nodes().any(|target| {
+                        target.node.sequence_start == 4 && added_edge(deletion, &target)
+                    });
+                    enters_after_base_3 && leaves_for_base_4
+                })
+                .count();
         assert!(
-            added_deletion_bypass_edges > 0,
-            "vcf diff should mark the edge that bypasses the deleted G as added"
+            deletion_routes > 0,
+            "vcf diff should mark the route through the deletion of G as added"
         );
         let removed_insertion_passthrough_edges = unknown_diff
             .graph
