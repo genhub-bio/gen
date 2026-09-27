@@ -351,7 +351,7 @@ pub fn export_genbank(
                     let mut location = None;
 
                     // we did an insertion/replacement
-                    if target_node.node_id != current_node.node_id {
+                    if target_node.node_id != current_node.node_id && !sequence.is_empty() {
                         // to distinguish between a replacement and an insertion, we look at the
                         // next node after our target node. If it is the same as our next_node, it's
                         // an insertion. Otherwise, it's a replacement. The 2 events look like this:
@@ -401,10 +401,11 @@ pub fn export_genbank(
                         } else {
                             panic!("unsupported. Maybe insert at end of sequence?");
                         }
-                    } else if target_node.node_id == current_node.node_id
-                        && target_node.sequence_start != current_node.sequence_end
+                    } else if target_node.node_id != current_node.node_id
+                        || target_node.sequence_start != current_node.sequence_end
                     {
-                        // if we're not contiguous, it's a deletion
+                        // A detour spelling nothing, through a deletion's node, or a jump ahead
+                        // on the same node is a deletion.
                         offset -= next_node.length();
                         let original_bases = seq
                             .seq

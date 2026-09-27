@@ -6,7 +6,7 @@ use std::{
 };
 
 use gen_core::{HashId, Workspace, is_terminal, strand::Strand};
-use gen_graph::{GenGraph, project_path};
+use gen_graph::{GenGraph, GraphNode, project_path};
 use gen_models::{
     block_group::BlockGroup,
     block_group_edge::BlockGroupEdge,
@@ -111,7 +111,8 @@ pub fn export_gfa(
     let mut segments = BTreeSet::new();
     let mut split_segments = HashMap::new();
     for block in &blocks {
-        if !is_terminal(block.node_id) {
+        // A deletion's node spells nothing, so it is exported as no segment; links bridge it.
+        if !is_terminal(block.node_id) && block.start != block.end {
             if block.end - block.start > chunk_size {
                 let mut sub_segments = vec![];
                 let block_sequence = block.sequence();
@@ -150,7 +151,7 @@ pub fn export_gfa(
     }
 
     let mut links = BTreeSet::new();
-    for (source, target, edge_info) in graph.all_edges() {
+    for (source, target, source_strand, target_strand) in segment_links(&graph) {
         if !is_terminal(source.node_id) && !is_terminal(target.node_id) {
             let source_segment = if let Some(splits) = split_segments.get(&source.node_id) {
                 let last_split = splits.last().unwrap();
@@ -159,7 +160,7 @@ pub fn export_gfa(
                     node_id: source.node_id,
                     sequence_start: last_split.0,
                     sequence_end: last_split.1,
-                    strand: edge_info[0].source_strand,
+                    strand: source_strand,
                 }
             } else {
                 Segment {
@@ -167,7 +168,7 @@ pub fn export_gfa(
                     node_id: source.node_id,
                     sequence_start: source.sequence_start,
                     sequence_end: source.sequence_end,
-                    strand: edge_info[0].source_strand,
+                    strand: source_strand,
                 }
             };
 
@@ -178,7 +179,7 @@ pub fn export_gfa(
                     node_id: target.node_id,
                     sequence_start: first_split.0,
                     sequence_end: first_split.1,
-                    strand: edge_info[0].source_strand,
+                    strand: source_strand,
                 }
             } else {
                 Segment {
@@ -186,15 +187,15 @@ pub fn export_gfa(
                     node_id: target.node_id,
                     sequence_start: target.sequence_start,
                     sequence_end: target.sequence_end,
-                    strand: edge_info[0].target_strand,
+                    strand: target_strand,
                 }
             };
 
             links.insert(Link {
                 source_segment_id: source_segment.segment_id(),
-                source_strand: edge_info[0].source_strand,
+                source_strand,
                 target_segment_id: target_segment.segment_id(),
-                target_strand: edge_info[0].target_strand,
+                target_strand,
             });
         }
     }
@@ -232,6 +233,40 @@ pub fn export_gfa(
     Ok(())
 }
 
+/// Whether `node` is a deletion's node, which spells nothing and so is no segment.
+fn is_deletion_node(node: &GraphNode) -> bool {
+    !is_terminal(node.node_id) && node.sequence_start == node.sequence_end
+}
+
+/// The links between the nodes that are segments, with their strands. A link into a chain of
+/// deletion nodes is bridged to every node the chain leads to, keeping the strand the route
+/// leaves its source on and the one it enters its target on. The bridges show the routes the
+/// deletions leave in place; which deletions a route passes through is not recorded in GFA.
+fn segment_links(graph: &GenGraph) -> BTreeSet<(GraphNode, GraphNode, Strand, Strand)> {
+    let mut links = BTreeSet::new();
+    for (source, target, edge_info) in graph.all_edges() {
+        if is_deletion_node(&source) {
+            continue;
+        }
+        let source_strand = edge_info[0].source_strand;
+        let mut pending = vec![(target, edge_info[0].target_strand)];
+        let mut visited = HashSet::new();
+        while let Some((node, strand)) = pending.pop() {
+            if !is_deletion_node(&node) {
+                links.insert((source, node, source_strand, strand));
+                continue;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            for (_, next, next_info) in graph.edges(node) {
+                pending.push((next, next_info[0].target_strand));
+            }
+        }
+    }
+    links
+}
+
 fn get_paths(
     conn: &GraphConnection,
     collection_name: &str,
@@ -256,9 +291,20 @@ fn get_paths(
         let sample_name = block_group.sample_name;
 
         let path_blocks = path.coordinate_blocks(conn, None);
-        let projected_path = project_path(graph, &path_blocks);
+        let projected_path = project_path(graph, &path_blocks)
+            .into_iter()
+            .filter(|(node, _)| !is_deletion_node(node))
+            .collect::<Vec<_>>();
+        let spells_nothing = projected_path
+            .iter()
+            .all(|(node, _)| is_terminal(node.node_id));
 
-        if !projected_path.is_empty() {
+        if spells_nothing && !path_blocks.is_empty() {
+            println!(
+                "Path {name} spells no sequence, and a GFA path needs at least one segment; it is not exported.",
+                name = path.name
+            );
+        } else if !projected_path.is_empty() {
             let full_path_name = if !sample_name.is_empty() {
                 format!("{}.{}", path.name, sample_name)
             } else {
@@ -336,7 +382,7 @@ mod tests {
     use std::fs;
 
     use gen_core::{PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, path::PathBlock};
-    use gen_graph::GraphNode;
+    use gen_graph::{GraphEdge, GraphNode};
     use gen_models::{
         annotations::add_annotation,
         block_group::{BlockGroup, BlockGroupChange},
@@ -1194,5 +1240,47 @@ mod tests {
             spelled.contains("ATCGATCGATCGATCGGGAACACACAGAGA"),
             "should export the path through both deletions, among {spelled:?}"
         );
+    }
+
+    /// Every route into a chain of deletion nodes links to every route out of it: two sources
+    /// and three targets around two chained deletions give six links, and none touch a deletion.
+    #[test]
+    fn test_segment_links_join_every_route_across_deletion_nodes() {
+        let node = |name: &str, length: i64| GraphNode {
+            node_id: HashId::convert_str(name),
+            sequence_start: 0,
+            sequence_end: length,
+        };
+        let weight = || {
+            vec![GraphEdge {
+                edge_id: HashId::convert_str("edge"),
+                source_strand: Strand::Forward,
+                target_strand: Strand::Forward,
+                chromosome_index: 0,
+                phased: 0,
+                created_on: 0,
+            }]
+        };
+        let sources = [node("left", 3), node("other left", 2)];
+        let targets = [node("right", 4), node("middle", 1), node("other right", 5)];
+        let (first_deletion, second_deletion) = (node("first", 0), node("second", 0));
+        let mut graph = GenGraph::new();
+        for source in sources {
+            graph.add_edge(source, first_deletion, weight());
+        }
+        graph.add_edge(first_deletion, second_deletion, weight());
+        for target in targets {
+            graph.add_edge(second_deletion, target, weight());
+        }
+
+        let links = segment_links(&graph)
+            .into_iter()
+            .map(|(source, target, _, _)| (source, target))
+            .collect::<HashSet<_>>();
+        let expected = sources
+            .into_iter()
+            .cartesian_product(targets)
+            .collect::<HashSet<_>>();
+        assert_eq!(links, expected);
     }
 }
