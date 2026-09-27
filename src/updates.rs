@@ -1,6 +1,6 @@
 use gen_core::{HashId, NO_CHROMOSOME_INDEX, PathBlock, Workspace};
 use gen_models::{
-    block_group::{BlockGroup, BlockGroupChange},
+    block_group::{BlockGroup, BlockGroupChange, PlannedEdit},
     db::GraphConnection,
     errors::BlockGroupError,
     path::Path,
@@ -84,7 +84,7 @@ pub(crate) fn insert_update_change(
     workspace: &Workspace,
     region: ResolvedGenRegion,
     data: InsertChangeData,
-) -> Result<(), BlockGroupError> {
+) -> Result<PlannedEdit, BlockGroupError> {
     let change = BlockGroupChange {
         region,
         path_accession: data.path_accession,

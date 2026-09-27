@@ -228,15 +228,20 @@ fn prepare_vcf_entry(
     let sequence = SequenceCache::lookup(sequence_cache, "DNA", alt_seq)?;
     let sequence_string = sequence.get_sequence(None, None)?;
     let source_path_id = source_region.path.as_ref().unwrap().id;
-    let node_id = Node::create(
-        conn,
-        &sequence.hash,
-        &HashId::convert_str(&format!(
-            "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
-            path_id = source_path_id,
-            sequence_hash = sequence.hash
-        )),
-    )?;
+    // A deletion's node is made when the change is planned, identified by the bases it removes.
+    let node_id = if sequence_string.is_empty() {
+        HashId::convert_str("")
+    } else {
+        Node::create(
+            conn,
+            &sequence.hash,
+            &HashId::convert_str(&format!(
+                "{path_id}:{ref_start}-{ref_end}->{sequence_hash}",
+                path_id = source_path_id,
+                sequence_hash = sequence.hash
+            )),
+        )?
+    };
     let change = prepare_change(
         path_region,
         ids,

@@ -5,8 +5,8 @@ use std::{
 
 use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX, NodeIntervalBlock,
-    PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand,
-    Workspace, calculate_hash, is_end_node, is_start_node, is_terminal,
+    PATH_END_NODE_ID, PATH_START_NODE_ID, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock,
+    Sha256Hash, Strand, Workspace, calculate_hash, is_end_node, is_start_node, is_terminal,
     range::Range,
     region::{Region, RegionResolutionError, RegionResolver},
     traits::Capnp,
@@ -17,6 +17,7 @@ use gen_graph::{
 };
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
+use itertools::Itertools;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,9 +34,11 @@ use crate::{
         SequenceError,
     },
     gen_models_capnp::block_group,
+    node::Node,
     path::{Path, PathData, PathSelect},
     region::{ResolvedGenRegion, ResolvedRegionKind},
     sample::{Sample, SampleSelect},
+    sequence::Sequence,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Serialize, PartialEq, ModelSelect)]
@@ -61,7 +64,7 @@ pub struct SubgraphBoundary<'a> {
 
 /// Which end of an edited span `BlockGroup::span_routes` reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SpanSide {
+pub enum SpanSide {
     Start,
     End,
 }
@@ -78,15 +81,39 @@ pub(crate) struct SpanRoutes {
     pub anchors: Vec<(HashId, i64)>,
 }
 
+/// One route into or out of a node, carrying the row it came from so a boundary with several
+/// routes meeting it can be reduced to one scaffold (see `RouteCache::scaffold`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RouteEndpoint {
+    node_id: HashId,
+    coordinate: i64,
+    created_on: i64,
+}
+
+impl RouteEndpoint {
+    fn point(&self) -> (HashId, i64) {
+        (self.node_id, self.coordinate)
+    }
+}
+
+/// The oldest of several routes meeting one boundary, ties broken by node id and coordinate for
+/// determinism. See `RouteCache::allele_flanks`.
+fn scaffold_route(routes: &[RouteEndpoint]) -> RouteEndpoint {
+    *routes
+        .iter()
+        .min_by_key(|route| (route.created_on, route.node_id, route.coordinate))
+        .expect("should have at least one route when called")
+}
+
 /// One node's stored edges, indexed by the coordinates they touch the node at.
 #[derive(Debug, Default)]
 struct NodeRoutes {
     /// Every coordinate an edge starts or ends at on this node.
     coordinates: BTreeSet<i64>,
     /// The sources of the jumps arriving at each coordinate.
-    arriving: HashMap<i64, Vec<(HashId, i64)>>,
+    arriving: HashMap<i64, Vec<RouteEndpoint>>,
     /// The targets of the jumps leaving each coordinate.
-    leaving: HashMap<i64, Vec<(HashId, i64)>>,
+    leaving: HashMap<i64, Vec<RouteEndpoint>>,
 }
 
 impl NodeRoutes {
@@ -111,11 +138,28 @@ impl NodeRoutes {
             if source == target {
                 continue;
             }
+            let created_on = augmented_edge.created_on;
             if target.0 == node_id {
-                routes.arriving.entry(target.1).or_default().push(source);
+                routes
+                    .arriving
+                    .entry(target.1)
+                    .or_default()
+                    .push(RouteEndpoint {
+                        node_id: source.0,
+                        coordinate: source.1,
+                        created_on,
+                    });
             }
             if source.0 == node_id {
-                routes.leaving.entry(source.1).or_default().push(target);
+                routes
+                    .leaving
+                    .entry(source.1)
+                    .or_default()
+                    .push(RouteEndpoint {
+                        node_id: target.0,
+                        coordinate: target.1,
+                        created_on,
+                    });
             }
         }
         Ok(routes)
@@ -129,6 +173,8 @@ impl NodeRoutes {
 #[derive(Debug, Default)]
 pub struct RouteCache {
     nodes: HashMap<(HashId, HashId), NodeRoutes>,
+    /// Whether each node looked up so far has an empty sequence, as a deletion's node does.
+    empty: HashMap<HashId, bool>,
 }
 
 impl RouteCache {
@@ -149,6 +195,146 @@ impl RouteCache {
         }
         Ok(&self.nodes[&key])
     }
+
+    fn is_empty_node(
+        &mut self,
+        conn: &GraphConnection,
+        node_id: HashId,
+    ) -> Result<bool, BlockGroupError> {
+        if is_terminal(node_id) {
+            return Ok(false);
+        }
+        if let Some(empty) = self.empty.get(&node_id) {
+            return Ok(*empty);
+        }
+        let empty = Node::query_nodes_length(conn, &[node_id])?.get(&node_id) == Some(&0);
+        self.empty.insert(node_id, empty);
+        Ok(empty)
+    }
+
+    /// The first deletion node of a chain of them leading from `from` to `to`, if routes go
+    /// from one to the other only through deletions. A path stepping through deletions between
+    /// two bases passes through such a chain.
+    fn deletion_chain_entry(
+        &mut self,
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        from: (HashId, i64),
+        to: (HashId, i64),
+    ) -> Result<Option<(HashId, i64)>, BlockGroupError> {
+        let reaches_to =
+            |point: &(HashId, i64)| *point == to || (is_end_node(to.0) && is_end_node(point.0));
+        let leaving = |routes: &mut Self, point: (HashId, i64)| {
+            routes.node(conn, block_group_id, point.0).map(|node| {
+                node.leaving
+                    .get(&point.1)
+                    .map(|targets| targets.iter().map(RouteEndpoint::point).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+        };
+        let mut pending = vec![];
+        for target in leaving(self, from)? {
+            if self.is_empty_node(conn, target.0)? {
+                pending.push((target, target));
+            }
+        }
+        let mut visited = HashSet::new();
+        while let Some((entry, point)) = pending.pop() {
+            if !visited.insert(point) {
+                continue;
+            }
+            for next in leaving(self, point)? {
+                if reaches_to(&next) {
+                    return Ok(Some(entry));
+                }
+                if self.is_empty_node(conn, next.0)? {
+                    pending.push((entry, next));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// `points` with each point on a deletion's empty node replaced by the sequence-bearing
+    /// positions reached through it: the sources of the routes arriving at a span's start, the
+    /// targets of those leaving its end. An allele's id is anchored there, so an earlier
+    /// deletion beside it does not change what it is.
+    pub fn sequence_anchors(
+        &mut self,
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        points: &[(HashId, i64)],
+        side: SpanSide,
+    ) -> Result<Vec<(HashId, i64)>, BlockGroupError> {
+        let mut anchors = vec![];
+        let mut pending = points.to_vec();
+        let mut visited = HashSet::new();
+        while let Some(point) = pending.pop() {
+            if !visited.insert(point) {
+                continue;
+            }
+            if !self.is_empty_node(conn, point.0)? {
+                anchors.push(point);
+                continue;
+            }
+            let node = self.node(conn, block_group_id, point.0)?;
+            let through = match side {
+                SpanSide::Start => node.arriving.get(&point.1),
+                SpanSide::End => node.leaving.get(&point.1),
+            };
+            pending.extend(through.into_iter().flatten().map(RouteEndpoint::point));
+        }
+        anchors.sort_unstable();
+        anchors.dedup();
+        Ok(anchors)
+    }
+
+    /// The bypass-edge flanks a deletion's allele replaces `points` with, on the given side: each
+    /// point itself where its node has sequence there, or, at a node boundary, one scaffold route
+    /// among those meeting it there (the sources arriving, on the start side, or the targets
+    /// leaving, on the end side). This is deliberately narrower than `SpanRoutes.positions`, which
+    /// also gathers the routes an interior split marker has already added there: those are
+    /// alternative routes through the position, not the position's own flank, so an earlier
+    /// insertion at the same interior point must not change the deletion's id. A flank landing on
+    /// another allele's empty node is resolved further through it via `sequence_anchors`.
+    ///
+    /// A boundary many samples share can have one route meeting it per sample, which would
+    /// otherwise hash a different id per sample for what is the same allele. Reducing to one
+    /// scaffold route keeps the id one, while `span_edges` still wires the allele to every route
+    /// that meets the boundary, not just the scaffold's.
+    fn allele_flanks(
+        &mut self,
+        conn: &GraphConnection,
+        block_group_id: &HashId,
+        points: &[(HashId, i64)],
+        side: SpanSide,
+    ) -> Result<Vec<(HashId, i64)>, BlockGroupError> {
+        let mut flanks = vec![];
+        for &(node_id, coordinate) in points {
+            if is_terminal(node_id) {
+                flanks.push((node_id, coordinate));
+                continue;
+            }
+            let node = self.node(conn, block_group_id, node_id)?;
+            let has_sequence = match side {
+                SpanSide::Start => node.coordinates.range(..coordinate).next().is_some(),
+                SpanSide::End => node.coordinates.range(coordinate + 1..).next().is_some(),
+            };
+            if has_sequence {
+                flanks.push((node_id, coordinate));
+                continue;
+            }
+            let meeting = match side {
+                SpanSide::Start => node.arriving.get(&coordinate),
+                SpanSide::End => node.leaving.get(&coordinate),
+            };
+            match meeting {
+                Some(routes) if !routes.is_empty() => flanks.push(scaffold_route(routes).point()),
+                _ => flanks.push((node_id, coordinate)),
+            }
+        }
+        self.sequence_anchors(conn, block_group_id, &flanks, side)
+    }
 }
 
 /// The edges one change writes, and where it attaches, so the changes of a batch that meet can
@@ -160,20 +346,73 @@ pub struct PlannedEdit {
     /// Where the change's span starts and ends, whatever routes meet there.
     starts: Vec<(HashId, i64)>,
     ends: Vec<(HashId, i64)>,
-    /// The routes it attaches to at each end.
-    sources: Vec<(HashId, i64)>,
-    targets: Vec<(HashId, i64)>,
-    /// The block it inserts, as its node, start and end; `None` for a deletion.
-    inserted: Option<(HashId, i64, i64)>,
+    /// The block routes pass through in place of the span, as its node, start and end: the
+    /// inserted sequence, or a deletion's empty node. `None` for a change that changes nothing.
+    allele: Option<(HashId, i64, i64)>,
     chromosome_index: i64,
     phased: i64,
 }
 
 impl PlannedEdit {
+    /// The node routes pass through in place of the edited span; `None` when the change
+    /// changes nothing.
+    pub fn allele_node_id(&self) -> Option<HashId> {
+        self.allele.map(|(node_id, _, _)| node_id)
+    }
+
     /// Whether the change spans no sequence on either side of a point, as an insertion does.
     fn is_point(&self) -> bool {
         self.starts == self.ends
     }
+
+    /// Whether the two changes may be on one haplotype: they are, unless both are phased onto
+    /// different chromosome copies.
+    fn may_share_a_haplotype(&self, other: &PlannedEdit) -> bool {
+        self.phased == 0 || other.phased == 0 || self.chromosome_index == other.chromosome_index
+    }
+}
+
+/// The id of the node holding `sequence_hash` between `starts` and `ends`: the positions, in
+/// sequence-bearing nodes, of the bypass edge the node takes the place of. Only where it sits and
+/// what it reads matter, so every edit putting the same sequence in the same place shares the
+/// node, whichever sample or tool makes it, and a deletion is the empty sequence there.
+pub fn allele_node_id(
+    starts: &[(HashId, i64)],
+    ends: &[(HashId, i64)],
+    sequence_hash: &Sha256Hash,
+) -> HashId {
+    let describe = |positions: &[(HashId, i64)]| {
+        positions
+            .iter()
+            .sorted()
+            .dedup()
+            .map(|(node_id, coordinate)| format!("{node_id}:{coordinate}"))
+            .join(",")
+    };
+    HashId::convert_str(&format!(
+        "{}|{}|{sequence_hash}",
+        describe(starts),
+        describe(ends)
+    ))
+}
+
+/// The node standing for a deletion between `starts` and `ends` (see `allele_node_id`), created
+/// with the empty sequence the first time it is needed. Deleting the same bases as two adjacent
+/// deletions or as one gives different nodes.
+fn deletion_node(
+    conn: &GraphConnection,
+    starts: &[(HashId, i64)],
+    ends: &[(HashId, i64)],
+) -> Result<HashId, BlockGroupError> {
+    let empty = Sequence::new()
+        .sequence_type("DNA")
+        .sequence("")
+        .save(conn)?;
+    Ok(Node::create(
+        conn,
+        &empty.hash,
+        &allele_node_id(starts, ends, &empty.hash),
+    )?)
 }
 
 /// State one batch of changes shares across the chunks it is applied in: interval trees, the
@@ -915,10 +1154,10 @@ impl BlockGroup {
         )
     }
 
-    /// Join the changes of `batch` that meet: a change starting where another ends continues
-    /// the routes through that one, including through chains of deletions. The changes are
-    /// taken as fully combinatorial.
-    // TODO: with phasing information, join only changes on the same chromosome index.
+    /// Join the changes of `batch` that meet: a route through a change ending where another
+    /// starts continues through that one, from the end of one's allele to the start of the
+    /// other's. Changes phased onto different chromosome copies never occur together, so they
+    /// are not joined; any others are taken as combinatorial.
     pub fn combine_batch(conn: &GraphConnection, batch: EditBatch) -> Result<(), BlockGroupError> {
         Self::persist_insert_changes(conn, Self::batch_combinations(&batch.edits), HashMap::new())
     }
@@ -933,88 +1172,67 @@ impl BlockGroup {
                     .push(index);
             }
         }
-        let mut combinations: HashMap<HashId, Vec<AugmentedEdgeData>> = HashMap::new();
+        let mut combinations: HashMap<HashId, IndexSet<AugmentedEdgeData>> = HashMap::new();
         for (index, edit) in edits.iter().enumerate() {
-            // The points a route leaves from after passing through at least one other change of
-            // the batch that ends where this one starts: an insertion's end, or, through a
-            // deletion, whatever reached that deletion.
-            let mut arrivals = vec![];
-            let mut visited = edit.starts.iter().copied().collect::<HashSet<_>>();
-            let mut pending = edit.starts.clone();
-            while let Some(point) = pending.pop() {
-                for &other in ending_at
-                    .get(&(edit.block_group_id, point))
-                    .into_iter()
-                    .flatten()
-                {
-                    let previous = &edits[other];
-                    // Insertions at the same point are alternatives to each other, not a
-                    // sequence; joining them both ways would loop.
-                    if other == index || (edit.is_point() && previous.is_point()) {
-                        continue;
-                    }
-                    match previous.inserted {
-                        Some((node_id, _, end)) => arrivals.push((node_id, end)),
-                        None => {
-                            arrivals.extend(previous.sources.iter().copied());
-                            for start in &previous.starts {
-                                if visited.insert(*start) {
-                                    pending.push(*start);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            arrivals.sort_unstable();
-            arrivals.dedup();
-            let targets = match edit.inserted {
-                Some((node_id, start, _)) => vec![(node_id, start)],
-                None => edit.targets.clone(),
+            let Some((node_id, allele_start, _)) = edit.allele else {
+                continue;
             };
-            for &source in &arrivals {
-                if edit
-                    .inserted
-                    .is_some_and(|(node_id, _, _)| node_id == source.0)
+            let previous_edits = edit
+                .starts
+                .iter()
+                .flat_map(|start| ending_at.get(&(edit.block_group_id, *start)))
+                .flatten()
+                .copied()
+                .filter(|&other| other != index);
+            for other in previous_edits {
+                let previous = &edits[other];
+                let Some((previous_node_id, _, previous_allele_end)) = previous.allele else {
+                    continue;
+                };
+                // Insertions at the same point are alternatives to each other, not a sequence;
+                // joining them both ways would loop. A change reapplying the other's allele
+                // would join its node to itself.
+                if (edit.is_point() && previous.is_point())
+                    || previous_node_id == node_id
+                    || !edit.may_share_a_haplotype(previous)
                 {
                     continue;
                 }
-                for &target in &targets {
-                    let loops_back =
-                        edit.inserted.is_none() && source.0 == target.0 && target.1 < source.1;
-                    if loops_back {
-                        continue;
-                    }
-                    combinations
-                        .entry(edit.block_group_id)
-                        .or_default()
-                        .push(AugmentedEdgeData {
-                            edge_data: EdgeData {
-                                source_node_id: source.0,
-                                source_coordinate: source.1,
-                                source_strand: Strand::Forward,
-                                target_node_id: target.0,
-                                target_coordinate: target.1,
-                                target_strand: Strand::Forward,
-                            },
-                            chromosome_index: edit.chromosome_index,
-                            phased: edit.phased,
-                        });
-                }
+                combinations
+                    .entry(edit.block_group_id)
+                    .or_default()
+                    .insert(AugmentedEdgeData {
+                        edge_data: EdgeData {
+                            source_node_id: previous_node_id,
+                            source_coordinate: previous_allele_end,
+                            source_strand: Strand::Forward,
+                            target_node_id: node_id,
+                            target_coordinate: allele_start,
+                            target_strand: Strand::Forward,
+                        },
+                        chromosome_index: edit.chromosome_index,
+                        phased: edit.phased,
+                    });
             }
         }
         combinations
+            .into_iter()
+            .map(|(block_group_id, edges)| (block_group_id, edges.into_iter().collect()))
+            .collect()
     }
 
+    /// Write one change to its block group, returning what was planned for it, including the
+    /// node routes now pass through in place of the edited span.
     pub fn insert_change(
         conn: &GraphConnection,
         workspace: &Workspace,
         change: &BlockGroupChange,
-    ) -> Result<(), BlockGroupError> {
-        let new_augmented_edges = change
-            .region
-            .plan_edges(conn, workspace, change, None, &mut RouteCache::default())?
-            .edges;
+    ) -> Result<PlannedEdit, BlockGroupError> {
+        let mut planned =
+            change
+                .region
+                .plan_edges(conn, workspace, change, None, &mut RouteCache::default())?;
+        let new_augmented_edges = std::mem::take(&mut planned.edges);
         let mut new_augmented_edges_by_block_group = HashMap::new();
         new_augmented_edges_by_block_group
             .insert(change.region.block_group.id, new_augmented_edges.clone());
@@ -1029,7 +1247,8 @@ impl BlockGroup {
             conn,
             new_augmented_edges_by_block_group,
             new_accession_edges,
-        )
+        )?;
+        Ok(planned)
     }
 
     #[cfg_attr(
@@ -1156,28 +1375,78 @@ impl BlockGroup {
         {
             return Ok(PlannedEdit::default());
         }
-        // The span starts at the first edited base, or at the insertion point. Past the end of the
-        // path there is no base, so the span starts where the last block ends.
+        // The span starts at the first edited base, or at the insertion point, and ends just past
+        // its last edited base; an insertion ends where it starts. Past the end of the path there
+        // is no base: an insertion there starts at the path end.
         let first_block = start_blocks[0];
-        let span_start = if is_terminal(first_block.node_id) {
-            (
-                start_block.node_id,
-                source_coordinate(change.region.start, start_block),
-            )
+        let span_start = (
+            first_block.node_id,
+            source_coordinate(change.region.start, first_block),
+        );
+        let span_end = if change.region.start == change.region.end {
+            span_start
         } else {
+            let last_block = tree
+                .query_point(change.region.end - 1)
+                .next()
+                .expect("should find the block holding the last edited base")
+                .value;
             (
-                first_block.node_id,
-                source_coordinate(change.region.start, first_block),
+                last_block.node_id,
+                source_coordinate(change.region.end, &last_block),
             )
         };
-        let span_end = (
+        // Past its end the edit rejoins the path's next base, and whatever routes leave from
+        // there. Where the path steps through deletions between its last edited base and the
+        // next one, it rejoins at the first of them instead, so they stay after it.
+        let next_base = (
             end_block.node_id,
             source_coordinate(change.region.end, end_block),
         );
         let block_group_id = change.region.block_group.id;
         let starts = Self::span_routes(routes, conn, &block_group_id, span_start, SpanSide::Start)?;
-        let ends = Self::span_routes(routes, conn, &block_group_id, span_end, SpanSide::End)?;
-        Ok(Self::span_edges(change, &starts, &ends))
+        let ends = if span_end == next_base || change.region.start == change.region.end {
+            Self::span_routes(routes, conn, &block_group_id, span_end, SpanSide::End)?
+        } else if let Some(entry) =
+            routes.deletion_chain_entry(conn, &block_group_id, span_end, next_base)?
+        {
+            SpanRoutes {
+                positions: vec![entry],
+                splits: vec![],
+                anchors: vec![span_end],
+            }
+        } else {
+            SpanRoutes {
+                anchors: vec![span_end],
+                ..Self::span_routes(routes, conn, &block_group_id, next_base, SpanSide::End)?
+            }
+        };
+        let allele = Self::allele(routes, conn, change, &starts, &ends)?;
+        Ok(Self::span_edges(change, allele, &starts, &ends))
+    }
+
+    /// The block routes pass through in place of `change`'s span: its inserted sequence, or, for
+    /// a deletion, the deletion's node (see `deletion_node`).
+    pub(crate) fn allele(
+        routes: &mut RouteCache,
+        conn: &GraphConnection,
+        change: &BlockGroupChange,
+        starts: &SpanRoutes,
+        ends: &SpanRoutes,
+    ) -> Result<(HashId, i64, i64), BlockGroupError> {
+        if change.block.sequence_start == change.block.sequence_end {
+            let block_group_id = change.region.block_group.id;
+            let starts =
+                routes.allele_flanks(conn, &block_group_id, &starts.anchors, SpanSide::Start)?;
+            let ends = routes.allele_flanks(conn, &block_group_id, &ends.anchors, SpanSide::End)?;
+            Ok((deletion_node(conn, &starts, &ends)?, 0, 0))
+        } else {
+            Ok((
+                change.block.node_id,
+                change.block.sequence_start,
+                change.block.sequence_end,
+            ))
+        }
     }
 
     /// The routes an edit's span connects to at one end, read from the block group's stored
@@ -1187,8 +1456,8 @@ impl BlockGroup {
     /// same-coordinate marker to split the block. At a block boundary nothing is split: a span's
     /// start connects to every route arriving there and its end to every route leaving. So an
     /// edit at the start of a block reaches the same routes as one at the start of a node, and
-    /// combinations with earlier edits there are written as edges rather than left to a
-    /// zero-width junction.
+    /// combinations with earlier edits there, a deletion's node among them, are written as
+    /// edges.
     pub(crate) fn span_routes(
         routes: &mut RouteCache,
         conn: &GraphConnection,
@@ -1202,6 +1471,23 @@ impl BlockGroup {
             splits,
             anchors: vec![position],
         };
+        // An insertion at the path end goes after every route reaching it.
+        if is_end_node(node_id) && side == SpanSide::Start {
+            let end = routes.node(conn, block_group_id, node_id)?;
+            let mut positions = end
+                .arriving
+                .values()
+                .flatten()
+                .map(RouteEndpoint::point)
+                .collect::<Vec<_>>();
+            positions.sort_unstable();
+            positions.dedup();
+            return Ok(SpanRoutes {
+                positions,
+                splits: vec![],
+                anchors: vec![position],
+            });
+        }
         if is_terminal(node_id) {
             return Ok(attached_here(vec![]));
         }
@@ -1226,7 +1512,7 @@ impl BlockGroup {
         let mut positions = has_sequence
             .then_some(position)
             .into_iter()
-            .chain(jumps.into_iter().flatten().copied())
+            .chain(jumps.into_iter().flatten().map(RouteEndpoint::point))
             .collect::<Vec<_>>();
         positions.sort_unstable();
         positions.dedup();
@@ -1242,10 +1528,12 @@ impl BlockGroup {
         })
     }
 
-    /// The edges joining an edit's routes: every start route straight to every end route for a
-    /// deletion, or through the new block otherwise, plus a marker at each split position.
+    /// The edges joining an edit's routes through `allele` (its node, start and end; see
+    /// `BlockGroup::allele`): every start route into it and out of it to every end route, plus a
+    /// marker at each split position.
     pub(crate) fn span_edges(
         change: &BlockGroupChange,
+        allele: (HashId, i64, i64),
         starts: &SpanRoutes,
         ends: &SpanRoutes,
     ) -> PlannedEdit {
@@ -1268,72 +1556,53 @@ impl BlockGroup {
                 phased,
             }
         };
+        let (allele_node_id, allele_start, allele_end) = allele;
         // A route leaving the span's end at a point before where a route arrives at its start, on
         // the same node, leads back upstream: joining it would loop the edit into itself, as would
-        // an edit joining the node it inserts to itself (the same insertion made twice).
-        let inserts_node = change.block.sequence_start != change.block.sequence_end;
-        let is_inserted_node =
-            |position: &&(HashId, i64)| inserts_node && position.0 == change.block.node_id;
+        // joining the allele's node to itself (the same edit made twice).
+        let is_allele = |position: &&(HashId, i64)| position.0 == allele_node_id;
         let loops_back = |target: &&(HashId, i64)| {
             starts
                 .positions
                 .iter()
                 .any(|(node_id, arrival)| *node_id == target.0 && target.1 < *arrival)
         };
-        let sources = starts
-            .positions
-            .iter()
-            .filter(|position| !is_inserted_node(position))
-            .collect::<Vec<_>>();
-        let targets = ends
-            .positions
-            .iter()
-            .filter(|position| !is_inserted_node(position) && !loops_back(position))
-            .collect::<Vec<_>>();
         let mut new_edges = starts
             .splits
             .iter()
             .chain(&ends.splits)
             .map(|&position| edge(position, position, marker_chromosome_index, 0))
             .collect::<Vec<_>>();
-        if change.block.sequence_start == change.block.sequence_end {
-            for &&source in &sources {
-                for &&target in &targets {
-                    new_edges.push(edge(source, target, change.chromosome_index, change.phased));
-                }
-            }
-        } else {
-            let block_start = (change.block.node_id, change.block.sequence_start);
-            let block_end = (change.block.node_id, change.block.sequence_end);
-            for &&source in &sources {
-                new_edges.push(edge(
-                    source,
-                    block_start,
-                    change.chromosome_index,
-                    change.phased,
-                ));
-            }
-            for &&target in &targets {
-                new_edges.push(edge(
-                    block_end,
-                    target,
-                    change.chromosome_index,
-                    change.phased,
-                ));
-            }
+        for &source in starts
+            .positions
+            .iter()
+            .filter(|position| !is_allele(position))
+        {
+            new_edges.push(edge(
+                source,
+                (allele_node_id, allele_start),
+                change.chromosome_index,
+                change.phased,
+            ));
+        }
+        for &target in ends
+            .positions
+            .iter()
+            .filter(|position| !is_allele(position) && !loops_back(position))
+        {
+            new_edges.push(edge(
+                (allele_node_id, allele_end),
+                target,
+                change.chromosome_index,
+                change.phased,
+            ));
         }
         PlannedEdit {
             edges: new_edges,
             block_group_id: change.region.block_group.id,
             starts: starts.anchors.clone(),
             ends: ends.anchors.clone(),
-            sources: sources.into_iter().copied().collect(),
-            targets: targets.into_iter().copied().collect(),
-            inserted: (change.block.sequence_start != change.block.sequence_end).then_some((
-                change.block.node_id,
-                change.block.sequence_start,
-                change.block.sequence_end,
-            )),
+            allele: Some(allele),
             chromosome_index: change.chromosome_index,
             phased: change.phased,
         }
@@ -4879,6 +5148,75 @@ mod tests {
                 .2
                 .iter()
                 .any(|graph_edge| graph_edge.edge_id == deletion.id)
+        );
+    }
+
+    /// A boundary many samples' edits converge on can end up with several routes meeting it in
+    /// one block group. `allele_flanks` reduces that to the oldest of them, so a deletion's id
+    /// there stays the same when a newer route is added at the same boundary, rather than
+    /// hashing the whole, growing set of routes into a different id per sample.
+    #[test]
+    fn test_allele_flanks_scaffold_on_the_oldest_route_at_a_fan_in_boundary() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let path_edges = Path::edges_for_path(conn, &path.id, None);
+        let a_node_id = path_edges[1].source_node_id;
+        let t_node_id = path_edges[1].target_node_id;
+        let empty_sequence_hash = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("")
+            .save(conn)
+            .unwrap()
+            .hash;
+
+        let before = RouteCache::default()
+            .allele_flanks(conn, &block_group_id, &[(t_node_id, 0)], SpanSide::Start)
+            .unwrap();
+        assert_eq!(before, vec![(a_node_id, 10)]);
+
+        // A later edge arriving at the same boundary, from a node no earlier edit touched.
+        let x_seq = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AACCGG")
+            .save(conn)
+            .unwrap();
+        let x_node_id = Node::create(
+            conn,
+            &x_seq.hash,
+            &HashId::convert_str(&format!("test-x-node.{}", x_seq.hash)),
+        )
+        .unwrap();
+        let later_edge = Edge::create(
+            conn,
+            x_node_id,
+            6,
+            Strand::Forward,
+            t_node_id,
+            0,
+            Strand::Forward,
+        )
+        .unwrap();
+        std::thread::sleep(core::time::Duration::from_millis(2));
+        BlockGroupEdge::bulk_create(
+            conn,
+            &[BlockGroupEdgeData {
+                block_group_id,
+                edge_id: later_edge.id,
+                chromosome_index: 0,
+                phased: 0,
+            }],
+        );
+
+        let after = RouteCache::default()
+            .allele_flanks(conn, &block_group_id, &[(t_node_id, 0)], SpanSide::Start)
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "the scaffold should stay the oldest route once a newer one joins the boundary"
+        );
+        assert_eq!(
+            allele_node_id(&after, &after, &empty_sequence_hash),
+            allele_node_id(&before, &before, &empty_sequence_hash)
         );
     }
 }

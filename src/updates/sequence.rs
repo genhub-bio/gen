@@ -66,10 +66,10 @@ pub fn update_with_sequence(
     for target_block_group in &target_block_groups {
         let path = BlockGroup::get_current_path(conn, &target_block_group.id, None)?;
         let (start_coordinate, end_coordinate) = (resolved_region.start, resolved_region.end);
-        let node_id = if sequence.is_empty() {
-            let node_id = HashId::convert_str("");
+        let allele_node_id = if sequence.is_empty() {
+            // Planning puts the deletion's own node in place of this placeholder.
             let path_block = PathBlock {
-                node_id,
+                node_id: HashId::convert_str(""),
                 block_sequence: sequence.to_string(),
                 sequence_start: 0,
                 sequence_end: 0,
@@ -85,8 +85,7 @@ pub fn update_with_sequence(
                 target_block_group,
                 &path,
                 path_block,
-            )?;
-            node_id
+            )?
         } else {
             let seq = Sequence::new()
                 .sequence_type("DNA")
@@ -121,26 +120,24 @@ pub fn update_with_sequence(
                 target_block_group,
                 &path,
                 path_block,
-            )?;
-            node_id
+            )?
         };
 
-        if !disable_reference_path_update && resolved_region.kind == ResolvedRegionKind::Path {
-            if node_id == HashId::convert_str("") {
-                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
-            } else {
-                // The new node can have an edge from every route meeting the edit's
-                // boundaries; splice in only the pair that continues the selected path.
-                let (edge_to_new_node, edge_from_new_node) =
-                    path.splice_edges_for_node(conn, node_id, start_coordinate, end_coordinate)?;
-                path.new_path_with(
-                    conn,
-                    start_coordinate,
-                    end_coordinate,
-                    &edge_to_new_node,
-                    &edge_from_new_node,
-                )?;
-            }
+        if !disable_reference_path_update
+            && resolved_region.kind == ResolvedRegionKind::Path
+            && let Some(node_id) = allele_node_id
+        {
+            // The new node can have an edge from every route meeting the edit's boundaries;
+            // splice in only the pair that continues the selected path.
+            let (edge_to_new_node, edge_from_new_node) =
+                path.splice_edges_for_node(conn, node_id, start_coordinate, end_coordinate)?;
+            path.new_path_with(
+                conn,
+                start_coordinate,
+                end_coordinate,
+                &edge_to_new_node,
+                &edge_from_new_node,
+            )?;
         }
     }
 
@@ -166,11 +163,10 @@ fn insert_sequence_change(
     target_block_group: &BlockGroup,
     path: &gen_models::path::Path,
     block: PathBlock,
-) -> Result<(), SequenceUpdateError> {
+) -> Result<Option<HashId>, SequenceUpdateError> {
     let source = target_update_region(conn, region, target_block_group.id, Some(path))?;
     let data = InsertChangeData::new(block);
-    insert_update_change(conn, workspace, source, data)?;
-    Ok(())
+    Ok(insert_update_change(conn, workspace, source, data)?.allele_node_id())
 }
 
 #[cfg(test)]
@@ -181,7 +177,7 @@ mod tests {
     use gen_models::{
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
-        block_group::{BlockGroup, BlockGroupChange, PathCache},
+        block_group::{BlockGroup, BlockGroupChange, PathCache, allele_node_id},
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
@@ -1607,5 +1603,68 @@ mod tests {
         let graph =
             BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
         assert!(!is_cyclic_directed(&graph));
+    }
+
+    /// Deleting a whole node keys its deletion on the bypass edge it takes the place of, not on
+    /// any position inside the deleted node itself. A point insertion consumes no reference
+    /// bases, so it sits between the same reference position on both sides; deleting that
+    /// insertion whole must match `allele_node_id` computed directly from that position, the way
+    /// two other samples' equivalent edits would.
+    #[test]
+    fn test_deleting_a_whole_node_is_keyed_on_its_bypass_edge_flanks() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "inserted",
+            "m123:10-10",
+            "GG",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "inserted",
+            "insertion deleted",
+            "m123:10-12",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let deletion_steps = path_deletion_steps(&context, collection, "insertion deleted");
+        assert_eq!(deletion_steps.len(), 1);
+        assert_eq!(
+            current_path_sequence(&context, collection, "insertion deleted"),
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+
+        let conn = context.graph().conn();
+        let reference_node_id = BlockGroup::get_current_path(
+            conn,
+            &get_sample_bg(conn, collection, Sample::DEFAULT_NAME).id,
+            None,
+        )
+        .unwrap()
+        .coordinate_blocks(conn, None)
+        .into_iter()
+        .find(|block| !is_terminal(block.node_id))
+        .expect("should find the reference node")
+        .node_id;
+        let flank = (reference_node_id, 10);
+        let empty_sequence_hash = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("")
+            .save(conn)
+            .unwrap()
+            .hash;
+        assert_eq!(
+            deletion_steps[0],
+            allele_node_id(&[flank], &[flank], &empty_sequence_hash)
+        );
     }
 }

@@ -792,7 +792,8 @@ impl ResolvedGenRegion {
         };
         let starts = span_routes(&start_positions, SpanSide::Start)?;
         let ends = span_routes(&end_positions, SpanSide::End)?;
-        Ok(BlockGroup::span_edges(change, &starts, &ends))
+        let allele = BlockGroup::allele(routes, conn, change, &starts, &ends)?;
+        Ok(BlockGroup::span_edges(change, allele, &starts, &ends))
     }
 }
 

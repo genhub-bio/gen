@@ -103,9 +103,9 @@ pub fn update_with_fasta(
 
         for state in &mut target_states {
             if sequence.is_empty() {
-                let node_id = HashId::convert_str("");
+                // Planning puts the deletion's own node in place of this placeholder.
                 let path_block = PathBlock {
-                    node_id,
+                    node_id: HashId::convert_str(""),
                     block_sequence: sequence.to_string(),
                     sequence_start: 0,
                     sequence_end: 0,
@@ -114,7 +114,7 @@ pub fn update_with_fasta(
                     strand: Strand::Forward,
                 };
 
-                insert_fasta_change(
+                let allele_node_id = insert_fasta_change(
                     conn,
                     context.workspace(),
                     &resolved_region,
@@ -123,7 +123,7 @@ pub fn update_with_fasta(
                     path_block,
                 )?;
                 if index == 0 {
-                    state.first_node = Some(node_id);
+                    state.first_node = allele_node_id;
                 } else if state.first_node.is_some() {
                     state.first_node = None;
                 }
@@ -178,21 +178,17 @@ pub fn update_with_fasta(
             && let Some(node_id) = state.first_node
             && let Some(path) = state.path
         {
-            if node_id == HashId::convert_str("") {
-                path.new_path_with_deletion(conn, start_coordinate, end_coordinate)?;
-            } else {
-                // The new node can have an edge from every route meeting the edit's
-                // boundaries; splice in only the pair that continues the selected path.
-                let (edge_to_new_node, edge_from_new_node) =
-                    path.splice_edges_for_node(conn, node_id, start_coordinate, end_coordinate)?;
-                path.new_path_with(
-                    conn,
-                    start_coordinate,
-                    end_coordinate,
-                    &edge_to_new_node,
-                    &edge_from_new_node,
-                )?;
-            }
+            // The new node can have an edge from every route meeting the edit's boundaries;
+            // splice in only the pair that continues the selected path.
+            let (edge_to_new_node, edge_from_new_node) =
+                path.splice_edges_for_node(conn, node_id, start_coordinate, end_coordinate)?;
+            path.new_path_with(
+                conn,
+                start_coordinate,
+                end_coordinate,
+                &edge_to_new_node,
+                &edge_from_new_node,
+            )?;
         }
     }
 
@@ -219,11 +215,10 @@ fn insert_fasta_change(
     target_block_group_id: HashId,
     path: Option<&gen_models::path::Path>,
     block: PathBlock,
-) -> Result<(), FastaError> {
+) -> Result<Option<HashId>, FastaError> {
     let source = target_update_region(conn, region, target_block_group_id, path)?;
     let data = InsertChangeData::new(block);
-    insert_update_change(conn, workspace, source, data)?;
-    Ok(())
+    Ok(insert_update_change(conn, workspace, source, data)?.allele_node_id())
 }
 
 #[cfg(test)]
