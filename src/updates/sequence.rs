@@ -1019,4 +1019,350 @@ mod tests {
         assert!(graph.contains_edge(first_deletion_boundary, second_deletion_boundary));
         assert!(graph.contains_edge(second_deletion_boundary, second_deleted_target));
     }
+
+    fn import_simple_fixture(context: &gen_models::db::DbContext, collection: &str) {
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            context,
+            &fasta_path.to_str().unwrap().to_string(),
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+    }
+
+    fn current_path_sequence(
+        context: &gen_models::db::DbContext,
+        collection: &str,
+        sample_name: &str,
+    ) -> String {
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, collection, sample_name);
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+        path.sequence(conn, context.workspace(), None).unwrap()
+    }
+
+    #[test]
+    fn test_deletion_at_contig_start_updates_reference_path() {
+        // Reference: ATCGATCGATCGATCGATCGGGAACACACAGAGA. Deleting 0-2 should
+        // leave the selected path spelling the suffix, not the full reference.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:0-2",
+            "",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "child sample"),
+            "CGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_second_deletion_on_updated_path_updates_reference_path() {
+        // First deletion removes CG at 2-4, leaving ATATCG... The second deletion
+        // is resolved against the updated path, so 2-4 now removes AT.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "child sample"),
+            "ATATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+        update_with_sequence(
+            &context,
+            &collection,
+            "child sample",
+            "grandchild sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "grandchild sample"),
+            "ATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_deletion_after_insertion_updates_reference_path() {
+        // Insert GG at 4, then delete 6-8 resolved against the inserted path.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:4",
+            "GG",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "child sample"),
+            "ATCGGGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+        update_with_sequence(
+            &context,
+            &collection,
+            "child sample",
+            "grandchild sample",
+            "m123:6-8",
+            "",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "grandchild sample"),
+            "ATCGGGCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_insertion_where_two_routes_arrive_updates_reference_path() {
+        // After deleting 2-4, position 2 has two arriving routes (reference and
+        // deletion bypass). Inserting there must splice the updated path, not fail
+        // while picking one of several edges into the new node.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            "child sample",
+            "grandchild sample",
+            "m123:2",
+            "GG",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "grandchild sample"),
+            "ATGGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_deletion_at_contig_end_updates_reference_path() {
+        // Deleting the last bases of the contig leaves the path ending at the deletion
+        // bypass, which runs straight into the path end node.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:30-34",
+            "",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "child sample"),
+            "ATCGATCGATCGATCGATCGGGAACACACA"
+        );
+    }
+
+    #[test]
+    fn test_whole_contig_deletion_updates_reference_path() {
+        // Deleting the whole contig leaves a path that goes from the start node straight to
+        // the end node and spells nothing.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:0-34",
+            "",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "child sample"),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_deleting_whole_insertion_restores_reference_path() {
+        // Deleting exactly the inserted GG, resolved against the inserted path, restores the
+        // original reference.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:4-4",
+            "GG",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            "child sample",
+            "grandchild sample",
+            "m123:4-6",
+            "",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "grandchild sample"),
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_deletion_spanning_insertion_updates_reference_path() {
+        // A deletion that spans the inserted GG and one reference base on each side splices
+        // the path from the left reference block to the right one, skipping the insertion.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:4-4",
+            "GG",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            "child sample",
+            "grandchild sample",
+            "m123:3-7",
+            "",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "grandchild sample"),
+            "ATCTCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_replacement_after_deletion_keeps_deletion_in_reference_path() {
+        // After deleting CG at 2-4, position 2 on the updated path is the junction where the
+        // deletion bypass leaves the first block. A replacement there must splice in through
+        // the bypass the path actually takes, not through a reference edge that would bring
+        // the deleted CG back.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            &collection,
+            "child sample",
+            "grandchild sample",
+            "m123:2-3",
+            "T",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "grandchild sample"),
+            "ATTTCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_insertion_at_contig_start_updates_reference_path() {
+        // Inserting at position 0 splices the new node in directly after the path start node.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:0-0",
+            "GG",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "child sample"),
+            "GGATCGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    #[test]
+    fn test_insertion_at_contig_end_updates_reference_path() {
+        // Inserting at the contig length splices the new node in directly before the path end
+        // node.
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_simple_fixture(&context, &collection);
+        update_with_sequence(
+            &context,
+            &collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:34-34",
+            "GG",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            current_path_sequence(&context, &collection, "child sample"),
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGAGG"
+        );
+    }
 }
