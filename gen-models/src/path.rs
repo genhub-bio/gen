@@ -946,10 +946,11 @@ impl Path {
     /// Returns the edges into and out of `new_node_id` that splice it into this path in place
     /// of `path_start..path_end`, for passing to [`Path::new_path_with`].
     ///
-    /// An edit at a block boundary writes one edge per route arriving at, or leaving, that
-    /// boundary, so the new node can have several entry and exit edges. Only the entry edge
-    /// leaving this path's own block before the edit, and the exit edge reaching its block
-    /// after the edit, keep the path on its route; any other would pull a different route
+    /// The new node can have several entry and exit edges: an inserted node's id depends only
+    /// on its block group and sequence, so inserting the same sequence elsewhere in the block
+    /// group reuses it, and a region resolved at several places writes edges at each. Only the
+    /// entry edge leaving this path's own block before the edit, and the exit edge reaching its
+    /// block after the edit, keep the path on its route; any other would pull a different route
     /// (such as sequence this path deleted) into the splice.
     ///
     /// # Errors
