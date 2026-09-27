@@ -177,7 +177,7 @@ fn insert_sequence_change(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_core::NO_CHROMOSOME_INDEX;
+    use gen_core::{NO_CHROMOSOME_INDEX, is_terminal};
     use gen_models::{
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
@@ -1379,5 +1379,233 @@ mod tests {
             current_path_sequence(&context, &collection, "child sample"),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGAGG"
         );
+    }
+
+    /// The deletion nodes `sample_name`'s current path steps through, in order.
+    fn path_deletion_steps(
+        context: &gen_models::db::DbContext,
+        collection: &str,
+        sample_name: &str,
+    ) -> Vec<HashId> {
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, collection, sample_name);
+        BlockGroup::get_current_path(conn, &block_group.id, None)
+            .unwrap()
+            .coordinate_blocks(conn, None)
+            .into_iter()
+            .filter(|block| {
+                !is_terminal(block.node_id) && block.sequence_start == block.sequence_end
+            })
+            .map(|block| block.node_id)
+            .collect()
+    }
+
+    /// A second deletion starting where the first ended, on the updated path, removes the next
+    /// bases: the path steps through both deletions, the first one kept in place.
+    #[test]
+    fn test_sequential_deletions_keep_each_deletion_in_the_path() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let first = path_deletion_steps(&context, collection, "child sample");
+        let both = path_deletion_steps(&context, collection, "grandchild sample");
+        assert_eq!(first.len(), 1);
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0], first[0]);
+        assert_ne!(both[1], first[0]);
+        assert_eq!(
+            current_path_sequence(&context, collection, "grandchild sample"),
+            "ATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    /// A deletion ending where an earlier one starts keeps the earlier one in the path after it.
+    #[test]
+    fn test_deletion_before_an_earlier_one_keeps_it_in_the_path() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:0-2",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let first = path_deletion_steps(&context, collection, "child sample");
+        let both = path_deletion_steps(&context, collection, "grandchild sample");
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[1], first[0]);
+        assert_eq!(
+            current_path_sequence(&context, collection, "grandchild sample"),
+            "ATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    /// An insertion where a deletion ends goes after the deletion, which stays in the path.
+    #[test]
+    fn test_insertion_after_a_deletion_keeps_it_in_the_path() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:2",
+            "GG",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            path_deletion_steps(&context, collection, "grandchild sample"),
+            path_deletion_steps(&context, collection, "child sample")
+        );
+        assert_eq!(
+            current_path_sequence(&context, collection, "grandchild sample"),
+            "ATGGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, collection, "grandchild sample");
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        assert!(!is_cyclic_directed(&graph));
+    }
+
+    /// Two samples deleting the same bases share one deletion node.
+    #[test]
+    fn test_same_deletion_in_two_samples_shares_its_node() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        for sample in ["one", "other"] {
+            update_with_sequence(
+                &context,
+                collection,
+                Sample::DEFAULT_NAME,
+                sample,
+                "m123:10-12",
+                "",
+                false,
+            )
+            .unwrap();
+        }
+
+        let one = path_deletion_steps(&context, collection, "one");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one, path_deletion_steps(&context, collection, "other"));
+    }
+
+    /// Deleting a whole contig leaves a path through one deletion and nothing else.
+    #[test]
+    fn test_whole_contig_deletion_is_one_deletion_step() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:0-34",
+            "",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            path_deletion_steps(&context, collection, "child sample").len(),
+            1
+        );
+        assert_eq!(
+            current_path_sequence(&context, collection, "child sample"),
+            ""
+        );
+    }
+
+    /// Deleting bases a sample has already deleted along another route changes nothing and
+    /// makes no cycle.
+    #[test]
+    fn test_reapplying_a_deletion_changes_nothing() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:10-12",
+            "",
+            true,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:10-12",
+            "",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sample_sequences(&context, collection, "grandchild sample"),
+            sample_sequences(&context, collection, "child sample")
+        );
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, collection, "grandchild sample");
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        assert!(!is_cyclic_directed(&graph));
     }
 }

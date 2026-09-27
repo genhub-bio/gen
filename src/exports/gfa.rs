@@ -1094,4 +1094,105 @@ mod tests {
         // split in half, there's just one new TTTTT sequence shared by 2 nodes
         assert_eq!(node_hashes2.len(), 6);
     }
+
+    /// Deletion nodes spell no sequence, so the export leaves them out: no empty segment, a
+    /// link across them, and paths that step from one sequence segment to the next.
+    #[test]
+    fn test_export_bridges_deletion_nodes() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        // Two deletions meeting at 4: the path steps through both.
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "first",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context, collection, "first", "second", "m123:2-4", "", false,
+        )
+        .unwrap();
+
+        let temp_dir = tempdir().expect("should create a temporary directory");
+        let gfa_path = temp_dir.path().join("deletions.gfa");
+        export_gfa(
+            conn,
+            context.workspace(),
+            collection,
+            &gfa_path,
+            "second",
+            None,
+            None,
+        )
+        .unwrap();
+        let gfa = fs::read_to_string(&gfa_path).expect("should read the exported GFA");
+        let segments = gfa
+            .lines()
+            .filter(|line| line.starts_with("S\t"))
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                (fields[1].to_string(), fields[2].to_string())
+            })
+            .collect::<HashMap<_, _>>();
+        assert!(
+            segments.values().all(|sequence| !sequence.is_empty()),
+            "should export no empty segment"
+        );
+        let links = gfa
+            .lines()
+            .filter(|line| line.starts_with("L\t"))
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                (fields[1].to_string(), fields[3].to_string())
+            })
+            .collect::<HashSet<_>>();
+        for (source, target) in &links {
+            assert!(
+                segments.contains_key(source) && segments.contains_key(target),
+                "link {source} -> {target} should join exported segments"
+            );
+        }
+        let mut spelled = HashSet::new();
+        for path_line in gfa.lines().filter(|line| line.starts_with("P\t")) {
+            let steps = path_line
+                .split('\t')
+                .nth(2)
+                .unwrap()
+                .split(',')
+                .map(|step| step.trim_end_matches(['+', '-']))
+                .collect::<Vec<_>>();
+            spelled.insert(
+                steps
+                    .iter()
+                    .map(|step| segments[*step].as_str())
+                    .collect::<String>(),
+            );
+            for (source, target) in steps.iter().tuple_windows() {
+                let pair = (source.to_string(), target.to_string());
+                assert!(
+                    links.contains(&pair),
+                    "path step {pair:?} should have a link"
+                );
+            }
+        }
+        assert!(
+            spelled.contains("ATCGATCGATCGATCGGGAACACACAGAGA"),
+            "should export the path through both deletions, among {spelled:?}"
+        );
+    }
 }

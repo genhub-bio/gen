@@ -997,6 +997,13 @@ mod tests {
     }
 
     #[test]
+    fn test_get_block_intervals_keeps_an_empty_node() {
+        let intervals =
+            Edge::get_block_intervals(&HashSet::from([0]), &HashSet::from([0]), 0).unwrap();
+        assert_eq!(intervals, vec![(0, 0)]);
+    }
+
+    #[test]
     fn test_get_block_intervals_errors_without_coordinates() {
         assert!(matches!(
             Edge::get_block_intervals(&HashSet::new(), &HashSet::new(), 0),
