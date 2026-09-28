@@ -253,14 +253,30 @@ fn authorize_request(
     }
 }
 
+fn with_idempotency_token(
+    builder: RequestBuilder,
+    idempotency_token: Option<&Uuid>,
+) -> RequestBuilder {
+    match idempotency_token {
+        Some(idempotency_token) => {
+            builder.header("Idempotency-Token", idempotency_token.to_string())
+        }
+        None => builder,
+    }
+}
+
 fn send_capability(
     client: &Client,
     repository: &RepositoryRemote,
     request: &CapabilityRequest<'_>,
     authorization: RequestAuthorization<'_>,
+    idempotency_token: Option<&Uuid>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
     let response = authorize_request(
-        client.post(repository.capability_url()).json(request),
+        with_idempotency_token(
+            client.post(repository.capability_url()).json(request),
+            idempotency_token,
+        ),
         authorization,
     )
     .send()?;
@@ -275,9 +291,13 @@ fn send_asset_transfers(
     repository: &RepositoryRemote,
     request: &AssetTransferRequest<'_>,
     authorization: RequestAuthorization<'_>,
+    idempotency_token: Option<&Uuid>,
 ) -> Result<AssetTransferResponse, RemoteClientError> {
     let response = authorize_request(
-        client.post(repository.asset_transfers_url()).json(request),
+        with_idempotency_token(
+            client.post(repository.asset_transfers_url()).json(request),
+            idempotency_token,
+        ),
         authorization,
     )
     .send()?;
@@ -292,11 +312,15 @@ fn send_asset_transfer_completion(
     repository: &RepositoryRemote,
     request: &AssetTransferCompletionRequest<'_>,
     authorization: RequestAuthorization<'_>,
+    idempotency_token: Option<&Uuid>,
 ) -> Result<(), RemoteClientError> {
     let response = authorize_request(
-        client
-            .post(repository.asset_transfer_completion_url())
-            .json(request),
+        with_idempotency_token(
+            client
+                .post(repository.asset_transfer_completion_url())
+                .json(request),
+            idempotency_token,
+        ),
         authorization,
     )
     .send()?;
@@ -422,6 +446,26 @@ fn acquire_capability_with_store(
     token_store: &impl TokenStore,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
+    acquire_capability_with_store_and_token(
+        client,
+        repository,
+        request,
+        None,
+        api_key,
+        token_store,
+        interactive_login,
+    )
+}
+
+fn acquire_capability_with_store_and_token(
+    client: &Client,
+    repository: &RepositoryRemote,
+    request: &CapabilityRequest<'_>,
+    idempotency_token: Option<&Uuid>,
+    api_key: Option<&str>,
+    token_store: &impl TokenStore,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<CapabilityResponse, RemoteClientError> {
     let allow_anonymous = matches!(
         request.operation,
         RemoteOperation::Clone | RemoteOperation::Pull
@@ -435,7 +479,15 @@ fn acquire_capability_with_store(
             token_store,
         },
         interactive_login,
-        |authorization| send_capability(client, repository, request, authorization),
+        |authorization| {
+            send_capability(
+                client,
+                repository,
+                request,
+                authorization,
+                idempotency_token,
+            )
+        },
     )
 }
 
@@ -456,9 +508,51 @@ pub fn acquire_capability(
     )
 }
 
+pub(crate) fn acquire_capability_with_idempotency_token(
+    repository: &RepositoryRemote,
+    request: &CapabilityRequest<'_>,
+    idempotency_token: &Uuid,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<CapabilityResponse, RemoteClientError> {
+    let client = Client::new();
+    let api_key = env::var("GENHUB_API_KEY").ok();
+    acquire_capability_with_store_and_token(
+        &client,
+        repository,
+        request,
+        Some(idempotency_token),
+        api_key.as_deref(),
+        &FileTokenStore,
+        interactive_login,
+    )
+}
+
 pub fn acquire_asset_transfers(
     repository: &RepositoryRemote,
     request: &AssetTransferRequest<'_>,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<AssetTransferResponse, RemoteClientError> {
+    acquire_asset_transfers_with_token(repository, request, None, interactive_login)
+}
+
+pub(crate) fn acquire_asset_transfers_with_idempotency_token(
+    repository: &RepositoryRemote,
+    request: &AssetTransferRequest<'_>,
+    idempotency_token: &Uuid,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<AssetTransferResponse, RemoteClientError> {
+    acquire_asset_transfers_with_token(
+        repository,
+        request,
+        Some(idempotency_token),
+        interactive_login,
+    )
+}
+
+fn acquire_asset_transfers_with_token(
+    repository: &RepositoryRemote,
+    request: &AssetTransferRequest<'_>,
+    idempotency_token: Option<&Uuid>,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
 ) -> Result<AssetTransferResponse, RemoteClientError> {
     let client = Client::new();
@@ -476,13 +570,44 @@ pub fn acquire_asset_transfers(
             token_store: &FileTokenStore,
         },
         interactive_login,
-        |authorization| send_asset_transfers(&client, repository, request, authorization),
+        |authorization| {
+            send_asset_transfers(
+                &client,
+                repository,
+                request,
+                authorization,
+                idempotency_token,
+            )
+        },
     )
 }
 
 pub fn complete_asset_transfers(
     repository: &RepositoryRemote,
     request: &AssetTransferCompletionRequest<'_>,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<(), RemoteClientError> {
+    complete_asset_transfers_with_token(repository, request, None, interactive_login)
+}
+
+pub(crate) fn complete_asset_transfers_with_idempotency_token(
+    repository: &RepositoryRemote,
+    request: &AssetTransferCompletionRequest<'_>,
+    idempotency_token: &Uuid,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<(), RemoteClientError> {
+    complete_asset_transfers_with_token(
+        repository,
+        request,
+        Some(idempotency_token),
+        interactive_login,
+    )
+}
+
+fn complete_asset_transfers_with_token(
+    repository: &RepositoryRemote,
+    request: &AssetTransferCompletionRequest<'_>,
+    idempotency_token: Option<&Uuid>,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
 ) -> Result<(), RemoteClientError> {
     let client = Client::new();
@@ -496,7 +621,15 @@ pub fn complete_asset_transfers(
             token_store: &FileTokenStore,
         },
         interactive_login,
-        |authorization| send_asset_transfer_completion(&client, repository, request, authorization),
+        |authorization| {
+            send_asset_transfer_completion(
+                &client,
+                repository,
+                request,
+                authorization,
+                idempotency_token,
+            )
+        },
     )
 }
 
