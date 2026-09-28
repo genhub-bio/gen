@@ -228,9 +228,10 @@ fn prepare_vcf_entry(
     let sequence = SequenceCache::lookup(sequence_cache, "DNA", alt_seq)?;
     let sequence_string = sequence.get_sequence(None, None)?;
     let source_path_id = source_region.path.as_ref().unwrap().id;
-    // A deletion's node is made when the change is planned, identified by the bases it removes.
+    // `BlockGroup::allele` computes a deletion's node itself, from the flanks of the bypass edge
+    // it replaces, and never reads this field for one, so it is left at its default.
     let node_id = if sequence_string.is_empty() {
-        HashId::convert_str("")
+        HashId::default()
     } else {
         Node::create(
             conn,
