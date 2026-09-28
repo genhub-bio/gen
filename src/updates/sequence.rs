@@ -1667,4 +1667,46 @@ mod tests {
             allele_node_id(&[flank], &[flank], &empty_sequence_hash)
         );
     }
+
+    /// Repeating an insertion and a deletion at one point, each on a new child sample, wires the
+    /// second insertion into the first. `BlockGroup::span_routes`'s End side gathers every route
+    /// leaving a boundary as a successor, which is right for two edits at different, adjacent
+    /// loci, but wrong when the edit's own span starts at that exact point: a sibling alternate
+    /// there (an earlier insertion's node, a deletion node) is not its successor. This already
+    /// fails on `main`, before deletion nodes existed, one step earlier than here (at the second
+    /// insertion rather than the second deletion); the new node-per-deletion model just gets one
+    /// step further before the same gap surfaces. The same cycle through the Python API does not
+    /// have this: `test_insert_and_delete_cycles_do_not_grow_the_graph` in
+    /// `gen-python/src/python_api/editing.rs` passes, since its insertion wiring retires only the
+    /// exact edge between named neighbour pairs, not every route meeting a boundary.
+    #[test]
+    #[ignore = "known limitation: BlockGroup::span_routes's End side chains a same-point \
+                insertion into whatever alternate already meets that boundary; already failing \
+                on main before deletion nodes were implemented. The corresponding test with the \
+                Python API, test_insert_and_delete_cycles_do_not_grow_the_graph in \
+                gen-python/src/python_api/editing.rs, passes"]
+    fn test_cli_insert_delete_cycle_at_one_point_does_not_chain_alternatives() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "s0",
+            "m123:10-10",
+            "CC",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(&context, collection, "s0", "s1", "m123:10-12", "", false).unwrap();
+        update_with_sequence(&context, collection, "s1", "s2", "m123:10-10", "CC", false).unwrap();
+        update_with_sequence(&context, collection, "s2", "s3", "m123:10-12", "", false).unwrap();
+
+        assert_eq!(
+            current_path_sequence(&context, collection, "s3"),
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
 }
