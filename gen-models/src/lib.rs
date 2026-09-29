@@ -13,6 +13,7 @@ pub mod block_group_lineage;
 pub mod collection;
 pub mod db;
 pub mod edge;
+pub mod edit_ports;
 pub mod errors;
 pub mod file_types;
 #[allow(clippy::all)]

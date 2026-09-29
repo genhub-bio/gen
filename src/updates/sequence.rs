@@ -4,7 +4,6 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
-    edge::Edge,
     node::Node,
     operations::{OperationInfo, OperationSummary},
     region::{GenRegionError, Region, ResolvedGenRegion, ResolvedRegionKind},
@@ -127,27 +126,8 @@ pub fn update_with_sequence(
         };
 
         if !disable_reference_path_update && resolved_region.kind == ResolvedRegionKind::Path {
-            if node_id == HashId::convert_str("") {
-                let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
-            } else {
-                let edge_to_new_node = Edge::select(conn)
-                    .target_node_id(node_id)
-                    .load()
-                    .expect("should load edge to inserted node")[0]
-                    .clone();
-                let edge_from_new_node = Edge::select(conn)
-                    .source_node_id(node_id)
-                    .load()
-                    .expect("should load edge from inserted node")[0]
-                    .clone();
-                path.new_path_with(
-                    conn,
-                    start_coordinate,
-                    end_coordinate,
-                    &edge_to_new_node,
-                    &edge_from_new_node,
-                )?;
-            }
+            let allele = (!sequence.is_empty()).then_some((node_id, 0, sequence.len() as i64));
+            path.new_path_with_edit(conn, start_coordinate, end_coordinate, allele)?;
         }
     }
 
@@ -184,11 +164,14 @@ fn insert_sequence_change(
 mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
-    use gen_core::NO_CHROMOSOME_INDEX;
+    use gen_core::{NO_CHROMOSOME_INDEX, is_end_node, is_start_node};
+    use gen_graph::all_simple_paths;
     use gen_models::{
         annotations::{Annotation, add_annotation},
         assets::{OperationKind, OperationLog},
         block_group::{BlockGroup, BlockGroupChange, PathCache},
+        block_group_edge::BlockGroupEdge,
+        db::DbContext,
         history::{HistoryStore, dolt::DoltHistoryStore},
         operations::commit_operation_summary,
         path::Path,
@@ -1386,5 +1369,457 @@ mod tests {
             current_path_sequence(&context, &collection, "child sample"),
             "ATCGATCGATCGATCGATCGGGAACACACAGAGAGG"
         );
+    }
+
+    /// The deletion edges `sample_name`'s current path takes on `m123` of `simple.fa`, in order:
+    /// edges between the reference node and the path's start and end that skip bases.
+    fn path_deletion_edges(
+        context: &gen_models::db::DbContext,
+        collection: &str,
+        sample_name: &str,
+    ) -> Vec<HashId> {
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, collection, sample_name);
+        let path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+        let reference = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let reference_path = BlockGroup::get_current_path(conn, &reference.id, None).unwrap();
+        let reference_node_id =
+            Path::edges_for_path(conn, &reference_path.id, None)[0].target_node_id;
+        let position = |node_id: HashId, coordinate: i64| {
+            if node_id == reference_node_id {
+                Some(coordinate)
+            } else if is_start_node(node_id) {
+                Some(0)
+            } else if is_end_node(node_id) {
+                Some(34)
+            } else {
+                None
+            }
+        };
+        Path::edges_for_path(conn, &path.id, None)
+            .into_iter()
+            .filter(|edge| {
+                let source = position(edge.source_node_id, edge.source_coordinate);
+                let target = position(edge.target_node_id, edge.target_coordinate);
+                matches!((source, target), (Some(source), Some(target)) if source < target)
+            })
+            .map(|edge| edge.id)
+            .collect()
+    }
+
+    /// Whether `sample`'s block group holds the edge `edge_id`.
+    fn graph_has_edge(
+        context: &gen_models::db::DbContext,
+        collection: &str,
+        sample: &str,
+        edge_id: HashId,
+    ) -> bool {
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, collection, sample);
+        BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
+            .iter()
+            .any(|augmented_edge| augmented_edge.edge.id == edge_id)
+    }
+
+    /// A second deletion starting where the first ended, on the updated path, removes the next
+    /// bases. The route through both is an edge of its own, skipping both, and the path takes
+    /// it; the first deletion stays in the graph.
+    #[test]
+    fn test_sequential_deletions_are_spliced_in_through_their_combination() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let first = path_deletion_edges(&context, collection, "child sample");
+        let both = path_deletion_edges(&context, collection, "grandchild sample");
+        assert_eq!(first.len(), 1);
+        assert_eq!(both.len(), 1);
+        assert_ne!(both[0], first[0]);
+        assert!(graph_has_edge(
+            &context,
+            collection,
+            "grandchild sample",
+            first[0]
+        ));
+        assert_eq!(
+            current_path_sequence(&context, collection, "grandchild sample"),
+            "ATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    /// A deletion ending where an earlier one starts is spliced in through the edge skipping
+    /// both; the earlier deletion stays in the graph.
+    #[test]
+    fn test_deletion_before_an_earlier_one_is_spliced_in_through_their_combination() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:0-2",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let first = path_deletion_edges(&context, collection, "child sample");
+        let both = path_deletion_edges(&context, collection, "grandchild sample");
+        assert_eq!(both.len(), 1);
+        assert_ne!(both[0], first[0]);
+        assert!(graph_has_edge(
+            &context,
+            collection,
+            "grandchild sample",
+            first[0]
+        ));
+        assert_eq!(
+            current_path_sequence(&context, collection, "grandchild sample"),
+            "ATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    /// An insertion where a deletion ends goes after the deletion. The combination is an edge of
+    /// its own, from where the deletion starts into the insertion, and the path takes it.
+    #[test]
+    fn test_insertion_after_a_deletion_is_spliced_in_through_their_combination() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:2",
+            "GG",
+            false,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let grandchild = get_sample_bg(conn, collection, "grandchild sample");
+        let grandchild_path = BlockGroup::get_current_path(conn, &grandchild.id, None).unwrap();
+        let reference_node_id =
+            Path::edges_for_path(conn, &grandchild_path.id, None)[0].target_node_id;
+        assert!(
+            Path::edges_for_path(conn, &grandchild_path.id, None)
+                .iter()
+                .any(|edge| edge.source_node_id == reference_node_id
+                    && edge.source_coordinate == 2
+                    && edge.target_node_id != reference_node_id),
+            "the path should leave the reference where the deletion starts, into the insertion"
+        );
+        assert_eq!(
+            current_path_sequence(&context, collection, "grandchild sample"),
+            "ATGGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &grandchild.id, None).unwrap();
+        assert!(!is_cyclic_directed(&graph));
+    }
+
+    /// Two samples deleting the same bases share one deletion edge.
+    #[test]
+    fn test_same_deletion_in_two_samples_shares_its_edge() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        for sample in ["one", "other"] {
+            update_with_sequence(
+                &context,
+                collection,
+                Sample::DEFAULT_NAME,
+                sample,
+                "m123:10-12",
+                "",
+                false,
+            )
+            .unwrap();
+        }
+
+        let one = path_deletion_edges(&context, collection, "one");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one, path_deletion_edges(&context, collection, "other"));
+    }
+
+    /// Deleting a whole contig leaves a path of one edge from the path start to its end.
+    #[test]
+    fn test_whole_contig_deletion_is_one_deletion_edge() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:0-34",
+            "",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            path_deletion_edges(&context, collection, "child sample").len(),
+            1
+        );
+        assert_eq!(
+            current_path_sequence(&context, collection, "child sample"),
+            ""
+        );
+    }
+
+    /// Deleting bases a sample has already deleted along another route changes nothing and
+    /// makes no cycle.
+    #[test]
+    fn test_reapplying_a_deletion_changes_nothing() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:10-12",
+            "",
+            true,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:10-12",
+            "",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sample_sequences(&context, collection, "grandchild sample"),
+            sample_sequences(&context, collection, "child sample")
+        );
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, collection, "grandchild sample");
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
+        assert!(!is_cyclic_directed(&graph));
+    }
+
+    /// Repeating an insertion and a deletion at one point, each on a new child sample, keeps
+    /// every sample on its own route: the second insertion goes in front of the first, which is
+    /// its sibling, rather than after it, and deleting it rejoins the path where it left.
+    #[test]
+    fn test_cli_insert_delete_cycle_at_one_point_does_not_chain_alternatives() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "s0",
+            "m123:10-10",
+            "CC",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(&context, collection, "s0", "s1", "m123:10-12", "", false).unwrap();
+        update_with_sequence(&context, collection, "s1", "s2", "m123:10-10", "CC", false).unwrap();
+        update_with_sequence(&context, collection, "s2", "s3", "m123:10-12", "", false).unwrap();
+
+        assert_eq!(
+            current_path_sequence(&context, collection, "s3"),
+            "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+    }
+
+    /// The number of routes from the path start to its end in `sample`'s pruned graph.
+    fn route_count(context: &DbContext, collection: &str, sample: &str) -> usize {
+        let block_group = get_sample_bg(context.graph().conn(), collection, sample);
+        let mut graph = BlockGroup::get_graph(
+            context.graph().conn(),
+            context.workspace(),
+            &block_group.id,
+            None,
+        )
+        .unwrap();
+        BlockGroup::prune_graph(&mut graph);
+        let start = graph
+            .nodes()
+            .find(|node| is_start_node(node.node_id))
+            .expect("should have a start node");
+        graph
+            .nodes()
+            .filter(|node| is_end_node(node.node_id))
+            .map(|end| all_simple_paths(&graph, start, end).count())
+            .sum()
+    }
+
+    /// `m123` of `simple.fa` with `edits` applied, each replacing `start..end` with `sequence`
+    /// in reference coordinates.
+    fn with_edits(edits: &[&(usize, usize, &str)]) -> String {
+        const REFERENCE: &str = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
+        let mut edits = edits.to_vec();
+        edits.sort_by_key(|(start, end, _)| (*start, *end));
+        let mut spelled = String::new();
+        let mut position = 0;
+        for (start, end, sequence) in edits {
+            spelled.push_str(&REFERENCE[position..*start]);
+            spelled.push_str(sequence);
+            position = *end;
+        }
+        spelled.push_str(&REFERENCE[position..]);
+        spelled
+    }
+
+    /// Two adjacent edits made one after the other, each keeping the reference, give the four
+    /// combinations of reference and alternative (RR, AR, RA and AA) through exactly four routes:
+    /// every combination is written once, as an edge of its own.
+    #[test]
+    fn test_adjacent_edits_give_every_combination_once() {
+        // Each edit is its region and sequence, the second's region on the first's path, and the
+        // same edit in reference coordinates.
+        type Edit<'a> = (&'a str, &'a str, (usize, usize, &'a str));
+        let cases: [(Edit, Edit); 8] = [
+            (
+                ("m123:9-10", "", (9, 10, "")),
+                ("m123:9-10", "", (10, 11, "")),
+            ),
+            (
+                ("m123:10-11", "", (10, 11, "")),
+                ("m123:9-10", "", (9, 10, "")),
+            ),
+            (
+                ("m123:9-10", "", (9, 10, "")),
+                ("m123:9-10", "A", (10, 11, "A")),
+            ),
+            (
+                ("m123:9-10", "G", (9, 10, "G")),
+                ("m123:10-11", "", (10, 11, "")),
+            ),
+            (
+                ("m123:9-10", "G", (9, 10, "G")),
+                ("m123:10-11", "A", (10, 11, "A")),
+            ),
+            (
+                ("m123:10-11", "A", (10, 11, "A")),
+                ("m123:9-10", "G", (9, 10, "G")),
+            ),
+            (
+                ("m123:10-10", "GG", (10, 10, "GG")),
+                ("m123:12-13", "", (10, 11, "")),
+            ),
+            (
+                ("m123:10-11", "", (10, 11, "")),
+                ("m123:10-10", "GG", (11, 11, "GG")),
+            ),
+        ];
+        for ((first_region, first, first_edit), (second_region, second, second_edit)) in cases {
+            let context = setup_gen();
+            let collection = "test";
+            import_simple_fixture(&context, collection);
+            update_with_sequence(
+                &context,
+                collection,
+                Sample::DEFAULT_NAME,
+                "first",
+                first_region,
+                first,
+                false,
+            )
+            .unwrap();
+            update_with_sequence(
+                &context,
+                collection,
+                "first",
+                "second",
+                second_region,
+                second,
+                false,
+            )
+            .unwrap();
+
+            let case = format!("{first_region} {first:?} then {second_region} {second:?}");
+            let expected = HashSet::from([
+                with_edits(&[]),
+                with_edits(&[&first_edit]),
+                with_edits(&[&second_edit]),
+                with_edits(&[&first_edit, &second_edit]),
+            ]);
+            assert_eq!(
+                sample_sequences(&context, collection, "second"),
+                expected,
+                "{case}"
+            );
+            assert_eq!(route_count(&context, collection, "second"), 4, "{case}");
+            assert_eq!(
+                current_path_sequence(&context, collection, "second"),
+                with_edits(&[&first_edit, &second_edit]),
+                "{case}"
+            );
+        }
+    }
+
+    /// Deleting a whole coding part, where three parts arrive, joins each of them to what
+    /// follows the deleted part.
+    #[test]
+    fn test_whole_node_deletion_joins_every_node_before_it_to_the_node_after_it() {
+        let context = setup_gen();
+        let collection = "test";
+        import_library_design(&context, collection);
+        update_with_sequence(
+            &context, collection, "design", "deleted", "cds1:0-7", "", false,
+        )
+        .unwrap();
+
+        let mut expected = sample_sequences(&context, collection, "design");
+        expected.extend(after_every_part(""));
+        assert_eq!(sample_sequences(&context, collection, "deleted"), expected);
     }
 }

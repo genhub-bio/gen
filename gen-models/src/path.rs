@@ -879,7 +879,7 @@ impl Path {
         // Creates a new path from the current one by replacing all edges between path_start and
         // path_end with the input edges that are to and from a new node
         let tree = self.intervaltree(conn)?;
-        let block_with_start = tree.query_point(path_start).next().unwrap().value;
+        let block_with_start = Path::block_before_position(&tree, path_start);
         let block_with_end = tree.query_point(path_end).next().unwrap().value;
 
         let edges = Path::edges_for_path(conn, &self.id, None);
@@ -900,7 +900,9 @@ impl Path {
                 .unwrap();
             Some(edge)
         };
-        let edge_after_new_node = if edge_from_new_node.target_node_id == PATH_END_NODE_ID {
+        let edge_after_new_node = if edge_from_new_node.target_node_id == PATH_END_NODE_ID
+            || block_with_end.node_id == PATH_END_NODE_ID
+        {
             None
         } else {
             let edge = edges_by_source
@@ -941,80 +943,183 @@ impl Path {
         Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids)
     }
 
-    pub fn new_path_with_deletion(
+    /// Creates a new path from this one with `path_start..path_end` replaced by an edit already
+    /// planned into the block group: `allele` is the inserted node and its `[start, end)` slice,
+    /// or `None` for a deletion.
+    ///
+    /// The edit's edges run from the port in front of its first base, or from the nodes whose
+    /// edges arrive there, to the port behind its last base, or to the nodes the path leaves
+    /// that port for (see `edit_ports`). Where the edit starts at the start of a path block, the
+    /// path's own edge into that block is replaced by the edit's edge from the same source, which
+    /// the edit writes for every route arriving there: after an earlier deletion, the path takes
+    /// the edge skipping both. The end is handled the same way with the path's edge out of the
+    /// block holding the edit's last base.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PathError::Query`] when the block group has no edge splicing the edit in.
+    pub fn new_path_with_edit(
         &self,
         conn: &GraphConnection,
-        deletion_start: i64,
-        deletion_end: i64,
+        path_start: i64,
+        path_end: i64,
+        allele: Option<(HashId, i64, i64)>,
     ) -> Result<Path, PathError> {
-        // Creates a new path from the current one by replacing all edges between deletion_start and
-        // deletion_end with a single edge spanning the deletion.
-        let tree = self.intervaltree(conn)?;
-        let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
-        let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
-
-        let node_deletion_start = deletion_start - block_with_start.start;
-        let node_deletion_end = deletion_end - block_with_end.start;
-        let deletion_edge_result = Edge::select(conn)
-            .source_node_id(block_with_start.node_id)
-            .source_coordinate(node_deletion_start)
-            .target_node_id(block_with_end.node_id)
-            .target_coordinate(node_deletion_end)
-            .load()?;
-
-        if deletion_edge_result.is_empty() {
-            let error_string = format!(
-                "No edge found from node {}:{node_deletion_start} to node {}:{node_deletion_end}",
-                block_with_start.node_id, block_with_end.node_id
-            );
-            return Err(PathError::Query(QueryError::ResultsNotFound(error_string)));
-        }
-
-        let deletion_edge = deletion_edge_result[0].clone();
-
         let edges = Path::edges_for_path(conn, &self.id, None);
-        let edges_by_source = edges
-            .iter()
-            .map(|edge| ((edge.source_node_id, edge.source_coordinate), edge))
-            .collect::<HashMap<(_, i64), &Edge>>();
-        let edges_by_target = edges
-            .iter()
-            .map(|edge| ((edge.target_node_id, edge.target_coordinate), edge))
-            .collect::<HashMap<(_, i64), &Edge>>();
-        let edge_before_deletion = edges_by_target
-            .get(&(block_with_start.node_id, block_with_start.sequence_start))
-            .unwrap();
-        let edge_after_deletion = edges_by_source
-            .get(&(block_with_end.node_id, block_with_end.sequence_end))
-            .unwrap();
+        let blocks = self.coordinate_blocks(conn, None);
+        let block_index_at = |position: i64| {
+            blocks
+                .iter()
+                .position(|block| {
+                    block.path_start <= position
+                        && position < block.path_end
+                        && block.path_start < block.path_end
+                })
+                .ok_or_else(|| {
+                    PathError::Invalid(format!("position {position} is not on path {}", self.id))
+                })
+        };
+        let port_at = |index: usize, position: i64| {
+            let block = &blocks[index];
+            (
+                block.node_id,
+                position - block.path_start + block.sequence_start,
+            )
+        };
 
-        let mut new_edge_ids = vec![];
-        let mut before_deletion = true;
-        let mut after_deletion = false;
-        for edge in &edges {
-            if before_deletion {
-                new_edge_ids.push(edge.id);
-                if edge.id == edge_before_deletion.id {
-                    before_deletion = false;
-                    new_edge_ids.push(deletion_edge.id);
-                }
-            } else if after_deletion {
-                new_edge_ids.push(edge.id);
-            } else if edge.id == edge_after_deletion.id {
-                after_deletion = true;
-                new_edge_ids.push(edge.id);
+        // Each candidate is a port with the number of path edges kept in front of it, or the
+        // index of the first path edge kept after it.
+        let start_index = block_index_at(path_start)?;
+        let mut sources = vec![];
+        if path_start == blocks[start_index].path_start {
+            let edge_in = &edges[start_index - 1];
+            sources.push((
+                (edge_in.source_node_id, edge_in.source_coordinate),
+                start_index - 1,
+            ));
+        }
+        sources.push((port_at(start_index, path_start), start_index));
+        let mut targets = vec![];
+        if path_end > path_start {
+            let end_index = block_index_at(path_end - 1)?;
+            if path_end == blocks[end_index].path_end {
+                let edge_out = &edges[end_index];
+                targets.push((
+                    (edge_out.target_node_id, edge_out.target_coordinate),
+                    end_index + 1,
+                ));
             }
+            targets.push((port_at(end_index, path_end), end_index));
+        } else {
+            targets.push((port_at(start_index, path_start), start_index));
         }
 
+        let edge_between = |source: (HashId, i64), target: (HashId, i64)| EdgeData {
+            source_node_id: source.0,
+            source_coordinate: source.1,
+            source_strand: Strand::Forward,
+            target_node_id: target.0,
+            target_coordinate: target.1,
+            target_strand: Strand::Forward,
+        };
+        let candidates = match allele {
+            None => sources
+                .iter()
+                .cartesian_product(&targets)
+                .map(|((source, _), (target, _))| edge_between(*source, *target))
+                .collect::<Vec<_>>(),
+            Some((node_id, start, end)) => sources
+                .iter()
+                .map(|(source, _)| edge_between(*source, (node_id, start)))
+                .chain(
+                    targets
+                        .iter()
+                        .map(|(target, _)| edge_between((node_id, end), *target)),
+                )
+                .collect(),
+        };
+        let candidate_ids = candidates.iter().map(EdgeData::id_hash).collect::<Vec<_>>();
+        let stored = BlockGroupEdge::specific_edges_for_block_group(
+            conn,
+            &self.block_group_id,
+            &candidate_ids,
+            None,
+        )
+        .into_iter()
+        .map(|augmented_edge| augmented_edge.edge.id)
+        .collect::<HashSet<_>>();
+        let find = |edge: EdgeData| stored.contains(&edge.id_hash()).then(|| edge.id_hash());
+        let not_found = |what: String| {
+            PathError::Query(QueryError::ResultsNotFound(format!(
+                "No edge found {what} for path {}",
+                self.id
+            )))
+        };
+
+        let (kept_before, spliced, resumed_at) = match allele {
+            None => sources
+                .iter()
+                .cartesian_product(&targets)
+                .find_map(|((source, kept_before), (target, resumed_at))| {
+                    find(edge_between(*source, *target))
+                        .map(|edge_id| (*kept_before, vec![edge_id], *resumed_at))
+                })
+                .ok_or_else(|| not_found(format!("deleting {path_start}-{path_end}")))?,
+            Some((node_id, start, end)) => {
+                let (entry, kept_before) = sources
+                    .iter()
+                    .find_map(|(source, kept_before)| {
+                        find(edge_between(*source, (node_id, start)))
+                            .map(|edge_id| (edge_id, *kept_before))
+                    })
+                    .ok_or_else(|| not_found(format!("into node {node_id}")))?;
+                let (exit, resumed_at) = targets
+                    .iter()
+                    .find_map(|(target, resumed_at)| {
+                        find(edge_between((node_id, end), *target))
+                            .map(|edge_id| (edge_id, *resumed_at))
+                    })
+                    .ok_or_else(|| not_found(format!("out of node {node_id}")))?;
+                (kept_before, vec![entry, exit], resumed_at)
+            }
+        };
+
+        let new_edge_ids = edges[..kept_before]
+            .iter()
+            .map(|edge| edge.id)
+            .chain(spliced)
+            .chain(edges[resumed_at..].iter().map(|edge| edge.id))
+            .collect::<Vec<_>>();
         let new_name = format!(
             "{}-start-{}-end-{}-node-{}",
             self.name,
-            deletion_start,
-            deletion_end,
-            HashId::convert_str("")
+            path_start,
+            path_end,
+            allele.map_or_else(|| HashId::convert_str(""), |(node_id, _, _)| node_id)
         );
-
         Path::create(conn, &new_name, &self.block_group_id, &new_edge_ids)
+    }
+
+    /// Returns the block an edit starting at `position` attaches to.
+    ///
+    /// At an exact block boundary [`Path::new_path_with`] keeps the path up to the end of the
+    /// previous (left) block, where its caller's entry edge leaves.
+    fn block_before_position(
+        tree: &IntervalTree<i64, NodeIntervalBlock>,
+        position: i64,
+    ) -> NodeIntervalBlock {
+        let block = tree
+            .query_point(position)
+            .next()
+            .expect("should find a path block at every position")
+            .value;
+        if position > 0
+            && block.start == position
+            && let Some(previous) = tree.query_point(position - 1).next()
+        {
+            return previous.value;
+        }
+        block
     }
 
     fn node_blocks_for_range(
@@ -4253,7 +4358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_path_with_deletion() {
+    fn test_new_path_with_edit_deletion() {
         let conn = &get_connection(None).unwrap();
         Collection::create(conn, "test collection").unwrap();
         let block_group = create_test_block_group(conn);
@@ -4338,7 +4443,7 @@ mod tests {
 
         BlockGroupEdge::bulk_create(conn, &[block_group_edge]);
 
-        let path2 = path1.new_path_with_deletion(conn, 4, 11).unwrap();
+        let path2 = path1.new_path_with_edit(conn, 4, 11, None).unwrap();
         assert_eq!(
             path2.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGAAAAA"

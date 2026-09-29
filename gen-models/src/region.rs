@@ -1,6 +1,6 @@
 pub use gen_core::region::Region;
 use gen_core::{
-    HashId, NodeIntervalBlock, PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, Strand, Workspace, is_terminal,
+    HashId, NodeIntervalBlock, Strand, Workspace, is_terminal,
     region::{RegionParseError, RegionResolutionError, RegionResolver},
 };
 use gen_graph::{GraphNode, GraphNodePosition, GraphNodeSlice};
@@ -13,7 +13,7 @@ use crate::{
     block_group::{BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource},
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
-    edge::EdgeData,
+    edit_ports::{EditSpan, Port, PortEdges},
     errors::PathError,
     locus::GraphLocus,
     path::Path,
@@ -702,7 +702,7 @@ impl ResolvedGenRegion {
 
     #[cfg_attr(
         feature = "profiling",
-        tracing::instrument(skip(self, conn, change, tree))
+        tracing::instrument(skip(self, conn, change, tree, ports))
     )]
     pub fn plan_edges(
         &self,
@@ -710,6 +710,7 @@ impl ResolvedGenRegion {
         workspace: &Workspace,
         change: &BlockGroupChange,
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
+        ports: &mut PortEdges,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         match self.kind {
             ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
@@ -721,7 +722,7 @@ impl ResolvedGenRegion {
                         &local_tree
                     }
                 };
-                return BlockGroup::set_up_new_edges(change, tree);
+                return BlockGroup::set_up_new_edges(conn, change, tree, ports);
             }
             ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {}
         };
@@ -766,80 +767,14 @@ impl ResolvedGenRegion {
                     resolved.end_anchors.expect("should have end anchors"),
                 )
             };
-        let preserve_chromosome_index = if change.preserve_edge {
-            0
-        } else {
-            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+        let port = |position: &GraphNodePosition| {
+            Port::new(position.graph_node.node_id, position.coordinate())
         };
-        let mut new_edges = vec![];
-
-        for position in start_positions.iter().chain(end_positions.iter()) {
-            if !is_terminal(position.graph_node.node_id) {
-                let coordinate = position.coordinate();
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: position.graph_node.node_id,
-                        source_coordinate: coordinate,
-                        source_strand: Strand::Forward,
-                        target_node_id: position.graph_node.node_id,
-                        target_coordinate: coordinate,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: preserve_chromosome_index,
-                    phased: 0,
-                });
-            }
-        }
-
-        if change.block.sequence_start == change.block.sequence_end {
-            for start_position in &start_positions {
-                for end_position in &end_positions {
-                    new_edges.push(AugmentedEdgeData {
-                        edge_data: EdgeData {
-                            source_node_id: start_position.graph_node.node_id,
-                            source_coordinate: start_position.coordinate(),
-                            source_strand: Strand::Forward,
-                            target_node_id: end_position.graph_node.node_id,
-                            target_coordinate: end_position.coordinate(),
-                            target_strand: Strand::Forward,
-                        },
-                        chromosome_index: change.chromosome_index,
-                        phased: change.phased,
-                    });
-                }
-            }
-        } else {
-            for start_position in &start_positions {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: start_position.graph_node.node_id,
-                        source_coordinate: start_position.coordinate(),
-                        source_strand: Strand::Forward,
-                        target_node_id: change.block.node_id,
-                        target_coordinate: change.block.sequence_start,
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-            }
-            for end_position in &end_positions {
-                new_edges.push(AugmentedEdgeData {
-                    edge_data: EdgeData {
-                        source_node_id: change.block.node_id,
-                        source_coordinate: change.block.sequence_end,
-                        source_strand: Strand::Forward,
-                        target_node_id: end_position.graph_node.node_id,
-                        target_coordinate: end_position.coordinate(),
-                        target_strand: Strand::Forward,
-                    },
-                    chromosome_index: change.chromosome_index,
-                    phased: change.phased,
-                });
-            }
-        }
-
-        Ok(new_edges)
+        let span = EditSpan {
+            starts: start_positions.iter().map(port).collect(),
+            ends: end_positions.iter().map(port).collect(),
+        };
+        Ok(ports.plan(conn, &span, change)?)
     }
 }
 

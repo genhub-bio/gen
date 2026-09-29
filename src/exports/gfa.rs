@@ -346,7 +346,6 @@ mod tests {
         region::ResolvedGenRegion,
         sequence::Sequence,
     };
-    use petgraph::Direction;
     use tempfile::tempdir;
 
     use super::*;
@@ -554,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn test_front_deletion_in_combinatorial_library_exports_junction_routes() {
+    fn test_front_deletion_in_combinatorial_library_exports_every_route() {
         let context = setup_gen();
         let conn = context.graph().conn();
         let collection = "test";
@@ -632,27 +631,16 @@ mod tests {
             .nodes()
             .find(|node| node.node_id == deleted_target.node_id && rendered_sequence(*node) == "A")
             .expect("should contain the original first base of cds1");
-        let junction = graph
-            .nodes()
-            .find(|node| {
-                node.node_id == deleted_target.node_id
-                    && node.sequence_start == 0
-                    && node.sequence_end == 0
-            })
-            .expect("should contain the front-deletion junction");
         let upstream_parts = graph
-            .neighbors_directed(junction, Direction::Incoming)
+            .nodes()
+            .filter(|node| ["AAAA", "CAAC", "TAAT"].contains(&rendered_sequence(*node).as_str()))
             .collect::<Vec<_>>();
-        let upstream_sequences = upstream_parts
-            .iter()
-            .map(|node| rendered_sequence(*node))
-            .collect::<HashSet<_>>();
-
         assert_eq!(
-            upstream_sequences,
-            HashSet::from(["AAAA".to_string(), "TAAT".to_string(), "CAAC".to_string()]),
-            "all combinatorial prefixes should enter the junction"
+            upstream_parts.len(),
+            3,
+            "should contain every combinatorial prefix"
         );
+
         let temp_dir = tempdir().expect("should create a temporary directory");
         let gfa_path = temp_dir.path().join("front-deletion.gfa");
         export_gfa(
@@ -684,23 +672,21 @@ mod tests {
             )
         };
 
-        assert!(
-            gfa_lines.contains(&format!("S\t{}\t", segment_id(junction))),
-            "the exported links should have a zero-width junction segment as their endpoint"
-        );
         for upstream_part in upstream_parts {
             assert!(
-                gfa_lines.contains(&link_line(upstream_part, junction)),
-                "each combinatorial prefix should link to the exported junction"
+                gfa_lines.contains(&link_line(upstream_part, original_first_base)),
+                "each combinatorial prefix should link to the original first base"
+            );
+            assert!(
+                gfa_lines.contains(&link_line(upstream_part, deleted_target)),
+                "each combinatorial prefix should link past the deleted base"
             );
         }
         assert!(
-            gfa_lines.contains(&link_line(junction, original_first_base)),
-            "GFA export should retain the reference-healing route through the junction"
-        );
-        assert!(
-            gfa_lines.contains(&link_line(junction, deleted_target)),
-            "GFA export should retain the front-deletion route through the junction"
+            !gfa_lines
+                .iter()
+                .any(|line| line.starts_with("S\t") && line.split('\t').nth(2) == Some("")),
+            "the front deletion should export no empty segment"
         );
     }
 
@@ -1107,5 +1093,106 @@ mod tests {
         // The 10-length A and T sequences have now been split in two, but since the T sequences was
         // split in half, there's just one new TTTTT sequence shared by 2 nodes
         assert_eq!(node_hashes2.len(), 6);
+    }
+
+    /// Two deletions meeting at a port export as sequence segments only: no empty segment, a
+    /// link for every step, and the path skipping both.
+    #[test]
+    fn test_export_adjacent_deletions_as_sequence_segments_only() {
+        let context = setup_gen();
+        let conn = context.graph().conn();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        // Two deletions meeting at 4: the path steps through both.
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "first",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context, collection, "first", "second", "m123:2-4", "", false,
+        )
+        .unwrap();
+
+        let temp_dir = tempdir().expect("should create a temporary directory");
+        let gfa_path = temp_dir.path().join("deletions.gfa");
+        export_gfa(
+            conn,
+            context.workspace(),
+            collection,
+            &gfa_path,
+            "second",
+            None,
+            None,
+        )
+        .unwrap();
+        let gfa = fs::read_to_string(&gfa_path).expect("should read the exported GFA");
+        let segments = gfa
+            .lines()
+            .filter(|line| line.starts_with("S\t"))
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                (fields[1].to_string(), fields[2].to_string())
+            })
+            .collect::<HashMap<_, _>>();
+        assert!(
+            segments.values().all(|sequence| !sequence.is_empty()),
+            "should export no empty segment"
+        );
+        let links = gfa
+            .lines()
+            .filter(|line| line.starts_with("L\t"))
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                (fields[1].to_string(), fields[3].to_string())
+            })
+            .collect::<HashSet<_>>();
+        for (source, target) in &links {
+            assert!(
+                segments.contains_key(source) && segments.contains_key(target),
+                "link {source} -> {target} should join exported segments"
+            );
+        }
+        let mut spelled = HashSet::new();
+        for path_line in gfa.lines().filter(|line| line.starts_with("P\t")) {
+            let steps = path_line
+                .split('\t')
+                .nth(2)
+                .unwrap()
+                .split(',')
+                .map(|step| step.trim_end_matches(['+', '-']))
+                .collect::<Vec<_>>();
+            spelled.insert(
+                steps
+                    .iter()
+                    .map(|step| segments[*step].as_str())
+                    .collect::<String>(),
+            );
+            for (source, target) in steps.iter().tuple_windows() {
+                let pair = (source.to_string(), target.to_string());
+                assert!(
+                    links.contains(&pair),
+                    "path step {pair:?} should have a link"
+                );
+            }
+        }
+        assert!(
+            spelled.contains("ATCGATCGATCGATCGGGAACACACAGAGA"),
+            "should export the path through both deletions, among {spelled:?}"
+        );
     }
 }

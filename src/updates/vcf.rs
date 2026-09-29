@@ -746,8 +746,11 @@ mod tests {
     use std::time;
     use std::{collections::HashSet, path::PathBuf};
 
+    use gen_core::{is_end_node, is_start_node};
+    use gen_graph::all_simple_paths;
     use gen_models::{
-        accession::Accession, node::Node, sample::Sample, sample_lineage::SampleLineage,
+        accession::Accession, block_group_edge::BlockGroupEdge, node::Node, sample::Sample,
+        sample_lineage::SampleLineage,
     };
 
     use super::*;
@@ -1160,6 +1163,315 @@ mod tests {
             .unwrap(),
             HashSet::from(["ATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
         );
+    }
+
+    /// `m123` of `simple.fa`.
+    const SIMPLE_REFERENCE: &str = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
+
+    /// Applies a VCF of `records` on `m123` of `simple.fa`, one genotype column per sample in
+    /// `samples`. Each record is its fields from `POS` on, tab-separated.
+    fn apply_simple_vcf(samples: &[&str], records: &[&str]) -> DbContext {
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        let vcf_path = directory.path().join("variants.vcf");
+        let mut vcf = std::fs::File::create(&vcf_path).unwrap();
+        writeln!(
+            vcf,
+            "##fileformat=VCFv4.1\n##contig=<ID=m123,length=34>\n\
+             ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}",
+            samples.join("\t")
+        )
+        .unwrap();
+        for record in records {
+            writeln!(vcf, "m123\t{record}").unwrap();
+        }
+        drop(vcf);
+        let context = setup_gen();
+        let collection = "test".to_string();
+        let fasta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+        context
+    }
+
+    /// The sequences `sample` spells.
+    fn sample_sequences(context: &DbContext, sample: &str) -> HashSet<String> {
+        let conn = context.graph().conn();
+        BlockGroup::get_all_sequences(
+            conn,
+            context.workspace(),
+            &get_sample_bg(conn, "test", sample).id,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// The deletions in `sample`'s graph, as the bases of `m123` each deletion edge skips: edges
+    /// along the reference node that jump ahead.
+    fn deletion_edges(context: &DbContext, sample: &str) -> HashSet<(usize, usize)> {
+        let conn = context.graph().conn();
+        BlockGroupEdge::edges_for_block_group(conn, &get_sample_bg(conn, "test", sample).id, None)
+            .into_iter()
+            .map(|augmented_edge| augmented_edge.edge)
+            .filter(|edge| {
+                edge.source_node_id == edge.target_node_id
+                    && edge.source_coordinate < edge.target_coordinate
+            })
+            .map(|edge| {
+                (
+                    edge.source_coordinate as usize,
+                    edge.target_coordinate as usize,
+                )
+            })
+            .collect()
+    }
+
+    /// The number of routes from the path start to its end in `sample`'s pruned graph.
+    fn route_count(context: &DbContext, sample: &str) -> usize {
+        let conn = context.graph().conn();
+        let mut graph = BlockGroup::get_graph(
+            conn,
+            context.workspace(),
+            &get_sample_bg(conn, "test", sample).id,
+            None,
+        )
+        .unwrap();
+        BlockGroup::prune_graph(&mut graph);
+        let start = graph
+            .nodes()
+            .find(|node| is_start_node(node.node_id))
+            .expect("should have a start node");
+        graph
+            .nodes()
+            .filter(|node| is_end_node(node.node_id))
+            .map(|end| all_simple_paths(&graph, start, end).count())
+            .sum()
+    }
+
+    /// `m123` with the bases in `deleted` (half-open, sorted, disjoint) removed.
+    fn without(deleted: &[(usize, usize)]) -> String {
+        let mut spelled = String::new();
+        let mut position = 0;
+        for &(start, end) in deleted {
+            spelled.push_str(&SIMPLE_REFERENCE[position..start]);
+            position = end;
+        }
+        spelled.push_str(&SIMPLE_REFERENCE[position..]);
+        spelled
+    }
+
+    /// A VCF record deleting `m123`'s bases `start..end`, anchored on the base before them.
+    fn deletion_record(start: usize, end: usize, genotypes: &str) -> String {
+        format!(
+            "{start}\t.\t{}\t{}\t60\t.\t.\tGT\t{genotypes}",
+            &SIMPLE_REFERENCE[start - 1..end],
+            &SIMPLE_REFERENCE[start - 1..start]
+        )
+    }
+
+    /// However many deletions meet end to end, the route through all of them is spelled, as
+    /// the only route. Each contiguous run of the deletions is an edge of its own, k(k+1)/2 for k
+    /// deletions, so that each combination can be retired on its own.
+    #[test]
+    fn test_chain_of_adjacent_deletions_in_one_vcf() {
+        for count in 1..=10 {
+            let deleted = (0..count)
+                .map(|index| (1 + 2 * index, 3 + 2 * index))
+                .collect::<Vec<_>>();
+            let records = deleted
+                .iter()
+                .map(|&(start, end)| deletion_record(start, end, "1"))
+                .collect::<Vec<_>>();
+            let context = apply_simple_vcf(
+                &["s"],
+                &records.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+
+            assert_eq!(
+                sample_sequences(&context, "s"),
+                HashSet::from([without(&[(1, 1 + 2 * count)])]),
+                "{count} deletions"
+            );
+            assert_eq!(route_count(&context, "s"), 1, "{count} deletions");
+            let runs = (0..count)
+                .flat_map(|first| (first..count).map(move |last| (1 + 2 * first, 3 + 2 * last)))
+                .collect::<HashSet<_>>();
+            assert_eq!(runs.len(), count * (count + 1) / 2);
+            assert_eq!(deletion_edges(&context, "s"), runs, "{count} deletions");
+        }
+    }
+
+    /// The order of the records does not change which deletions combine.
+    #[test]
+    fn test_adjacent_deletions_combine_in_either_record_order() {
+        let context = apply_simple_vcf(
+            &["s"],
+            &[&deletion_record(11, 13, "1"), &deletion_record(9, 11, "1")],
+        );
+        assert_eq!(
+            sample_sequences(&context, "s"),
+            HashSet::from([without(&[(9, 13)])])
+        );
+    }
+
+    /// A homozygous deletion next to a homozygous substitution, on either side and in either
+    /// record order, combines with it, as two adjacent substitutions do: the combination is the
+    /// only route left, each edit retiring the route past the other.
+    #[test]
+    fn test_adjacent_mixed_variants_in_one_vcf_combine() {
+        let cases = [
+            (
+                vec![
+                    deletion_record(9, 11, "1"),
+                    "12\t.\tG\tT\t60\t.\t.\tGT\t1".to_string(),
+                ],
+                format!("{}T{}", &SIMPLE_REFERENCE[..9], &SIMPLE_REFERENCE[12..]),
+            ),
+            (
+                vec![
+                    "10\t.\tT\tG\t60\t.\t.\tGT\t1".to_string(),
+                    deletion_record(10, 12, "1"),
+                ],
+                format!("{}G{}", &SIMPLE_REFERENCE[..9], &SIMPLE_REFERENCE[12..]),
+            ),
+            (
+                vec![
+                    "10\t.\tT\tG\t60\t.\t.\tGT\t1".to_string(),
+                    "11\t.\tC\tA\t60\t.\t.\tGT\t1".to_string(),
+                ],
+                format!("{}GA{}", &SIMPLE_REFERENCE[..9], &SIMPLE_REFERENCE[11..]),
+            ),
+        ];
+        for (records, expected) in cases {
+            for records in [records.clone(), records.iter().rev().cloned().collect()] {
+                let context = apply_simple_vcf(
+                    &["s"],
+                    &records.iter().map(String::as_str).collect::<Vec<_>>(),
+                );
+                assert_eq!(
+                    sample_sequences(&context, "s"),
+                    HashSet::from([expected.clone()]),
+                    "{records:?}"
+                );
+                assert_eq!(route_count(&context, "s"), 1, "{records:?}");
+            }
+        }
+    }
+
+    /// Deletions phased onto different haplotypes never occur together, so no route combines
+    /// them even though they meet.
+    #[test]
+    fn test_phased_adjacent_deletions_on_different_haplotypes_do_not_combine() {
+        let context = apply_simple_vcf(
+            &["s"],
+            &[
+                &deletion_record(9, 11, "1|0"),
+                &deletion_record(11, 13, "0|1"),
+            ],
+        );
+        let sequences = sample_sequences(&context, "s");
+        assert!(sequences.contains(&without(&[(9, 11)])), "{sequences:?}");
+        assert!(!sequences.contains(&without(&[(9, 13)])), "{sequences:?}");
+    }
+
+    /// Two samples deleting the same bases share the deletion's edge. Deleting the same bases as
+    /// two adjacent deletions also writes the edge skipping both, which is the edge of deleting
+    /// them at once, so the graph no longer tells the two apart.
+    #[test]
+    fn test_adjacent_deletions_share_the_edge_of_deleting_both_at_once() {
+        let context = apply_simple_vcf(
+            &["two", "first", "one"],
+            &[
+                &deletion_record(9, 11, "1\t1\t0"),
+                &deletion_record(11, 13, "1\t0\t0"),
+                &deletion_record(9, 13, "0\t0\t1"),
+            ],
+        );
+        assert_eq!(
+            sample_sequences(&context, "two"),
+            sample_sequences(&context, "one")
+        );
+        assert_eq!(
+            deletion_edges(&context, "two"),
+            HashSet::from([(9, 11), (11, 13), (9, 13)])
+        );
+        assert_eq!(deletion_edges(&context, "first"), HashSet::from([(9, 11)]));
+        assert_eq!(deletion_edges(&context, "one"), HashSet::from([(9, 13)]));
+    }
+
+    /// Variants that meet across the boundary between two chunks of changes combine as they do
+    /// within one chunk.
+    #[test]
+    fn test_adjacent_deletions_across_a_chunk_boundary_combine() {
+        use std::io::Write;
+
+        // A 12 kb reference with a substitution every other base up to the chunk size, then two
+        // deletions meeting at 11,000 as the last change of one chunk and the first of the next.
+        let substitutions = VCF_CHANGE_APPLY_CHUNK_SIZE - 1;
+        let reference = "AC".repeat(6_000);
+        let directory = tempfile::tempdir().unwrap();
+        let fasta_path = directory.path().join("reference.fa");
+        std::fs::write(&fasta_path, format!(">chr1\n{reference}\n")).unwrap();
+        let vcf_path = directory.path().join("variants.vcf");
+        let mut vcf = std::fs::File::create(&vcf_path).unwrap();
+        writeln!(
+            vcf,
+            "##fileformat=VCFv4.1\n##contig=<ID=chr1,length=12000>\n\
+             ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts"
+        )
+        .unwrap();
+        for index in 0..substitutions {
+            writeln!(vcf, "chr1\t{}\t.\tA\tT\t60\t.\t.\tGT\t1", 1 + 2 * index).unwrap();
+        }
+        writeln!(vcf, "chr1\t10998\t.\tCAC\tC\t60\t.\t.\tGT\t1").unwrap();
+        writeln!(vcf, "chr1\t11000\t.\tCAC\tC\t60\t.\t.\tGT\t1").unwrap();
+        drop(vcf);
+
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let mut expected = "TC".repeat(substitutions) + &reference[2 * substitutions..10_998];
+        expected.push_str(&reference[11_002..]);
+        assert_eq!(sample_sequences(&context, "s"), HashSet::from([expected]));
     }
 
     #[test]
