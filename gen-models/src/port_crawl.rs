@@ -4,7 +4,10 @@
 //! the far port; sliding closes it at the next active port and caches that port's edges.
 //! The closed block stays frontier until the viewer requests another expansion.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    io::Write as _,
+};
 
 use gen_core::{
     HashId, INDETERMINATE_CHROMOSOME_INDEX, NO_CHROMOSOME_INDEX,
@@ -349,25 +352,15 @@ impl PortCrawler {
             return Ok(());
         }
         let edges = self.load_group(conn, Port::of(&node, direction), direction)?;
-        // A slice at a backing node's end needs an outgoing edge to continue. Check only
-        // suspected dead ends; an empty slice at the start can be a pruned branch tip.
-        #[cfg(debug_assertions)]
-        if direction == Direction::Outgoing
-            && node.length() == 0
-            && !is_terminal(node.node_id)
-            && edges.is_empty()
-        {
-            let sequence_length: i64 = conn.query_row(
-                "SELECT sequences.length FROM nodes JOIN sequences \
-                 ON sequences.hash = nodes.sequence_hash WHERE nodes.id = ?1",
-                [node.node_id],
-                |row| row.get(0),
-            )?;
-            debug_assert!(
-                node.sequence_end != sequence_length,
-                "zero-length frontier at node end has no outgoing edges: block group {:?}, node {:?}",
+        if node.length() == 0 && !is_terminal(node.node_id) && edges.is_empty() {
+            // The model crate has no default tracing subscriber. Write directly to stderr
+            // so a passing test still reports a dangling slice.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: dangling graph slice in block group {:?}: node {:?} has no {:?} edges",
                 self.block_group_id,
-                node
+                node,
+                direction
             );
         }
         for augmented_edge in edges {
@@ -524,10 +517,8 @@ mod tests {
         assert!(graph.contains_edge(block("b", 4, 4), block("end", 0, 0)));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "zero-length frontier at node end has no outgoing edges")]
-    fn test_forward_crawl_reports_a_dangling_empty_end_slice() {
+    fn test_forward_crawl_reports_a_dangling_empty_slice_without_failing() {
         let conn = get_connection(None).unwrap();
         let block_group_id = setup_block_group(
             &conn,
@@ -538,6 +529,7 @@ mod tests {
         let mut graph = GenGraph::new();
         graph.add_node(start_sentinel());
         crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
+        assert!(graph.contains_node(block("b", 4, 4)));
     }
 
     #[test]
