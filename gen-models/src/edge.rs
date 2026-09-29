@@ -477,11 +477,8 @@ impl Edge {
         rows.collect::<Result<Vec<_>, _>>().map_err(EdgeError::from)
     }
 
-    /// Find the closing port of a slide. A jump may land directly on a junction;
-    /// a continuity edge leaving that junction must advance past its own port.
-    ///
-    /// Only a slide whose nearest port is its own landing port needs junction
-    /// classification, so ordinary slides stay a single nearest-group lookup.
+    /// Find the next port that closes a sequence interval. A jump may land on a port
+    /// with an outgoing edge; the interval continues to the next port when one exists.
     pub(crate) fn slide_edge_group(
         conn: &GraphConnection,
         block_group_id: &HashId,

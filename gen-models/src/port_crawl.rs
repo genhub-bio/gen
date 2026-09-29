@@ -302,25 +302,9 @@ impl PortCrawler {
                 include_landing,
             )?
         };
-        let mut frontier = edges
+        let frontier = edges
             .first()
             .map_or(port, |edge| Port::endpoint(&edge.edge, direction));
-        let mut closed_from_opposite_side = false;
-        if include_landing && frontier == port && !is_terminal(port.node_id) {
-            // At an outer port, the current side has no further edge. The sequence interval
-            // belongs to the nearest port on the other side when one exists.
-            let opposite_edges = Edge::nearest_edge_group(
-                conn,
-                &self.block_group_id,
-                (port.node_id, port.coordinate),
-                direction.opposite(),
-                false,
-            )?;
-            if let Some(edge) = opposite_edges.first() {
-                frontier = Port::endpoint(&edge.edge, direction.opposite());
-                closed_from_opposite_side = true;
-            }
-        }
         let node = GraphNode {
             node_id: port.node_id,
             sequence_start: port.coordinate.min(frontier.coordinate),
@@ -328,15 +312,12 @@ impl PortCrawler {
         };
         // A sentinel still needs an exact lookup when expanded. An advancing slide's
         // closing group and an inclusive landing query are already complete.
-        if !is_terminal(port.node_id)
-            && !closed_from_opposite_side
-            && (frontier != port || include_landing)
-        {
+        if !is_terminal(port.node_id) && (frontier != port || include_landing) {
             self.edge_groups.insert((frontier, direction), edges);
         }
         let slides = self.slide_cache.entry((port, direction)).or_default();
         if include_landing {
-            // If no junction interrupted the slide, continuity takes the same route.
+            // A nonempty interval serves both an arriving jump and a continuation.
             if frontier != port {
                 slides.continuation = Some(node);
             }
@@ -498,6 +479,28 @@ mod tests {
                 "expanding the frontier should complete it"
             );
         }
+    }
+
+    #[test]
+    fn test_forward_crawl_follows_edges_out_of_an_empty_end_slice() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC")],
+            &[
+                ("start", 0, "a", 0, 0),
+                ("a", 4, "b", 4, 0),
+                ("b", 4, "end", 0, 0),
+            ],
+        );
+        let eager = BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
+        let mut crawler = PortCrawler::new(block_group_id, false);
+        let mut graph = GenGraph::new();
+        graph.add_node(start_sentinel());
+        crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
+
+        assert_eq!(connected_shape(&graph), connected_shape(&eager));
+        assert!(graph.contains_edge(block("b", 4, 4), block("end", 0, 0)));
     }
 
     #[test]
