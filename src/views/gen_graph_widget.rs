@@ -2621,7 +2621,7 @@ mod tests {
         // Each span is shorter than the one before, so none is covered by a later one.
         let track = span_overlay("track", vec![(node_a, 0, 30, Strand::Unknown)]);
         let mut keyed = span_overlay("keyed", vec![(node_a, 0, 25, Strand::Unknown)]);
-        keyed.source = OverlaySource::Annotation("keyed".to_string());
+        keyed.source = OverlaySource::Track("keyed".to_string());
         let mut adhoc = span_overlay("adhoc", vec![(node_a, 0, 20, Strand::Unknown)]);
         adhoc.source = OverlaySource::Adhoc;
         let mut search = span_overlay("match", vec![(node_a, 0, 10, Strand::Unknown)]);

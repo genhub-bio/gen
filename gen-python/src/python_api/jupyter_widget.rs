@@ -12,7 +12,6 @@ use r#gen::views::{
     },
     annotations::{parse_translated_bed, parse_translated_gff},
     gen_graph_controller::{AnnotationDisplay, ClickOutcome, GenGraphController},
-    gen_graph_widget::locus_midpoint,
     graph_database::GraphDatabase,
     graph_overlay::{
         GraphOverlay, OverlayContent, OverlaySource, PathMembership, remove_path_overlay,
@@ -25,8 +24,7 @@ use gen_annotations::{
 };
 use gen_core::{HashId, Workspace};
 use gen_models::{
-    annotations::Annotation, block_group::BlockGroup, db::GraphConnection, locus::GraphLocus,
-    sample::Sample,
+    annotations::Annotation, block_group::BlockGroup, db::GraphConnection, sample::Sample,
 };
 use gen_tui::{LineStyle, layout::VisualDetail, plotter::PathStyle, theme::current_theme};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
@@ -51,7 +49,7 @@ use serde::Serialize;
 
 use crate::python_api::{
     annotation::PyAnnotation, block_group::PySequenceGraph, graph_search::PyGraphLocus,
-    position::PyPosition, utils::block_group_err_to_pyerr,
+    position::PyPosition,
 };
 
 /// Convert a ratatui `Color` to a CSS hex string.
@@ -513,13 +511,9 @@ impl GraphPage {
         self.controller.pan(dx, dy);
     }
 
-    fn go_to_pos(&mut self, pos: &PyGraphPos, center: bool) {
-        let block = pos.inner.block;
-        self.controller.go_to_coordinate(
-            block.node_id,
-            block.sequence_start + pos.inner.offset as i64,
-            center,
-        );
+    fn go_to_pos(&mut self, pos: &PyPosition, center: bool) {
+        self.controller
+            .go_to_coordinate(pos.position.node_id, pos.position.coordinate, center);
     }
 
     /// Highlight the path of nodes covered by `match_obj` in the given colour.
@@ -528,15 +522,20 @@ impl GraphPage {
     /// ratatui colours (`"yellow"`, `"cyan"`, `"red"`, …).  When omitted the
     /// next unused theme accent colour (slots 0x08–0x0F) is chosen automatically.
     fn highlight_match(&mut self, locus: &PyGraphLocus, color: Option<&str>) -> PyResult<()> {
-        self.push_adhoc_highlight(annotation_span_from_graph_locus(&locus.inner, ""), color)
+        self.push_adhoc_highlight(
+            annotation_span_from_graph_locus(&locus.graph_locus(), ""),
+            color,
+        )
     }
 
-    /// Remove the highlights: matches, highlighted annotations, `add_annotation` spans and the
-    /// path. Annotation groups and tracks stay.
+    /// Remove ephemeral highlights while keeping named tracks and the selected path.
     fn clear_highlights(&mut self) {
-        self.controller
-            .overlays_mut()
-            .retain(|overlay| matches!(overlay.source, OverlaySource::Track(_)));
+        self.controller.overlays_mut().retain(|overlay| {
+            matches!(
+                overlay.source,
+                OverlaySource::Track(_) | OverlaySource::Path
+            )
+        });
         self.controller.set_focused_annotation(None);
     }
 
@@ -786,10 +785,7 @@ impl GraphPage {
                         .and_then(|group_id| entries.iter().find(|entry| entry.id == group_id))
                         .map_or(key.as_str(), |entry| entry.name.as_str()),
                 ),
-                OverlaySource::Annotation(_)
-                | OverlaySource::Adhoc
-                | OverlaySource::Path
-                | OverlaySource::Search => None,
+                OverlaySource::Adhoc | OverlaySource::Path | OverlaySource::Search => None,
             })
             .filter(|name| seen.insert(*name))
             .collect();
@@ -825,6 +821,7 @@ impl GraphPage {
             .overlays_mut()
             .retain(|overlay| matches!(overlay.source, OverlaySource::Adhoc | OverlaySource::Path));
     }
+
     /// Add annotations rendered directly on the graph canvas.
     /// Annotations are tinted with an accent colour and labelled below their span.
     pub fn add_annotation(
@@ -837,16 +834,14 @@ impl GraphPage {
                 .overlays()
                 .iter()
                 .find_map(|overlay| match &overlay.source {
-                    OverlaySource::Annotation(existing) if existing == name => {
-                        Some(overlay.style.color)
-                    }
+                    OverlaySource::Track(existing) if existing == name => Some(overlay.style.color),
                     _ => None,
                 })
         });
         let color =
             existing_color.unwrap_or_else(|| self.controller.view_state_mut().next_accent_color());
         let source = match &track_name {
-            Some(name) => OverlaySource::Annotation(name.clone()),
+            Some(name) => OverlaySource::Track(name.clone()),
             None => OverlaySource::Adhoc,
         };
         let overlays = self.controller.overlays_mut();
@@ -879,6 +874,7 @@ impl GraphPage {
         self.controller
             .overlays_mut()
             .retain(|overlay| overlay.span().is_none_or(|span| span.name != name));
+        self.controller.set_focused_annotation(None);
     }
 }
 
@@ -1290,7 +1286,7 @@ impl PyGraphController {
 
     /// Clear path highlighting previously applied by `show_path`.
     pub fn hide_path(&mut self) -> PyResult<()> {
-        self.active()?.hide_path();
+        self.active()?.clear_path();
         Ok(())
     }
 
@@ -1359,19 +1355,30 @@ impl PyGraphController {
     /// annotation through its own context.
     #[getter]
     pub fn annotations(&mut self) -> PyResult<Vec<PyAnnotation>> {
-        self.active()?.annotations()
+        self.active()?.list_annotations()
     }
 
     /// Every annotation-group name visible from this sequence graph — the full menu
     /// `add_track_group` accepts, independent of which tracks are currently displayed.
     #[getter]
     pub fn track_names(&mut self) -> PyResult<Vec<String>> {
-        self.active()?.track_names()
+        Ok(self
+            .active()?
+            .controller
+            .annotation_group_entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect())
     }
 
     /// Remove a track-panel annotation by name.
     pub fn remove_track(&mut self, name: &str) -> PyResult<()> {
         self.active()?.remove_track(name);
+        Ok(())
+    }
+
+    pub fn remove_annotation(&mut self, name: &str) -> PyResult<()> {
+        self.active()?.remove_annotation(name);
         Ok(())
     }
 
@@ -1443,7 +1450,6 @@ mod tests {
         },
     };
     use gen_core::{BranchName, HashId, Strand, is_end_node, is_start_node};
-    use gen_graph::GraphNodeSlice;
     use gen_models::{
         block_group::BlockGroup,
         history::{
@@ -1610,7 +1616,7 @@ mod tests {
                     })
                     .collect(),
             }),
-            source: OverlaySource::Annotation("gene".to_string()),
+            source: OverlaySource::Track("gene".to_string()),
             style: PathStyle::new(Color::Red),
         });
         let unfocused = rendered_text(&mut controller);
