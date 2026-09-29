@@ -349,6 +349,27 @@ impl PortCrawler {
             return Ok(());
         }
         let edges = self.load_group(conn, Port::of(&node, direction), direction)?;
+        // A slice at a backing node's end needs an outgoing edge to continue. Check only
+        // suspected dead ends; an empty slice at the start can be a pruned branch tip.
+        #[cfg(debug_assertions)]
+        if direction == Direction::Outgoing
+            && node.length() == 0
+            && !is_terminal(node.node_id)
+            && edges.is_empty()
+        {
+            let sequence_length: i64 = conn.query_row(
+                "SELECT sequences.length FROM nodes JOIN sequences \
+                 ON sequences.hash = nodes.sequence_hash WHERE nodes.id = ?1",
+                [node.node_id],
+                |row| row.get(0),
+            )?;
+            debug_assert!(
+                node.sequence_end != sequence_length,
+                "zero-length frontier at node end has no outgoing edges: block group {:?}, node {:?}",
+                self.block_group_id,
+                node
+            );
+        }
         for augmented_edge in edges {
             let key = (augmented_edge.edge.id, direction);
             let same_coordinate = is_continuity(&augmented_edge.edge);
@@ -501,6 +522,22 @@ mod tests {
 
         assert_eq!(connected_shape(&graph), connected_shape(&eager));
         assert!(graph.contains_edge(block("b", 4, 4), block("end", 0, 0)));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "zero-length frontier at node end has no outgoing edges")]
+    fn test_forward_crawl_reports_a_dangling_empty_end_slice() {
+        let conn = get_connection(None).unwrap();
+        let block_group_id = setup_block_group(
+            &conn,
+            &[("a", "AAAA"), ("b", "CCCC")],
+            &[("start", 0, "a", 0, 0), ("a", 4, "b", 4, 0)],
+        );
+        let mut crawler = PortCrawler::new(block_group_id, false);
+        let mut graph = GenGraph::new();
+        graph.add_node(start_sentinel());
+        crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
     }
 
     #[test]
