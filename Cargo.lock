@@ -2893,6 +2893,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libdoltlite-sys"
 version = "0.38.22"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=remoteserver-uri#0550ebda4bf7734931b4f7228705ccb56818cfee"
 dependencies = [
  "cc",
  "pkg-config",
@@ -4913,6 +4914,7 @@ dependencies = [
 [[package]]
 name = "rusqdoltlite"
 version = "0.40.22"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=remoteserver-uri#0550ebda4bf7734931b4f7228705ccb56818cfee"
 dependencies = [
  "bitflags 2.13.0",
  "fallible-iterator",

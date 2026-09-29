@@ -21,7 +21,7 @@ use gen_models::{
     operations::OperationFileInfo,
     patch::{
         DoltPatchStatement, apply_dolt_patch, load_dolt_patch, operation_asset_files_for_logs,
-        operation_logs_added_between, operation_logs_at_ref,
+        operation_logs_added_between,
     },
 };
 use rusqlite::Error as SQLError;
@@ -455,7 +455,8 @@ fn patch_log_ids_and_kind(
             .unwrap_or_else(|| parent_commit_hash.to_string());
         operation_logs_added_between(context.graph().conn(), &parent_ref, commit_ref)?
     } else {
-        operation_logs_at_ref(context.graph().conn(), commit_ref)?
+        // Dolt's parentless seed has an empty catalog, before Gen's operation log table exists.
+        Vec::new()
     };
 
     let mut log_ids = Vec::with_capacity(log_rows.len());
@@ -949,6 +950,85 @@ mod tests {
         create_patch(&context, &[op_1, op_2], &mut write_stream).unwrap();
         write_stream.set_position(0);
         load_patches(&mut write_stream);
+    }
+
+    #[test]
+    fn test_create_patch_spans_schema_less_root_and_migration_commit() {
+        let context = setup_gen_on_disk();
+        let history_store = DoltHistoryStore::new(context.graph().conn());
+        let initial_history = history_store
+            .log(None)
+            .expect("should read initial Gen history");
+        let seed_commit = initial_history
+            .iter()
+            .find(|entry| entry.parent_hash.is_none())
+            .expect("should have Dolt's parentless seed commit");
+        let migration_commit = initial_history
+            .iter()
+            .find(|entry| entry.message == "Apply Gen schema migrations")
+            .expect("should have the Gen schema migration commit");
+        assert_eq!(
+            migration_commit.parent_hash,
+            Some(seed_commit.commit_hash),
+            "the schema migration should follow Dolt's schema-less seed"
+        );
+
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let operation_commit = add_files_operation(
+            &context,
+            &[OperationFile::new(fasta_path.to_string_lossy())],
+            Some("track fasta fixture"),
+        )
+        .expect("should commit FASTA asset operation");
+        let mut write_stream = Cursor::new(Vec::new());
+        create_patch(
+            &context,
+            &[
+                seed_commit.commit_hash,
+                migration_commit.commit_hash,
+                operation_commit,
+            ],
+            &mut write_stream,
+        )
+        .expect("should create patches across the schema-less Dolt root");
+        write_stream.set_position(0);
+        let patches = load_patches(&mut write_stream);
+
+        assert_eq!(
+            patches.len(),
+            3,
+            "should retain each selected history commit"
+        );
+        assert_eq!(patches[0].commit.hash, seed_commit.commit_hash);
+        assert_eq!(
+            patches[0].commit.change_type,
+            OperationKind::HistoryCommit.to_string()
+        );
+        assert!(
+            patches[0].files.is_empty() && patches[0].statements.is_empty(),
+            "the empty Dolt seed should have no Gen operation data or schema patch"
+        );
+        assert_eq!(patches[1].commit.hash, migration_commit.commit_hash);
+        assert!(
+            !patches[1].statements.is_empty(),
+            "the migration commit should carry its schema statements"
+        );
+        assert_eq!(patches[2].commit.hash, operation_commit);
+        assert_eq!(
+            patches[2].commit.change_type,
+            OperationKind::AddFile.to_string()
+        );
+        assert!(
+            patches[2]
+                .files
+                .iter()
+                .any(|file| file.file.file_type == FileTypes::Fasta),
+            "the asset-backed operation should retain its FASTA file metadata"
+        );
+        assert!(
+            !patches[2].statements.is_empty(),
+            "the asset-backed operation should retain its graph and operation rows"
+        );
     }
 
     #[test]

@@ -27,7 +27,6 @@ use rusqlite::{
     OptionalExtension, Result as SqlResult, params,
     types::{Type, Value},
 };
-use uuid::Uuid;
 
 use crate::{
     db::{ConfigConnection, GraphConnection},
@@ -814,69 +813,11 @@ pub fn push(conn: &GraphConnection, remote_name: &str, branch_name: &str) -> Sql
     )
 }
 
-/// Pushes a branch with one token for this SQL call and its native HTTP retries.
-///
-/// The token is not stored in the Dolt remote configuration. The result preserves native Dolt and
-/// remote HTTP errors from this push.
-///
-/// # Arguments
-///
-/// * `conn` - Graph database connection used for the push.
-/// * `remote_name` - Configured Dolt remote name.
-/// * `branch_name` - Branch to push.
-/// * `idempotency_token` - Token attached to HTTP requests made by this push.
-///
-/// # Errors
-///
-/// Returns the native Dolt SQL error if the push fails.
-pub fn push_with_idempotency_token(
-    conn: &GraphConnection,
-    remote_name: &str,
-    branch_name: &str,
-    idempotency_token: &Uuid,
-) -> SqlResult<()> {
-    let idempotency_token = idempotency_token.to_string();
-    run_history_statement(
-        conn,
-        "SELECT dolt_push(?1, ?2, '--idempotency-token', ?3)",
-        &[&remote_name, &branch_name, &idempotency_token],
-    )
-}
-
 pub fn push_force(conn: &GraphConnection, remote_name: &str, branch_name: &str) -> SqlResult<()> {
     run_history_statement(
         conn,
         "SELECT dolt_push(?1, ?2, '--force')",
         &[&remote_name, &branch_name],
-    )
-}
-
-/// Force-pushes a branch with one token for this SQL call and its native HTTP retries.
-///
-/// The token is not stored in the Dolt remote configuration. The result preserves native Dolt and
-/// remote HTTP errors from this push.
-///
-/// # Arguments
-///
-/// * `conn` - Graph database connection used for the push.
-/// * `remote_name` - Configured Dolt remote name.
-/// * `branch_name` - Branch to push.
-/// * `idempotency_token` - Token attached to HTTP requests made by this push.
-///
-/// # Errors
-///
-/// Returns the native Dolt SQL error if the push fails.
-pub fn push_force_with_idempotency_token(
-    conn: &GraphConnection,
-    remote_name: &str,
-    branch_name: &str,
-    idempotency_token: &Uuid,
-) -> SqlResult<()> {
-    let idempotency_token = idempotency_token.to_string();
-    run_history_statement(
-        conn,
-        "SELECT dolt_push(?1, ?2, '--force', '--idempotency-token', ?3)",
-        &[&remote_name, &branch_name, &idempotency_token],
     )
 }
 

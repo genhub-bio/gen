@@ -78,9 +78,8 @@ use gen_models::{
     db::{ConfigConnection, GraphConnection},
     errors::{QueryError, RemoteError as ModelRemoteError},
     history::dolt::{
-        active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull,
-        push_force_with_idempotency_token, push_with_idempotency_token, remote_rows,
-        set_remote_url,
+        active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull, push,
+        push_force, remote_rows, set_remote_url,
     },
     operations::{
         Defaults, Remote, RemoteBranch, RemoteOperationKind as StoredRemoteOperationKind,
@@ -104,9 +103,7 @@ use crate::{
         client::{
             AssetTransferCompletionRequest, AssetTransferRequest, AssetUploadReceipt,
             CapabilityRequest, RemoteClientError, RemoteOperation, RepositoryRemote,
-            acquire_asset_transfers, acquire_asset_transfers_with_idempotency_token,
-            acquire_capability, acquire_capability_with_idempotency_token,
-            complete_asset_transfers, complete_asset_transfers_with_idempotency_token,
+            acquire_asset_transfers, acquire_capability, complete_asset_transfers,
         },
         login_origin,
     },
@@ -186,7 +183,6 @@ fn transfer_authorization(
     operation: RemoteOperation,
     branch: Option<&str>,
     force: bool,
-    idempotency_token: Option<&Uuid>,
 ) -> Result<GraphTransferAuthorization, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
         return Ok(GraphTransferAuthorization {
@@ -200,15 +196,7 @@ fn transfer_authorization(
         branch,
         force,
     };
-    let capability = match idempotency_token {
-        Some(idempotency_token) => acquire_capability_with_idempotency_token(
-            &repository,
-            &request,
-            idempotency_token,
-            login_origin,
-        )?,
-        None => acquire_capability(&repository, &request, login_origin)?,
-    };
+    let capability = acquire_capability(&repository, &request, login_origin)?;
     let push_lease = (operation == RemoteOperation::Push).then_some(PushTransferLease {
         transfer_id: capability.transfer_id,
         expires_at: capability.expires_at.timestamp(),
@@ -293,11 +281,10 @@ fn run_graph_transfer(
     operation: RemoteOperation,
     branch: &str,
     force: bool,
-    idempotency_token: Option<&Uuid>,
     mut transfer: impl FnMut() -> Result<(), SqlError>,
 ) -> Result<Option<PushTransferLease>, Box<dyn Error>> {
     if remote.url.starts_with("file://") {
-        let authorization = transfer_authorization(remote, operation, Some(branch), force, None)?;
+        let authorization = transfer_authorization(remote, operation, Some(branch), force)?;
         ensure_graph_remote(graph, &remote.name, &authorization.remote_url)?;
         let result = transfer();
         restore_canonical_url(graph, remote);
@@ -307,8 +294,7 @@ fn run_graph_transfer(
 
     let mut last_error = None;
     for attempt in 0..2 {
-        let authorization =
-            transfer_authorization(remote, operation, Some(branch), force, idempotency_token)?;
+        let authorization = transfer_authorization(remote, operation, Some(branch), force)?;
         ensure_graph_remote(graph, &remote.name, &authorization.remote_url)?;
         match transfer() {
             Ok(()) => {
@@ -335,13 +321,11 @@ fn push_graph_branch(
     remote_name: &str,
     branch: &str,
     force: bool,
-    idempotency_token: Option<&Uuid>,
 ) -> Result<(), SqlError> {
-    match (force, idempotency_token) {
-        (true, Some(token)) => push_force_with_idempotency_token(graph, remote_name, branch, token),
-        (false, Some(token)) => push_with_idempotency_token(graph, remote_name, branch, token),
-        (true, None) => gen_models::history::dolt::push_force(graph, remote_name, branch),
-        (false, None) => gen_models::history::dolt::push(graph, remote_name, branch),
+    if force {
+        push_force(graph, remote_name, branch)
+    } else {
+        push(graph, remote_name, branch)
     }
 }
 
@@ -969,7 +953,6 @@ fn transfer_assets(
     workspace: &Workspace,
     remote: &Remote,
     operation: RemoteOperation,
-    idempotency_token: Option<&Uuid>,
     target: AssetTransferTarget<'_>,
     mut complete_commit: impl FnMut(&DoltHashId) -> Result<(), Box<dyn Error>>,
 ) -> Result<Vec<AssetUploadReceipt>, Box<dyn Error>> {
@@ -1050,26 +1033,16 @@ fn transfer_assets(
     }
 
     let repository = RepositoryRemote::parse(&remote.url)?;
-    let request = AssetTransferRequest {
-        operation,
-        branch: target.branch,
-        from_commit: target.range.from_commit,
-        to_commit: Some(&commit_hash),
-    };
-    let idempotency_token = if operation == RemoteOperation::Push {
-        idempotency_token
-    } else {
-        None
-    };
-    let response = match idempotency_token {
-        Some(idempotency_token) => acquire_asset_transfers_with_idempotency_token(
-            &repository,
-            &request,
-            idempotency_token,
-            login_origin,
-        )?,
-        None => acquire_asset_transfers(&repository, &request, login_origin)?,
-    };
+    let response = acquire_asset_transfers(
+        &repository,
+        &AssetTransferRequest {
+            operation,
+            branch: target.branch,
+            from_commit: target.range.from_commit,
+            to_commit: Some(&commit_hash),
+        },
+        login_origin,
+    )?;
     let client = Client::new();
     for transfer in &response.assets {
         if !range_assets.contains_key(&transfer.id) && !excluded_assets.contains_key(&transfer.id) {
@@ -1152,8 +1125,7 @@ pub fn clone_into_workspace(
     };
     let mut clone_result = None;
     for attempt in 0..attempt_count {
-        let authorization =
-            transfer_authorization(remote, RemoteOperation::Clone, None, false, None)?;
+        let authorization = transfer_authorization(remote, RemoteOperation::Clone, None, false)?;
         match clone_remote(&graph, &authorization.remote_url) {
             Ok(()) => {
                 clone_result = Some(Ok(()));
@@ -1198,7 +1170,6 @@ pub fn clone_into_workspace(
         workspace,
         remote,
         RemoteOperation::Clone,
-        None,
         AssetTransferTarget {
             branch: &branch,
             history_ref: &branch,
@@ -1271,11 +1242,6 @@ pub fn execute_push(
     };
     let remote = resolve_remote(&config, explicit_remote, &branch)
         .map_err(RemotePushError::RemoteResolution)?;
-    let push_idempotency_token = if remote.url.starts_with("file://") {
-        None
-    } else {
-        Some(Uuid::now_v7())
-    };
     // A missing or stale tracking ref only makes the transfer conservatively include more assets.
     // Force pushes cannot use the tracking ref as a lower bound because they may replace history.
     let tracking_ref = format!("{}/{branch}", remote.name);
@@ -1289,8 +1255,7 @@ pub fn execute_push(
             RemoteOperation::Push,
             &branch,
             force,
-            None,
-            || push_graph_branch(&graph, &remote.name, &branch, force, None),
+            || push_graph_branch(&graph, &remote.name, &branch, force),
         )
         .map_err(RemotePushError::GraphTransfer)?;
         None
@@ -1324,16 +1289,7 @@ pub fn execute_push(
                     RemoteOperation::Push,
                     &branch,
                     force,
-                    push_idempotency_token.as_ref(),
-                    || {
-                        push_graph_branch(
-                            &graph,
-                            &remote.name,
-                            &branch,
-                            force,
-                            push_idempotency_token.as_ref(),
-                        )
-                    },
+                    || push_graph_branch(&graph, &remote.name, &branch, force),
                 );
                 let transfer_lease = match graph_transfer {
                     Ok(Some(transfer_lease)) => transfer_lease,
@@ -1375,7 +1331,6 @@ pub fn execute_push(
         workspace,
         &remote,
         RemoteOperation::Push,
-        push_idempotency_token.as_ref(),
         AssetTransferTarget {
             branch: &branch,
             history_ref: &branch,
@@ -1390,20 +1345,15 @@ pub fn execute_push(
     .map_err(RemotePushError::AssetTransfer)?;
     if let Some((operation, transfer_lease, destination_hash)) = push_context.as_mut() {
         let repository = RepositoryRemote::parse(&remote.url)?;
-        let completion = AssetTransferCompletionRequest {
-            transfer_id: transfer_lease.transfer_id,
-            branch: &branch,
-            assets: &upload_receipts,
-        };
-        match push_idempotency_token.as_ref() {
-            Some(idempotency_token) => complete_asset_transfers_with_idempotency_token(
-                &repository,
-                &completion,
-                idempotency_token,
-                login_origin,
-            )?,
-            None => complete_asset_transfers(&repository, &completion, login_origin)?,
-        }
+        complete_asset_transfers(
+            &repository,
+            &AssetTransferCompletionRequest {
+                transfer_id: transfer_lease.transfer_id,
+                branch: &branch,
+                assets: &upload_receipts,
+            },
+            login_origin,
+        )?;
         operation.advance_assets_transfer_checkpoint(&config, destination_hash)?;
         operation.complete(&config)?;
     }
@@ -1413,7 +1363,6 @@ pub fn execute_push(
         RemoteOperation::Pull,
         &branch,
         false,
-        None,
         || fetch(&graph, &remote.name, Some(&branch)),
     ) {
         eprintln!(
@@ -1458,7 +1407,6 @@ pub fn execute_pull(
         RemoteOperation::Pull,
         &branch,
         false,
-        None,
         || pull(&graph, &remote.name, &branch),
     ) {
         if let Err(metadata_error) = operation.fail(&config) {
@@ -1477,7 +1425,6 @@ pub fn execute_pull(
         workspace,
         &remote,
         RemoteOperation::Pull,
-        None,
         AssetTransferTarget {
             branch: &branch,
             history_ref: &branch,
@@ -1519,7 +1466,6 @@ pub fn execute_fetch(
         RemoteOperation::Pull,
         &branch,
         false,
-        None,
         || fetch(&graph, &remote.name, Some(&branch)),
     )?;
 
@@ -1529,7 +1475,6 @@ pub fn execute_fetch(
         workspace,
         &remote,
         RemoteOperation::Pull,
-        None,
         AssetTransferTarget {
             branch: &branch,
             history_ref: &tracking_ref,
@@ -1584,11 +1529,10 @@ mod tests {
         ffi::OsString,
         fs,
         io::{Cursor, Read as _, Write as _},
-        net::{TcpListener, TcpStream},
+        net::TcpListener,
         path::PathBuf,
         sync::Mutex,
         thread,
-        time::{Duration, Instant},
     };
 
     use chrono::Utc;
@@ -1597,9 +1541,7 @@ mod tests {
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
         db::GraphConnection,
-        history::dolt::{
-            add_remote, clone_remote, commit_all, hash_of, pull, remote_rows, remove_remote,
-        },
+        history::dolt::{clone_remote, commit_all, hash_of, remote_rows, remove_remote},
         operations::{
             Defaults, Remote, RemoteOperationKind as StoredRemoteOperationKind,
             RemoteOperationRecord, calculate_reader_checksum,
@@ -1615,101 +1557,14 @@ mod tests {
         AssetTransferRange, AssetTransferTarget, DownloadAssetOutcome, PushTransferLease,
         RemoteOperation, canonical_remote_url, clone_destination_name, copy_versioned_asset,
         download_asset, download_to_versioned_store, execute_pull, execute_push, file_graph_url,
-        get_remaining_assets_to_transfer, push_graph_branch, resolve_remote, run_graph_transfer,
-        temporary_path, transfer_assets,
+        get_remaining_assets_to_transfer, resolve_remote, run_graph_transfer, temporary_path,
+        transfer_assets,
     };
     use crate::{get_config_connection, get_connection, get_raw_connection};
 
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
     const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
     const RETRIED_TRANSFER_ID: Uuid = Uuid::from_u128(2);
-
-    fn request_idempotency_token(request: &str) -> Option<Uuid> {
-        request
-            .lines()
-            .take_while(|line| !line.is_empty())
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("idempotency-token")
-                    .then(|| Uuid::parse_str(value.trim()).ok())
-                    .flatten()
-            })
-    }
-
-    fn read_native_protocol_request(stream: &mut TcpStream) -> String {
-        let mut request = Vec::new();
-        let mut expected_length = None;
-        let mut buffer = [0_u8; 4096];
-        loop {
-            let read = stream
-                .read(&mut buffer)
-                .expect("should read native Dolt HTTP request");
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&buffer[..read]);
-            if expected_length.is_none()
-                && let Some(header_end) =
-                    request.windows(4).position(|window| window == b"\r\n\r\n")
-            {
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length").then(|| {
-                            value
-                                .trim()
-                                .parse::<usize>()
-                                .expect("should parse request content length")
-                        })
-                    })
-                    .unwrap_or(0);
-                expected_length = Some(header_end + 4 + content_length);
-            }
-            if expected_length.is_some_and(|length| request.len() >= length) {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&request).into_owned()
-    }
-
-    fn serve_unauthorized_dolt_remote() -> (String, thread::JoinHandle<String>) {
-        let listener =
-            TcpListener::bind("127.0.0.1:0").expect("should bind native Dolt HTTP endpoint");
-        listener
-            .set_nonblocking(true)
-            .expect("should make native Dolt listener nonblocking");
-        let address = listener
-            .local_addr()
-            .expect("should read native Dolt HTTP address");
-        let server = thread::spawn(move || {
-            let started_at = Instant::now();
-            let (mut stream, _) = loop {
-                match listener.accept() {
-                    Ok(connection) => break connection,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::WouldBlock
-                            && started_at.elapsed() < Duration::from_secs(10) =>
-                    {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => panic!("should accept native Dolt HTTP request: {error}"),
-                }
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("should set request read timeout");
-            let request = read_native_protocol_request(&mut stream);
-            stream
-                .write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .expect("should reject native Dolt HTTP request");
-            request
-        });
-        (format!("http://{address}/dolt/remote.db"), server)
-    }
 
     mod clone {
         use std::{
@@ -1906,12 +1761,6 @@ mod tests {
             assert_eq!(
                 capability_requests, 2,
                 "clone should request a fresh capability after the first capability is rejected; result={result:?}"
-            );
-            assert!(
-                requests
-                    .iter()
-                    .all(|request| super::request_idempotency_token(request).is_none()),
-                "clone should not send an idempotency token"
             );
             assert_eq!(result.expect("clone retry should succeed"), "main");
         }
@@ -2529,7 +2378,6 @@ mod tests {
             &workspace,
             &remote,
             RemoteOperation::Pull,
-            None,
             AssetTransferTarget {
                 branch: "main",
                 history_ref: "main",
@@ -2598,7 +2446,6 @@ mod tests {
             &workspace,
             &remote,
             RemoteOperation::Clone,
-            None,
             AssetTransferTarget {
                 branch: "main",
                 history_ref: "main",
@@ -3044,14 +2891,12 @@ mod tests {
             .local_addr()
             .expect("should read capability server address");
         let server = thread::spawn(move || {
-            let mut requests = Vec::new();
             for attempt in 0..2 {
                 let (mut stream, _) = listener.accept().expect("should accept capability request");
                 let mut request = [0_u8; 8192];
-                let read = stream
+                let _ = stream
                     .read(&mut request)
                     .expect("should read capability request");
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
                 let body = format!(
                     "{{\"remote_url\":\"http://127.0.0.1:1/transfer-{attempt}\",\
                      \"expires_at\":\"2030-01-01T00:00:00Z\",\
@@ -3070,7 +2915,6 @@ mod tests {
                 )
                 .expect("should write capability response");
             }
-            requests
         });
 
         let connection = Connection::open_in_memory().expect("should open graph database");
@@ -3080,14 +2924,12 @@ mod tests {
             url: format!("http://{address}/api/repos/alice/example"),
         };
         let mut attempts = 0;
-        let idempotency_token = Uuid::now_v7();
         let transfer_lease = run_graph_transfer(
             &graph,
             &remote,
             RemoteOperation::Push,
             "main",
             false,
-            Some(&idempotency_token),
             || {
                 attempts += 1;
                 if attempts == 1 {
@@ -3101,18 +2943,9 @@ mod tests {
             },
         )
         .expect("should retry authorization failure");
-        let requests = server.join().expect("capability server should finish");
+        server.join().expect("capability server should finish");
 
         assert_eq!(attempts, 2);
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            request_idempotency_token(&requests[0]),
-            Some(idempotency_token)
-        );
-        assert_eq!(
-            request_idempotency_token(&requests[1]),
-            Some(idempotency_token)
-        );
         assert_eq!(
             transfer_lease,
             Some(PushTransferLease {
@@ -3126,153 +2959,6 @@ mod tests {
                 .iter()
                 .any(|graph_remote| graph_remote.name == "origin" && graph_remote.url == remote.url)
         );
-    }
-
-    #[test]
-    fn test_push_keeps_one_idempotency_token_across_native_auth_refreshes() {
-        let _environment_lock = ENVIRONMENT_LOCK
-            .lock()
-            .expect("should lock process environment");
-        let _api_key = EnvironmentGuard::set("GENHUB_API_KEY", "push-test-key");
-        let native_remotes = (0..4)
-            .map(|_| serve_unauthorized_dolt_remote())
-            .collect::<Vec<_>>();
-        let remote_urls = native_remotes
-            .iter()
-            .map(|(url, _)| url.clone())
-            .collect::<Vec<_>>();
-        let capability_listener =
-            TcpListener::bind("127.0.0.1:0").expect("should bind capability server");
-        let capability_address = capability_listener
-            .local_addr()
-            .expect("should read capability server address");
-        let capability_server = thread::spawn(move || {
-            let mut requests = Vec::new();
-            for (attempt, remote_url) in remote_urls.into_iter().enumerate() {
-                let (mut stream, _) = capability_listener
-                    .accept()
-                    .expect("should accept capability request");
-                let request = read_native_protocol_request(&mut stream);
-                requests.push(request);
-                let body = json!({
-                    "remote_url": remote_url,
-                    "expires_at": "2030-01-01T00:00:00Z",
-                    "default_branch": "main",
-                    "transfer_id": Uuid::from_u128(attempt as u128 + 1),
-                })
-                .to_string();
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .expect("should write capability response");
-            }
-            requests
-        });
-
-        let temp = tempdir().expect("should create native push fixture");
-        let graph = get_connection(temp.path().join("source.db"))
-            .expect("should create source graph database");
-        Collection::create(&graph, "native-push-fixture")
-            .expect("should create source graph state");
-        commit_all(&graph, "native push fixture").expect("should commit source graph state");
-        let remote = Remote {
-            name: "origin".to_string(),
-            url: format!("http://{capability_address}/api/repos/alice/example"),
-        };
-        let idempotency_tokens = [Uuid::now_v7(), Uuid::now_v7()];
-
-        for idempotency_token in idempotency_tokens {
-            let result = run_graph_transfer(
-                &graph,
-                &remote,
-                RemoteOperation::Push,
-                "main",
-                false,
-                Some(&idempotency_token),
-                || {
-                    push_graph_branch(
-                        &graph,
-                        &remote.name,
-                        "main",
-                        false,
-                        Some(&idempotency_token),
-                    )
-                },
-            );
-            assert!(result.is_err(), "the mock remote should reject the push");
-        }
-
-        let capability_requests = capability_server
-            .join()
-            .expect("capability server should finish");
-        let native_requests = native_remotes
-            .into_iter()
-            .map(|(_, server)| server.join().expect("native remote should finish"))
-            .collect::<Vec<_>>();
-        let expected_tokens = [
-            Some(idempotency_tokens[0]),
-            Some(idempotency_tokens[0]),
-            Some(idempotency_tokens[1]),
-            Some(idempotency_tokens[1]),
-        ];
-
-        assert_eq!(capability_requests.len(), 4);
-        assert_eq!(native_requests.len(), 4);
-        for ((capability_request, native_request), expected_token) in capability_requests
-            .iter()
-            .zip(&native_requests)
-            .zip(expected_tokens)
-        {
-            assert_eq!(
-                request_idempotency_token(capability_request),
-                expected_token,
-                "capability refreshes within a push should reuse its token"
-            );
-            assert!(
-                native_request.starts_with("GET /dolt/remote.db/refs "),
-                "push should negotiate refs through the native Dolt HTTP protocol: {native_request}"
-            );
-            assert_eq!(
-                request_idempotency_token(native_request),
-                expected_token,
-                "the native Dolt request should carry the same push token"
-            );
-        }
-        assert_ne!(idempotency_tokens[0], idempotency_tokens[1]);
-    }
-
-    #[test]
-    fn test_native_clone_and_pull_requests_do_not_send_idempotency_tokens() {
-        let temp = tempdir().expect("should create non-push remote fixture");
-        let (clone_url, clone_server) = serve_unauthorized_dolt_remote();
-        let clone_graph = GraphConnection(
-            Connection::open_in_memory().expect("should open clone graph database"),
-        );
-        assert!(
-            clone_remote(&clone_graph, &clone_url).is_err(),
-            "mock remote should reject clone"
-        );
-        let clone_request = clone_server
-            .join()
-            .expect("clone remote server should finish");
-        assert_eq!(request_idempotency_token(&clone_request), None);
-
-        let (pull_url, pull_server) = serve_unauthorized_dolt_remote();
-        let pull_graph =
-            get_connection(temp.path().join("pull.db")).expect("should create pull graph database");
-        Collection::create(&pull_graph, "pull-fixture").expect("should create pull graph state");
-        commit_all(&pull_graph, "pull fixture").expect("should commit pull graph state");
-        add_remote(&pull_graph, "origin", &pull_url).expect("should configure pull remote");
-        assert!(
-            pull(&pull_graph, "origin", "main").is_err(),
-            "mock remote should reject pull"
-        );
-        let pull_request = pull_server
-            .join()
-            .expect("pull remote server should finish");
-        assert_eq!(request_idempotency_token(&pull_request), None);
     }
 
     #[test]
@@ -3354,11 +3040,6 @@ mod tests {
         assert!(requests[2].contains("\"branch\":\"main\""));
         assert!(requests[2].contains("\"assets\":[]"));
         assert!(requests[3].contains("\"operation\":\"pull\""));
-        let push_token = request_idempotency_token(&requests[0])
-            .expect("push capability should include an idempotency token");
-        assert_eq!(request_idempotency_token(&requests[1]), Some(push_token));
-        assert_eq!(request_idempotency_token(&requests[2]), Some(push_token));
-        assert_eq!(request_idempotency_token(&requests[3]), None);
         let graph =
             get_connection(workspace.graph_db_path().unwrap()).expect("should reopen graph");
         let local_hash = hash_of(&graph, "main").expect("should query local branch");
@@ -3476,24 +3157,6 @@ mod tests {
             assert!(request.contains("\"assets\":[]"));
         }
         assert!(requests[5].contains("\"operation\":\"pull\""));
-        let first_push_token = request_idempotency_token(&requests[0])
-            .expect("initial push capability should include an idempotency token");
-        assert_eq!(
-            request_idempotency_token(&requests[1]),
-            Some(first_push_token)
-        );
-        assert_eq!(
-            request_idempotency_token(&requests[2]),
-            Some(first_push_token)
-        );
-        let resumed_push_token = request_idempotency_token(&requests[3])
-            .expect("resumed push should create a fresh idempotency token");
-        assert_ne!(resumed_push_token, first_push_token);
-        assert_eq!(
-            request_idempotency_token(&requests[4]),
-            Some(resumed_push_token)
-        );
-        assert_eq!(request_idempotency_token(&requests[5]), None);
         let pending_operations = config
             .query_row(
                 "SELECT COUNT(*) FROM remote_operations \
@@ -3875,7 +3538,6 @@ mod tests {
             RemoteOperation::Pull,
             "main",
             false,
-            None,
             || {
                 remove_remote(&graph, "origin")?;
                 Ok(())
@@ -3894,7 +3556,6 @@ mod tests {
             RemoteOperation::Pull,
             "main",
             false,
-            None,
             || Ok(()),
         )
         .expect("next transfer should recreate the missing remote");
