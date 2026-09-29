@@ -97,7 +97,7 @@ CREATE TABLE edges (
 -- Edge IDs are deterministic hashes of the complete endpoint tuple, so the primary key is the
 -- canonical identity constraint without a second copy of every endpoint in a unique index.
 CREATE INDEX edge_source_idx ON edges(source_node_id, source_coordinate);
-CREATE INDEX edge_target_node_idx ON edges(target_node_id);
+CREATE INDEX edge_target_node_idx ON edges(target_node_id, target_coordinate);
 
 CREATE TABLE block_group_edges (
   id BLOB PRIMARY KEY NOT NULL,
