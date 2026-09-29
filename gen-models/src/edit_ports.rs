@@ -67,6 +67,11 @@ impl Port {
 pub struct EditSpan {
     pub starts: Vec<Port>,
     pub ends: Vec<Port>,
+    /// Whether the span is a coordinate on a linear path rather than a named feature. An
+    /// insertion at a path coordinate belongs to the point between the path's blocks, so it
+    /// leads into every route leaving that point even when the path enters the next block
+    /// through an allele.
+    pub along_path: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -411,10 +416,27 @@ impl PortEdges {
             .iter()
             .flat_map(|start| self.sources(*start, &rules))
             .collect::<Vec<_>>();
-        let targets = ends
+        let mut targets = ends
             .iter()
             .flat_map(|end| self.targets(*end, &rules))
             .collect::<Vec<_>>();
+        if is_insertion && span.along_path {
+            // The path enters the block after the insertion through an allele, so the insertion
+            // sits at the port that allele was entered from and leads into every route leaving
+            // that port, not only the allele it was addressed through.
+            for start in starts
+                .iter()
+                .filter(|start| !self.has_sequence_before(**start))
+            {
+                for source in self.sources(*start, &rules) {
+                    for target in self.targets(source.port, &rules) {
+                        if !targets.iter().any(|known| known.port == target.port) {
+                            targets.push(target);
+                        }
+                    }
+                }
+            }
+        }
         let mut continued = vec![];
         match rules.allele {
             None => {

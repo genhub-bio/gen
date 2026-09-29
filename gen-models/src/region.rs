@@ -773,6 +773,7 @@ impl ResolvedGenRegion {
         let span = EditSpan {
             starts: start_positions.iter().map(port).collect(),
             ends: end_positions.iter().map(port).collect(),
+            along_path: false,
         };
         Ok(ports.plan(conn, &span, change)?)
     }

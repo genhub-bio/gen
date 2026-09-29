@@ -1718,49 +1718,62 @@ mod tests {
         spelled
     }
 
-    /// Two adjacent edits made one after the other, each keeping the reference, give the four
-    /// combinations of reference and alternative (RR, AR, RA and AA) through exactly four routes:
-    /// every combination is written once, as an edge of its own.
+    /// Every pair of touching edits (deletion, substitution or insertion on either side of the
+    /// point 10), made one after the other in either order and each keeping the reference, gives
+    /// the four combinations of reference and alternative (RR, AR, RA and AA) through exactly four
+    /// routes: every combination is written once, as an edge of its own.
     #[test]
     fn test_adjacent_edits_give_every_combination_once() {
-        // Each edit is its region and sequence, the second's region on the first's path, and the
-        // same edit in reference coordinates.
-        type Edit<'a> = (&'a str, &'a str, (usize, usize, &'a str));
-        let cases: [(Edit, Edit); 8] = [
-            (
-                ("m123:9-10", "", (9, 10, "")),
-                ("m123:9-10", "", (10, 11, "")),
-            ),
-            (
-                ("m123:10-11", "", (10, 11, "")),
-                ("m123:9-10", "", (9, 10, "")),
-            ),
-            (
-                ("m123:9-10", "", (9, 10, "")),
-                ("m123:9-10", "A", (10, 11, "A")),
-            ),
-            (
-                ("m123:9-10", "G", (9, 10, "G")),
-                ("m123:10-11", "", (10, 11, "")),
-            ),
-            (
-                ("m123:9-10", "G", (9, 10, "G")),
-                ("m123:10-11", "A", (10, 11, "A")),
-            ),
-            (
-                ("m123:10-11", "A", (10, 11, "A")),
-                ("m123:9-10", "G", (9, 10, "G")),
-            ),
-            (
-                ("m123:10-10", "GG", (10, 10, "GG")),
-                ("m123:12-13", "", (10, 11, "")),
-            ),
-            (
-                ("m123:10-11", "", (10, 11, "")),
-                ("m123:10-10", "GG", (11, 11, "GG")),
-            ),
-        ];
-        for ((first_region, first, first_edit), (second_region, second, second_edit)) in cases {
+        type Edit = (usize, usize, &'static str);
+        const LEFT_OF_TEN: [Edit; 2] = [(9, 10, ""), (9, 10, "G")];
+        const RIGHT_OF_TEN: [Edit; 2] = [(10, 11, ""), (10, 11, "A")];
+        const INSERTION_AT_TEN: Edit = (10, 10, "GG");
+        const INSERTION_AT_ELEVEN: Edit = (11, 11, "GG");
+
+        let mut pairs = vec![];
+        for left in LEFT_OF_TEN {
+            for right in RIGHT_OF_TEN {
+                pairs.push((left, right));
+            }
+            pairs.push((left, INSERTION_AT_TEN));
+        }
+        for right in RIGHT_OF_TEN {
+            pairs.push((INSERTION_AT_TEN, right));
+            pairs.push((right, INSERTION_AT_ELEVEN));
+        }
+
+        // The second edit is made on the first's path, so its region shifts by the length the
+        // first added or removed unless it lies before it.
+        let region_after = |first: &Edit, second: &Edit| {
+            let shift = if second.0 >= first.1 && first != second {
+                first.2.len() as i64 - (first.1 - first.0) as i64
+            } else {
+                0
+            };
+            format!(
+                "m123:{}-{}",
+                second.0 as i64 + shift,
+                second.1 as i64 + shift
+            )
+        };
+
+        let mut cases = vec![];
+        for (left, right) in pairs {
+            cases.push((left, right));
+            cases.push((right, left));
+        }
+        let mut failures = vec![];
+        for (first_edit, second_edit) in cases {
+            // Once a base is deleted, its position on the path is the point after it, so an
+            // insertion before that base cannot be addressed there.
+            let is_deletion = first_edit.2.is_empty() && first_edit.1 > first_edit.0;
+            if is_deletion && second_edit.0 == second_edit.1 && second_edit.0 == first_edit.0 {
+                continue;
+            }
+            let first_region = format!("m123:{}-{}", first_edit.0, first_edit.1);
+            let first = first_edit.2;
+            let second_region = region_after(&first_edit, &second_edit);
+            let second = second_edit.2;
             let context = setup_gen();
             let collection = "test";
             import_simple_fixture(&context, collection);
@@ -1769,7 +1782,7 @@ mod tests {
                 collection,
                 Sample::DEFAULT_NAME,
                 "first",
-                first_region,
+                &first_region,
                 first,
                 false,
             )
@@ -1779,7 +1792,7 @@ mod tests {
                 collection,
                 "first",
                 "second",
-                second_region,
+                &second_region,
                 second,
                 false,
             )
@@ -1792,18 +1805,20 @@ mod tests {
                 with_edits(&[&second_edit]),
                 with_edits(&[&first_edit, &second_edit]),
             ]);
-            assert_eq!(
-                sample_sequences(&context, collection, "second"),
-                expected,
-                "{case}"
-            );
-            assert_eq!(route_count(&context, collection, "second"), 4, "{case}");
-            assert_eq!(
-                current_path_sequence(&context, collection, "second"),
-                with_edits(&[&first_edit, &second_edit]),
-                "{case}"
-            );
+            let sequences = sample_sequences(&context, collection, "second");
+            let routes = route_count(&context, collection, "second");
+            let current = current_path_sequence(&context, collection, "second");
+            if sequences != expected
+                || routes != 4
+                || current != with_edits(&[&first_edit, &second_edit])
+            {
+                failures.push(format!(
+                    "{case}: {} sequences, {routes} routes",
+                    sequences.len()
+                ));
+            }
         }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     /// Deleting a whole coding part, where three parts arrive, joins each of them to what

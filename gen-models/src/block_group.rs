@@ -956,6 +956,7 @@ impl BlockGroup {
         let span = EditSpan {
             starts: vec![start_port],
             ends: vec![end_port],
+            along_path: true,
         };
         Ok(ports.plan(conn, &span, change)?)
     }
