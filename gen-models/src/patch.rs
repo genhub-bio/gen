@@ -63,24 +63,11 @@ pub fn operation_logs_at_ref(
     let operation_logs_table = OperationLog::table_name_with_history_ref(Some(history_ref));
     let query =
         format!("SELECT id, operation_kind FROM {operation_logs_table} ORDER BY created_on, id");
-    let result = (|| {
-        let mut statement = conn.prepare(&query)?;
-        let rows = statement.query_map(named_params! { ":history_ref": history_ref }, |row| {
-            Ok((row.get::<_, HashId>(0)?, row.get::<_, OperationKind>(1)?))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()
-    })();
-
-    match result {
-        // Commits made before Gen's schema migration legitimately lack this metadata table.
-        Err(rusqlite::Error::SqliteFailure(code, Some(message)))
-            if code.extended_code == rusqlite::ffi::SQLITE_ERROR
-                && message == format!("table not found: gen_operation_log at {history_ref}") =>
-        {
-            Ok(Vec::new())
-        }
-        result => result,
-    }
+    let mut statement = conn.prepare(&query)?;
+    let rows = statement.query_map(named_params! { ":history_ref": history_ref }, |row| {
+        Ok((row.get::<_, HashId>(0)?, row.get::<_, OperationKind>(1)?))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
 }
 
 /// From the list of log ids (operation logs), return the operation files (such as fastas) associated with each one.
@@ -216,14 +203,12 @@ mod tests {
 
     use super::{
         DoltPatchStatement, apply_dolt_patch, load_dolt_patch, operation_asset_files_for_logs,
-        operation_logs_at_ref,
     };
     use crate::{
         assets::{AssetRef, AssetRole, OperationAsset, OperationKind, OperationLog},
         db::GraphConnection,
         file_types::FileTypes,
         history::dolt::commit_all,
-        migrations::run_migrations,
         test_helpers::setup_gen,
     };
 
@@ -252,51 +237,6 @@ mod tests {
             diff_type: "data".to_string(),
             statement: statement.to_string(),
         }
-    }
-
-    #[test]
-    fn test_operation_logs_at_ref_handles_pre_migration_root_and_preserves_errors() {
-        let connection = Connection::open_in_memory().expect("should open database");
-        let mut conn = GraphConnection(connection);
-        conn.execute_batch(
-            "CREATE TABLE legacy_metadata (id INTEGER PRIMARY KEY);
-             INSERT INTO legacy_metadata VALUES (1);",
-        )
-        .expect("should create pre-migration database state");
-        let pre_migration_commit =
-            commit_all(&conn, "pre-migration root").expect("should create pre-migration root");
-        let pre_migration_ref = pre_migration_commit.to_string();
-
-        run_migrations(&mut conn.0);
-
-        assert_eq!(
-            operation_logs_at_ref(&conn, &pre_migration_ref)
-                .expect("should treat absent historical metadata as empty"),
-            Vec::new(),
-            "a root created before Gen migrations should have no operation logs"
-        );
-
-        let operation_log = OperationLog {
-            id: HashId::convert_str("post-migration-log"),
-            operation_kind: OperationKind::AddFile,
-            command: "add file".to_string(),
-            created_on: 1,
-        };
-        OperationLog::create(&conn, &operation_log).expect("should create operation log");
-        let current_commit = commit_all(&conn, "post-migration commit")
-            .expect("should commit current operation log");
-        let current_ref = current_commit.to_string();
-
-        assert_eq!(
-            operation_logs_at_ref(&conn, &current_ref)
-                .expect("should query current metadata snapshot"),
-            vec![(operation_log.id, OperationKind::AddFile)],
-            "a snapshot with the metadata table should return its rows"
-        );
-        assert!(
-            operation_logs_at_ref(&conn, "invalid-history-reference").is_err(),
-            "an invalid history reference should remain an error"
-        );
     }
 
     #[test]
