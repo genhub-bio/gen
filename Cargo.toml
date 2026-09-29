@@ -74,7 +74,7 @@ rat-cursor = "2.0.0"
 tui-widget-list = "0.15.0"
 url-parse = "1.0.10"
 url = "2.5.0"
-uuid = { version = "1.18.1", features = ["serde", "v7"] }
+uuid = { version = "1.18.1", features = ["serde"] }
 once_cell = "1.21.3"
 webbrowser = "1.0.5"
 reqwest = { version = "0.12.23", default-features = false,features = ["blocking", "json", "multipart", "stream", "rustls-tls"] }
@@ -109,5 +109,5 @@ codegen-units = 1
 panic = "abort"
 
 [patch.crates-io]
-rusqdoltlite = { path = "../../rusqdoltlite/remoteserver-uri" }
-libdoltlite-sys = { path = "../../rusqdoltlite/remoteserver-uri/libdoltlite-sys" }
+rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite", branch = "remoteserver-uri" }
+libdoltlite-sys = { git = "https://github.com/Chris7/rusqdoltlite", branch = "remoteserver-uri" }
