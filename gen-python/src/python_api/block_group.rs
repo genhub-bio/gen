@@ -13,10 +13,12 @@ use r#gen::{
         },
     },
 };
-use gen_annotations::projection::annotation_segments;
+use gen_annotations::projection::{AnnotationSegment, annotation_segments};
+use gen_core::range::Range;
 use gen_graph::GraphNode;
 use gen_models::{
-    annotations::Annotation,
+    accession::{Accession, AccessionSpan, NewAccession},
+    annotations::{Annotation, AnnotationGroupSample},
     block_group::BlockGroup,
     db::DbContext,
     node::Node,
@@ -37,7 +39,9 @@ use super::{
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
+    locus::GraphLocusExt as _,
     position::positions_of,
+    repository::run_context_operation_write,
     translation::build_translation_params,
     utils::block_group_err_to_pyerr,
 };
@@ -627,6 +631,97 @@ impl PySequenceGraph {
                 sequence_graph: Some(self.clone()),
             })
             .collect())
+    }
+
+    /// Persist an annotation over a locus in this sequence graph.
+    ///
+    /// Parameters
+    /// target : Locus
+    ///     Graph-space span to annotate. The locus must cover at least one base
+    ///     and belong to this sequence graph.
+    /// name : str
+    ///     Human-readable annotation name.
+    /// track : str, optional
+    ///     Annotation group in the database. Defaults to ``"default"``.
+    ///
+    /// Returns the database-backed ``Annotation`` that was created.
+    #[pyo3(signature = (target, name, track="default"))]
+    fn add_annotation(
+        &self,
+        target: &Bound<'_, PyAny>,
+        name: &str,
+        track: &str,
+    ) -> PyResult<PyAnnotation> {
+        let target = target
+            .extract::<PyRef<PyGraphLocus>>()
+            .map_err(|_| PyTypeError::new_err("annotation target must be a Locus"))?;
+        let target_locus = target.graph_locus();
+        if target_locus.slices.is_empty() || target_locus.length() == 0 {
+            return Err(PyValueError::new_err(
+                "annotation target must cover at least one base",
+            ));
+        }
+        let context = self.require_context("add_annotation()")?;
+        let annotation_segments: Vec<AnnotationSegment> = target_locus
+            .slices
+            .iter()
+            .map(|slice| AnnotationSegment {
+                node_id: slice.block.node_id,
+                range: Range {
+                    start: slice.block.sequence_start + slice.start as i64,
+                    end: slice.block.sequence_start + slice.end as i64,
+                },
+                strand: slice.strand,
+            })
+            .collect();
+
+        run_context_operation_write(
+            context,
+            |context| {
+                let conn = context.graph().conn();
+                let spans: Vec<AccessionSpan> = annotation_segments
+                    .iter()
+                    .map(|segment| AccessionSpan {
+                        node_id: segment.node_id,
+                        range: segment.range.clone(),
+                        strand: segment.strand,
+                    })
+                    .collect();
+                let accession = Accession::get_or_create(
+                    conn,
+                    &NewAccession {
+                        name: name.to_string(),
+                        block_group_id: self.id,
+                        parent_accession_id: None,
+                        spans,
+                    },
+                )
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                let annotation = Annotation::get_or_create(conn, name, track, &accession.id, None)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                AnnotationGroupSample::create(conn, track, &self.sample_name)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                let result = PyAnnotation {
+                    inner: annotation,
+                    context: Some(context.clone()),
+                    ann_segments: annotation_segments.clone(),
+                    source_block_group_id: Some(self.id),
+                    locus: Some(target_locus),
+                    sequence_graph: Some(self.clone()),
+                };
+                Ok((
+                    result,
+                    OperationSummary::new(
+                        OperationInfo {
+                            files: vec![],
+                            description: "add_annotation".to_string(),
+                        },
+                        format!("add annotation '{name}' to track '{track}'"),
+                    ),
+                ))
+            },
+            |error| PyRuntimeError::new_err(format!("failed to add annotation: {error}")),
+        )
     }
 
     /// Translate a sequence graph or annotation into a protein ``SequenceGraph``.
