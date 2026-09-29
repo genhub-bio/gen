@@ -50,9 +50,8 @@ impl Port {
     }
 }
 
-/// The blocks closed by sliding from one oriented port. A junction closes an arriving jump
-/// immediately. Its continuity edge can subsequently open a sequence block at the same
-/// oriented port without repeating the arriving jump.
+/// The blocks closed by sliding from one oriented port. Landing on a jump and continuing
+/// through a continuity edge can select different sequence intervals at the same port.
 #[derive(Clone, Debug, Default)]
 struct PortSlides {
     landing: Option<GraphNode>,
@@ -303,9 +302,25 @@ impl PortCrawler {
                 include_landing,
             )?
         };
-        let frontier = edges
+        let mut frontier = edges
             .first()
             .map_or(port, |edge| Port::endpoint(&edge.edge, direction));
+        let mut closed_from_opposite_side = false;
+        if include_landing && frontier == port && !is_terminal(port.node_id) {
+            // At an outer port, the current side has no further edge. The sequence interval
+            // belongs to the nearest port on the other side when one exists.
+            let opposite_edges = Edge::nearest_edge_group(
+                conn,
+                &self.block_group_id,
+                (port.node_id, port.coordinate),
+                direction.opposite(),
+                false,
+            )?;
+            if let Some(edge) = opposite_edges.first() {
+                frontier = Port::endpoint(&edge.edge, direction.opposite());
+                closed_from_opposite_side = true;
+            }
+        }
         let node = GraphNode {
             node_id: port.node_id,
             sequence_start: port.coordinate.min(frontier.coordinate),
@@ -313,7 +328,10 @@ impl PortCrawler {
         };
         // A sentinel still needs an exact lookup when expanded. An advancing slide's
         // closing group and an inclusive landing query are already complete.
-        if !is_terminal(port.node_id) && (frontier != port || include_landing) {
+        if !is_terminal(port.node_id)
+            && !closed_from_opposite_side
+            && (frontier != port || include_landing)
+        {
             self.edge_groups.insert((frontier, direction), edges);
         }
         let slides = self.slide_cache.entry((port, direction)).or_default();
@@ -350,40 +368,11 @@ impl PortCrawler {
             return Ok(());
         }
         let edges = self.load_group(conn, Port::of(&node, direction), direction)?;
-        let port = Port::of(&node, direction);
-        let junction = GraphNode {
-            node_id: port.node_id,
-            sequence_start: port.coordinate,
-            sequence_end: port.coordinate,
-        };
-        let has_continuity = edges.iter().any(|edge| is_continuity(&edge.edge));
-        let has_jump = edges.iter().any(|edge| !is_continuity(&edge.edge));
-        let has_same_node_jump = edges.iter().any(|edge| {
-            !is_continuity(&edge.edge) && edge.edge.source_node_id == edge.edge.target_node_id
-        });
-        // An arbitrary viewer anchor (a door, or a position gone to directly) can expose the
-        // sequence side of a junction before any jump has discovered it. Only a group mixing
-        // continuity with jumps, or leaving by a same-node jump that another same-node jump may
-        // meet, can end at a junction, so only those pay for the check.
-        if node != junction
-            && !graph.contains_node(junction)
-            && has_jump
-            && (has_continuity || has_same_node_jump)
-            && self.slide(conn, port, direction.opposite(), true)? == junction
-        {
-            graph.add_node(junction);
-        }
         for augmented_edge in edges {
             let key = (augmented_edge.edge.id, direction);
             let same_coordinate = is_continuity(&augmented_edge.edge);
-            let enters_junction = node != junction && graph.contains_node(junction);
-            if enters_junction && !same_coordinate {
-                // Non-continuity edges belong to the junction's frontier, not the
-                // sequence block ending here. Expanding that junction executes them.
-                continue;
-            }
-            // One continuity edge can project to both sequence -> junction and
-            // junction -> sequence. The slide cache prevents repeating its database work.
+            // A continuity edge can project through several blocks at one coordinate.
+            // The slide cache prevents repeating its database work.
             if self.visited_edges.contains(&key) && !same_coordinate {
                 continue;
             }
@@ -391,11 +380,7 @@ impl PortCrawler {
                 self.visited_edges.insert(key);
                 continue;
             }
-            let far_node = if enters_junction {
-                junction
-            } else {
-                self.land(conn, &augmented_edge.edge, direction)?
-            };
+            let far_node = self.land(conn, &augmented_edge.edge, direction)?;
             let (source, target) = match direction {
                 Direction::Outgoing => (node, far_node),
                 Direction::Incoming => (far_node, node),
@@ -603,140 +588,6 @@ mod tests {
                 Direction::Outgoing
             )),
             "both branches land on the same cached slide"
-        );
-    }
-
-    #[test]
-    fn test_outer_junction_and_continuity_match_eager_graph_in_both_directions() {
-        let conn = get_connection(None).unwrap();
-        let block_group_id = setup_block_group(
-            &conn,
-            &[("ref", "AAAAAAAAAA")],
-            &[
-                ("start", 0, "ref", 0, 0),
-                ("ref", 0, "ref", 0, 0),
-                ("ref", 0, "ref", 3, 1),
-                ("ref", 3, "ref", 3, 0),
-                ("ref", 3, "ref", 6, 1),
-                ("ref", 6, "ref", 6, 0),
-                ("ref", 6, "ref", 10, 1),
-                ("ref", 10, "ref", 10, 0),
-                ("ref", 10, "end", 0, 0),
-            ],
-        );
-        let eager = BlockGroup::get_graph(&conn, test_workspace(), &block_group_id, None).unwrap();
-        for anchor in [start_sentinel(), block("end", 0, 0)] {
-            let mut crawler = PortCrawler::new(block_group_id, false);
-            let mut graph = GenGraph::new();
-            graph.add_node(anchor);
-            crawl_to_exhaustion(&conn, &mut crawler, &mut graph);
-            assert_eq!(
-                connected_shape(&graph),
-                connected_shape(&eager),
-                "the lazy crawl should match the eager graph"
-            );
-        }
-    }
-
-    #[test]
-    fn test_jump_closes_at_junction_before_following_its_edge_batch() {
-        let conn = get_connection(None).unwrap();
-        let block_group_id = setup_block_group(
-            &conn,
-            &[("ref", "AAAAAAAAAA")],
-            &[
-                ("start", 0, "ref", 0, 0),
-                ("ref", 3, "ref", 6, 0),
-                ("ref", 6, "ref", 9, 0),
-                ("ref", 9, "end", 0, 0),
-            ],
-        );
-        let mut crawler = PortCrawler::new(block_group_id, false);
-        let mut graph = GenGraph::new();
-        graph.add_node(start_sentinel());
-        crawler
-            .expand(
-                &conn,
-                &mut graph,
-                &[start_sentinel()],
-                Direction::Outgoing,
-                1,
-            )
-            .unwrap();
-        assert!(
-            graph.contains_node(block("ref", 6, 6)),
-            "the jump should close at the landing junction"
-        );
-        assert!(
-            !graph.contains_node(block("ref", 9, 9)),
-            "the junction's own jump should not be followed yet"
-        );
-        assert!(
-            !crawler.is_complete(&block("ref", 6, 6), Direction::Outgoing),
-            "the landing junction should stay frontier"
-        );
-    }
-
-    #[test]
-    fn test_continuity_stops_at_junction_without_expanding_it() {
-        let conn = get_connection(None).unwrap();
-        let block_group_id = setup_block_group(
-            &conn,
-            &[("ref", "AAAAAAAAAA")],
-            &[
-                ("start", 0, "ref", 0, 0),
-                ("ref", 0, "ref", 0, 0),
-                ("ref", 0, "ref", 3, 1),
-                ("ref", 3, "ref", 3, 0),
-                ("ref", 3, "ref", 6, 1),
-                ("ref", 6, "end", 0, 0),
-            ],
-        );
-        let mut crawler = PortCrawler::new(block_group_id, false);
-        let mut graph = GenGraph::new();
-        graph.add_node(start_sentinel());
-        crawler
-            .expand(
-                &conn,
-                &mut graph,
-                &[start_sentinel()],
-                Direction::Outgoing,
-                1,
-            )
-            .unwrap();
-        crawler
-            .expand(
-                &conn,
-                &mut graph,
-                &[block("ref", 0, 3)],
-                Direction::Outgoing,
-                0,
-            )
-            .unwrap();
-        assert!(
-            graph.contains_edge(block("ref", 0, 3), block("ref", 3, 3)),
-            "continuity should connect the block to its junction"
-        );
-        assert!(
-            !graph.contains_node(block("ref", 3, 6)),
-            "the junction should not be expanded past"
-        );
-        assert!(
-            !graph.contains_node(block("ref", 6, 6)),
-            "the junction's jump should not be followed"
-        );
-        crawler
-            .expand(
-                &conn,
-                &mut graph,
-                &[block("ref", 3, 3)],
-                Direction::Outgoing,
-                0,
-            )
-            .unwrap();
-        assert!(
-            graph.contains_edge(block("ref", 3, 3), block("ref", 3, 6)),
-            "expanding the junction should open the next block"
         );
     }
 

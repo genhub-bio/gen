@@ -499,13 +499,11 @@ impl Edge {
                 };
                 coordinate == port.1
             });
-        if !closes_at_landing
-            || Self::is_landing_junction(conn, block_group_id, port, direction, &edges)?
-        {
+        if !closes_at_landing {
             return Ok(edges);
         }
-        // The landing port is not a junction, so the block runs on to the next port. With
-        // no further port, the landing group itself closes the slide.
+        // Every interval between ports carries sequence in the current edit model. Continue
+        // past a landing port when another port bounds that sequence.
         let beyond = Self::nearest_edge_group(conn, block_group_id, port, direction, false)?;
         Ok(if beyond.is_empty() { edges } else { beyond })
     }
@@ -583,76 +581,6 @@ impl Edge {
             },
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(EdgeError::from)
-    }
-
-    /// Whether a slide landing on `port` closes there as a zero-width junction, given the
-    /// `landing_edges` leaving it in `direction`. Mirrors `get_block_intervals`: a same-node
-    /// jump meeting another same-node jump from the opposite side, or an outer junction
-    /// with no edge on the node before `port`.
-    fn is_landing_junction(
-        conn: &GraphConnection,
-        block_group_id: &HashId,
-        port: (HashId, i64),
-        direction: Direction,
-        landing_edges: &[AugmentedEdge],
-    ) -> Result<bool, EdgeError> {
-        let (opposite_side, outer_comparison) = match direction {
-            Direction::Outgoing => ("target", "<"),
-            Direction::Incoming => ("source", ">"),
-        };
-        let query = format!(
-            "\
-            SELECT
-                EXISTS (
-                    SELECT 1 FROM {edges} opposite
-                    CROSS JOIN {block_group_edges} opposite_group
-                    WHERE opposite.{opposite_side}_node_id = :node_id
-                      AND opposite.{opposite_side}_coordinate = :coordinate
-                      AND opposite.source_node_id = opposite.target_node_id
-                      AND opposite.source_coordinate != opposite.target_coordinate
-                      AND opposite_group.block_group_id = :block_group_id
-                      AND opposite_group.edge_id = opposite.id
-                ),
-                EXISTS (
-                    SELECT 1 FROM {edges} earlier_source
-                    CROSS JOIN {block_group_edges} earlier_source_group
-                    WHERE earlier_source.source_node_id = :node_id
-                      AND earlier_source.source_coordinate {outer_comparison} :coordinate
-                      AND earlier_source_group.block_group_id = :block_group_id
-                      AND earlier_source_group.edge_id = earlier_source.id
-                ),
-                EXISTS (
-                    SELECT 1 FROM {edges} earlier_target
-                    CROSS JOIN {block_group_edges} earlier_target_group
-                    WHERE earlier_target.target_node_id = :node_id
-                      AND earlier_target.target_coordinate {outer_comparison} :coordinate
-                      AND earlier_target_group.block_group_id = :block_group_id
-                      AND earlier_target_group.edge_id = earlier_target.id
-                );",
-            edges = Self::table_name_with_history_ref(None),
-            block_group_edges = BlockGroupEdge::table_name_with_history_ref(None),
-        );
-        let mut statement = conn.prepare_cached(&query)?;
-        let (has_opposite_jump, has_earlier_source, has_earlier_target) = statement.query_row(
-            named_params! {
-                ":node_id": port.0,
-                ":coordinate": port.1,
-                ":block_group_id": block_group_id,
-            },
-            |row| {
-                Ok((
-                    row.get::<_, bool>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, bool>(2)?,
-                ))
-            },
-        )?;
-        let leaves_by_same_node_jump = landing_edges.iter().any(|edge| {
-            edge.edge.source_node_id == edge.edge.target_node_id
-                && edge.edge.source_coordinate != edge.edge.target_coordinate
-        });
-        Ok((leaves_by_same_node_jump && has_opposite_jump)
-            || (!has_earlier_source && !has_earlier_target))
     }
 
     /// Converts input edge coordinates for one backing node into the sequence slices represented

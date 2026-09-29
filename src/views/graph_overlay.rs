@@ -188,7 +188,7 @@ pub enum OverlaySource {
 impl OverlaySource {
     /// Whether this overlay is an annotation, as opposed to a search result or a path.
     pub fn is_annotation(&self) -> bool {
-        matches!(self, Self::Track(_) | Self::Annotation(_) | Self::Adhoc)
+        matches!(self, Self::Track(_) | Self::Adhoc)
     }
 }
 
