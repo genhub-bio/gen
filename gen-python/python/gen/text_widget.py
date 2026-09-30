@@ -67,7 +67,6 @@ _GRAPHWIDGET_ONLY_METHODS = frozenset(
         "clear_highlights",
         "show_path",
         "hide_path",
-        "load_track",
         "show_track",
         "hide_track",
         "tracks",

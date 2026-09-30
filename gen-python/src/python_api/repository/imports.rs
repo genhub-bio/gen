@@ -11,6 +11,7 @@ use r#gen::{
     },
 };
 use gen_models::{
+    annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
     errors::OperationError,
     sample::{NewSample, Sample},
 };
@@ -23,6 +24,32 @@ use crate::python_api::{
 
 #[pymethods]
 impl PyRepository {
+    /// Record an annotation file as a repository asset and return its commit hash.
+    ///
+    /// The format is inferred from the filename unless provided. A neighboring tabix index is
+    /// discovered unless an index path is provided. Views match file references to block groups.
+    #[pyo3(signature = (filename, format=None, index=None, name=None, message=None))]
+    fn import_annotations(
+        &self,
+        filename: &str,
+        format: Option<&str>,
+        index: Option<&str>,
+        name: Option<&str>,
+        message: Option<&str>,
+    ) -> PyResult<String> {
+        add_annotation_file(
+            &self.context,
+            filename,
+            format,
+            index,
+            name,
+            message,
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .map(|commit_hash| commit_hash.to_string())
+        .map_err(|error| PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}")))
+    }
+
     #[pyo3(signature = (filename, sample=None, shallow=false, collection=None))]
     pub fn import_fasta(
         &self,
