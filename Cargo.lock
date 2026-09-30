@@ -4966,6 +4966,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "hashlink",
  "libdoltlite-sys",
+ "sha2 0.10.9",
  "smallvec",
  "sqlite-wasm-rs",
  "uuid",
