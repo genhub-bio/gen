@@ -121,6 +121,10 @@ use crate::{
             complete_asset_transfers, publish_direct_push,
         },
         login_origin,
+        progress::{
+            AssetUploadProgressReporter, GraphUploadProgressReporter, UploadBodyReader,
+            write_progress_line,
+        },
         server::AuthTokens,
     },
     get_config_connection, get_connection_for_branch, get_raw_connection,
@@ -691,7 +695,9 @@ fn push_graph_through_direct_session(
     force: bool,
     destination_hash: &DoltHashId,
     renewal: &PushCapabilityRenewal,
+    attempt: usize,
 ) -> Result<(), PushGraphTransferError> {
+    let graph_progress = GraphUploadProgressReporter::new(attempt, 2);
     let response = renewal.capability_response()?;
     let capability = response.direct_push.as_ref().ok_or_else(|| {
         PushGraphTransferError::Protocol(
@@ -714,13 +720,18 @@ fn push_graph_through_direct_session(
         .map_err(|error| {
             PushGraphTransferError::database("creating session operation ID", error)
         })?;
+    write_progress_line(&format!(
+        "Opening direct GCS graph session (attempt {attempt}/2)..."
+    ));
     let renewal_callback = renewal.clone();
+    let graph_progress_callback = graph_progress.clone();
     let session =
         BlockCacheSessionOptions::for_uri(capability.session_id.to_string(), scope, operation_id)
             .map_err(|error| PushGraphTransferError::database("attaching GCS session", error))?
             .auth_callback(move |_storage, _account, _container, reason| {
                 renewal_callback.auth_token(reason)
-            });
+            })
+            .upload_progress_callback(move |progress| graph_progress_callback.report(progress));
     let options = RemoteServerOptions::new().blockcache_session(session);
     let mut local_server =
         RemoteServer::start_with_options(Path::new(&capability.database_uri), &options).map_err(
@@ -738,18 +749,28 @@ fn push_graph_through_direct_session(
     };
     match operation_status {
         SessionOperationStatus::Accepted | SessionOperationStatus::Committed => {
+            write_progress_line(
+                "Reusing accepted graph checkpoint; verifying the staged branch...",
+            );
             if let Err(error) =
                 validate_direct_session_branch(&local_server, branch, destination_hash)
             {
+                graph_progress.finish();
                 close_direct_push_server(local_server)?;
                 return Err(error);
             }
+            graph_progress.finish();
             close_direct_push_server(local_server)?;
+            write_progress_line("Accepted graph checkpoint is ready for publication.");
         }
         SessionOperationStatus::New => {
+            write_progress_line(&format!(
+                "Staging graph database to GCS (attempt {attempt}/2)..."
+            ));
             let local_remote_url =
                 local_server.database_url(&capability.session_scope.target_database);
             if let Err(error) = ensure_graph_remote(graph, &remote.name, &local_remote_url) {
+                graph_progress.finish();
                 close_direct_push_server(local_server)?;
                 return Err(PushGraphTransferError::database(
                     "configuring loopback Dolt remote",
@@ -757,6 +778,7 @@ fn push_graph_through_direct_session(
                 ));
             }
             if let Err(error) = push_graph_branch(graph, &remote.name, branch, force) {
+                graph_progress.finish();
                 close_direct_push_server(local_server)?;
                 return Err(PushGraphTransferError::database(
                     "running Dolt push through loopback RemoteServer",
@@ -766,6 +788,7 @@ fn push_graph_through_direct_session(
             if let Err(error) =
                 validate_direct_session_branch(&local_server, branch, destination_hash)
             {
+                graph_progress.finish();
                 close_direct_push_server(local_server)?;
                 return Err(error);
             }
@@ -773,23 +796,29 @@ fn push_graph_through_direct_session(
                 PushGraphTransferError::database("staging direct-push operation", error)
             });
             let close_result = close_direct_push_server(local_server);
+            graph_progress.finish();
             stage_result?;
             close_result?;
+            write_progress_line("Graph staging complete.");
         }
         SessionOperationStatus::Failed => {
+            graph_progress.finish();
             close_direct_push_server(local_server)?;
             return Err(PushGraphTransferError::Protocol(
                 "GenHub direct-push session has already failed".to_string(),
             ));
         }
         SessionOperationStatus::Conflict => {
+            graph_progress.finish();
             close_direct_push_server(local_server)?;
             return Err(PushGraphTransferError::Protocol(
                 "GenHub direct-push session conflicts with another operation".to_string(),
             ));
         }
     }
+    write_progress_line("Publishing graph manifest...");
     renewal.publish()?;
+    write_progress_line("Graph manifest published.");
     Ok(())
 }
 
@@ -830,6 +859,9 @@ fn run_push_graph_transfer(
     let mut last_error = None;
     let mut expected_session_identity: Option<PushCapabilityRenewal> = None;
     for attempt in 0..2 {
+        if attempt > 0 {
+            write_progress_line("Retrying direct GCS graph transfer (attempt 2/2)...");
+        }
         let authorization = if attempt == 0 {
             transfer_authorization(
                 remote,
@@ -895,6 +927,7 @@ fn run_push_graph_transfer(
             force,
             destination_hash,
             &renewal,
+            attempt + 1,
         );
         match transfer_result {
             Ok(()) => {
@@ -1063,18 +1096,24 @@ fn materialized_asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn E
     }
 }
 
-fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String), std::io::Error> {
+fn calculate_upload_checksums(
+    path: &Path,
+    progress: &AssetUploadProgressReporter,
+) -> Result<(Sha256Hash, String, String), std::io::Error> {
     let file = fs::File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut sha256 = Sha256::new();
     let mut md5 = Md5::new();
     let mut crc32c = 0;
+    let mut bytes_read = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let length = reader.read(&mut buffer)?;
         if length == 0 {
             break;
         }
+        bytes_read += length as u64;
+        progress.checksum_bytes(bytes_read);
         sha256.update(&buffer[..length]);
         md5.update(&buffer[..length]);
         crc32c = crc32c_append(crc32c, &buffer[..length]);
@@ -1086,11 +1125,30 @@ fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String
     ))
 }
 
+fn progress_asset_name(asset: &AssetRef, source_path: &Path) -> String {
+    let name = asset
+        .logical_path
+        .as_deref()
+        .or_else(|| source_path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or("asset");
+    name.chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 fn upload_asset(
     client: &Client,
     workspace: &Workspace,
     asset: &AssetRef,
     url: &str,
+    index: usize,
+    total: usize,
 ) -> Result<AssetUploadReceipt, Box<dyn Error>> {
     let relative_path = LocalAssetUri::path_from_uri(&asset.uri)
         .ok_or_else(|| format!("Invalid local asset URI: {}", asset.uri))?;
@@ -1108,8 +1166,16 @@ fn upload_asset(
             asset.logical_path.as_deref(),
         )?
     };
-    let (actual_checksum, md5, crc32c) =
-        calculate_upload_checksums(&source_path).map_err(|error| {
+    let length = fs::metadata(&source_path)?.len();
+    let progress = AssetUploadProgressReporter::new(
+        index,
+        total,
+        progress_asset_name(asset, &source_path),
+        length,
+    );
+    progress.checksum_started();
+    let (actual_checksum, md5, crc32c) = calculate_upload_checksums(&source_path, &progress)
+        .map_err(|error| {
             format!(
                 "Unable to read asset {} at {}: {error}",
                 asset.id,
@@ -1125,7 +1191,17 @@ fn upload_asset(
         .into());
     }
     let file = fs::File::open(&source_path)?;
-    let length = file.metadata()?.len();
+    if file.metadata()?.len() != length {
+        return Err(format!(
+            "Asset {} at {} changed size while its checksum was being verified",
+            asset.id,
+            source_path.display()
+        )
+        .into());
+    }
+    progress.checksum_verified();
+    progress.upload_started();
+    let request_body = UploadBodyReader::new(file, progress.clone());
     let response = client
         .put(url)
         .header("content-type", "application/octet-stream")
@@ -1133,7 +1209,7 @@ fn upload_asset(
         // composite objects (those > 5GB)
         .header("content-md5", &md5)
         .header("x-goog-if-generation-match", "0")
-        .body(Body::sized(file, length))
+        .body(Body::sized(request_body, length))
         .send()
         .map_err(|error| error.without_url())?;
     if !response.status().is_success()
@@ -1145,6 +1221,11 @@ fn upload_asset(
             response.status()
         )
         .into());
+    }
+    if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+        progress.upload_already_present();
+    } else {
+        progress.upload_accepted();
     }
     Ok(AssetUploadReceipt {
         id: asset.id,
@@ -1870,6 +1951,15 @@ fn transfer_assets(
 
     let repository = RepositoryRemote::parse(&remote.url)?;
     if operation == RemoteOperation::Push {
+        let local_asset_count = assets.len();
+        let asset_label = if local_asset_count == 1 {
+            "asset"
+        } else {
+            "assets"
+        };
+        write_progress_line(&format!(
+            "Checking {local_asset_count} local {asset_label} for transfer..."
+        ));
         before_transfer()?;
     }
     let response = acquire_asset_transfers(
@@ -1893,14 +1983,36 @@ fn transfer_assets(
         }
     }
     if operation == RemoteOperation::Push {
+        let upload_total = response
+            .assets
+            .iter()
+            .filter(|transfer| assets.contains_key(&transfer.id))
+            .count();
+        if upload_total == 0 {
+            write_progress_line("No new assets need uploading.");
+        } else {
+            let asset_label = if upload_total == 1 { "asset" } else { "assets" };
+            write_progress_line(&format!(
+                "Preparing {upload_total} {asset_label} for upload..."
+            ));
+        }
         let mut assets = assets;
         let mut upload_receipts = Vec::new();
+        let mut upload_index = 0;
         for transfer in response.assets {
             let Some(asset) = assets.remove(&transfer.id) else {
                 continue;
             };
+            upload_index += 1;
             before_transfer()?;
-            upload_receipts.push(upload_asset(&client, workspace, &asset, &transfer.url)?);
+            upload_receipts.push(upload_asset(
+                &client,
+                workspace,
+                &asset,
+                &transfer.url,
+                upload_index,
+                upload_total,
+            )?);
         }
         if !assets.is_empty() {
             return Err(format!(
@@ -2094,6 +2206,10 @@ pub fn execute_push(
     };
     let remote = resolve_remote(&config, explicit_remote, &branch)
         .map_err(RemotePushError::RemoteResolution)?;
+    write_progress_line(&format!(
+        "Preparing push of branch '{branch}' to '{}'...",
+        remote.name,
+    ));
     // A missing or stale tracking ref only makes the transfer conservatively include more assets.
     // Force pushes cannot use the tracking ref as a lower bound because they may replace history.
     let tracking_ref = format!("{}/{branch}", remote.name);
@@ -2154,6 +2270,7 @@ pub fn execute_push(
             operation.set_push_session_id(&config, Uuid::new_v4())?;
         }
         let renewal = if let Some(transfer_lease) = existing_transfer_lease {
+            write_progress_line("Graph manifest already published; resuming asset transfer...");
             let push_session_id = operation
                 .push_session_id
                 .expect("push session UUID should be persisted before transfer");
@@ -2266,6 +2383,7 @@ pub fn execute_push(
             .push_lease()
             .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?;
         let repository = RepositoryRemote::parse(&remote.url)?;
+        write_progress_line("Verifying asset uploads and finishing push...");
         complete_asset_transfers(
             &repository,
             &AssetTransferCompletionRequest {
@@ -2275,6 +2393,7 @@ pub fn execute_push(
             },
             login_origin,
         )?;
+        write_progress_line("GenHub verified and accepted the asset uploads.");
         operation.advance_assets_transfer_checkpoint(&config, destination_hash)?;
         operation.complete(&config)?;
     }

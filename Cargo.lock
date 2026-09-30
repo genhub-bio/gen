@@ -1142,7 +1142,7 @@ dependencies = [
  "openssl-sys",
  "pkg-config",
  "vcpkg",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2910,7 +2910,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 [[package]]
 name = "libdoltlite-sys"
 version = "0.38.22"
-source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#ebf31b9528b78b7357a79023627c450db34f7ffb"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#ab8ffa7212906569bfaa8be1c0a127125aebbef1"
 dependencies = [
  "cc",
  "curl-sys",
@@ -5011,7 +5011,7 @@ dependencies = [
 [[package]]
 name = "rusqdoltlite"
 version = "0.40.22"
-source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#ebf31b9528b78b7357a79023627c450db34f7ffb"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#ab8ffa7212906569bfaa8be1c0a127125aebbef1"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
