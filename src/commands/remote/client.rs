@@ -174,6 +174,8 @@ impl fmt::Debug for CapabilityResponse {
 pub struct DirectPushCapability {
     /// GCS database URI containing the short-lived, downscoped token.
     pub database_uri: String,
+    /// Expiration time of the downscoped token carried by `database_uri`.
+    pub token_expires_at: DateTime<Utc>,
     /// Stable client session UUID shared with the GenHub lease.
     pub session_id: Uuid,
     /// Context used to bind the local and server-side session attachments.
@@ -586,9 +588,15 @@ pub fn acquire_push_capability(
 /// Publishes a staged direct-GCS session through its signed GenHub endpoint.
 pub fn publish_direct_push(capability: &DirectPushCapability) -> Result<(), RemoteClientError> {
     let client = Client::builder().redirect(Policy::none()).build()?;
-    let response = client.post(&capability.publish_url).send()?;
+    let response = client
+        .post(&capability.publish_url)
+        .send()
+        .map_err(|error| RemoteClientError::Request(error.without_url()))?;
     if !response.status().is_success() {
-        return Err(response_error(response));
+        return Err(RemoteClientError::Http {
+            status: response.status(),
+            message: "direct GCS manifest publication failed".to_string(),
+        });
     }
     Ok(())
 }
@@ -910,6 +918,7 @@ mod tests {
             "transfer_id": TEST_TRANSFER_ID,
             "direct_push": {
                 "database_uri": "gcs://bucket/repos/alice/example/.gen/graph_db/?vfs=blockcachevfs&access_token=secret",
+                "token_expires_at": "2030-01-01T00:15:00Z",
                 "session_id": TEST_TRANSFER_ID,
                 "session_scope": {
                     "principal": session_scope.principal.clone(),
@@ -948,6 +957,9 @@ mod tests {
             capability.direct_push,
             Some(DirectPushCapability {
                 database_uri: "gcs://bucket/repos/alice/example/.gen/graph_db/?vfs=blockcachevfs&access_token=secret".to_string(),
+                token_expires_at: "2030-01-01T00:15:00Z"
+                    .parse()
+                    .expect("should parse CAB token expiry"),
                 session_id: TEST_TRANSFER_ID,
                 session_scope,
                 publish_url: "https://genhub.bio/api/publish?token=secret".to_string(),

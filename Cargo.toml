@@ -109,5 +109,5 @@ codegen-units = 1
 panic = "abort"
 
 [patch.crates-io]
-rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite", branch = "remoteserver-uri" }
-libdoltlite-sys = { git = "https://github.com/Chris7/rusqdoltlite", branch = "remoteserver-uri" }
+rusqdoltlite = { git = "https://github.com/Chris7/rusqdoltlite", branch = "direct-gcs-session" }
+libdoltlite-sys = { git = "https://github.com/Chris7/rusqdoltlite", branch = "direct-gcs-session" }
