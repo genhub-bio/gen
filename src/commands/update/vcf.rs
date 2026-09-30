@@ -35,9 +35,9 @@ pub struct Command {
     /// Apply edits in-place instead of using parent sample's reference coordinates
     #[arg(long = "inplace")]
     in_place: bool,
-    /// Create a path for new samples when all VCF calls are homozygous and unambiguous.
+    /// Require a path for new samples; fail if calls or parent paths are ambiguous.
     #[arg(long)]
-    update_homozygous_paths: bool,
+    create_homozygous_paths: bool,
 }
 
 #[cfg_attr(feature = "profiling", tracing::instrument(skip(cli_context, cmd)))]
@@ -70,7 +70,7 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
             fixed_sample: cmd.sample.clone(),
             parent_samples: cmd.parent_samples.clone(),
             in_place: cmd.in_place,
-            update_homozygous_paths: cmd.update_homozygous_paths,
+            create_homozygous_paths: cmd.create_homozygous_paths,
         },
     ) {
         Ok((operation_summary, _output_samples)) => {
