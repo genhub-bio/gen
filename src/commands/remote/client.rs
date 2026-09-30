@@ -30,8 +30,9 @@ use std::{env, fmt, io};
 use chrono::{DateTime, Utc};
 use gen_core::{DoltHashId, HashId};
 use reqwest::{
-    StatusCode, Url,
+    StatusCode, Url, Version,
     blocking::{Client, RequestBuilder},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
@@ -260,7 +261,7 @@ pub enum RemoteClientError {
     InvalidRepositoryUrl(String),
     #[error("Authentication is required; run `gen remote login` or set GENHUB_API_KEY")]
     AuthenticationRequired,
-    #[error("GenHub request failed with HTTP {status}: {message}")]
+    #[error("Remote endpoint returned HTTP {status}: {message}")]
     Http { status: StatusCode, message: String },
     #[error(
         "Failed to decode {endpoint} response (HTTP {status}, declared Content-Length {declared_content_length:?}): {source}"
@@ -590,15 +591,55 @@ pub fn publish_direct_push(capability: &DirectPushCapability) -> Result<(), Remo
     let client = Client::builder().redirect(Policy::none()).build()?;
     let response = client
         .post(&capability.publish_url)
+        .header(CONTENT_LENGTH, "0")
         .send()
         .map_err(|error| RemoteClientError::Request(error.without_url()))?;
     if !response.status().is_success() {
+        let status = response.status();
+        let protocol = http_version_label(response.version());
+        let content_type = response_content_type_label(response.headers());
         return Err(RemoteClientError::Http {
-            status: response.status(),
-            message: "direct GCS manifest publication failed".to_string(),
+            status,
+            message: format!(
+                "manifest publication request received {protocol}; response Content-Type: {content_type}"
+            ),
         });
     }
     Ok(())
+}
+
+fn http_version_label(version: Version) -> &'static str {
+    match version {
+        Version::HTTP_09 => "HTTP/0.9",
+        Version::HTTP_10 => "HTTP/1.0",
+        Version::HTTP_11 => "HTTP/1.1",
+        Version::HTTP_2 => "HTTP/2",
+        Version::HTTP_3 => "HTTP/3",
+        _ => "unknown HTTP version",
+    }
+}
+
+fn response_content_type_label(headers: &HeaderMap) -> &'static str {
+    let Some(value) = headers.get(CONTENT_TYPE) else {
+        return "absent";
+    };
+    let Ok(value) = value.to_str() else {
+        return "other";
+    };
+    let media_type = value
+        .split_once(';')
+        .map_or(value, |(media_type, _)| media_type)
+        .trim()
+        .to_ascii_lowercase();
+    if media_type == "application/json"
+        || (media_type.starts_with("application/") && media_type.ends_with("+json"))
+    {
+        "JSON"
+    } else if media_type == "text/html" || media_type == "application/xhtml+xml" {
+        "HTML"
+    } else {
+        "other"
+    }
 }
 
 pub fn acquire_asset_transfers(
@@ -661,7 +702,8 @@ mod tests {
         AssetTransferRequest, AuthTokens, CapabilityRequest, CapabilityResponse,
         DirectPushCapability, RemoteClientError, RemoteOperation, RepositoryRemote,
         RequestAuthorization, SessionScope, TokenStore, acquire_capability_with_store,
-        acquire_capability_with_store_and_token, normalized_origin, send_asset_transfers,
+        acquire_capability_with_store_and_token, http_version_label, normalized_origin,
+        publish_direct_push, response_content_type_label, send_asset_transfers,
     };
 
     const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
@@ -761,6 +803,92 @@ mod tests {
                     body.len()
                 )
                 .expect("should write mock GenHub response");
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn read_request_head(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .expect("should read request headers");
+            assert!(read > 0, "request should include its headers");
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return request;
+            }
+        }
+    }
+
+    fn strict_empty_post_server(request_count: usize) -> (String, JoinHandle<Vec<(String, u16)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind strict HTTP fixture");
+        let address = listener
+            .local_addr()
+            .expect("should read strict HTTP fixture address");
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("should accept strict publication request");
+                let request = String::from_utf8(read_request_head(&mut stream))
+                    .expect("should decode request headers as UTF-8");
+                let forced_response = if request.starts_with("POST /reject-html?") {
+                    Some((411, "Length Required", "Content-Type: text/html\r\n"))
+                } else if request.starts_with("POST /reject-json?") {
+                    Some((
+                        502,
+                        "Bad Gateway",
+                        "Content-Type: application/problem+json\r\n",
+                    ))
+                } else if request.starts_with("POST /reject-other?") {
+                    Some((
+                        502,
+                        "Bad Gateway",
+                        "Content-Type: application/x-private; name=private-canary\r\n",
+                    ))
+                } else if request.starts_with("POST /reject-absent?") {
+                    Some((502, "Bad Gateway", ""))
+                } else {
+                    None
+                };
+                let header_end = request
+                    .as_bytes()
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .expect("should find the end of request headers");
+                let headers = request[..header_end].to_ascii_lowercase();
+                let content_lengths = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .filter(|(name, _)| name.trim() == "content-length")
+                    .map(|(_, value)| value.trim())
+                    .collect::<Vec<_>>();
+                let body = &request.as_bytes()[header_end + 4..];
+                let (status, reason, content_type, response_body) =
+                    if let Some((status, reason, content_type)) = forced_response {
+                        (status, reason, content_type, "response-body-canary")
+                    } else if content_lengths.as_slice() == ["0"] && body.is_empty() {
+                        (204, "No Content", "", "")
+                    } else {
+                        (
+                            411,
+                            "Length Required",
+                            "Content-Type: text/html\r\n",
+                            "length required",
+                        )
+                    };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\n{content_type}Content-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                )
+                .expect("should write strict publication response");
+                requests.push((request, status));
             }
             requests
         });
@@ -1256,5 +1384,165 @@ mod tests {
         ));
         assert_eq!(stored.jwt, "expired-access");
         assert_eq!(stored.refresh_token, "invalid-refresh");
+    }
+
+    #[test]
+    fn test_publish_direct_push_requires_explicit_zero_content_length() {
+        let (origin, server) = strict_empty_post_server(7);
+        let address = origin
+            .strip_prefix("http://")
+            .expect("should use HTTP/1.1 in the strict fixture");
+        let mut missing_length_request =
+            TcpStream::connect(address).expect("should connect to strict fixture");
+        write!(
+            missing_length_request,
+            "POST /publish HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        )
+        .expect("should send request without Content-Length");
+        let mut missing_length_rejection = String::new();
+        missing_length_request
+            .read_to_string(&mut missing_length_rejection)
+            .expect("should read missing Content-Length rejection");
+        assert!(
+            missing_length_rejection.starts_with("HTTP/1.1 411 Length Required\r\n"),
+            "strict fixture should reject missing Content-Length: {missing_length_rejection}"
+        );
+
+        let mut nonempty_length_request =
+            TcpStream::connect(address).expect("should connect to strict fixture");
+        write!(
+            nonempty_length_request,
+            "POST /publish HTTP/1.1\r\nHost: {address}\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"
+        )
+        .expect("should send nonzero-length request headers");
+        let mut rejection = String::new();
+        nonempty_length_request
+            .read_to_string(&mut rejection)
+            .expect("should read strict fixture rejection");
+        assert!(
+            rejection.starts_with("HTTP/1.1 411 Length Required\r\n"),
+            "strict fixture should reject nonzero Content-Length: {rejection}"
+        );
+
+        let capability = DirectPushCapability {
+            database_uri: "gcs://bucket/prefix?access_token=not-used".to_string(),
+            token_expires_at: "2030-01-01T00:00:00Z"
+                .parse()
+                .expect("should parse test token expiration"),
+            session_id: TEST_TRANSFER_ID,
+            session_scope: SessionScope {
+                principal: "alice".to_string(),
+                target_database: "example".to_string(),
+                operations: "commit".to_string(),
+            },
+            publish_url: format!("{origin}/publish?signature=publish-secret"),
+        };
+        let publish_result = publish_direct_push(&capability);
+
+        let rejection_cases = [
+            ("html", 411, "HTML"),
+            ("json", 502, "JSON"),
+            ("other", 502, "other"),
+            ("absent", 502, "absent"),
+        ];
+        let rejected_results = rejection_cases.map(|(body_type, _, _)| {
+            let rejected_capability = DirectPushCapability {
+                publish_url: format!("{origin}/reject-{body_type}?signature=publish-secret"),
+                ..capability.clone()
+            };
+            publish_direct_push(&rejected_capability)
+                .expect_err("should report forced publication rejection")
+                .to_string()
+        });
+        let requests = server.join().expect("should finish strict fixture");
+
+        assert_eq!(requests.len(), 7);
+        assert_eq!(
+            requests[0].1, 411,
+            "missing Content-Length should be rejected"
+        );
+        assert_eq!(
+            requests[1].1, 411,
+            "nonzero Content-Length should be rejected"
+        );
+        assert_eq!(
+            requests[2].1, 204,
+            "publisher should send Content-Length: 0 and no request body; captured request: {}",
+            requests[2].0
+        );
+        assert_eq!(requests[3].1, 411, "should return the HTML fixture status");
+        assert_eq!(requests[4].1, 502, "should return the JSON fixture status");
+        assert_eq!(requests[5].1, 502, "should return the other fixture status");
+        assert_eq!(
+            requests[6].1, 502,
+            "should return the absent fixture status"
+        );
+        assert!(
+            publish_result.is_ok(),
+            "empty manifest publication should be accepted: {publish_result:?}"
+        );
+        let request = &requests[2].0;
+        let (headers, body) = request
+            .split_once("\r\n\r\n")
+            .expect("should find captured publication request headers");
+        assert!(
+            headers.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length") && value.trim() == "0"
+                })
+            }),
+            "wire request should explicitly contain Content-Length: 0: {headers}"
+        );
+        assert!(
+            body.is_empty(),
+            "manifest publication request body should be empty"
+        );
+
+        for ((body_type, status, content_type), rendered_error) in
+            rejection_cases.into_iter().zip(rejected_results)
+        {
+            assert!(
+                rendered_error.contains(&format!("Remote endpoint returned HTTP {status}")),
+                "should identify the remote HTTP response for {body_type}: {rendered_error}"
+            );
+            assert!(
+                rendered_error.contains("manifest publication request received HTTP/1.1"),
+                "should identify the publication request protocol: {rendered_error}"
+            );
+            assert!(
+                rendered_error.contains(&format!("response Content-Type: {content_type}")),
+                "should classify the response content type: {rendered_error}"
+            );
+            assert!(
+                !rendered_error.contains("publish-secret")
+                    && !rendered_error.contains("response-body-canary")
+                    && !rendered_error.contains("private-canary"),
+                "should hide signed URLs, response bodies, and raw Content-Type values: {rendered_error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_publish_response_diagnostic_labels_are_fixed() {
+        let cases = [
+            (Some("application/json; charset=utf-8"), "JSON"),
+            (Some("application/problem+json"), "JSON"),
+            (Some("text/html"), "HTML"),
+            (Some("application/xhtml+xml"), "HTML"),
+            (Some("application/octet-stream"), "other"),
+            (Some("not-a-media-type"), "other"),
+            (None, "absent"),
+        ];
+        for (value, expected) in cases {
+            let mut headers = reqwest::header::HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    value.parse().expect("should parse test Content-Type"),
+                );
+            }
+            assert_eq!(response_content_type_label(&headers), expected);
+        }
+        assert_eq!(http_version_label(reqwest::Version::HTTP_11), "HTTP/1.1");
     }
 }
