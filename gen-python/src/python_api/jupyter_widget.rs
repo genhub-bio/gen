@@ -1,7 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
-    io::BufReader,
     path::PathBuf,
 };
 
@@ -800,104 +798,6 @@ impl GraphPage {
         Ok(())
     }
 
-    /// Load annotations from a GFF3 or BED file and render them as
-    /// inline graph highlights with floating labels.
-    ///
-    /// Accepts both standard files (chromosome/contig names as reference) and
-    /// pre-translated files (node hash-IDs as reference).  Standard files are
-    /// translated in-memory against `from_sample` before parsing.  If
-    /// translation produces no output the file is parsed as-is, so
-    /// pre-translated files work without specifying `from_sample`.
-    pub fn add_track_file(
-        &mut self,
-        file_path: &str,
-        display_name: Option<&str>,
-        from_sample: Option<&str>,
-    ) -> PyResult<()> {
-        use std::io::Cursor;
-
-        use r#gen::views::annotations::{parse_translated_bed, parse_translated_gff};
-        use gen_annotations::translate::{bed::translate_bed, gff::translate_gff};
-        use gen_models::sample::Sample;
-
-        let name = display_name.unwrap_or(file_path);
-        let node_ids = self.all_node_ids();
-        let sample = from_sample.unwrap_or(Sample::DEFAULT_NAME);
-
-        let track = if let Some(bg_id) = self.block_group_id {
-            let conn = self.open_conn()?;
-            let bg = BlockGroup::get_by_id(&conn, &bg_id, None)
-                .map_err(|e| PyRuntimeError::new_err(format!("Block group not found: {e}")))?;
-
-            let path = std::path::Path::new(file_path);
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-
-            let mut buffer: Vec<u8> = Vec::new();
-            let translate_result: Result<(), String> = match ext.as_str() {
-                "gff" | "gff3" => translate_gff(
-                    &conn,
-                    &self.workspace,
-                    &bg.collection_name,
-                    sample,
-                    None,
-                    BufReader::new(
-                        File::open(file_path)
-                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
-                    ),
-                    &mut buffer,
-                )
-                .map_err(|e| e.to_string()),
-                "bed" => translate_bed(
-                    &conn,
-                    &self.workspace,
-                    &bg.collection_name,
-                    sample,
-                    None,
-                    File::open(file_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
-                    &mut buffer,
-                )
-                .map_err(|e| e.to_string()),
-                other => {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "unsupported annotation file type: {other:?}; expected .gff, .gff3, or .bed"
-                    )));
-                }
-            };
-
-            if let Err(e) = translate_result {
-                return Err(PyRuntimeError::new_err(e.to_string()));
-            }
-
-            let spans = if !buffer.is_empty() {
-                match ext.as_str() {
-                    "gff" | "gff3" => {
-                        parse_translated_gff(Cursor::new(buffer), &node_ids, name, HashMap::new())
-                    }
-                    _ => parse_translated_bed(Cursor::new(buffer), &node_ids, name, HashMap::new()),
-                }
-            } else {
-                // Buffer empty means translation found no matching sequences —
-                // file may already be in translated (hash-ID) format.
-                load_track_from_file(file_path, name, &node_ids)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-                    .annotations
-            };
-
-            AnnotationTrack::new(name.to_string(), spans)
-        } else {
-            load_track_from_file(file_path, name, &node_ids)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-        };
-
-        self.push_track_as_overlays(track);
-        self.reapply();
-        Ok(())
-    }
-
     /// Navigate to an `Annotation` object.
     pub fn go_to_annotation_obj(&mut self, annotation: &PyAnnotation, center: bool) {
         let span = annotation_to_span(annotation);
@@ -986,7 +886,7 @@ impl GraphPage {
     }
 
     /// Remove all overlays belonging to the track `name` (loaded via
-    /// `add_track_group` / `add_track_file` / auto-loaded annotation groups).
+    /// `add_track_group` / auto-loaded annotation groups).
     pub fn remove_track(&mut self, name: &str) {
         self.overlays
             .retain(|overlay| !matches!(&overlay.source, OverlaySource::Track(n) if n == name));
@@ -1005,37 +905,6 @@ impl GraphPage {
         });
         self.reapply();
     }
-}
-
-// File loading helper
-
-/// Parse a translated GFF3 or BED file into an `AnnotationTrack`.
-///
-/// The file must use node hash-ID strings as reference names (i.e. the
-/// "translated" format produced by gen's GFF/BED translation step).
-fn load_track_from_file(
-    file_path: &str,
-    display_name: &str,
-    node_filter: &HashSet<HashId>,
-) -> Result<AnnotationTrack, Box<dyn std::error::Error>> {
-    use r#gen::views::annotations::{parse_translated_bed_file, parse_translated_gff_file};
-    let path = std::path::Path::new(file_path);
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let spans = match ext.as_str() {
-        "gff" | "gff3" => parse_translated_gff_file(path, node_filter, display_name)?,
-        "bed" => parse_translated_bed_file(path, node_filter, display_name)?,
-        other => {
-            return Err(format!(
-                "unsupported annotation file type: {other:?}; expected .gff, .gff3, or .bed"
-            )
-            .into());
-        }
-    };
-    Ok(AnnotationTrack::new(display_name.to_string(), spans))
 }
 
 /// Build an eagerly-loaded `GraphPage` for a `PySequenceGraph`, loading its
@@ -1359,24 +1228,6 @@ impl PyGraphController {
     /// horizontal track panel below the graph.
     pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
         self.active()?.add_track_group(group)
-    }
-
-    /// Load annotations from a GFF3 or BED file and add them as a
-    /// horizontal track panel below the graph.
-    ///
-    /// Accepts both standard files (chromosome/contig names as reference) and
-    /// pre-translated files (node hash-IDs as reference).  Standard files are
-    /// translated in-memory against `from_sample` before parsing.  If
-    /// translation produces no output the file is parsed as-is, so
-    /// pre-translated files work without specifying `from_sample`.
-    pub fn add_track_file(
-        &mut self,
-        file_path: &str,
-        display_name: Option<&str>,
-        from_sample: Option<&str>,
-    ) -> PyResult<()> {
-        self.active()?
-            .add_track_file(file_path, display_name, from_sample)
     }
 
     /// Navigate to an `Annotation` object.
