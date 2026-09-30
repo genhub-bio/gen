@@ -21,6 +21,7 @@ CREATE TABLE remote_operations (
     assets_transfer_checkpoint TEXT,
     to_commit TEXT,
     transfer_id BLOB CHECK(transfer_id IS NULL OR length(transfer_id) = 16),
+    push_session_id BLOB CHECK(push_session_id IS NULL OR length(push_session_id) = 16),
     transfer_expires_at INTEGER,
     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT,

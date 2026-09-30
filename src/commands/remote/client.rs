@@ -25,13 +25,14 @@
 //! refreshed through GenHub's CLI refresh endpoint when possible, and refreshed or
 //! newly issued tokens are saved for later requests.
 
-use std::{env, io};
+use std::{env, fmt, io};
 
 use chrono::{DateTime, Utc};
 use gen_core::{DoltHashId, HashId};
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, RequestBuilder},
+    redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -143,13 +144,62 @@ pub struct CapabilityRequest<'branch> {
     pub force: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 pub struct CapabilityResponse {
-    pub remote_url: String,
+    pub remote_url: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub default_branch: String,
     /// Identifies the capability's transfer-scoped push lease.
     pub transfer_id: Uuid,
+    /// Direct GCS upload details returned for GenHub pushes.
+    #[serde(default)]
+    pub direct_push: Option<DirectPushCapability>,
+}
+
+impl fmt::Debug for CapabilityResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapabilityResponse")
+            .field("remote_url", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("default_branch", &self.default_branch)
+            .field("transfer_id", &self.transfer_id)
+            .field("direct_push", &self.direct_push)
+            .finish()
+    }
+}
+
+/// A GenHub capability for staging graph blocks directly in cloud storage.
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+pub struct DirectPushCapability {
+    /// GCS database URI containing the short-lived, downscoped token.
+    pub database_uri: String,
+    /// Stable client session UUID shared with the GenHub lease.
+    pub session_id: Uuid,
+    /// Context used to bind the local and server-side session attachments.
+    pub session_scope: SessionScope,
+    /// Signed GenHub endpoint that publishes the accepted session manifest.
+    pub publish_url: String,
+}
+
+impl fmt::Debug for DirectPushCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DirectPushCapability")
+            .field("database_uri", &"[REDACTED]")
+            .field("session_id", &self.session_id)
+            .field("session_scope", &self.session_scope)
+            .field("publish_url", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Scope fields shared by the direct uploader and GenHub's manifest publisher.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct SessionScope {
+    pub principal: String,
+    pub target_database: String,
+    pub operations: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -210,6 +260,16 @@ pub enum RemoteClientError {
     AuthenticationRequired,
     #[error("GenHub request failed with HTTP {status}: {message}")]
     Http { status: StatusCode, message: String },
+    #[error(
+        "Failed to decode {endpoint} response (HTTP {status}, declared Content-Length {declared_content_length:?}): {source}"
+    )]
+    ResponseDecode {
+        endpoint: &'static str,
+        status: StatusCode,
+        declared_content_length: Option<u64>,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("HTTP client error: {0}")]
     Request(#[from] reqwest::Error),
     #[error("Token storage error: {0}")]
@@ -257,17 +317,27 @@ fn send_capability(
     client: &Client,
     repository: &RepositoryRemote,
     request: &CapabilityRequest<'_>,
+    idempotency_token: Option<Uuid>,
     authorization: RequestAuthorization<'_>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
-    let response = authorize_request(
-        client.post(repository.capability_url()).json(request),
-        authorization,
-    )
-    .send()?;
+    let mut builder = client.post(repository.capability_url()).json(request);
+    if let Some(idempotency_token) = idempotency_token {
+        builder = builder.header("Idempotency-Token", idempotency_token.to_string());
+    }
+    let response = authorize_request(builder, authorization).send()?;
     if !response.status().is_success() {
         return Err(response_error(response));
     }
-    Ok(response.json()?)
+    let status = response.status();
+    let declared_content_length = response.content_length();
+    response
+        .json()
+        .map_err(|source| RemoteClientError::ResponseDecode {
+            endpoint: "remote capability",
+            status,
+            declared_content_length,
+            source,
+        })
 }
 
 fn send_asset_transfers(
@@ -284,7 +354,16 @@ fn send_asset_transfers(
     if !response.status().is_success() {
         return Err(response_error(response));
     }
-    Ok(response.json()?)
+    let status = response.status();
+    let declared_content_length = response.content_length();
+    response
+        .json()
+        .map_err(|source| RemoteClientError::ResponseDecode {
+            endpoint: "asset transfers",
+            status,
+            declared_content_length,
+            source,
+        })
 }
 
 fn send_asset_transfer_completion(
@@ -422,6 +501,26 @@ fn acquire_capability_with_store(
     token_store: &impl TokenStore,
     interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
 ) -> Result<CapabilityResponse, RemoteClientError> {
+    acquire_capability_with_store_and_token(
+        client,
+        repository,
+        request,
+        None,
+        api_key,
+        token_store,
+        interactive_login,
+    )
+}
+
+fn acquire_capability_with_store_and_token(
+    client: &Client,
+    repository: &RepositoryRemote,
+    request: &CapabilityRequest<'_>,
+    idempotency_token: Option<Uuid>,
+    api_key: Option<&str>,
+    token_store: &impl TokenStore,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<CapabilityResponse, RemoteClientError> {
     let allow_anonymous = matches!(
         request.operation,
         RemoteOperation::Clone | RemoteOperation::Pull
@@ -435,7 +534,15 @@ fn acquire_capability_with_store(
             token_store,
         },
         interactive_login,
-        |authorization| send_capability(client, repository, request, authorization),
+        |authorization| {
+            send_capability(
+                client,
+                repository,
+                request,
+                idempotency_token,
+                authorization,
+            )
+        },
     )
 }
 
@@ -454,6 +561,36 @@ pub fn acquire_capability(
         &FileTokenStore,
         interactive_login,
     )
+}
+
+/// Requests a push capability with a caller-persisted idempotency token.
+pub fn acquire_push_capability(
+    repository: &RepositoryRemote,
+    request: &CapabilityRequest<'_>,
+    idempotency_token: Uuid,
+    interactive_login: impl FnOnce(&str) -> Result<AuthTokens, Box<dyn std::error::Error>>,
+) -> Result<CapabilityResponse, RemoteClientError> {
+    let client = Client::new();
+    let api_key = env::var("GENHUB_API_KEY").ok();
+    acquire_capability_with_store_and_token(
+        &client,
+        repository,
+        request,
+        Some(idempotency_token),
+        api_key.as_deref(),
+        &FileTokenStore,
+        interactive_login,
+    )
+}
+
+/// Publishes a staged direct-GCS session through its signed GenHub endpoint.
+pub fn publish_direct_push(capability: &DirectPushCapability) -> Result<(), RemoteClientError> {
+    let client = Client::builder().redirect(Policy::none()).build()?;
+    let response = client.post(&capability.publish_url).send()?;
+    if !response.status().is_success() {
+        return Err(response_error(response));
+    }
+    Ok(())
 }
 
 pub fn acquire_asset_transfers(
@@ -513,8 +650,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AuthTokens, CapabilityRequest, CapabilityResponse, RemoteClientError, RemoteOperation,
-        RepositoryRemote, TokenStore, acquire_capability_with_store, normalized_origin,
+        AssetTransferRequest, AuthTokens, CapabilityRequest, CapabilityResponse,
+        DirectPushCapability, RemoteClientError, RemoteOperation, RepositoryRemote,
+        RequestAuthorization, SessionScope, TokenStore, acquire_capability_with_store,
+        acquire_capability_with_store_and_token, normalized_origin, send_asset_transfers,
     };
 
     const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
@@ -635,6 +774,39 @@ mod tests {
             .expect("should parse mock repository")
     }
 
+    fn assert_response_decode_context(
+        error: &RemoteClientError,
+        endpoint: &str,
+        response_body: &str,
+    ) {
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(endpoint),
+            "error should identify {endpoint}: {rendered}"
+        );
+        assert!(
+            rendered.contains("HTTP 200"),
+            "error should include status: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                "declared Content-Length Some({})",
+                response_body.len()
+            )),
+            "error should include only the declared response length: {rendered}"
+        );
+        assert!(
+            !format!("{error:?}").contains("sensitive-canary"),
+            "error must not expose response-body contents"
+        );
+        assert!(
+            std::error::Error::source(error)
+                .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                .is_some(),
+            "response decoder error should retain its reqwest source"
+        );
+    }
+
     fn no_interactive_login(_origin: &str) -> Result<AuthTokens, Box<dyn std::error::Error>> {
         Err("interactive login should not run".into())
     }
@@ -711,16 +883,129 @@ mod tests {
         assert_eq!(
             response,
             CapabilityResponse {
-                remote_url: expected_url.to_string(),
+                remote_url: Some(expected_url.to_string()),
                 expires_at: "2030-01-01T00:00:00Z"
                     .parse()
                     .expect("should parse capability expiry"),
                 default_branch: "main".to_string(),
                 transfer_id: TEST_TRANSFER_ID,
+                direct_push: None,
             }
         );
         assert!(!requests[0].to_ascii_lowercase().contains("x-api-key:"));
         assert!(!requests[0].to_ascii_lowercase().contains("authorization:"));
+    }
+
+    #[test]
+    fn test_push_capability_sends_idempotency_token_and_parses_direct_gcs_grant() {
+        let session_scope = SessionScope {
+            principal: "repository:repo-uuid".to_string(),
+            target_database: "default.db".to_string(),
+            operations: r#"["write","push","main",false]"#.to_string(),
+        };
+        let body = serde_json::json!({
+            "remote_url": null,
+            "expires_at": "2030-01-01T00:00:00Z",
+            "default_branch": "main",
+            "transfer_id": TEST_TRANSFER_ID,
+            "direct_push": {
+                "database_uri": "gcs://bucket/repos/alice/example/.gen/graph_db/?vfs=blockcachevfs&access_token=secret",
+                "session_id": TEST_TRANSFER_ID,
+                "session_scope": {
+                    "principal": session_scope.principal.clone(),
+                    "target_database": session_scope.target_database.clone(),
+                    "operations": session_scope.operations.clone()
+                },
+                "publish_url": "https://genhub.bio/api/publish?token=secret"
+            }
+        })
+        .to_string();
+        let (origin, server) = mock_server(vec![(200, body)]);
+        let repository = repository(&origin);
+        let capability = acquire_capability_with_store_and_token(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            Some(TEST_TRANSFER_ID),
+            Some("test-api-key"),
+            &MemoryTokenStore::empty(),
+            no_interactive_login,
+        )
+        .expect("push should receive direct GCS capability");
+        let requests = server.join().expect("mock GenHub should finish");
+
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains(&format!("idempotency-token: {TEST_TRANSFER_ID}"))
+        );
+        assert_eq!(capability.transfer_id, TEST_TRANSFER_ID);
+        assert_eq!(
+            capability.direct_push,
+            Some(DirectPushCapability {
+                database_uri: "gcs://bucket/repos/alice/example/.gen/graph_db/?vfs=blockcachevfs&access_token=secret".to_string(),
+                session_id: TEST_TRANSFER_ID,
+                session_scope,
+                publish_url: "https://genhub.bio/api/publish?token=secret".to_string(),
+            })
+        );
+        let debug = format!("{capability:?}");
+        assert!(!debug.contains("legacy-transfer"));
+        assert!(!debug.contains("access_token=secret"));
+        assert!(!debug.contains("token=secret"));
+    }
+
+    #[test]
+    fn test_capability_decode_error_has_safe_endpoint_context() {
+        let response_body =
+            r#"{"direct_push":{"database_uri":"gcs://bucket/?access_token=sensitive-canary""#;
+        let (origin, server) = mock_server(vec![(200, response_body.to_string())]);
+        let repository = repository(&origin);
+        let error = acquire_capability_with_store_and_token(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            Some(TEST_TRANSFER_ID),
+            Some("test-api-key"),
+            &MemoryTokenStore::empty(),
+            no_interactive_login,
+        )
+        .expect_err("malformed capability JSON should fail");
+        server.join().expect("mock GenHub should finish");
+
+        assert_response_decode_context(&error, "remote capability", response_body);
+    }
+
+    #[test]
+    fn test_asset_transfer_decode_error_has_safe_endpoint_context() {
+        let response_body =
+            r#"{"assets":[{"url":"https://storage.example/?token=sensitive-canary""#;
+        let (origin, server) = mock_server(vec![(200, response_body.to_string())]);
+        let repository = repository(&origin);
+        let request = AssetTransferRequest {
+            operation: RemoteOperation::Push,
+            branch: "main",
+            from_commit: None,
+            to_commit: None,
+        };
+        let error = send_asset_transfers(
+            &Client::new(),
+            &repository,
+            &request,
+            RequestAuthorization::ApiKey("test-api-key"),
+        )
+        .expect_err("malformed asset transfer JSON should fail");
+        server.join().expect("mock GenHub should finish");
+
+        assert_response_decode_context(&error, "asset transfers", response_body);
     }
 
     #[test]
