@@ -2123,7 +2123,7 @@ mod tests {
             block: insert,
             chromosome_index: 0,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(&conn, test_workspace(), &change).unwrap();
         let mut edges = BlockGroupEdge::edges_for_block_group(&conn, &block_group_id, None);

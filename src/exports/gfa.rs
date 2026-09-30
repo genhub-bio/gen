@@ -1002,7 +1002,7 @@ mod tests {
             block: insert,
             chromosome_index: 1,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
         BlockGroup::insert_change(conn, crate::test_helpers::test_workspace(), &change).unwrap();
 
