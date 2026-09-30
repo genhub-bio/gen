@@ -62,25 +62,20 @@ repeatable `--index <path-or-uri>` option. For example, a BGZF FASTA can use bot
 
 # VCF update
 
-When `gen update vcf` creates a sample block group with a single forward parent
-path, it records the sample sequence in the inherited path if every genotype has
-one distinct, known allele and the variant records do not conflict. Haploid and
-homozygous calls qualify; heterozygous and missing calls do not. Substitutions,
-insertions, and deletions are applied in parent coordinates, keeping the path name.
-Reference-only samples retain the inherited path.
+`gen update vcf` applies the variants in a VCF file to sample graphs and records
+the update as an operation. It uses genotypes from the VCF, or a genotype
+provided with `--genotype`; use `--sample` when assigning calls from a VCF without
+sample columns. Use `--parent-samples` to choose the sample or samples that
+provide the reference coordinates for new samples.
 
-Automatic path inference currently skips existing block groups, `--inplace`,
-multiple parent block groups or paths, and unsupported alleles. In these cases,
-the update retains its existing graph behavior and inherited paths; an inherited
-path should not be interpreted as a resolved sample sequence.
+By default, variant positions are interpreted in the parent sample's reference
+coordinates. Use `--inplace` to interpret them against the sample's existing
+graph instead.
 
-Path inference reuses existing block-group edges without adding connections. If
-those edges cannot form a valid path, inference is skipped. Adjacent variants can
-connect through zero-length parent junctions without requiring new edges.
-
-Use the exact sample name from the VCF header with `gen export fasta --sample`.
-FASTA export reports an error if the selection matches no block groups and leaves
-any existing output file untouched.
+For a newly created sample, `--update-homozygous-paths` also records a sample
+path when its calls are homozygous and unambiguous. Without the flag, the graph
+is updated while the stored path remains inherited. Use the VCF header's sample
+name with `gen export fasta --sample`.
 
 # View diff
 

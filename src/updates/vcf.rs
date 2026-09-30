@@ -488,6 +488,21 @@ pub enum VcfError {
     PathError(#[from] PathError),
 }
 
+/// Options controlling how a VCF update selects samples and records inferred paths.
+#[derive(Debug, Default)]
+pub struct VcfUpdateOptions {
+    /// Genotype to use when the VCF has no sample genotype.
+    pub fixed_genotype: String,
+    /// Sample name to assign when the VCF has no sample columns.
+    pub fixed_sample: Option<String>,
+    /// Parent sample names used as the coordinate reference.
+    pub parent_samples: Vec<String>,
+    /// Apply variants using coordinates in the existing sample graph.
+    pub in_place: bool,
+    /// Record an inferred path for a new sample when the calls are unambiguous.
+    pub update_homozygous_paths: bool,
+}
+
 fn resolve_parent_samples(
     conn: &GraphConnection,
     sample_name: &str,
@@ -519,6 +534,38 @@ pub fn update_with_vcf(
     parent_samples: Vec<String>,
     in_place: bool,
 ) -> Result<(OperationSummary, Vec<String>), VcfError> {
+    update_with_vcf_options(
+        context,
+        vcf_path,
+        collection_name,
+        VcfUpdateOptions {
+            fixed_genotype,
+            fixed_sample: fixed_sample.map(str::to_string),
+            parent_samples,
+            in_place,
+            update_homozygous_paths: false,
+        },
+    )
+}
+
+#[cfg_attr(
+    feature = "profiling",
+    tracing::instrument(skip(context, vcf_path, options))
+)]
+pub fn update_with_vcf_options(
+    context: &DbContext,
+    vcf_path: &String,
+    collection_name: &str,
+    options: VcfUpdateOptions,
+) -> Result<(OperationSummary, Vec<String>), VcfError> {
+    let VcfUpdateOptions {
+        fixed_genotype,
+        fixed_sample,
+        parent_samples,
+        in_place,
+        update_homozygous_paths,
+    } = options;
+    let fixed_sample = fixed_sample.as_deref();
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
@@ -941,7 +988,8 @@ pub fn update_with_vcf(
             sample_name: &sample_name,
             name: path.name.clone(),
         });
-        if !in_place
+        if update_homozygous_paths
+            && !in_place
             && !existing_block_groups.contains(&path.block_group_id)
             && !ambiguous_samples.contains(&(sample_name.clone(), path.name.clone()))
             && siblings.is_some_and(|ids| ids.len() == 1)
@@ -1208,14 +1256,17 @@ mod tests {
         std::fs::write(&vcf_path, format!(
             "##fileformat=VCFv4.3\n##contig=<ID=m123,length=34>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n{records}"
         )).unwrap();
-        update_with_vcf(
+        update_with_vcf_options(
             &context,
             &vcf_path.to_string_lossy().into_owned(),
             "test",
-            fixed_genotype.to_string(),
-            Some("sample"),
-            vec![Sample::DEFAULT_NAME.to_string()],
-            false,
+            VcfUpdateOptions {
+                fixed_genotype: fixed_genotype.to_string(),
+                fixed_sample: Some("sample".to_string()),
+                parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
+                update_homozygous_paths: true,
+                ..VcfUpdateOptions::default()
+            },
         )
         .unwrap();
         let paths = Path::query_for_collection_and_sample(conn, "test", "sample");
@@ -1809,6 +1860,84 @@ mod tests {
         assert!(
             elapsed < max_elapsed,
             "VCF import benchmark failed: Elapsed time is {elapsed}."
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "benchmark")]
+    #[ignore = "manual benchmark; creates 100,000 variants and a sample path"]
+    fn test_vcf_sample_path_benchmark() {
+        let context = setup_gen();
+        let directory = tempfile::tempdir().expect("should create benchmark directory");
+        let fasta_path = directory.path().join("reference.fa");
+        let vcf_path = directory.path().join("sample.vcf");
+        let variant_count = 100_000;
+        let reference = "AAAAAAAAAA".repeat(variant_count);
+
+        // Spaced homozygous SNPs ensure every call contributes to an unambiguous path.
+        // Generate fixtures and import the parent outside the timed update, as above.
+        std::fs::write(&fasta_path, format!(">benchmark\n{reference}\n"))
+            .expect("should write benchmark reference");
+        let mut records = format!(
+            "##fileformat=VCFv4.3\n##contig=<ID=benchmark,length={}>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n",
+            reference.len()
+        );
+        for index in 0..variant_count {
+            records.push_str(&format!(
+                "benchmark\t{}\t.\tA\tC\t.\tPASS\t.\tGT\t1/1\n",
+                index * 10 + 5
+            ));
+        }
+        std::fs::write(&vcf_path, records).expect("should write benchmark variants");
+        import_fasta(
+            &context,
+            &fasta_path.to_string_lossy().into_owned(),
+            "test",
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .expect("should import benchmark reference");
+
+        let start = time::Instant::now();
+        // Match the CLI transaction so individual writes do not commit catalog snapshots.
+        let transaction = context
+            .graph()
+            .conn()
+            .unchecked_transaction()
+            .expect("should begin benchmark update transaction");
+        update_with_vcf_options(
+            &context,
+            &vcf_path.to_string_lossy().into_owned(),
+            "test",
+            VcfUpdateOptions {
+                parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
+                update_homozygous_paths: true,
+                ..VcfUpdateOptions::default()
+            },
+        )
+        .expect("should update benchmark sample");
+        transaction
+            .commit()
+            .expect("should commit benchmark update");
+        let elapsed = start.elapsed().as_secs_f64();
+        #[cfg(feature = "profiling")]
+        tracing::info!(variant_count, elapsed, "VCF sample path benchmark");
+
+        // Verify inference actually ran, without charging sequence retrieval to the update.
+        let conn = context.graph().conn();
+        let paths = Path::query_for_collection_and_sample(conn, "test", "sample");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            paths[0]
+                .sequence(conn, context.workspace(), None)
+                .expect("should read inferred sample path"),
+            "AAAACAAAAA".repeat(variant_count)
+        );
+        let max_elapsed = if cfg!(debug_assertions) { 120.0 } else { 60.0 };
+        assert!(
+            elapsed < max_elapsed,
+            "VCF sample path benchmark failed: Elapsed time is {elapsed:.3}s."
         );
     }
 
