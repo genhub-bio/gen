@@ -67,6 +67,7 @@ use std::{
     io::{self, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use base64::{Engine as _, engine::general_purpose};
@@ -117,8 +118,8 @@ use crate::{
         },
         login_origin,
         progress::{
-            AssetUploadProgressReporter, GraphUploadProgressReporter, UploadBodyReader,
-            write_progress_line,
+            AssetUploadProgressReporter, GraphUploadProgressReporter, ProgressHeartbeat,
+            UploadBodyReader, format_elapsed, write_progress_line,
         },
         server::AuthTokens,
     },
@@ -677,10 +678,101 @@ impl PushGraphTransferError {
     }
 }
 
-fn close_direct_push_server(server: RemoteServer) -> Result<(), PushGraphTransferError> {
-    server
+fn close_direct_push_server(
+    mut server: RemoteServer,
+    progress: &GraphUploadProgressReporter,
+    preserve_phase: bool,
+) -> Result<(), PushGraphTransferError> {
+    let initial_storage_failure = server.first_storage_error();
+    if preserve_phase && let Some(failure) = initial_storage_failure {
+        write_progress_line(&format!("Direct GCS storage diagnostic: {failure}"));
+    }
+    let _heartbeat = if preserve_phase {
+        progress.heartbeat_preserving_phase("closing the direct GCS graph session")
+    } else {
+        progress.heartbeat("closing the direct GCS graph session")
+    };
+    let quiesce_result = server
+        .quiesce()
+        .map_err(|error| PushGraphTransferError::database("quiescing direct GCS server", error));
+    let final_storage_failure = server.first_storage_error();
+    let close_result = server
         .close()
-        .map_err(|error| PushGraphTransferError::database("closing direct GCS server", error))
+        .map_err(|error| PushGraphTransferError::database("closing direct GCS server", error));
+    let cleanup_failed = quiesce_result.is_err() || close_result.is_err();
+    if let Some(failure) = final_storage_failure
+        && ((preserve_phase && initial_storage_failure != Some(failure))
+            || (!preserve_phase && cleanup_failed))
+    {
+        write_progress_line(&format!("Direct GCS storage diagnostic: {failure}"));
+    }
+    match quiesce_result {
+        Err(quiesce_error) => {
+            if let Err(close_error) = close_result {
+                write_progress_line(&format!(
+                    "Direct GCS server close also failed during {}; preserving the quiesce error.",
+                    safe_graph_error_context(&close_error),
+                ));
+            }
+            Err(quiesce_error)
+        }
+        Ok(()) => close_result,
+    }
+}
+
+fn preserve_graph_error_after_close(
+    primary_error: PushGraphTransferError,
+    close_result: Result<(), PushGraphTransferError>,
+) -> PushGraphTransferError {
+    if let Err(close_error) = close_result {
+        write_progress_line(&format!(
+            "Direct GCS server cleanup also failed during {}; returning the original graph-transfer error.",
+            safe_graph_error_context(&close_error),
+        ));
+    }
+    primary_error
+}
+
+fn safe_graph_error_context(error: &PushGraphTransferError) -> String {
+    match error {
+        PushGraphTransferError::Database {
+            phase,
+            source: SqlError::SqliteFailure(code, _),
+        } => format!("{phase} (SQLite code {})", code.extended_code),
+        PushGraphTransferError::Database { phase, .. } => {
+            format!("{phase} (database error)")
+        }
+        PushGraphTransferError::Client(RemoteClientError::Http { status, .. }) => {
+            format!("HTTP {status}")
+        }
+        PushGraphTransferError::Client(_) => "remote client request".to_string(),
+        PushGraphTransferError::Protocol(_) => "remote protocol response".to_string(),
+    }
+}
+
+fn close_server_after_graph_failure(
+    server: RemoteServer,
+    progress: &GraphUploadProgressReporter,
+    primary_error: PushGraphTransferError,
+) -> PushGraphTransferError {
+    write_progress_line(&format!(
+        "Graph operation failed during {}; waiting for local server cleanup.",
+        safe_graph_error_context(&primary_error),
+    ));
+    preserve_graph_error_after_close(
+        primary_error,
+        close_direct_push_server(server, progress, true),
+    )
+}
+
+struct DirectGraphPushRequest<'a> {
+    graph: &'a GraphConnection,
+    remote: &'a Remote,
+    branch: &'a str,
+    force: bool,
+    destination_hash: &'a DoltHashId,
+    renewal: &'a PushCapabilityRenewal,
+    attempt: usize,
 }
 
 fn push_graph_through_direct_session(
@@ -693,7 +785,39 @@ fn push_graph_through_direct_session(
     attempt: usize,
 ) -> Result<(), PushGraphTransferError> {
     let graph_progress = GraphUploadProgressReporter::new(attempt, 2);
-    let response = renewal.capability_response()?;
+    let request = DirectGraphPushRequest {
+        graph,
+        remote,
+        branch,
+        force,
+        destination_hash,
+        renewal,
+        attempt,
+    };
+    let result = push_graph_through_direct_session_inner(request, &graph_progress);
+    if result.is_err() {
+        graph_progress.failed();
+    }
+    result
+}
+
+fn push_graph_through_direct_session_inner(
+    request: DirectGraphPushRequest<'_>,
+    graph_progress: &GraphUploadProgressReporter,
+) -> Result<(), PushGraphTransferError> {
+    let DirectGraphPushRequest {
+        graph,
+        remote,
+        branch,
+        force,
+        destination_hash,
+        renewal,
+        attempt,
+    } = request;
+    let response = {
+        let _heartbeat = graph_progress.heartbeat("fetching direct-push session capability");
+        renewal.capability_response()?
+    };
     let capability = response.direct_push.as_ref().ok_or_else(|| {
         PushGraphTransferError::Protocol(
             "GenHub push capability did not include a direct GCS session".to_string(),
@@ -728,17 +852,22 @@ fn push_graph_through_direct_session(
             })
             .upload_progress_callback(move |progress| graph_progress_callback.report(progress));
     let options = RemoteServerOptions::new().blockcache_session(session);
-    let mut local_server =
-        RemoteServer::start_with_options(Path::new(&capability.database_uri), &options).map_err(
-            |error| PushGraphTransferError::database("opening direct GCS server", error),
-        )?;
-    let operation_status = match local_server.operation_status() {
+    let mut local_server = {
+        let _heartbeat = graph_progress.heartbeat("opening the direct GCS graph database");
+        RemoteServer::start_with_options(Path::new(&capability.database_uri), &options)
+            .map_err(|error| PushGraphTransferError::database("opening direct GCS server", error))?
+    };
+    let operation_status_result = {
+        let _heartbeat = graph_progress.heartbeat("checking direct-push session status");
+        local_server.operation_status()
+    };
+    let operation_status = match operation_status_result {
         Ok(operation_status) => operation_status,
         Err(error) => {
-            close_direct_push_server(local_server)?;
-            return Err(PushGraphTransferError::database(
-                "reading direct-push session status",
-                error,
+            return Err(close_server_after_graph_failure(
+                local_server,
+                graph_progress,
+                PushGraphTransferError::database("reading direct-push session status", error),
             ));
         }
     };
@@ -747,15 +876,20 @@ fn push_graph_through_direct_session(
             write_progress_line(
                 "Reusing accepted graph checkpoint; verifying the staged branch...",
             );
-            if let Err(error) =
+            let validation = {
+                let _heartbeat = graph_progress.heartbeat("validating the staged graph branch");
                 validate_direct_session_branch(&local_server, branch, destination_hash)
-            {
+            };
+            if let Err(error) = validation {
                 graph_progress.finish();
-                close_direct_push_server(local_server)?;
-                return Err(error);
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    error,
+                ));
             }
             graph_progress.finish();
-            close_direct_push_server(local_server)?;
+            close_direct_push_server(local_server, graph_progress, false)?;
             write_progress_line("Accepted graph checkpoint is ready for publication.");
         }
         SessionOperationStatus::New => {
@@ -764,55 +898,91 @@ fn push_graph_through_direct_session(
             ));
             let local_remote_url =
                 local_server.database_url(&capability.session_scope.target_database);
-            if let Err(error) = ensure_graph_remote(graph, &remote.name, &local_remote_url) {
+            let configure_remote = {
+                let _heartbeat = graph_progress.heartbeat("configuring the loopback Dolt remote");
+                ensure_graph_remote(graph, &remote.name, &local_remote_url)
+            };
+            if let Err(error) = configure_remote {
                 graph_progress.finish();
-                close_direct_push_server(local_server)?;
-                return Err(PushGraphTransferError::database(
-                    "configuring loopback Dolt remote",
-                    error,
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    PushGraphTransferError::database("configuring loopback Dolt remote", error),
                 ));
             }
-            if let Err(error) = push_graph_branch(graph, &remote.name, branch, force) {
+            let push_result = {
+                let _heartbeat =
+                    graph_progress.heartbeat("running Dolt push through loopback RemoteServer");
+                push_graph_branch(graph, &remote.name, branch, force)
+            };
+            if let Err(error) = push_result {
                 graph_progress.finish();
-                close_direct_push_server(local_server)?;
-                return Err(PushGraphTransferError::database(
-                    "running Dolt push through loopback RemoteServer",
-                    error,
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    PushGraphTransferError::database(
+                        "running Dolt push through loopback RemoteServer",
+                        error,
+                    ),
                 ));
             }
-            if let Err(error) =
+            let validation = {
+                let _heartbeat = graph_progress.heartbeat("validating the staged graph branch");
                 validate_direct_session_branch(&local_server, branch, destination_hash)
-            {
+            };
+            if let Err(error) = validation {
                 graph_progress.finish();
-                close_direct_push_server(local_server)?;
-                return Err(error);
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    error,
+                ));
             }
-            let stage_result = local_server.stage_request().map_err(|error| {
-                PushGraphTransferError::database("staging direct-push operation", error)
-            });
-            let close_result = close_direct_push_server(local_server);
+            let stage_result = {
+                let _heartbeat =
+                    graph_progress.heartbeat("staging graph blocks and checkpointing the session");
+                local_server.stage_request().map_err(|error| {
+                    PushGraphTransferError::database("staging direct-push operation", error)
+                })
+            };
+            if let Err(primary_error) = stage_result {
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    primary_error,
+                ));
+            }
+            let close_result = close_direct_push_server(local_server, graph_progress, false);
             graph_progress.finish();
-            stage_result?;
             close_result?;
             write_progress_line("Graph staging complete.");
         }
         SessionOperationStatus::Failed => {
             graph_progress.finish();
-            close_direct_push_server(local_server)?;
-            return Err(PushGraphTransferError::Protocol(
-                "GenHub direct-push session has already failed".to_string(),
+            return Err(close_server_after_graph_failure(
+                local_server,
+                graph_progress,
+                PushGraphTransferError::Protocol(
+                    "GenHub direct-push session has already failed".to_string(),
+                ),
             ));
         }
         SessionOperationStatus::Conflict => {
             graph_progress.finish();
-            close_direct_push_server(local_server)?;
-            return Err(PushGraphTransferError::Protocol(
-                "GenHub direct-push session conflicts with another operation".to_string(),
+            return Err(close_server_after_graph_failure(
+                local_server,
+                graph_progress,
+                PushGraphTransferError::Protocol(
+                    "GenHub direct-push session conflicts with another operation".to_string(),
+                ),
             ));
         }
     }
     write_progress_line("Publishing graph manifest...");
-    renewal.publish()?;
+    {
+        let _heartbeat = graph_progress.heartbeat("publishing the graph manifest to GenHub");
+        renewal.publish()?;
+    }
     write_progress_line("Graph manifest published.");
     Ok(())
 }
@@ -857,24 +1027,27 @@ fn run_push_graph_transfer(
         if attempt > 0 {
             write_progress_line("Retrying direct GCS graph transfer (attempt 2/2)...");
         }
-        let authorization = if attempt == 0 {
-            transfer_authorization(
-                remote,
-                RemoteOperation::Push,
-                Some(branch),
-                force,
-                Some(idempotency_token),
-                login_origin,
-            )
-        } else {
-            transfer_authorization(
-                remote,
-                RemoteOperation::Push,
-                Some(branch),
-                force,
-                Some(idempotency_token),
-                |_| Err("interactive login is unavailable during a push retry".into()),
-            )
+        let authorization = {
+            let _heartbeat = ProgressHeartbeat::waiting("requesting GenHub direct-push capability");
+            if attempt == 0 {
+                transfer_authorization(
+                    remote,
+                    RemoteOperation::Push,
+                    Some(branch),
+                    force,
+                    Some(idempotency_token),
+                    login_origin,
+                )
+            } else {
+                transfer_authorization(
+                    remote,
+                    RemoteOperation::Push,
+                    Some(branch),
+                    force,
+                    Some(idempotency_token),
+                    |_| Err("interactive login is unavailable during a push retry".into()),
+                )
+            }
         }?;
         let Some(capability) = authorization.direct_push.as_ref() else {
             restore_canonical_url(graph, remote);
@@ -1159,15 +1332,42 @@ fn upload_asset(
         progress_asset_name(asset, &source_path),
         length,
     );
+    let result = upload_asset_with_progress(
+        client,
+        asset,
+        url,
+        source_path,
+        expected_checksum,
+        length,
+        &progress,
+    );
+    if result.is_err() {
+        progress.failed();
+    }
+    result
+}
+
+fn upload_asset_with_progress(
+    client: &Client,
+    asset: &AssetRef,
+    url: &str,
+    source_path: PathBuf,
+    expected_checksum: Sha256Hash,
+    length: u64,
+    progress: &AssetUploadProgressReporter,
+) -> Result<AssetUploadReceipt, Box<dyn Error>> {
     progress.checksum_started();
-    let (actual_checksum, md5, crc32c) = calculate_upload_checksums(&source_path, &progress)
-        .map_err(|error| {
-            format!(
-                "Unable to read asset {} at {}: {error}",
-                asset.id,
-                source_path.display()
-            )
-        })?;
+    let (actual_checksum, md5, crc32c) = {
+        let _heartbeat = progress.heartbeat("scanning and checksumming the local asset");
+        calculate_upload_checksums(&source_path, progress)
+    }
+    .map_err(|error| {
+        format!(
+            "Unable to read asset {} at {}: {error}",
+            asset.id,
+            source_path.display()
+        )
+    })?;
     if actual_checksum != expected_checksum {
         return Err(format!(
             "Asset {} at {} does not match its recorded checksum",
@@ -1188,16 +1388,20 @@ fn upload_asset(
     progress.checksum_verified();
     progress.upload_started();
     let request_body = UploadBodyReader::new(file, progress.clone());
-    let response = client
-        .put(url)
-        .header("content-type", "application/octet-stream")
-        // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
-        // composite objects (those > 5GB)
-        .header("content-md5", &md5)
-        .header("x-goog-if-generation-match", "0")
-        .body(Body::sized(request_body, length))
-        .send()
-        .map_err(|error| error.without_url())?;
+    let response = {
+        let _heartbeat =
+            progress.heartbeat("sending the asset request and waiting for storage acceptance");
+        client
+            .put(url)
+            .header("content-type", "application/octet-stream")
+            // For GCS, content-md5 will be used as a server side integrity verification. It is ignored for
+            // composite objects (those > 5GB)
+            .header("content-md5", &md5)
+            .header("x-goog-if-generation-match", "0")
+            .body(Body::sized(request_body, length))
+            .send()
+            .map_err(|error| error.without_url())?
+    };
     if !response.status().is_success()
         && response.status() != reqwest::StatusCode::PRECONDITION_FAILED
     {
@@ -1841,18 +2045,25 @@ fn transfer_assets(
         write_progress_line(&format!(
             "Checking {local_asset_count} local {asset_label} for transfer..."
         ));
-        before_transfer()?;
+        {
+            let _heartbeat =
+                ProgressHeartbeat::waiting("refreshing the push lease before asset transfer");
+            before_transfer()?;
+        }
     }
-    let response = acquire_asset_transfers(
-        &repository,
-        &AssetTransferRequest {
-            operation,
-            branch: target.branch,
-            from_commit: target.range.from_commit,
-            to_commit: Some(&commit_hash),
-        },
-        login_origin,
-    )?;
+    let response = {
+        let _heartbeat = ProgressHeartbeat::waiting("requesting GenHub asset transfer URLs");
+        acquire_asset_transfers(
+            &repository,
+            &AssetTransferRequest {
+                operation,
+                branch: target.branch,
+                from_commit: target.range.from_commit,
+                to_commit: Some(&commit_hash),
+            },
+            login_origin,
+        )?
+    };
     let client = Client::new();
     for transfer in &response.assets {
         if !range_assets.contains_key(&transfer.id) && !excluded_assets.contains_key(&transfer.id) {
@@ -1885,7 +2096,11 @@ fn transfer_assets(
                 continue;
             };
             upload_index += 1;
-            before_transfer()?;
+            {
+                let _heartbeat =
+                    ProgressHeartbeat::waiting("refreshing the push lease before asset upload");
+                before_transfer()?;
+            }
             upload_receipts.push(upload_asset(
                 &client,
                 workspace,
@@ -2155,13 +2370,18 @@ pub fn execute_push(
             let push_session_id = operation
                 .push_session_id
                 .expect("push session UUID should be persisted before transfer");
-            let renewal = match acquire_existing_push_renewal(
-                &remote,
-                &branch,
-                force,
-                push_session_id,
-                transfer_lease.transfer_id,
-            ) {
+            let renewal_result = {
+                let _heartbeat =
+                    ProgressHeartbeat::waiting("resuming the existing direct-push lease");
+                acquire_existing_push_renewal(
+                    &remote,
+                    &branch,
+                    force,
+                    push_session_id,
+                    transfer_lease.transfer_id,
+                )
+            };
+            let renewal = match renewal_result {
                 Ok(renewal) => renewal,
                 Err(error) => {
                     if error.is_terminal()
@@ -2174,9 +2394,12 @@ pub fn execute_push(
                     return Err(RemotePushError::GraphTransfer(Box::new(error)));
                 }
             };
-            let refreshed_lease = renewal
-                .ensure_fresh()
-                .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?;
+            let refreshed_lease = {
+                let _heartbeat = ProgressHeartbeat::waiting("refreshing the existing push lease");
+                renewal
+                    .ensure_fresh()
+                    .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?
+            };
             operation.set_push_destination(
                 &config,
                 &destination_hash,
@@ -2265,15 +2488,28 @@ pub fn execute_push(
             .map_err(|error| RemotePushError::GraphTransfer(Box::new(error)))?;
         let repository = RepositoryRemote::parse(&remote.url)?;
         write_progress_line("Verifying asset uploads and finishing push...");
-        complete_asset_transfers(
-            &repository,
-            &AssetTransferCompletionRequest {
-                transfer_id: transfer_lease.transfer_id,
-                branch: &branch,
-                assets: &upload_receipts,
-            },
-            login_origin,
-        )?;
+        let verification_started = Instant::now();
+        let verification_result = {
+            let _heartbeat = ProgressHeartbeat::waiting(
+                "waiting for GenHub to verify asset uploads and finish the push",
+            );
+            complete_asset_transfers(
+                &repository,
+                &AssetTransferCompletionRequest {
+                    transfer_id: transfer_lease.transfer_id,
+                    branch: &branch,
+                    assets: &upload_receipts,
+                },
+                login_origin,
+            )
+        };
+        if let Err(error) = verification_result {
+            write_progress_line(&format!(
+                "GenHub did not confirm asset verification after {}; per-asset request progress above reflects bytes consumed.",
+                format_elapsed(verification_started.elapsed()),
+            ));
+            return Err(RemotePushError::Client(error));
+        }
         write_progress_line("GenHub verified and accepted the asset uploads.");
         operation.advance_assets_transfer_checkpoint(&config, destination_hash)?;
         operation.complete(&config)?;
@@ -2480,8 +2716,9 @@ mod tests {
         AssetTransferRange, AssetTransferTarget, DownloadAssetOutcome, PushCapabilityFetcher,
         PushCapabilityRenewal, RemoteOperation, canonical_remote_url, clone_destination_name,
         copy_versioned_asset, download_asset, download_to_versioned_store, execute_pull,
-        execute_push, file_graph_url, get_remaining_assets_to_transfer, push_capability_renewal,
-        resolve_remote, run_graph_transfer, temporary_path, transfer_assets,
+        execute_push, file_graph_url, get_remaining_assets_to_transfer,
+        preserve_graph_error_after_close, push_capability_renewal, resolve_remote,
+        run_graph_transfer, safe_graph_error_context, temporary_path, transfer_assets,
     };
     use crate::{
         commands::remote::client::{
@@ -4836,5 +5073,35 @@ mod tests {
                 .expect("should query remotes")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_direct_push_cleanup_error_does_not_replace_primary_sql_error() {
+        let primary = super::PushGraphTransferError::database(
+            "running Dolt push through loopback RemoteServer",
+            SqlError::InvalidQuery,
+        );
+        let close = Err(super::PushGraphTransferError::database(
+            "closing direct GCS server",
+            SqlError::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                Some("signed-url=secret access_token=secret".to_string()),
+            ),
+        ));
+
+        let cleanup_context = safe_graph_error_context(close.as_ref().expect_err("should fail"));
+        let error = preserve_graph_error_after_close(primary, close);
+
+        assert!(matches!(
+            error,
+            super::PushGraphTransferError::Database {
+                phase: "running Dolt push through loopback RemoteServer",
+                source: SqlError::InvalidQuery,
+            }
+        ));
+        assert!(cleanup_context.contains("SQLite code"));
+        assert!(!cleanup_context.contains("secret"));
+        assert!(!error.to_string().contains("access_token"));
+        assert!(!error.to_string().contains("signed"));
     }
 }
