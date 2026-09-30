@@ -11,7 +11,7 @@ use crate::layout::VisualDetail;
 use crate::testing::create_test_terminal;
 #[cfg(test)]
 use crate::testing::mocks::{
-    FixedNodeSizer, MockDomainGraph, TestGraphs, TestNodeSizers, TestRenderers,
+    FixedNodeSizer, MockDomainGraph, MockRenderer, TestGraphs, TestNodeSizers, TestRenderers,
 };
 
 #[cfg(test)]
@@ -542,6 +542,7 @@ fn test_layer_coordinate_alignment_and_ordering() {
                 _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
             },
             |_| true,
+            |_| false,
         )
     };
     let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
@@ -663,6 +664,114 @@ fn test_skip_layer() {
     insta::assert_snapshot!("skip_layer", snapshot);
 }
 
+/// Sizes every node 5x3 and marks a chosen set as centered.
+#[cfg(test)]
+struct CenteredSizer {
+    centered: Vec<NodeIndex>,
+}
+
+#[cfg(test)]
+impl MockRenderer<MockDomainGraph> for CenteredSizer {
+    fn get_node_size(&self, _node: &NodeIndex, _detail_level: VisualDetail) -> (u64, u64) {
+        (5, 3)
+    }
+
+    fn is_centered(&self, node: &NodeIndex) -> bool {
+        self.centered.contains(node)
+    }
+}
+
+/// Forks, merges, and edges that skip a centered node (`A -> C` over `B`) and an uncentered
+/// one (`X -> D` over `Y`). The centered nodes `A -> B -> C -> D -> E` form a complete path and should share one straight row.
+#[test]
+fn test_centered_nodes_pin_their_layers_across_forks_and_skips() {
+    let _ = env_logger::try_init();
+    let mut domain_graph = MockDomainGraph::new();
+    let [a, b, x, c, y, d, e] = [(); 7].map(|_| domain_graph.add_node(()));
+    for (source, target) in [
+        (a, b),
+        (a, x),
+        (a, c),
+        (b, c),
+        (x, y),
+        (x, d),
+        (c, d),
+        (y, d),
+        (d, e),
+    ] {
+        domain_graph.add_edge(source, target, ());
+    }
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        80,
+        30,
+        CenteredSizer {
+            centered: vec![a, b, c, d, e],
+        },
+        TestRenderers::debug(),
+        &[],
+        GapSizes::default(),
+    );
+
+    insta::assert_snapshot!("centered_nodes_pin_layers_forks_and_skips", snapshot);
+}
+
+/// The centered path skips `B` and `C` along `A -> D`, so the layers of `B` and `C` hold no
+/// centered data node; the routing node of that edge pins them instead, keeping the path one
+/// straight row.
+#[test]
+fn test_centered_edge_pins_layers_it_crosses_without_a_centered_node() {
+    let _ = env_logger::try_init();
+    let mut domain_graph = MockDomainGraph::new();
+    let [a, b, c, d] = [(); 4].map(|_| domain_graph.add_node(()));
+    for (source, target) in [(a, b), (b, c), (c, d), (a, d)] {
+        domain_graph.add_edge(source, target, ());
+    }
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        80,
+        20,
+        CenteredSizer {
+            centered: vec![a, d],
+        },
+        TestRenderers::debug(),
+        &[],
+        GapSizes::default(),
+    );
+
+    insta::assert_snapshot!("centered_edge_pins_layers_without_centered_node", snapshot);
+}
+
+#[test]
+fn test_centered_circular_bubble_keeps_return_edge_straight() {
+    let mut domain_graph = MockDomainGraph::new();
+    let [source, alternate, reference, sink] = [(); 4].map(|_| domain_graph.add_node(()));
+    for (from, to) in [
+        (source, alternate),
+        (source, reference),
+        (alternate, sink),
+        (reference, sink),
+    ] {
+        domain_graph.add_edge(from, to, ());
+    }
+
+    let snapshot = make_snapshot_custom(
+        domain_graph,
+        80,
+        24,
+        CenteredSizer {
+            centered: vec![source, reference, sink],
+        },
+        TestRenderers::debug(),
+        &[(sink, source)],
+        GapSizes::default(),
+    );
+
+    insta::assert_snapshot!("centered_circular_bubble", snapshot);
+}
+
 #[test]
 fn viewport_chain_long_spanning_edge() {
     let _ = env_logger::try_init();
@@ -746,6 +855,7 @@ fn test_skip_layer_edges_carry_bundles() {
                 _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
             },
             |_| true,
+            |_| false,
         )
     };
     let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
@@ -1333,6 +1443,7 @@ fn test_grid_disperse_zoom_preserves_spacing() {
                     _ => NodeRenderer::<MockDomainGraph>::get_dummy_size(visual),
                 },
                 |_| true,
+                |_| false,
             )
         };
         let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);

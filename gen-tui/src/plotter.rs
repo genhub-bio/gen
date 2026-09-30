@@ -105,6 +105,13 @@ where
         None
     }
 
+    /// Whether `node` should sit at y = 0. Layout aligns centered nodes across layers while
+    /// preserving within-layer spacing and straight routing chains where feasible. A renderer
+    /// marks e.g. the reference sequence so the main path reads as a straight line.
+    fn is_centered(&self, _node: &G::NodeId) -> bool {
+        false
+    }
+
     /// A counter that changes whenever `get_node_size` or `get_dummy_size` may answer
     /// differently than before. Views reuse a window's routed geometry until it changes, so a
     /// renderer whose sizes depend on mutable state (e.g. annotation lanes under each node) must
@@ -140,6 +147,10 @@ where
         (**self).cursor_row(node)
     }
 
+    fn is_centered(&self, node: &G::NodeId) -> bool {
+        (**self).is_centered(node)
+    }
+
     fn size_generation(&self) -> u64 {
         (**self).size_generation()
     }
@@ -169,6 +180,10 @@ where
 
     fn cursor_row(&self, node: &G::NodeId) -> Option<u64> {
         (**self).cursor_row(node)
+    }
+
+    fn is_centered(&self, node: &G::NodeId) -> bool {
+        (**self).is_centered(node)
     }
 
     fn size_generation(&self) -> u64 {

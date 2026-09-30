@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use gen_core::{HashId, Strand, Workspace, is_end_node, is_start_node};
+use gen_core::{HashId, Strand, Workspace, is_end_node, is_start_node, is_terminal};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{db::GraphConnection, locus::GraphLocus, node::Node, sequence::SequenceError};
 use gen_tui::{
@@ -35,7 +35,7 @@ use crate::{
             span_covered_by_later, span_label_text,
         },
         graph_dimming::GraphDimming,
-        graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource},
+        graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership},
         inline_label_placement::draw_label_near_pos,
     },
 };
@@ -222,6 +222,116 @@ where
     let full: Arc<dyn NodeRenderer<GenGraph> + Send + Sync> =
         Arc::new(GenGraphAnnotatedRenderer::new(source, layer));
     zoom_entries!(minimal, truncated, full)
+}
+
+/// The reference path whose graph nodes a viewer centers on y = 0, shared between the viewer
+/// that picks it and the [`CenteringRenderer`]s inside its zoom table. Membership comes from
+/// the path's own edges (see [`PathMembership::covers`]), so it never needs the edges of the
+/// block group the path lives in.
+#[derive(Clone, Debug, Default)]
+pub struct CenteredPath {
+    membership: Arc<Mutex<Option<Arc<PathMembership>>>>,
+    /// Bumped whenever `set` changes what is centered, so views re-route their geometry.
+    generation: Arc<AtomicU64>,
+}
+
+impl CenteredPath {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Center the nodes on `path`, or nothing when `None`.
+    pub fn set(&self, path: Option<PathMembership>) {
+        let mut current = self.lock();
+        if current.is_some() || path.is_some() {
+            self.generation.fetch_add(1, Ordering::Relaxed);
+        }
+        *current = path.map(Arc::new);
+    }
+
+    /// A handle with its own state, holding the same path as this one.
+    pub fn detached_copy(&self) -> Self {
+        let copy = Self::new();
+        *copy.lock() = self.lock().clone();
+        copy
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<PathMembership>>> {
+        self.membership
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Wraps a renderer to mark the nodes on a [`CenteredPath`] as centered, leaving sizing and
+/// painting to the wrapped renderer.
+pub struct CenteringRenderer<R: ?Sized> {
+    centered: CenteredPath,
+    inner: Arc<R>,
+}
+
+impl<R: ?Sized> CenteringRenderer<R> {
+    pub fn new(inner: Arc<R>, centered: CenteredPath) -> Self {
+        Self { centered, inner }
+    }
+}
+
+impl<R> NodeRenderer<GenGraph> for CenteringRenderer<R>
+where
+    R: NodeRenderer<GenGraph> + ?Sized,
+{
+    fn get_node_size(&self, node: &GraphNode) -> (u64, u64) {
+        self.inner.get_node_size(node)
+    }
+
+    fn get_dummy_size(&self) -> (u64, u64) {
+        self.inner.get_dummy_size()
+    }
+
+    fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) {
+        self.inner.render_node(buffer, area, node_id);
+    }
+
+    fn is_visible(&self, node: &GraphNode) -> bool {
+        self.inner.is_visible(node)
+    }
+
+    fn cursor_row(&self, node: &GraphNode) -> Option<u64> {
+        self.inner.cursor_row(node)
+    }
+
+    /// The path's start and end nodes bracket it, so they are centered along with it. With no
+    /// path set nothing is centered.
+    fn is_centered(&self, node: &GraphNode) -> bool {
+        self.centered.lock().as_ref().is_some_and(|membership| {
+            is_terminal(node.node_id)
+                || membership.covers(node.node_id, node.sequence_start, node.sequence_end)
+        })
+    }
+
+    /// Centering moves nodes, so a change to it invalidates routed geometry like a resize.
+    fn size_generation(&self) -> u64 {
+        self.inner.size_generation() + self.centered.generation()
+    }
+}
+
+/// Wrap every renderer of a zoom table so it centers the nodes on `centered`'s path.
+pub fn center_zoom_levels(
+    levels: SendSyncZoomLevels,
+    centered: &CenteredPath,
+) -> SendSyncZoomLevels {
+    levels
+        .into_iter()
+        .map(|(detail, inner, gaps)| {
+            let renderer: Arc<dyn NodeRenderer<GenGraph> + Send + Sync> =
+                Arc::new(CenteringRenderer::new(inner, centered.clone()));
+            (detail, renderer, gaps)
+        })
+        .collect()
 }
 
 /// Apply `levels[index]` (clamped in range) to a view state's zoom index and gaps. Generic
@@ -2221,7 +2331,7 @@ mod tests {
     fn snapshot_zygosity_pruned_edges() {
         use std::path::PathBuf;
 
-        use gen_models::sample::Sample;
+        use gen_models::{block_group::BlockGroup, sample::Sample};
         use gen_tui::{graph_view::GraphView, testing::create_test_terminal};
         use ratatui::widgets::StatefulWidget as _;
 
@@ -2270,17 +2380,37 @@ mod tests {
         let (mut engine, zoom_levels, mut view_state) =
             create_gen_graph_engine(gen_graph, (conn, context.workspace()));
         apply_zoom_level(&mut view_state, TRUNCATED_ZOOM_LEVEL, &zoom_levels);
-        let visual = &zoom_levels[view_state.zoom_index].1;
+        let centered = CenteredPath::new();
+        let visual = CenteringRenderer::new(
+            Arc::clone(&zoom_levels[view_state.zoom_index].1),
+            centered.clone(),
+        );
 
         let mut terminal = create_test_terminal(132, 43);
         terminal
             .draw(|f| {
                 let area = f.area();
-                GraphView::new(&mut engine, visual).render(area, f.buffer_mut(), &mut view_state);
+                GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut view_state);
             })
             .unwrap();
-
         insta::assert_snapshot!("zygosity_pruned_edges", terminal.backend().to_string());
+
+        // Centering the default sample's reference path re-lays out the same graph.
+        let reference_block_group =
+            Sample::get_block_groups(conn, collection, Sample::DEFAULT_NAME, None).remove(0);
+        let reference_path =
+            BlockGroup::get_current_path(conn, &reference_block_group.id, None).unwrap();
+        centered.set(Some(PathMembership::load(conn, &reference_path.id, None)));
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                GraphView::new(&mut engine, &visual).render(area, f.buffer_mut(), &mut view_state);
+            })
+            .unwrap();
+        insta::assert_snapshot!(
+            "zygosity_centered_on_reference_path",
+            terminal.backend().to_string()
+        );
     }
 
     /// Renders through `SqlGraphSource` (the same lazy-crawl path the live TUI viewer uses for

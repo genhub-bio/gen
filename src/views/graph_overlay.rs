@@ -121,7 +121,7 @@ impl PathMembership {
     }
 
     /// Whether a single path range covers the slice of `node_id` from `start` to `end`.
-    fn covers(&self, node_id: HashId, start: i64, end: i64) -> bool {
+    pub fn covers(&self, node_id: HashId, start: i64, end: i64) -> bool {
         self.node_ranges.get(&node_id).is_some_and(|ranges| {
             ranges
                 .iter()

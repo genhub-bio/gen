@@ -41,8 +41,8 @@ use crate::views::{
         active_neighborhood_node_ids, load_block_group_graph, teleport_through_wormhole,
     },
     gen_graph_widget::{
-        self, AnnotationLabels, AnnotationStarts, NodeAnnotationLayer, OverlayInputs,
-        SendSyncZoomLevels, build_send_sync_annotated_zoom_levels,
+        self, AnnotationLabels, AnnotationStarts, CenteredPath, NodeAnnotationLayer, OverlayInputs,
+        SendSyncZoomLevels, build_send_sync_annotated_zoom_levels, center_zoom_levels,
         create_send_sync_annotated_gen_graph_engine_lazy, draw_annotation_connectors,
         draw_annotation_labels, reapply_overlays, starting_zoom_level, update_node_annotations,
     },
@@ -129,6 +129,11 @@ pub struct GenGraphController {
     /// Annotation flags drawn under nodes at full detail. Only filled when a viewer draws with
     /// [`AnnotationDisplay::FlagsUnderNodes`].
     node_annotations: NodeAnnotationLayer,
+    /// The path whose nodes the renderers center on y = 0; see
+    /// [`Self::with_centered_current_path`].
+    centered_path: CenteredPath,
+    /// Whether opened block groups center on their current path.
+    center_current_path: bool,
     /// Where annotations start on each loaded node, for the `w`/`b` keys. Rebuilt with the
     /// highlights whatever the annotation display, so the stops don't depend on flags being
     /// drawn.
@@ -178,9 +183,13 @@ pub struct GenGraphController {
 impl Clone for GenGraphController {
     fn clone(&self) -> Self {
         let node_annotations = NodeAnnotationLayer::new();
-        let zoom_levels = build_send_sync_annotated_zoom_levels(
-            self.database.sequence_source(),
-            node_annotations.clone(),
+        let centered_path = self.centered_path.detached_copy();
+        let zoom_levels = center_zoom_levels(
+            build_send_sync_annotated_zoom_levels(
+                self.database.sequence_source(),
+                node_annotations.clone(),
+            ),
+            &centered_path,
         );
         Self {
             database: self.database.clone(),
@@ -191,6 +200,8 @@ impl Clone for GenGraphController {
             view_state: self.view_state.clone(),
             dimming: self.dimming.clone(),
             node_annotations,
+            centered_path,
+            center_current_path: self.center_current_path,
             annotation_starts: self.annotation_starts.clone(),
             block_group: self.block_group.clone(),
             annotation_group_entries: self.annotation_group_entries.clone(),
@@ -228,6 +239,8 @@ impl GenGraphController {
             node_annotations.clone(),
             zoom_index,
         );
+        let centered_path = CenteredPath::new();
+        let zoom_levels = center_zoom_levels(zoom_levels, &centered_path);
         Self {
             database,
             history_ref,
@@ -237,6 +250,8 @@ impl GenGraphController {
             view_state,
             dimming: GraphDimming::default(),
             node_annotations,
+            centered_path,
+            center_current_path: false,
             annotation_starts: AnnotationStarts::default(),
             block_group: None,
             annotation_group_entries: Vec::new(),
@@ -275,6 +290,17 @@ impl GenGraphController {
         }
     }
 
+    /// Center the block groups opened from now on on their current path: every graph node the
+    /// path runs through is placed at y = 0 (within layers where it is the only such node), so
+    /// the reference reads as a straight line. Only the path's own edges are loaded, never the
+    /// block group's.
+    pub fn with_centered_current_path(self, center_current_path: bool) -> Self {
+        Self {
+            center_current_path,
+            ..self
+        }
+    }
+
     /// Replace the graph with `block_group_id`'s, starting over from its seed at its starting
     /// zoom level (see `starting_zoom_level`) with no overlays, paths or annotation groups
     /// loaded.
@@ -296,6 +322,15 @@ impl GenGraphController {
                 self.node_annotations.clone(),
                 loaded.zoom_index,
             );
+        self.zoom_levels = center_zoom_levels(self.zoom_levels.clone(), &self.centered_path);
+        self.centered_path.set(if self.center_current_path {
+            let conn = self.database.connection()?;
+            BlockGroup::get_current_path(conn, block_group_id, history_ref)
+                .ok()
+                .map(|path| PathMembership::load(conn, &path.id, history_ref))
+        } else {
+            None
+        });
         self.dimming = GraphDimming::default();
         self.annotation_group_entries =
             load_annotation_group_entries(self.database.connection()?, &block_group, history_ref);

@@ -127,6 +127,7 @@ fn full_render_errors(
             _ => (1, 1),
         },
         |_| true,
+        |_| false,
     );
     let validation = validate_layout_graph(&geometry.graph);
     if validation.is_valid() {
