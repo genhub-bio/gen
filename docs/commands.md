@@ -126,8 +126,10 @@ By default, variant positions are interpreted in the parent sample's reference
 coordinates. Use `--inplace` to interpret them against the sample's existing
 graph instead.
 
-For a newly created sample, `--update-homozygous-paths` also records a sample
-path when its calls are homozygous and unambiguous. Without the flag, the graph
+For a newly created sample, `--create-homozygous-paths` also records a sample
+path when its calls are homozygous and unambiguous. The update returns an error
+if a path cannot be inferred, including ambiguous calls, conflicting variants,
+or unsupported parent paths. Without the flag, the graph
 is updated while the stored path remains inherited. Use the VCF header's sample
 name with `gen export fasta --sample`.
 

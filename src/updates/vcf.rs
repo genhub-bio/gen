@@ -154,25 +154,12 @@ fn path_edge_key(mut edge: EdgeData) -> EdgeData {
     edge
 }
 
-/// Assemble a single traversal in parent coordinates before persisting any path changes.
+/// Assemble and persist a single traversal using the child's existing edges.
 ///
-/// Path inference deliberately skips multiple parent block groups, multiple parent
-/// paths, updates to existing block groups, --inplace updates, and parent paths
-/// containing any non-forward strand. The caller excludes all but the strand case
-/// before invoking this function. It also requires a parent path and rejects missing
-/// or multi-allele calls, unsupported alleles, and conflicting VCF records.
-///
-/// After deduplicating identical edits, this function returns Ok(()) without changing
-/// the inherited path if edits overlap or share a start coordinate, a parent block
-/// is not forward-stranded, or an edit starts before the assembled position (including
-/// before coordinate zero) or ends beyond the parent path. These are conservative
-/// skips: graph updates remain valid even when we cannot confidently infer a path.
-/// It also skips if any required connection is absent from the child's existing
-/// block-group edges or those edges fail path validation. Adjacent edits retain
-/// zero-length parent junctions so their existing variant edges can form a path.
-/// This method only writes the path; it never creates edges or their associations.
-/// Otherwise, Ok(()) means the inherited path was replaced under the same name with
-/// the assembled sample traversal.
+/// Reject overlapping edits, unsupported parent strands, out-of-bounds edits,
+/// and missing or invalid connections rather than retaining the inherited path.
+/// Adjacent edits retain zero-length parent junctions so existing variant edges
+/// can form a path. This method never creates edges or their associations.
 fn record_sample_path(
     conn: &GraphConnection,
     path: &Path,
@@ -184,14 +171,18 @@ fn record_sample_path(
     if edits.windows(2).any(|pair| {
         pair[1].region.start < pair[0].region.end || pair[1].region.start == pair[0].region.start
     }) {
-        return Ok(());
+        return Err(VcfError::PathInference(
+            "edits overlap or share a start coordinate".to_string(),
+        ));
     }
     let parent_blocks = path.coordinate_blocks(conn, None);
     if parent_blocks
         .iter()
         .any(|block| block.strand != Strand::Forward)
     {
-        return Ok(());
+        return Err(VcfError::PathInference(
+            "parent path contains a non-forward strand".to_string(),
+        ));
     }
     let length = parent_blocks
         .last()
@@ -201,7 +192,9 @@ fn record_sample_path(
     let mut position = 0;
     for change in edits {
         if change.region.start < position || change.region.end > length {
-            return Ok(());
+            return Err(VcfError::PathInference(
+                "edit lies outside the parent path".to_string(),
+            ));
         }
         append_parent_range(
             &parent_blocks[1..parent_blocks.len() - 1],
@@ -248,13 +241,19 @@ fn record_sample_path(
             target_strand: target.strand,
         });
         let Some(edge_id) = existing_edges.get(&key) else {
-            return Ok(());
+            return Err(VcfError::PathInference(
+                "required connection is absent from the sample graph".to_string(),
+            ));
         };
         edge_ids.push(*edge_id);
     }
     match Path::validate_edges(conn, &edge_ids, &path.block_group_id) {
         Ok(()) => {}
-        Err(PathError::Invalid(_)) => return Ok(()),
+        Err(PathError::Invalid(reason)) => {
+            return Err(VcfError::PathInference(format!(
+                "invalid inferred path: {reason}"
+            )));
+        }
         Err(error) => return Err(error.into()),
     }
     Path::delete(conn, &path.name, &path.block_group_id);
@@ -476,6 +475,9 @@ struct VcfEntry {
 
 #[derive(Error, Debug, PartialEq)]
 pub enum VcfError {
+    /// The requested sample path cannot be inferred safely.
+    #[error("Cannot infer a path with --create-homozygous-paths: {0}")]
+    PathInference(String),
     #[error("Operation Error: {0}")]
     OperationError(#[from] OperationError),
     #[error("Sample Error: {0}")]
@@ -543,10 +545,10 @@ pub struct VcfUpdateOptions {
     pub parent_samples: Vec<String>,
     /// Apply variants using coordinates in the existing sample graph.
     pub in_place: bool,
-    /// Record an inferred path for a new sample when the calls are unambiguous.
-    pub update_homozygous_paths: bool,
     /// Read SAMPLE header fields as typed sample metadata.
     pub read_metadata: bool,
+    /// Require an inferred path for a new sample, returning an error if inference fails.
+    pub create_homozygous_paths: bool,
 }
 
 fn resolve_parent_samples(
@@ -586,8 +588,8 @@ pub fn update_with_vcf(
             fixed_sample: fixed_sample.map(str::to_string),
             parent_samples,
             in_place,
-            update_homozygous_paths: false,
             read_metadata: false,
+            create_homozygous_paths: false,
         },
     )
 }
@@ -608,8 +610,8 @@ pub fn update_with_vcf_options(
         fixed_sample,
         parent_samples,
         in_place,
-        update_homozygous_paths,
         read_metadata,
+        create_homozygous_paths,
     } = options;
     let fixed_sample = fixed_sample.as_deref();
     let conn = context.graph().conn();
@@ -995,6 +997,50 @@ pub fn update_with_vcf_options(
         }
     }
 
+    if create_homozygous_paths {
+        if in_place {
+            return Err(VcfError::PathInference(
+                "--inplace updates are unsupported".to_string(),
+            ));
+        }
+        if let Some((sample_name, path_name)) = ambiguous_samples.iter().next() {
+            return Err(VcfError::PathInference(format!(
+                "sample {sample_name}, path {path_name} has ambiguous, conflicting, or unsupported calls"
+            )));
+        }
+        for (block_group, block_group_ids) in &block_group_cache.cache {
+            if block_group_ids.len() != 1 || existing_block_groups.contains(&block_group_ids[0]) {
+                return Err(VcfError::PathInference(format!(
+                    "sample {}, path {} requires a new block group with a single parent",
+                    block_group.sample_name, block_group.name
+                )));
+            }
+            let child = BlockGroup::get_by_id(conn, &block_group_ids[0], None)?;
+            let Some(parent_id) = child.parent_block_group_id else {
+                return Err(VcfError::PathInference(
+                    "sample has no parent block group".to_string(),
+                ));
+            };
+            let parent_paths = Path::select(conn)
+                .block_group_id(parent_id)
+                .load()
+                .map_err(BlockGroupError::from)?;
+            if parent_paths.len() != 1 {
+                return Err(VcfError::PathInference(
+                    "parent block group must have exactly one path".to_string(),
+                ));
+            }
+            let path = PathCache::lookup(
+                &mut path_cache,
+                &block_group_ids[0],
+                block_group.name.clone(),
+            )?;
+            changes
+                .entry((path, block_group.sample_name.to_string()))
+                .or_default();
+        }
+    }
+
     let bar = progress_bar.add(get_progress_bar(
         changes.values().map(|c| c.len() as u64).sum::<u64>(),
     ));
@@ -1035,28 +1081,8 @@ pub fn update_with_vcf_options(
             bar.inc(chunk.len() as u64);
         }
         let change_count = path_changes.len() as i64;
-        // Apply the conservative path inference policies documented on record_sample_path.
-        let siblings = block_group_cache.cache.get(&BlockGroupData {
-            collection_name,
-            sample_name: &sample_name,
-            name: path.name.clone(),
-        });
-        if update_homozygous_paths
-            && !in_place
-            && !existing_block_groups.contains(&path.block_group_id)
-            && !ambiguous_samples.contains(&(sample_name.clone(), path.name.clone()))
-            && siblings.is_some_and(|ids| ids.len() == 1)
-        {
-            let block_group = BlockGroup::get_by_id(conn, &path.block_group_id, None)?;
-            if let Some(parent_id) = block_group.parent_block_group_id {
-                let parent_paths = Path::select(conn)
-                    .block_group_id(parent_id)
-                    .load()
-                    .map_err(BlockGroupError::from)?;
-                if parent_paths.len() == 1 {
-                    paths_to_record.push((path.clone(), path_changes));
-                }
-            }
+        if create_homozygous_paths {
+            paths_to_record.push((path.clone(), path_changes));
         }
         summary
             .entry(sample_name)
@@ -1363,7 +1389,12 @@ mod tests {
                     .unwrap()
                     .into_iter()
                     .collect::<HashSet<_>>();
-                record_sample_path(conn, &path, &changes).unwrap();
+                let result = record_sample_path(conn, &path, &changes);
+                if stage < 2 {
+                    assert!(matches!(result, Err(VcfError::PathInference(_))));
+                } else {
+                    result.unwrap();
+                }
                 assert_eq!(
                     Edge::select(conn)
                         .load()
@@ -1425,10 +1456,12 @@ mod tests {
             ("1/1", "1/1", "1/1", "ACCGGGAGATCGATCGATCGGGAACACACAGAGA"),
             ("1", "1", "1", "ACCGGGAGATCGATCGATCGGGAACACACAGAGA"),
             ("0/0", "0/0", "0/0", "ATCGATCGATCGATCGATCGGGAACACACAGAGA"),
-            ("0/1", "1/1", "1/1", "ATCGATCGATCGATCGATCGGGAACACACAGAGA"),
-            ("1/2", "1/1", "1/1", "ATCGATCGATCGATCGATCGGGAACACACAGAGA"),
-            ("./1", "1/1", "1/1", "ATCGATCGATCGATCGATCGGGAACACACAGAGA"),
-            (".", "1/1", "1/1", "ATCGATCGATCGATCGATCGGGAACACACAGAGA"),
+            ("0/1", "1/1", "1/1", ""),
+            ("1/2", "1/1", "1/1", ""),
+            ("./1", "1/1", "1/1", ""),
+            (".", "1/1", "1/1", ""),
+            (".", ".", ".", ""),
+            ("0/1", "0/1", "0/1", ""),
         ];
         for (first, second, third, expected) in cases {
             let records = format!(
@@ -1456,7 +1489,7 @@ mod tests {
         std::fs::write(&vcf_path, format!(
             "##fileformat=VCFv4.3\n##contig=<ID=m123,length=34>\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n{records}"
         )).unwrap();
-        update_with_vcf_options(
+        let result = update_with_vcf_options(
             &context,
             &vcf_path.to_string_lossy().into_owned(),
             "test",
@@ -1464,11 +1497,18 @@ mod tests {
                 fixed_genotype: fixed_genotype.to_string(),
                 fixed_sample: Some("sample".to_string()),
                 parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
-                update_homozygous_paths: true,
+                create_homozygous_paths: true,
                 ..VcfUpdateOptions::default()
             },
-        )
-        .unwrap();
+        );
+        if expected.is_empty() {
+            assert!(
+                matches!(result, Err(VcfError::PathInference(_))),
+                "records: {records}, result: {result:?}"
+            );
+            return;
+        }
+        result.unwrap();
         let paths = Path::query_for_collection_and_sample(conn, "test", "sample");
         assert_eq!(paths.len(), 1);
         assert_eq!(
@@ -1491,12 +1531,11 @@ mod tests {
         let records = "m123\t1\t.\tA\tC\t.\t.\t.\tGT\t1/1\nm123\t1\t.\tA\tC\t.\t.\t.\tGT\t1/1\nm123\t34\t.\tA\tAT\t.\t.\t.\tGT\t1/1\n";
         assert_sample_path(records, "", "CTCGATCGATCGATCGATCGGGAACACACAGAGAT");
         assert_sample_path(records, "1/1", "CTCGATCGATCGATCGATCGGGAACACACAGAGAT");
-        assert_sample_path(records, "0/1", "ATCGATCGATCGATCGATCGGGAACACACAGAGA");
+        assert_sample_path(records, "0/1", "");
     }
 
     #[test]
     fn test_vcf_path_conflicting_and_unsupported_calls() {
-        let original = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
         for record in [
             "m123\t2\t.\tT\tG\t.\t.\t.\tGT\t1/1\n",
             "m123\t2\t.\tT\tC\t.\t.\t.\tGT\t0/0\n",
@@ -1505,7 +1544,7 @@ mod tests {
             "m123\t5\t.\tA\t*\t.\t.\t.\tGT\t1/1\n",
         ] {
             let records = format!("m123\t2\t.\tT\tC\t.\t.\t.\tGT\t1/1\n{record}");
-            assert_sample_path(&records, "", original);
+            assert_sample_path(&records, "", "");
         }
     }
 
@@ -2112,7 +2151,7 @@ mod tests {
             "test",
             VcfUpdateOptions {
                 parent_samples: vec![Sample::DEFAULT_NAME.to_string()],
-                update_homozygous_paths: true,
+                create_homozygous_paths: true,
                 ..VcfUpdateOptions::default()
             },
         )
