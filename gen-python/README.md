@@ -232,6 +232,26 @@ inserted = sequence.replace(annotation, "ACGT")
 sequence.add_annotation(inserted, "mutation")
 ```
 
+## Annotation files
+
+Add a GFF3, BED, or GenBank file to repository history with
+`Repository.import_annotations()`. The file is
+available on branches containing that operation; views match its sequence names
+to block groups when loading it. An optional tabix index, display name, and
+operation message can be supplied:
+
+```python
+commit_hash = repo.import_annotations(
+    "features.gff3", name="genes", message="Add genes"
+)
+```
+
+The format is inferred from the extension, including `.gz` and `.bgz` paths;
+use `format="gff3"`, `format="bed"`, or `format="genbank"` to override it.
+A neighboring `.tbi` index is discovered automatically, or `index=` can specify
+another path. This records the file as an asset; it does not create database
+annotation rows.
+
 ## Architecture
 
 The package is built from three layers:
@@ -275,7 +295,7 @@ an [anywidget](https://anywidget.dev) subclass that:
 - exposes `zoom_in()`/`zoom_out()`, `scroll_left()`/`scroll_right()`/`scroll_up()`/
   `scroll_down()`, `next_page()`/`prev_page()`, and `refresh()` for programmatic
   control, plus higher-level helpers like `go_to()`, `show()`, `clear_highlights()`,
-  and track management (`load_track()`, `show_track()`, `hide_track()`, `tracks`,
+  and track management (`show_track()`, `hide_track()`, `tracks`,
   `hide_all_tracks()`).
 
 The Python layer does no rendering or layout logic itself; it is a bridge.

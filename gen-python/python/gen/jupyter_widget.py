@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
-import tempfile
 import warnings
 
 import anywidget
@@ -485,7 +484,7 @@ class GraphWidget(anywidget.AnyWidget):
     def clear_highlights(self) -> None:
         """Remove the ephemeral highlights added via :meth:`show`.
 
-        Persistent tracks (from :meth:`load_track`/:meth:`show_track`) and
+        Persistent tracks (from :meth:`show_track`) and
         the path highlight from :meth:`show_path` are left untouched.
         """
         if self._frozen:
@@ -527,60 +526,6 @@ class GraphWidget(anywidget.AnyWidget):
 
     # ── Track API ─────────────────────────────────────────────────────────
 
-    def load_track(
-        self,
-        file: str,
-        *,
-        name: str | None = None,
-        from_sample: str | None = None,
-        filter=None,
-    ) -> None:
-        """Load a GFF3 or BED file as a persistent annotation track.
-
-        Parameters
-        ----------
-        file : str
-            Path to a GFF3 or BED annotation file.  Both standard files
-            (chromosome/contig names as reference) and pre-translated files
-            (node hash-IDs as reference) are accepted; standard files are
-            translated automatically.  *name* defaults to the file path.
-        name : str, optional
-            Display label for this annotation track.
-        from_sample : str, optional
-            Sample whose coordinate space the file uses.  Defaults to
-            ``"reference"``.
-        filter : callable, optional
-            ``(row: str) -> bool`` predicate applied to each non-header line.
-        """
-        if self._frozen:
-            return
-        if filter is not None:
-            file = self._apply_row_filter(file, filter)
-        self._controller.add_track_file(file, name, from_sample)
-        self._render()
-
-    @staticmethod
-    def _apply_row_filter(file: str, filter) -> str:
-        # TODO: temporary bandaid — move row filtering to Rust once annotation
-        # metadata infrastructure is built out further.
-        """Write header lines + approved data rows to a temp file; return its path."""
-        suffix = pathlib.Path(file).suffix
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=suffix, delete=False, encoding="utf-8"
-        )
-        with open(file, encoding="utf-8") as fh:
-            for line in fh:
-                if (
-                    line.startswith("#")
-                    or line.startswith("track")
-                    or line.startswith("browser")
-                ):
-                    tmp.write(line)
-                elif filter(line):
-                    tmp.write(line)
-        tmp.close()
-        return tmp.name
-
     def show_track(self, name: str) -> None:
         """Load and display a DB-stored annotation group by name.
 
@@ -593,7 +538,7 @@ class GraphWidget(anywidget.AnyWidget):
         self._render()
 
     def hide_track(self, name: str) -> None:
-        """Remove a displayed track, however it was shown (:meth:`load_track` or :meth:`show_track`)."""
+        """Remove a displayed annotation track."""
         if self._frozen:
             return
         self._controller.remove_track(name)
