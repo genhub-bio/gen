@@ -58,15 +58,29 @@ pub fn export_fasta(
     let mut writer = fasta::io::Writer::new(file);
 
     for block_group in block_groups {
-        let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
+        let mut sequences = if sample_name.is_some() && history_ref.is_none() {
+            BlockGroup::get_all_sequences(conn, workspace, &block_group.id, false)?
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
+            vec![path.sequence(conn, workspace, history_ref)?]
+        };
+        sequences.sort();
 
-        let definition = fasta::record::Definition::new(block_group.name, None);
-        let sequence = fasta::record::Sequence::from(
-            path.sequence(conn, workspace, history_ref)?.into_bytes(),
-        );
-        let record = fasta::Record::new(definition, sequence);
+        let multiple_sequences = sequences.len() > 1;
+        for (index, sequence) in sequences.into_iter().enumerate() {
+            let name = if multiple_sequences {
+                format!("{}|sequence_{}", block_group.name, index + 1)
+            } else {
+                block_group.name.clone()
+            };
+            let definition = fasta::record::Definition::new(name, None);
+            let sequence = fasta::record::Sequence::from(sequence.into_bytes());
+            let record = fasta::Record::new(definition, sequence);
 
-        writer.write_record(&record)?;
+            writer.write_record(&record)?;
+        }
     }
 
     println!("Exported to file {}", filename.display());

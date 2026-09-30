@@ -3963,6 +3963,7 @@ fn test_vcf_update_exports_sample_in_default_collection() {
             "vcf",
             "--parent-samples",
             "reference",
+            "--update-homozygous-paths",
             "random_snps.vcf",
         ],
         vec!["export", "fasta", "--sample", "sample_001", "0001.fa"],
