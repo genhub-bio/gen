@@ -79,6 +79,13 @@ or unsupported parent paths. Without the flag, the graph
 is updated while the stored path remains inherited. Use the VCF header's sample
 name with `gen export fasta --sample`.
 
+# FASTA export
+
+`gen export fasta <path> --sample <sample>` exports the stored path sequence
+when a block group has exactly one path. For block groups with zero or multiple
+paths, it exports all graph sequences. Exports with a revision selection use the
+current path at that revision.
+
 # View diff
 
 Compare one sequence graph between two samples with:
