@@ -6,6 +6,7 @@ use gen_models::{
     collection::Collection,
     db::GraphConnection,
     errors::PathError,
+    path::Path,
     sample::Sample,
 };
 use noodles::fasta;
@@ -13,6 +14,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FastaExportError {
+    /// The sample, collection, and revision selection matched no block groups.
+    #[error("No block groups found for {0}; check the sample, collection, and revision")]
+    NoMatchingBlockGroups(String),
     #[error("I/O error while exporting FASTA: {0}")]
     Io(#[from] std::io::Error),
     #[error("Path error while exporting FASTA: {0}")]
@@ -35,19 +39,58 @@ pub fn export_fasta(
         Collection::get_block_groups(conn, collection_name, history_ref)
     };
 
+    // A failed selection must not look like a successful export or truncate an
+    // existing output file. Missing paths within a matching group error below.
+    if block_groups.is_empty() {
+        let selection = match sample_name {
+            Some(sample_name) => {
+                format!("sample '{sample_name}' in collection '{collection_name}'")
+            }
+            None => format!("collection '{collection_name}'"),
+        };
+        let selection = match history_ref {
+            Some(history_ref) => format!("{selection} at revision '{history_ref}'"),
+            None => selection,
+        };
+        return Err(FastaExportError::NoMatchingBlockGroups(selection));
+    }
+
     let file = File::create(filename)?;
     let mut writer = fasta::io::Writer::new(file);
 
     for block_group in block_groups {
-        let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
+        let mut sequences = if sample_name.is_some() && history_ref.is_none() {
+            let paths = Path::select(conn)
+                .block_group_id(block_group.id)
+                .limit(2)
+                .load()
+                .map_err(PathError::from)?;
+            if let [path] = paths.as_slice() {
+                vec![path.sequence(conn, workspace, None)?]
+            } else {
+                BlockGroup::get_all_sequences(conn, workspace, &block_group.id, false)?
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            }
+        } else {
+            let path = BlockGroup::get_current_path(conn, &block_group.id, history_ref)?;
+            vec![path.sequence(conn, workspace, history_ref)?]
+        };
+        sequences.sort();
 
-        let definition = fasta::record::Definition::new(block_group.name, None);
-        let sequence = fasta::record::Sequence::from(
-            path.sequence(conn, workspace, history_ref)?.into_bytes(),
-        );
-        let record = fasta::Record::new(definition, sequence);
+        let multiple_sequences = sequences.len() > 1;
+        for (index, sequence) in sequences.into_iter().enumerate() {
+            let name = if multiple_sequences {
+                format!("{}|sequence_{}", block_group.name, index + 1)
+            } else {
+                block_group.name.clone()
+            };
+            let definition = fasta::record::Definition::new(name, None);
+            let sequence = fasta::record::Sequence::from(sequence.into_bytes());
+            let record = fasta::Record::new(definition, sequence);
 
-        writer.write_record(&record)?;
+            writer.write_record(&record)?;
+        }
     }
 
     println!("Exported to file {}", filename.display());
@@ -60,13 +103,39 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{io, path::PathBuf, str};
 
+    use gen_models::{block_group::BlockGroup, path::Path, sample::Sample};
     use noodles::fasta;
     use tempfile;
 
-    use super::*;
+    use super::{FastaExportError, export_fasta};
     use crate::{
         imports::fasta::import_fasta, test_helpers::setup_gen, updates::fasta::update_with_fasta,
     };
+
+    #[test]
+    fn test_export_missing_selection_preserves_output() {
+        let context = setup_gen();
+        let directory = tempfile::tempdir().unwrap();
+        let filename = directory.path().join("out.fa");
+        std::fs::write(&filename, "existing output").unwrap();
+        for sample_name in [Some("sample_0001"), None] {
+            let error = export_fasta(
+                context.graph().conn(),
+                context.workspace(),
+                "missing-collection",
+                sample_name,
+                &filename,
+                None,
+            )
+            .unwrap_err();
+            assert!(matches!(error, FastaExportError::NoMatchingBlockGroups(_)));
+            assert!(error.to_string().contains("missing-collection"));
+            assert_eq!(
+                std::fs::read_to_string(&filename).unwrap(),
+                "existing output"
+            );
+        }
+    }
 
     #[test]
     fn test_import_then_export() {
@@ -118,6 +187,15 @@ mod tests {
 
     #[test]
     fn test_import_fasta_update_with_fasta_export() {
+        export_updated_fasta(false);
+    }
+
+    #[test]
+    fn test_export_single_path_ignores_alternative_graph_sequences() {
+        export_updated_fasta(true);
+    }
+
+    fn export_updated_fasta(single_path: bool) {
         /*
         Graph after fasta update:
         AT ----> CGA ------> TCGATCGATCGATCGGGAACACACAGAGA
@@ -151,6 +229,27 @@ mod tests {
             false,
         );
 
+        if single_path {
+            let block_groups = Sample::get_block_groups(conn, &collection, "child sample", None);
+            let block_group = &block_groups[0];
+            let current_path = BlockGroup::get_current_path(conn, &block_group.id, None).unwrap();
+            let paths = Path::select(conn)
+                .block_group_id(block_group.id)
+                .load()
+                .unwrap();
+            for path in paths {
+                if path.id != current_path.id {
+                    Path::delete(conn, &path.name, &block_group.id);
+                }
+            }
+            assert_eq!(
+                BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+
         let tmp_dir = tempfile::tempdir().unwrap().keep();
         let filename = tmp_dir.join("out.fa");
         export_fasta(
@@ -166,8 +265,8 @@ mod tests {
         let mut fasta_reader = fasta::io::reader::Builder
             .build_from_path(filename)
             .unwrap();
-        let record = fasta_reader
-            .records()
+        let mut records = fasta_reader.records();
+        let record = records
             .next()
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "No records found in fasta file")
@@ -179,5 +278,15 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(sequence, "ATAAAAAAAATCGATCGATCGATCGGGAACACACAGAGA");
+        if single_path {
+            assert!(records.next().is_none());
+        } else {
+            let record = records.next().unwrap().unwrap();
+            assert_eq!(
+                str::from_utf8(record.sequence().as_ref()).unwrap(),
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+            );
+            assert!(records.next().is_none());
+        }
     }
 }

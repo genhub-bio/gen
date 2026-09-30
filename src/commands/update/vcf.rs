@@ -4,7 +4,7 @@ use gen_models::errors::OperationError;
 
 use crate::{
     commands::{cli_context::CliContext, commit_operation, get_default_collection},
-    updates::vcf::update_with_vcf,
+    updates::vcf::{VcfUpdateOptions, update_with_vcf_options},
 };
 
 /// Update with a VCF file
@@ -35,6 +35,9 @@ pub struct Command {
     /// Apply edits in-place instead of using parent sample's reference coordinates
     #[arg(long = "inplace")]
     in_place: bool,
+    /// Require a path for new samples; fail if calls or parent paths are ambiguous.
+    #[arg(long)]
+    create_homozygous_paths: bool,
 }
 
 #[cfg_attr(feature = "profiling", tracing::instrument(skip(cli_context, cmd)))]
@@ -58,14 +61,17 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         .clone()
         .unwrap_or_else(|| get_default_collection(config_conn));
 
-    match update_with_vcf(
+    match update_with_vcf_options(
         context,
         &cmd.path,
         collection_name,
-        cmd.genotype.clone().unwrap_or("".to_string()),
-        cmd.sample.as_deref(),
-        cmd.parent_samples.clone(),
-        cmd.in_place,
+        VcfUpdateOptions {
+            fixed_genotype: cmd.genotype.clone().unwrap_or_default(),
+            fixed_sample: cmd.sample.clone(),
+            parent_samples: cmd.parent_samples.clone(),
+            in_place: cmd.in_place,
+            create_homozygous_paths: cmd.create_homozygous_paths,
+        },
     ) {
         Ok((operation_summary, _output_samples)) => {
             conn.execute("END TRANSACTION", [])?;
