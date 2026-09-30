@@ -48,7 +48,7 @@ use super::{
     graph_read::{current_graph, locus_from_region, shortest_route},
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
-    jupyter_widget::{PyGraphController, build_widget},
+    jupyter_widget::{PlotOptions, PyGraphController, build_widget},
     locus::GraphLocusExt as _,
     position::{PyPosition, positions_of},
     repository::run_context_operation_write,
@@ -301,7 +301,10 @@ impl PySequenceGraph {
     ///     Keep retired edit-site and pruned edges in the graph, dimmed,
     ///     instead of removing them along with the nodes only they reach.
     ///     Defaults to ``False``.
-    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None, show_history=false))]
+    /// center_reference : bool, optional
+    ///     Lay the current path out as one straight row, with variation branching
+    ///     above and below it. Defaults to ``False``.
+    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None, show_history=false, center_reference=false))]
     fn plot(
         slf: &Bound<'_, PySequenceGraph>,
         rows: Option<u32>,
@@ -309,9 +312,16 @@ impl PySequenceGraph {
         detail: Option<&str>,
         colors: Option<Py<PyAny>>,
         show_history: bool,
+        center_reference: bool,
     ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let mut ctrl = PyGraphController::for_sequence_graph(&slf.borrow(), show_history)?;
+        let mut ctrl = PyGraphController::for_sequence_graph(
+            &slf.borrow(),
+            PlotOptions {
+                show_history,
+                center_reference,
+            },
+        )?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
         }

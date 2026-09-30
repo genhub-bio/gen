@@ -37,6 +37,11 @@ pub trait MockRenderer<G: GraphBase> {
     ) {
         let _ = (buffer, area, node_id, detail_level);
     }
+
+    fn is_centered(&self, node: &G::NodeId) -> bool {
+        let _ = node;
+        false
+    }
 }
 
 /// Combines a sizing-focused and a rendering-focused [`MockRenderer`] into a single
@@ -74,6 +79,10 @@ where
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
         self.renderer
             .render_node(buffer, area, node_id, self.detail);
+    }
+
+    fn is_centered(&self, node: &G::NodeId) -> bool {
+        self.sizer.is_centered(node)
     }
 
     /// Sizes follow `detail`, which tests switch in place between renders.

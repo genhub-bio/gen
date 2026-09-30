@@ -233,6 +233,9 @@ impl WindowScene {
                 _ => visual.get_dummy_size(),
             },
             is_visible,
+            |node_index| {
+                visual.is_centered(&<G as NodeIndexable>::from_index(graph, node_index.index()))
+            },
         );
         let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
         Self {

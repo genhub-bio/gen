@@ -6,13 +6,211 @@ use petgraph::{
     Undirected,
     graph::NodeIndex,
     stable_graph::StableGraph,
+    unionfind::UnionFind,
     visit::{EdgeRef, IntoEdgeReferences},
 };
 
 use crate::{
+    compaction::{Constraint, compact_axis_with_centering},
     distribute_nodes::base_step,
     layout::{LayoutEdge, LayoutNode, NodeRole},
 };
+
+/// Mirror simple branch-and-merge bubbles when this moves centered nodes toward the first row.
+/// Sugiyama's routing vertices stay on their branch; cycle-bypass edges are excluded. The
+/// ordinal y values produced by assembly are still intact at this point.
+pub fn orient_centered_bubbles(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    centered: &HashSet<NodeIndex>,
+) {
+    if centered.is_empty() {
+        return;
+    }
+
+    let mut layers: BTreeMap<i64, Vec<NodeIndex<u32>>> = BTreeMap::new();
+    for node_index in graph.node_indices() {
+        layers
+            .entry(graph[node_index].pos.x)
+            .or_default()
+            .push(node_index);
+    }
+    let mut layers: Vec<Vec<NodeIndex<u32>>> = layers.into_values().collect();
+    for layer in &mut layers {
+        layer.sort_by_key(|&node_index| graph[node_index].pos.y);
+    }
+
+    let backward_bundles: HashSet<_> = graph
+        .edge_references()
+        .filter(|edge| edge.weight().is_backward_span)
+        .flat_map(|edge| edge.weight().bundle.iter().copied())
+        .collect();
+    let mut outgoing: HashMap<NodeIndex<u32>, Vec<NodeIndex<u32>>> = HashMap::new();
+    let mut incoming: HashMap<NodeIndex<u32>, Vec<NodeIndex<u32>>> = HashMap::new();
+    for edge in graph.edge_references() {
+        let (first, second) = (edge.source(), edge.target());
+        if matches!(graph[first].role, NodeRole::Pin | NodeRole::Wormhole(_))
+            || matches!(graph[second].role, NodeRole::Pin | NodeRole::Wormhole(_))
+            || edge.weight().is_backward_span
+            || edge
+                .weight()
+                .bundle
+                .iter()
+                .any(|bundle| backward_bundles.contains(bundle))
+        {
+            continue;
+        }
+        let (left, right) = if graph[first].pos.x + 1 == graph[second].pos.x {
+            (first, second)
+        } else if graph[second].pos.x + 1 == graph[first].pos.x {
+            (second, first)
+        } else {
+            continue;
+        };
+        outgoing.entry(left).or_default().push(right);
+        incoming.entry(right).or_default().push(left);
+    }
+    for neighbours in outgoing.values_mut().chain(incoming.values_mut()) {
+        neighbours.sort_unstable();
+        neighbours.dedup();
+    }
+
+    let columns: HashMap<i64, usize> = layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| (graph[layer[0]].pos.x, index))
+        .collect();
+    for source in graph.node_indices().collect::<Vec<_>>() {
+        if !matches!(graph[source].role, NodeRole::Data(_)) {
+            continue;
+        }
+        let Some(branches) = outgoing.get(&source).filter(|branches| branches.len() > 1) else {
+            continue;
+        };
+        let mut sink = None;
+        let mut interior = HashSet::new();
+        let mut valid = true;
+        for &branch in branches {
+            let mut current = branch;
+            loop {
+                if incoming
+                    .get(&current)
+                    .is_some_and(|parents| parents.len() > 1)
+                {
+                    if sink.is_some_and(|existing| existing != current) {
+                        valid = false;
+                    }
+                    sink = Some(current);
+                    break;
+                }
+                if !interior.insert(current) {
+                    valid = false;
+                    break;
+                }
+                let Some(children) = outgoing
+                    .get(&current)
+                    .filter(|children| children.len() == 1)
+                else {
+                    valid = false;
+                    break;
+                };
+                current = children[0];
+            }
+            if !valid {
+                break;
+            }
+        }
+        let Some(sink) = sink.filter(|_| valid && !interior.is_empty()) else {
+            continue;
+        };
+        if !matches!(graph[sink].role, NodeRole::Data(_))
+            || !incoming[&sink]
+                .iter()
+                .all(|parent| *parent == source || interior.contains(parent))
+        {
+            continue;
+        }
+
+        let mut bubble_layers: BTreeMap<i64, Vec<NodeIndex<u32>>> = BTreeMap::new();
+        for &node_index in &interior {
+            bubble_layers
+                .entry(graph[node_index].pos.x)
+                .or_default()
+                .push(node_index);
+        }
+        let mut ranges = Vec::new();
+        let mut improvement = 0_isize;
+        for (column, members) in bubble_layers {
+            let layer_index = columns[&column];
+            let layer = &layers[layer_index];
+            let positions: Vec<_> = layer
+                .iter()
+                .enumerate()
+                .filter_map(|(position, node_index)| {
+                    interior.contains(node_index).then_some(position)
+                })
+                .collect();
+            let start = positions[0];
+            if positions.len() != members.len()
+                || positions.last() != Some(&(start + members.len() - 1))
+            {
+                valid = false;
+                break;
+            }
+            let end = start + members.len();
+            let block = &layer[start..end];
+            if let Some(position) = centered_position(graph, block, centered) {
+                improvement += 2 * position as isize - (block.len() - 1) as isize;
+            }
+            ranges.push((layer_index, start, end));
+        }
+        if !valid || improvement <= 0 {
+            continue;
+        }
+        for (layer_index, start, end) in ranges {
+            let layer = &mut layers[layer_index];
+            layer[start..end].reverse();
+            for (position, &node_index) in layer[start..end].iter().enumerate() {
+                graph[node_index].pos.y = (start + position) as i64;
+            }
+        }
+    }
+}
+
+fn centered_position(
+    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    block: &[NodeIndex<u32>],
+    centered: &HashSet<NodeIndex>,
+) -> Option<usize> {
+    let centered_data: Vec<_> = block
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &node_index)| match graph[node_index].role {
+            NodeRole::Data(domain_index) if centered.contains(&domain_index) => Some(position),
+            _ => None,
+        })
+        .collect();
+    match centered_data.as_slice() {
+        [position] => return Some(*position),
+        [] => {}
+        _ => return None,
+    }
+    let centered_routing: Vec<_> = block
+        .iter()
+        .enumerate()
+        .filter(|&(_, &node_index)| {
+            matches!(graph[node_index].role, NodeRole::Routing)
+                && graph
+                    .edges(node_index)
+                    .flat_map(|edge| edge.weight().bundle.iter())
+                    .any(|(source, target)| centered.contains(source) || centered.contains(target))
+        })
+        .map(|(position, _)| position)
+        .collect();
+    match centered_routing.as_slice() {
+        [position] => Some(*position),
+        _ => None,
+    }
+}
 
 /// Assign size-aware cross-axis coordinates while preserving Sugiyama's within-layer order.
 pub fn assign_cross_coordinates(
@@ -62,6 +260,141 @@ pub fn assign_cross_coordinates(
     for (dense_id, &node_index) in node_indices.iter().enumerate() {
         graph[node_index].pos.y = coordinates[dense_id];
     }
+}
+
+/// Place centered nodes on one row using the same symmetric separation solver as compaction.
+/// Routing chains that Sugiyama left straight are tied together, so pinning data nodes does not
+/// introduce an avoidable bend before edge routing. A centered edge can pin a layer with no
+/// centered data node; ambiguous layers are left without an anchor.
+pub fn center_layers(
+    graph: &mut StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    centered: &HashSet<NodeIndex>,
+) {
+    if centered.is_empty() {
+        return;
+    }
+    let mut layers: BTreeMap<i64, Vec<NodeIndex<u32>>> = BTreeMap::new();
+    for node_index in graph.node_indices() {
+        layers
+            .entry(graph[node_index].pos.x)
+            .or_default()
+            .push(node_index);
+    }
+    let mut constraints = Vec::new();
+    let mut anchors = Vec::new();
+    for layer in layers.values_mut() {
+        layer.sort_by_key(|&node_index| graph[node_index].pos.y);
+        for pair in layer.windows(2) {
+            constraints.push(Constraint {
+                from: pair[0].index(),
+                to: pair[1].index(),
+                gap: base_step(graph[pair[0]].size.1 as i64, graph[pair[1]].size.1 as i64) + 1,
+            });
+        }
+        let data: Vec<_> = layer.iter().copied().filter(|&node_index| {
+            matches!(graph[node_index].role, NodeRole::Data(domain_index) if centered.contains(&domain_index))
+        }).collect();
+        match data.as_slice() {
+            [only] => anchors.push(*only),
+            [] => {
+                let routing: Vec<_> = layer
+                    .iter()
+                    .copied()
+                    .filter(|&node_index| {
+                        matches!(graph[node_index].role, NodeRole::Routing)
+                            && graph
+                                .edges(node_index)
+                                .flat_map(|edge| edge.weight().bundle.iter())
+                                .any(|(source, target)| {
+                                    centered.contains(source) || centered.contains(target)
+                                })
+                    })
+                    .collect();
+                if let [only] = routing.as_slice() {
+                    anchors.push(*only);
+                }
+            }
+            _ => {}
+        }
+    }
+    if anchors.is_empty() {
+        return;
+    }
+    let mut aligned_routing = Vec::new();
+    for edge in graph.edge_references() {
+        let source = edge.source();
+        let target = edge.target();
+        if matches!(graph[source].role, NodeRole::Routing)
+            && matches!(graph[target].role, NodeRole::Routing)
+            && graph[source].pos.y == graph[target].pos.y
+        {
+            aligned_routing.push((source, target));
+        }
+    }
+    let placement = solve_centered_layers(graph, &constraints, &anchors, &aligned_routing)
+        .or_else(|| solve_centered_layers(graph, &constraints, &anchors, &[]));
+    let Some(placement) = placement else {
+        log::warn!("centered cross-coordinate constraints are infeasible");
+        return;
+    };
+    for node_index in graph.node_indices().collect::<Vec<_>>() {
+        graph[node_index].pos.y = placement[&node_index];
+    }
+}
+
+/// Equality groups are contracted before solving. The generic solver can handle zero-gap cycles,
+/// but contraction keeps this frequent pre-routing pass on its acyclic fast path.
+fn solve_centered_layers(
+    graph: &StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
+    separations: &[Constraint],
+    anchors: &[NodeIndex<u32>],
+    aligned_routing: &[(NodeIndex<u32>, NodeIndex<u32>)],
+) -> Option<HashMap<NodeIndex<u32>, i64>> {
+    let node_indices: Vec<_> = graph.node_indices().collect();
+    let dense: HashMap<_, _> = node_indices
+        .iter()
+        .enumerate()
+        .map(|(index, &node_index)| (node_index, index))
+        .collect();
+    let mut groups = UnionFind::<usize>::new(node_indices.len());
+    for &node_index in &anchors[1..] {
+        groups.union(dense[&anchors[0]], dense[&node_index]);
+    }
+    for &(source, target) in aligned_routing {
+        groups.union(dense[&source], dense[&target]);
+    }
+
+    let mut group_ids = HashMap::new();
+    let group_of: HashMap<_, _> = node_indices
+        .iter()
+        .map(|&node_index| {
+            let root = groups.find(dense[&node_index]);
+            let next_id = group_ids.len();
+            let group_id = *group_ids.entry(root).or_insert(next_id);
+            (node_index, group_id)
+        })
+        .collect();
+    let mut constraints = Vec::with_capacity(separations.len());
+    for &constraint in separations {
+        let from = group_of[&NodeIndex::new(constraint.from)];
+        let to = group_of[&NodeIndex::new(constraint.to)];
+        if from == to {
+            return None;
+        }
+        constraints.push(Constraint {
+            from,
+            to,
+            gap: constraint.gap,
+        });
+    }
+    let placement = compact_axis_with_centering(0..group_ids.len(), &constraints).ok()?;
+    let origin = placement.centered[&group_of[&anchors[0]]];
+    Some(
+        group_of
+            .into_iter()
+            .map(|(node_index, group_id)| (node_index, placement.centered[&group_id] - origin))
+            .collect(),
+    )
 }
 
 /// Dense representation used by the four Brandes–Köpf alignment passes.
@@ -507,5 +840,343 @@ fn round_half_even(value: f64) -> i64 {
         floor
     } else {
         floor + 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use petgraph::{Undirected, graph::NodeIndex, stable_graph::StableGraph};
+
+    use crate::{
+        assembly::assemble_window,
+        crawl::{EagerSource, GraphCursor, build_window_graph, neighborhood},
+        cross_coordinates::{assign_cross_coordinates, center_layers, orient_centered_bubbles},
+        geometry::LocalPos,
+        layout::{LayoutEdge, LayoutNode, NodeRole},
+        testing::mocks::MockDomainGraph,
+    };
+
+    #[test]
+    fn test_orient_centered_three_layer_bubble() {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        let left = graph.add_node(LayoutNode::data(
+            NodeIndex::new(0),
+            LocalPos::new_xy(0, 0),
+            (1, 1),
+            Some(0),
+        ));
+        let alternate = graph.add_node(LayoutNode::data(
+            NodeIndex::new(1),
+            LocalPos::new_xy(1, 0),
+            (1, 1),
+            Some(1),
+        ));
+        let reference = graph.add_node(LayoutNode::data(
+            NodeIndex::new(2),
+            LocalPos::new_xy(1, 1),
+            (1, 1),
+            Some(1),
+        ));
+        let right = graph.add_node(LayoutNode::data(
+            NodeIndex::new(3),
+            LocalPos::new_xy(2, 0),
+            (1, 1),
+            Some(2),
+        ));
+        for middle in [alternate, reference] {
+            graph.add_edge(left, middle, LayoutEdge::empty());
+            graph.add_edge(middle, right, LayoutEdge::empty());
+        }
+
+        orient_centered_bubbles(&mut graph, &HashSet::from([NodeIndex::new(2)]));
+
+        assert_eq!(graph[reference].pos.y, 0);
+        assert_eq!(graph[alternate].pos.y, 1);
+        assert_eq!(graph[left].pos.y, 0);
+        assert_eq!(graph[right].pos.y, 0);
+    }
+
+    #[test]
+    fn test_orient_centered_bubble_mirrors_all_interior_layers() {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        let mut nodes = Vec::new();
+        for (column, order) in [(0, 0), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0)] {
+            let domain_index = NodeIndex::new(nodes.len());
+            nodes.push(graph.add_node(LayoutNode::data(
+                domain_index,
+                LocalPos::new_xy(column, order),
+                (1, 1),
+                Some(column as i32),
+            )));
+        }
+        for (source, target) in [(0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 5)] {
+            graph.add_edge(nodes[source], nodes[target], LayoutEdge::empty());
+        }
+
+        orient_centered_bubbles(
+            &mut graph,
+            &HashSet::from([NodeIndex::new(2), NodeIndex::new(4)]),
+        );
+
+        assert_eq!(graph[nodes[2]].pos.y, 0);
+        assert_eq!(graph[nodes[4]].pos.y, 0);
+        assert_eq!(graph[nodes[1]].pos.y, 1);
+        assert_eq!(graph[nodes[3]].pos.y, 1);
+    }
+
+    #[test]
+    fn test_orient_centered_bubble_skips_unconnected_layers() {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        let positions = [(0, 0), (1, 0), (1, 1), (2, 0), (2, 1)];
+        for (domain_index, (column, order)) in positions.into_iter().enumerate() {
+            graph.add_node(LayoutNode::data(
+                NodeIndex::new(domain_index),
+                LocalPos::new_xy(column, order),
+                (1, 1),
+                Some(column as i32),
+            ));
+        }
+
+        orient_centered_bubbles(&mut graph, &HashSet::from([NodeIndex::new(2)]));
+
+        assert_eq!(graph[NodeIndex::new(2)].pos.y, 1);
+    }
+
+    #[test]
+    fn test_orient_centered_bubble_skips_dead_end_branch() {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        let nodes: Vec<_> = [(0, 0), (1, 0), (1, 1), (2, 0)]
+            .into_iter()
+            .enumerate()
+            .map(|(domain_index, (column, order))| {
+                graph.add_node(LayoutNode::data(
+                    NodeIndex::new(domain_index),
+                    LocalPos::new_xy(column, order),
+                    (1, 1),
+                    Some(column as i32),
+                ))
+            })
+            .collect();
+        for (source, target) in [(0, 1), (0, 2), (1, 3)] {
+            graph.add_edge(nodes[source], nodes[target], LayoutEdge::empty());
+        }
+
+        orient_centered_bubbles(&mut graph, &HashSet::from([NodeIndex::new(2)]));
+
+        assert_eq!(graph[nodes[2]].pos.y, 1);
+    }
+
+    #[test]
+    fn test_orient_centered_bubble_inside_cycle_bypass() {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        let backward = (NodeIndex::new(3), NodeIndex::new(0));
+        let left_pin = graph.add_node(LayoutNode::new(
+            crate::layout::NodeRole::Pin,
+            LocalPos::new_xy(0, 0),
+            (1, 1),
+            None,
+        ));
+        let source = graph.add_node(LayoutNode::data(
+            NodeIndex::new(0),
+            LocalPos::new_xy(0, 1),
+            (1, 1),
+            Some(0),
+        ));
+        let bypass = graph.add_node(LayoutNode::routing(LocalPos::new_xy(1, 0), (1, 1)));
+        let alternate = graph.add_node(LayoutNode::data(
+            NodeIndex::new(1),
+            LocalPos::new_xy(1, 1),
+            (1, 1),
+            Some(1),
+        ));
+        let reference = graph.add_node(LayoutNode::data(
+            NodeIndex::new(2),
+            LocalPos::new_xy(1, 2),
+            (1, 1),
+            Some(1),
+        ));
+        let right_pin = graph.add_node(LayoutNode::new(
+            crate::layout::NodeRole::Pin,
+            LocalPos::new_xy(2, 0),
+            (1, 1),
+            None,
+        ));
+        let sink = graph.add_node(LayoutNode::data(
+            NodeIndex::new(3),
+            LocalPos::new_xy(2, 1),
+            (1, 1),
+            Some(2),
+        ));
+        for middle in [alternate, reference] {
+            graph.add_edge(source, middle, LayoutEdge::empty());
+            graph.add_edge(middle, sink, LayoutEdge::empty());
+        }
+        for (first, second) in [(left_pin, source), (sink, right_pin)] {
+            graph.add_edge(first, second, LayoutEdge::new(backward.0, backward.1));
+        }
+        for (first, second) in [(left_pin, bypass), (bypass, right_pin)] {
+            let mut edge = LayoutEdge::new(backward.0, backward.1);
+            edge.is_backward_span = true;
+            graph.add_edge(first, second, edge);
+        }
+
+        orient_centered_bubbles(&mut graph, &HashSet::from([NodeIndex::new(2)]));
+
+        assert_eq!(graph[reference].pos.y, 1);
+        assert_eq!(graph[alternate].pos.y, 2);
+        assert_eq!(graph[bypass].pos.y, 0);
+    }
+
+    #[test]
+    fn test_orient_centered_bubble_after_circular_sugiyama() {
+        let mut domain_graph = MockDomainGraph::new();
+        let [source, alternate, reference, sink] = [(); 4].map(|_| domain_graph.add_node(()));
+        for (from, to) in [
+            (source, alternate),
+            (source, reference),
+            (alternate, sink),
+            (reference, sink),
+            (sink, source),
+        ] {
+            domain_graph.add_edge(from, to, ());
+        }
+        let backward_edges = HashSet::from([(sink, source)]);
+        let subgraph = neighborhood(
+            source,
+            10,
+            &mut GraphCursor::new(&mut domain_graph, &mut EagerSource),
+            &|_| false,
+            &std::collections::HashMap::new(),
+        )
+        .expect("should crawl circular bubble");
+        let (window, _) = build_window_graph(&subgraph, &domain_graph, Some(&backward_edges))
+            .expect("should build circular window");
+        let mut assembled = assemble_window(&window).expect("should assemble circular window");
+        let bubble_nodes: Vec<_> = assembled
+            .graph
+            .node_indices()
+            .filter(|&node_index| {
+                matches!(assembled.graph[node_index].role, NodeRole::Data(domain_index) if domain_index == alternate || domain_index == reference)
+            })
+            .collect();
+        assert_eq!(bubble_nodes.len(), 2);
+        let (first, second) =
+            if assembled.graph[bubble_nodes[0]].pos.y < assembled.graph[bubble_nodes[1]].pos.y {
+                (bubble_nodes[0], bubble_nodes[1])
+            } else {
+                (bubble_nodes[1], bubble_nodes[0])
+            };
+        let centered_domain = match assembled.graph[second].role {
+            NodeRole::Data(domain_index) => domain_index,
+            _ => unreachable!(),
+        };
+        let routing_rows: Vec<_> = assembled
+            .graph
+            .node_indices()
+            .filter(|&node_index| {
+                matches!(assembled.graph[node_index].role, NodeRole::Routing)
+                    && assembled.graph[node_index].pos.x == assembled.graph[second].pos.x
+            })
+            .map(|node_index| (node_index, assembled.graph[node_index].pos.y))
+            .collect();
+        assert!(
+            !routing_rows.is_empty(),
+            "cycle bypass should cross the bubble layer"
+        );
+
+        orient_centered_bubbles(&mut assembled.graph, &HashSet::from([centered_domain]));
+
+        assert!(assembled.graph[second].pos.y < assembled.graph[first].pos.y);
+        for (node_index, row) in routing_rows {
+            assert_eq!(assembled.graph[node_index].pos.y, row);
+        }
+
+        assign_cross_coordinates(&mut assembled.graph, 1);
+        center_layers(
+            &mut assembled.graph,
+            &HashSet::from([source, centered_domain, sink]),
+        );
+        let bypass_rows: Vec<_> = assembled
+            .graph
+            .node_indices()
+            .filter(|&node_index| {
+                matches!(assembled.graph[node_index].role, NodeRole::Routing)
+                    && assembled
+                        .graph
+                        .edges(node_index)
+                        .any(|edge| edge.weight().bundle.contains(&(sink, source)))
+            })
+            .map(|node_index| assembled.graph[node_index].pos.y)
+            .collect();
+        assert_eq!(bypass_rows.len(), 3);
+        assert!(bypass_rows.iter().all(|&row| row == bypass_rows[0]));
+    }
+
+    #[test]
+    fn test_center_layers_balances_routing_around_centered_data() {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        let first_routing = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, -5), (1, 1)));
+        let first = graph.add_node(LayoutNode::data(
+            NodeIndex::new(0),
+            LocalPos::new_xy(0, 3),
+            (1, 1),
+            Some(0),
+        ));
+        let second_routing = graph.add_node(LayoutNode::routing(LocalPos::new_xy(1, 0), (1, 1)));
+        let second = graph.add_node(LayoutNode::data(
+            NodeIndex::new(1),
+            LocalPos::new_xy(1, 3),
+            (1, 1),
+            Some(1),
+        ));
+
+        center_layers(
+            &mut graph,
+            &HashSet::from([NodeIndex::new(0), NodeIndex::new(1)]),
+        );
+
+        assert_eq!(graph[first].pos.y, 0);
+        assert_eq!(graph[second].pos.y, 0);
+        assert_eq!(graph[first_routing].pos.y, -2);
+        assert_eq!(graph[second_routing].pos.y, -2);
+    }
+
+    #[test]
+    fn test_center_layers_relaxes_incompatible_routing_alignment() {
+        let mut graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32> =
+            StableGraph::default();
+        let first_routing = graph.add_node(LayoutNode::routing(LocalPos::new_xy(0, 0), (1, 1)));
+        let first_data = graph.add_node(LayoutNode::data(
+            NodeIndex::new(0),
+            LocalPos::new_xy(0, 2),
+            (1, 1),
+            Some(0),
+        ));
+        let second_data = graph.add_node(LayoutNode::data(
+            NodeIndex::new(1),
+            LocalPos::new_xy(1, -2),
+            (1, 1),
+            Some(1),
+        ));
+        let second_routing = graph.add_node(LayoutNode::routing(LocalPos::new_xy(1, 0), (1, 1)));
+        graph.add_edge(first_routing, second_routing, LayoutEdge::empty());
+
+        center_layers(
+            &mut graph,
+            &HashSet::from([NodeIndex::new(0), NodeIndex::new(1)]),
+        );
+
+        assert_eq!(graph[first_data].pos.y, 0);
+        assert_eq!(graph[second_data].pos.y, 0);
+        assert!(graph[first_routing].pos.y <= -2);
+        assert!(graph[second_routing].pos.y >= 2);
     }
 }

@@ -263,14 +263,23 @@ struct GraphPage {
     annotation_groups_loaded: bool,
 }
 
+/// How `plot()` loads and lays out a page.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PlotOptions {
+    /// Keep pruned/retired edit-site edges in the graph, dimmed, instead of removing them.
+    pub show_history: bool,
+    /// Place the block group's current path on one straight row.
+    pub center_reference: bool,
+}
+
 /// The information needed to lazily build a `GraphPage` on first visit.
 #[derive(Clone)]
 struct PageRef {
     name: String,
     database: GraphDatabase,
     block_group_id: HashId,
-    /// Mirrors `plot(show_history=...)` - see `GraphPage::new`.
-    show_history: bool,
+    /// Mirrors `plot(show_history=..., center_reference=...)` - see `GraphPage::new`.
+    options: PlotOptions,
 }
 
 /// One page of a `PyGraphController`: either already loaded, or pending lazy
@@ -297,15 +306,17 @@ fn runtime_error(error: impl ToString) -> PyErr {
 impl GraphPage {
     /// Open `block_group_id` in a controller, its graph seeded and grown lazily as renders
     /// crawl it. `show_history=False` leaves pruned/retired edit-site edges out of the crawl
-    /// entirely; `show_history=True` loads them and dims them instead.
+    /// entirely; `show_history=True` loads them and dims them instead. `center_reference=True`
+    /// lays the block group's current path out as one straight row.
     fn new(
         name: String,
         database: GraphDatabase,
         block_group_id: HashId,
-        show_history: bool,
+        options: PlotOptions,
     ) -> PyResult<Self> {
-        let mut controller =
-            GenGraphController::new(database, None).with_pruned_history(!show_history);
+        let mut controller = GenGraphController::new(database, None)
+            .with_pruned_history(!options.show_history)
+            .with_centered_current_path(options.center_reference);
         controller
             .open_block_group(&block_group_id)
             .map_err(runtime_error)?;
@@ -1021,22 +1032,25 @@ fn database_for_sequence_graph(sg: &PySequenceGraph) -> PyResult<GraphDatabase> 
 }
 
 /// Build a lazily-loaded `GraphPage` for a `PySequenceGraph` - see `GraphPage::new`.
-fn loaded_page_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<GraphPage> {
+fn loaded_page_for_sequence_graph(
+    sg: &PySequenceGraph,
+    options: PlotOptions,
+) -> PyResult<GraphPage> {
     GraphPage::new(
         sg.name.clone(),
         database_for_sequence_graph(sg)?,
         sg.id,
-        show_history,
+        options,
     )
 }
 
 /// Capture the information needed to lazily build a page for `sg` later.
-fn page_ref_for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<PageRef> {
+fn page_ref_for_sequence_graph(sg: &PySequenceGraph, options: PlotOptions) -> PyResult<PageRef> {
     Ok(PageRef {
         name: sg.name.clone(),
         database: database_for_sequence_graph(sg)?,
         block_group_id: sg.id,
-        show_history,
+        options,
     })
 }
 
@@ -1081,18 +1095,20 @@ impl PyGraphController {
                 String::new(),
                 database,
                 block_group_id,
-                true,
+                PlotOptions {
+                    show_history: true,
+                    ..PlotOptions::default()
+                },
             )?))],
             current_index: 0,
         })
     }
 
     /// Build a single-page controller for `sg`, loading its graph lazily.
-    pub(crate) fn for_sequence_graph(sg: &PySequenceGraph, show_history: bool) -> PyResult<Self> {
+    pub(crate) fn for_sequence_graph(sg: &PySequenceGraph, options: PlotOptions) -> PyResult<Self> {
         Ok(Self {
             pages: vec![Page::Loaded(Box::new(loaded_page_for_sequence_graph(
-                sg,
-                show_history,
+                sg, options,
             )?))],
             current_index: 0,
         })
@@ -1102,7 +1118,7 @@ impl PyGraphController {
     /// `block_groups`. Each page's graph is loaded lazily on first visit.
     pub(crate) fn for_sample(
         block_groups: &[PySequenceGraph],
-        show_history: bool,
+        options: PlotOptions,
     ) -> PyResult<Self> {
         if block_groups.is_empty() {
             return Err(PyRuntimeError::new_err(
@@ -1112,7 +1128,7 @@ impl PyGraphController {
         let pages = block_groups
             .iter()
             .map(|sg| {
-                page_ref_for_sequence_graph(sg, show_history)
+                page_ref_for_sequence_graph(sg, options)
                     .map(|page_ref| Page::Pending(Box::new(page_ref)))
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -1129,7 +1145,7 @@ impl PyGraphController {
                 page_ref.name.clone(),
                 page_ref.database.clone(),
                 page_ref.block_group_id,
-                page_ref.show_history,
+                page_ref.options,
             )?;
             *page = Page::Loaded(Box::new(loaded));
         }
@@ -1462,7 +1478,7 @@ mod tests {
     use ratatui::style::Color;
     use serde_json::Value;
 
-    use super::{PyGraphController, current_theme};
+    use super::{PlotOptions, PyGraphController, current_theme};
     use crate::python_api::block_group::PySequenceGraph;
 
     #[test]
@@ -1490,10 +1506,16 @@ mod tests {
             name: block_group.name,
             context: Some(context.clone()),
         };
-        let mut graph_controller = PyGraphController::for_sequence_graph(&sequence_graph, true)
-            .expect("should create graph widget on design branch");
-        let mut sample_controller = PyGraphController::for_sample(&[sequence_graph], true)
-            .expect("should capture lazy sample page on design branch");
+        let history_options = PlotOptions {
+            show_history: true,
+            ..PlotOptions::default()
+        };
+        let mut graph_controller =
+            PyGraphController::for_sequence_graph(&sequence_graph, history_options)
+                .expect("should create graph widget on design branch");
+        let mut sample_controller =
+            PyGraphController::for_sample(&[sequence_graph], history_options)
+                .expect("should capture lazy sample page on design branch");
         history_store
             .checkout_branch(&BranchName("main".to_string()))
             .expect("should return to main");

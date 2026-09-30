@@ -43,24 +43,30 @@ impl<G: GraphBase> NodeRenderer<G> for MinimalNodeRenderer {
 ///
 /// `size_of` supplies the rendered size for each node role, and `is_visible` says which domain
 /// nodes are drawn; the rest become junctions of their edges (see [`WindowGeometry::new`]) and
-/// should be given a routing node's size.
+/// should be given a routing node's size. `is_centered` marks nodes that pin their layer to
+/// y = 0 (see `NodeRenderer::is_centered`).
 pub fn build_window_geometry(
     assembled: AssembledLayout,
     gaps: &GapSizes,
     mut size_of: impl FnMut(&NodeRole) -> (u64, u64),
     is_visible: impl Fn(NodeIndex) -> bool,
+    is_centered: impl Fn(NodeIndex) -> bool,
 ) -> WindowGeometry {
     let mut graph = assembled.graph;
     let mut junctions = HashSet::new();
+    let mut centered = HashSet::new();
     for node in graph.node_weights_mut() {
         node.size = size_of(&node.role);
-        if let NodeRole::Data(domain_index) = node.role
-            && !is_visible(domain_index)
-        {
-            junctions.insert(domain_index);
+        if let NodeRole::Data(domain_index) = node.role {
+            if !is_visible(domain_index) {
+                junctions.insert(domain_index);
+            }
+            if is_centered(domain_index) {
+                centered.insert(domain_index);
+            }
         }
     }
-    WindowGeometry::new(graph, gaps, &junctions)
+    WindowGeometry::new(graph, gaps, &junctions, &centered)
 }
 
 pub(crate) fn style_cursor_cell(buffer: &mut WorldBuffer, pos: WorldPos, theme: &Theme) {
@@ -187,8 +193,13 @@ mod tests {
                 .count();
             assert!(expected_data > 0);
 
-            let geometry =
-                build_window_geometry(assembled, &GapSizes::default(), size_of, |_| true);
+            let geometry = build_window_geometry(
+                assembled,
+                &GapSizes::default(),
+                size_of,
+                |_| true,
+                |_| false,
+            );
 
             let data_nodes = geometry
                 .graph
@@ -206,8 +217,13 @@ mod tests {
             let graph = TestGraphs::domain_extended_diamond();
             let assembled = assembled_window(&graph);
 
-            let geometry =
-                build_window_geometry(assembled, &GapSizes::default(), size_of, |_| true);
+            let geometry = build_window_geometry(
+                assembled,
+                &GapSizes::default(),
+                size_of,
+                |_| true,
+                |_| false,
+            );
 
             for node in geometry.graph.node_weights() {
                 if matches!(node.role, NodeRole::Data(_)) {

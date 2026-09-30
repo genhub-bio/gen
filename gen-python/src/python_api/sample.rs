@@ -12,7 +12,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::python_api::{
     block_group::PySequenceGraph,
-    jupyter_widget::{PyGraphController, build_widget},
+    jupyter_widget::{PlotOptions, PyGraphController, build_widget},
     repository::run_context_operation_write,
     utils::block_group_err_to_pyerr,
 };
@@ -102,16 +102,26 @@ impl PySample {
     ///     Keep retired edit-site and pruned edges in the graph, dimmed,
     ///     instead of removing them along with the nodes only they reach.
     ///     Defaults to ``False``.
-    #[pyo3(signature = (rows=None, cols=None, colors=None, show_history=false))]
+    /// center_reference : bool, optional
+    ///     Lay the current path out as one straight row, with variation branching
+    ///     above and below it. Defaults to ``False``.
+    #[pyo3(signature = (rows=None, cols=None, colors=None, show_history=false, center_reference=false))]
     fn plot(
         slf: &Bound<'_, PySample>,
         rows: Option<u32>,
         cols: Option<u32>,
         colors: Option<Py<PyAny>>,
         show_history: bool,
+        center_reference: bool,
     ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let ctrl = PyGraphController::for_sample(&slf.borrow().sequence_graphs, show_history)?;
+        let ctrl = PyGraphController::for_sample(
+            &slf.borrow().sequence_graphs,
+            PlotOptions {
+                show_history,
+                center_reference,
+            },
+        )?;
         let ctrl = Py::new(py, ctrl)?;
         build_widget(py, ctrl, rows, cols, colors)
     }

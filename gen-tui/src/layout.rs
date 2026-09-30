@@ -14,7 +14,7 @@ use rust_sugiyama::{LayoutVertex, configure::Config, from_edges_with_dummies};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cross_coordinates::assign_cross_coordinates,
+    cross_coordinates::{assign_cross_coordinates, center_layers, orient_centered_bubbles},
     distribute_nodes::{GapSizes, compact_layout},
     edge_router::{layout_graph_process::prune_pin_stubs, route_graph::make_rectilinear},
     geometry::LocalPos,
@@ -225,16 +225,23 @@ impl WindowGeometry {
     /// routed like any other node, so every edge still meets at them and keeps its domain-edge
     /// bundle, then become routing nodes before compaction: they are drawn as the junction of
     /// their edges and are never placed as selectable nodes.
+    ///
+    /// `centered` names the domain nodes aligned at y = 0 (see
+    /// [`crate::cross_coordinates::center_layers`]); constraints are solved before routing so the
+    /// routed edges follow the aligned geometry.
     pub fn new(
         mut layout_graph: StableGraph<LayoutNode, LayoutEdge, Undirected, u32>,
         gaps: &GapSizes,
         junctions: &HashSet<NodeIndex>,
+        centered: &HashSet<NodeIndex>,
     ) -> Self {
         // Assembly places rows at their size-independent within-layer ordinals. The edge router
         // reacts only to y, so assign real-size-aware cross coordinates before routing. This pass
         // only needs a small structural gap, not the caller's actual zoom target: compaction below
         // is the sole place either target gap is enforced.
+        orient_centered_bubbles(&mut layout_graph, centered);
         assign_cross_coordinates(&mut layout_graph, 1);
+        center_layers(&mut layout_graph, centered);
 
         if let Err(error) = make_rectilinear(&mut layout_graph) {
             log::warn!("Edge routing failed: {:?}", error);
