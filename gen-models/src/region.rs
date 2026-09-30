@@ -766,11 +766,9 @@ impl ResolvedGenRegion {
                     resolved.end_anchors.expect("should have end anchors"),
                 )
             };
-        let preserve_chromosome_index = if change.preserve_edge {
-            0
-        } else {
-            PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-        };
+        let preserve_chromosome_index = change
+            .preserve_chromosome_index
+            .unwrap_or(PRESERVE_EDIT_SITE_CHROMOSOME_INDEX);
         let mut new_edges = vec![];
 
         for position in start_positions.iter().chain(end_positions.iter()) {

@@ -257,7 +257,7 @@ mod tests {
             block: insertion_block(&conn, "acc-no-path-node", "NNNN"),
             chromosome_index: NO_CHROMOSOME_INDEX,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
 
         BlockGroup::insert_change(&conn, crate::test_helpers::test_workspace(), &change).unwrap();
@@ -297,7 +297,7 @@ mod tests {
             block: insertion_block(&conn, "ann-no-path-node", "NNNN"),
             chromosome_index: NO_CHROMOSOME_INDEX,
             phased: 0,
-            preserve_edge: true,
+            preserve_chromosome_index: Some(0),
         };
 
         BlockGroup::insert_change(&conn, crate::test_helpers::test_workspace(), &change).unwrap();
