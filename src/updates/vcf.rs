@@ -1679,4 +1679,59 @@ mod tests {
 
         assert!(SampleLineage::get_parents(conn, "child", None).is_empty());
     }
+
+    fn heterozygous_snp_sequences(vcf_name: &str) -> HashSet<String> {
+        let context = setup_gen();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fixtures
+                .join("first_haplotype_variant.fa")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &fixtures.join(vcf_name).to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        BlockGroup::get_all_sequences(
+            conn,
+            crate::test_helpers::test_workspace(),
+            &get_sample_bg(conn, &collection, "S").id,
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_heterozygous_snp_alt_on_second_copy_keeps_both_alleles() {
+        assert_eq!(
+            heterozygous_snp_sequences("second_haplotype_variant.vcf"),
+            HashSet::from_iter(["AAGAAAAAAA".to_string(), "AACAAAAAAA".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_heterozygous_snp_alt_on_first_copy_keeps_both_alleles() {
+        assert_eq!(
+            heterozygous_snp_sequences("first_haplotype_variant.vcf"),
+            HashSet::from_iter(["AAGAAAAAAA".to_string(), "AACAAAAAAA".to_string()])
+        );
+    }
 }
