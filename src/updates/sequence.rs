@@ -1107,6 +1107,10 @@ mod tests {
             current_path_sequence(&context, &collection, "grandchild sample"),
             "ATCGATCGATCGATCGGGAACACACAGAGA"
         );
+        assert_eq!(
+            sample_sequences(&context, &collection, "grandchild sample").len(),
+            4
+        );
     }
 
     #[test]
@@ -1142,6 +1146,10 @@ mod tests {
         assert_eq!(
             current_path_sequence(&context, &collection, "grandchild sample"),
             "ATCGGGCGATCGATCGATCGGGAACACACAGAGA"
+        );
+        assert_eq!(
+            sample_sequences(&context, &collection, "grandchild sample").len(),
+            4
         );
     }
 
@@ -1464,6 +1472,48 @@ mod tests {
         assert_eq!(
             current_path_sequence(&context, collection, "grandchild sample"),
             "ATCGATCGATCGATCGGGAACACACAGAGA"
+        );
+        assert_eq!(
+            sample_sequences(&context, collection, "grandchild sample").len(),
+            4
+        );
+    }
+
+    /// Two deletions that do not touch, the second made on the first's path, give the four
+    /// combinations of the two, as touching ones do.
+    #[test]
+    fn test_non_touching_sequential_deletions_give_every_combination() {
+        let context = setup_gen();
+        let collection = "test";
+        import_simple_fixture(&context, collection);
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:2-4",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
+            "grandchild sample",
+            "m123:8-10",
+            "",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sample_sequences(&context, collection, "grandchild sample").len(),
+            4
+        );
+        assert_eq!(
+            current_path_sequence(&context, collection, "grandchild sample"),
+            "ATATCGATATCGATCGGGAACACACAGAGA"
         );
     }
 
@@ -1809,6 +1859,7 @@ mod tests {
             let routes = route_count(&context, collection, "second");
             let current = current_path_sequence(&context, collection, "second");
             if sequences != expected
+                || sequences.len() != 4
                 || routes != 4
                 || current != with_edits(&[&first_edit, &second_edit])
             {
