@@ -674,6 +674,7 @@ impl Sequence {
                 name: row.get(13)?,
                 created_on: row.get(14)?,
                 upstream_asset_ref_id: row.get(15)?,
+                materialized_checksum: row.get(16)?,
             };
             if LocalAssetUri::is_local_path_or_file_uri(&asset_ref.uri)
                 && let Err(error) = asset_ref.versioned_store_path(workspace)
@@ -684,19 +685,20 @@ impl Sequence {
             sequence.asset_ref = Some(asset_ref);
             sequence.workspace = Some(workspace.clone());
 
-            let index_asset_ref_id: Option<HashId> = row.get(16)?;
+            let index_asset_ref_id: Option<HashId> = row.get(17)?;
             if let Some(index_asset_ref_id) = index_asset_ref_id {
                 let index_asset = AssetRef {
                     id: index_asset_ref_id,
-                    uri: row.get(17)?,
-                    file_type: row.get(18)?,
-                    checksum: row.get(19)?,
-                    size: row.get(20)?,
-                    role: row.get(21)?,
-                    logical_path: row.get(22)?,
-                    name: row.get(23)?,
-                    created_on: row.get(24)?,
-                    upstream_asset_ref_id: row.get(25)?,
+                    uri: row.get(18)?,
+                    file_type: row.get(19)?,
+                    checksum: row.get(20)?,
+                    size: row.get(21)?,
+                    role: row.get(22)?,
+                    logical_path: row.get(23)?,
+                    name: row.get(24)?,
+                    created_on: row.get(25)?,
+                    upstream_asset_ref_id: row.get(26)?,
+                    materialized_checksum: row.get(27)?,
                 };
                 if !LocalAssetUri::is_local_path_or_file_uri(&index_asset.uri)
                     || index_asset.versioned_store_path(workspace).is_ok()
@@ -1082,6 +1084,7 @@ mod tests {
             name: Some("secret.fa".to_string()),
             created_on: 1,
             upstream_asset_ref_id: None,
+            materialized_checksum: None,
         };
         AssetRef::create(context.graph().conn(), &asset_ref).unwrap();
         let asset_filename =
@@ -1247,6 +1250,12 @@ mod tests {
             None,
         )
         .remove(0);
+        // The first read loads the complete BGZF contig into the sequence cache; keep cold-load
+        // cost out of this repeated-access timing.
+        assert_eq!(
+            sequence.get_sequence(0, 20).unwrap(),
+            "ATCGATCGATCGATCGATCG"
+        );
         let s = time::Instant::now();
         for _ in 1..1_000_000 {
             let start = rand::rng().random_range(1..200_000_000);

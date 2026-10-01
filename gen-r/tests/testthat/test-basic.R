@@ -55,6 +55,13 @@ test_that("Repository initializes workspace and returns correct paths", {
   expect_match(repo$db_path, "default\\.db$")
 })
 
+test_that("FASTA import methods do not expose shallow", {
+  repo <- setup_repository()
+
+  expect_false("shallow" %in% names(formals(repo$import_fasta)))
+  expect_false("shallow" %in% names(formals(repo$import_reference_fasta)))
+})
+
 test_that("HashId constructor works", {
   hash_id <- HashId("abc123")
   expect_s3_class(hash_id, "gen_hash_id")

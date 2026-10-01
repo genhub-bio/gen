@@ -17,7 +17,7 @@ use r#gen::{
     patch::load_patches,
 };
 use gen_models::{
-    assets::AssetRef,
+    assets::{AssetRef, AssetRole},
     block_group::BlockGroup,
     collection::Collection,
     history::{
@@ -25,6 +25,7 @@ use gen_models::{
         dolt::{DoltHistoryStore, status_rows},
     },
     node::Node,
+    operations::calculate_file_checksum,
     sample::Sample,
     sample_lineage::SampleLineage,
 };
@@ -417,10 +418,11 @@ mod diff_views {
 }
 
 mod operation_history {
+    use gen_core::HashId;
     use gen_models::assets::OperationLog;
 
     use super::{
-        DoltHistoryStore, HistoryStore, PathBuf, assert_success, asset_refs,
+        AssetRole, DoltHistoryStore, HistoryStore, PathBuf, Workspace, assert_success, asset_refs,
         commit_hash_for_summary, fs, get_connection, operations_stdout, run_gen, tempdir,
         trailing_commit_hash,
     };
@@ -449,12 +451,51 @@ mod operation_history {
         assert_success(&import_output, "fasta import should succeed");
 
         let refs = asset_refs(repo_dir.path());
+        let sequence_asset = refs
+            .iter()
+            .find(|asset_ref| asset_ref.role == AssetRole::Input)
+            .expect("FASTA import should archive the sequence asset");
+        assert_eq!(
+            sequence_asset.name.as_deref(),
+            Some("simple.fa"),
+            "the sequence asset should retain the source FASTA filename"
+        );
         assert!(
-            refs.iter().any(|asset_ref| {
-                asset_ref.uri == "file://.gen/outside_root/simple.fa"
-                    && asset_ref.name.as_deref() == Some("simple.fa")
+            sequence_asset.uri.starts_with("file://.gen/assets/")
+                && sequence_asset.uri.ends_with(".fa.bgz"),
+            "the archived sequence should live in the content-addressed asset directory: {sequence_asset:?}"
+        );
+        let sequence_asset_path = sequence_asset
+            .versioned_store_path(&Workspace::new(repo_dir.path()))
+            .expect("should resolve archived FASTA asset");
+        let archived_fasta = fs::read(&sequence_asset_path).expect("should read archived FASTA");
+        assert!(
+            archived_fasta.starts_with(&[0x1f, 0x8b, 0x08, 0x04]),
+            "the archived FASTA should be BGZF compressed"
+        );
+
+        let index_assets = refs
+            .iter()
+            .filter(|asset_ref| asset_ref.role == AssetRole::SequenceIndex)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            index_assets.len(),
+            2,
+            "FASTA import should archive both indexes"
+        );
+        assert!(
+            index_assets.iter().any(|asset_ref| {
+                asset_ref.name.as_deref() == Some("simple.fa.fai")
+                    && asset_ref.upstream_asset_ref_id == Some(sequence_asset.id)
             }),
-            "external FASTA should be namespaced away from workspace-root files: {refs:?}"
+            "the FASTA index should link to its archived sequence: {index_assets:?}"
+        );
+        assert!(
+            index_assets.iter().any(|asset_ref| {
+                asset_ref.name.as_deref() == Some("simple.fa.gzi")
+                    && asset_ref.upstream_asset_ref_id == Some(sequence_asset.id)
+            }),
+            "the BGZF index should link to its archived sequence: {index_assets:?}"
         );
 
         let stdout = operations_stdout(repo_dir.path());
@@ -465,6 +506,21 @@ mod operation_history {
 
         let graph_conn = get_connection(repo_dir.path().join(".gen/default.db"))
             .expect("should reopen graph database");
+        let (sequence_byte_length, sequence_asset_ref_id): (i64, HashId) = graph_conn
+            .query_row(
+                "SELECT length(sequence), asset_ref_id FROM sequences WHERE name = 'm123'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("should inspect external FASTA sequence storage");
+        assert_eq!(
+            sequence_byte_length, 0,
+            "external FASTA sequences should not duplicate sequence bytes in SQLite"
+        );
+        assert_eq!(
+            sequence_asset_ref_id, sequence_asset.id,
+            "the sequence row should point at its archived BGZF asset"
+        );
         let history = DoltHistoryStore::new(&graph_conn)
             .log(None)
             .expect("should query dolt history");
@@ -1370,18 +1426,15 @@ mod revision_views {
             &run_gen(
                 repo_root,
                 &[
-                    "import",
-                    "fasta",
+                    "add-file",
                     logical_path
                         .to_str()
                         .expect("should encode logical asset path"),
-                    "--collection",
-                    "test-collection",
-                    "--sample",
-                    "test-sample",
+                    "--message",
+                    "main asset version",
                 ],
             ),
-            "main fasta import should succeed",
+            "main asset addition should succeed",
         );
         assert_success(
             &run_gen(repo_root, &["checkout", "--branch", "feature"]),
@@ -2729,7 +2782,7 @@ mod branch_history {
 mod remotes {
     use std::{
         collections::HashMap,
-        io::{Read as _, Write as _},
+        io::{Cursor, Read as _, Write as _},
         net::{TcpListener, TcpStream},
         sync::{
             Arc, Mutex,
@@ -2743,13 +2796,14 @@ mod remotes {
     use gen_models::{
         assets::{Assets, LocalAssetUri, materialization_destination_path},
         history::dolt::{add_remote, push},
+        operations::calculate_reader_checksum,
     };
     use rusqlite::{Connection, RemoteServer};
     use serde_json::json;
 
     use super::{
-        Path, PathBuf, assert_success, asset_refs, fs, get_connection, operations_stdout, run_gen,
-        tempdir,
+        AssetRole, Path, PathBuf, assert_success, asset_refs, calculate_file_checksum, fs,
+        get_connection, operations_stdout, run_gen, tempdir,
     };
 
     fn resolved_ref_hash(repo_root: &Path, reference: &str) -> String {
@@ -2905,7 +2959,10 @@ mod remotes {
         );
     }
 
-    fn materialized_asset_contents(repo_root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn materialized_asset_contents(
+        repo_root: &Path,
+        require_materialized_files: bool,
+    ) -> Vec<(String, Vec<u8>)> {
         let workspace = Workspace::new(repo_root);
         let connection = get_connection(repo_root.join(".gen/default.db"))
             .expect("should open graph database for materialized assets");
@@ -2935,17 +2992,69 @@ mod remotes {
                 let versioned_contents = fs::read(&versioned_path).unwrap_or_else(|error| {
                     panic!("should read {}: {error}", versioned_path.display())
                 });
-                let materialized_contents = fs::read(&materialized_path).unwrap_or_else(|error| {
-                    panic!("should read {}: {error}", materialized_path.display())
-                });
+                let archived_checksum = asset
+                    .checksum
+                    .as_ref()
+                    .expect("should have an archive checksum for the versioned local asset");
                 assert_eq!(
-                    materialized_contents,
-                    versioned_contents,
-                    "{} should contain the branch-head version stored at {}",
-                    materialized_path.display(),
+                    &calculate_file_checksum(&versioned_path)
+                        .expect("should checksum archived asset"),
+                    archived_checksum,
+                    "{} should match its archive checksum",
                     versioned_path.display()
                 );
-                (logical_path, versioned_contents)
+                let expected_materialized_contents = if asset.materialized_checksum.is_some() {
+                    let mut decoded_contents = Vec::new();
+                    noodles::bgzf::io::Reader::new(fs::File::open(&versioned_path).unwrap_or_else(
+                        |error| panic!("should open {}: {error}", versioned_path.display()),
+                    ))
+                    .read_to_end(&mut decoded_contents)
+                    .unwrap_or_else(|error| {
+                        panic!("should decode {}: {error}", versioned_path.display())
+                    });
+                    decoded_contents
+                } else {
+                    versioned_contents.clone()
+                };
+                let expected_materialized_checksum = asset
+                    .materialized_checksum
+                    .as_ref()
+                    .unwrap_or(archived_checksum);
+                let expected_bytes_checksum =
+                    calculate_reader_checksum(Cursor::new(&expected_materialized_contents))
+                        .expect("should checksum expected materialized asset bytes");
+                assert_eq!(
+                    &expected_bytes_checksum,
+                    expected_materialized_checksum,
+                    "{} should identify the expected materialized bytes",
+                    materialized_path.display()
+                );
+                let materialized_contents = if materialized_path.exists() {
+                    fs::read(&materialized_path).unwrap_or_else(|error| {
+                        panic!("should read {}: {error}", materialized_path.display())
+                    })
+                } else {
+                    assert!(
+                        !require_materialized_files,
+                        "{} should exist after remote materialization",
+                        materialized_path.display()
+                    );
+                    expected_materialized_contents.clone()
+                };
+                assert_eq!(
+                    materialized_contents,
+                    expected_materialized_contents,
+                    "{} should contain the expected materialized bytes",
+                    materialized_path.display()
+                );
+                assert_eq!(
+                    calculate_reader_checksum(Cursor::new(&materialized_contents))
+                        .expect("should checksum materialized asset bytes"),
+                    *expected_materialized_checksum,
+                    "{} should match its materialized checksum",
+                    materialized_path.display()
+                );
+                (logical_path, materialized_contents)
             })
             .collect::<Vec<_>>();
         assets.sort_by(|left, right| left.0.cmp(&right.0));
@@ -2955,22 +3064,118 @@ mod remotes {
     fn assert_materialized_assets_match(
         source_repo_root: &Path,
         destination_repo_root: &Path,
-        expected_logical_paths: &[&str],
+        expected_logical_paths: &[String],
     ) {
-        let source_assets = materialized_asset_contents(source_repo_root);
+        let source_assets = materialized_asset_contents(source_repo_root, false);
         let actual_logical_paths = source_assets
             .iter()
-            .map(|(logical_path, _)| logical_path.as_str())
+            .map(|(logical_path, _)| logical_path.clone())
             .collect::<Vec<_>>();
         assert_eq!(
             actual_logical_paths, expected_logical_paths,
             "source branch head should expose the expected logical asset paths"
         );
         assert_eq!(
-            materialized_asset_contents(destination_repo_root),
+            materialized_asset_contents(destination_repo_root, true),
             source_assets,
             "remote transfer should materialize the same branch-head paths and contents"
         );
+    }
+
+    fn materialized_asset_logical_paths(repo_root: &Path) -> Vec<String> {
+        materialized_asset_contents(repo_root, false)
+            .into_iter()
+            .map(|(logical_path, _)| logical_path)
+            .collect()
+    }
+
+    fn assert_archived_fasta_and_indices(repo_root: &Path) {
+        let assets = asset_refs(repo_root);
+        let sequence_asset = assets
+            .iter()
+            .find(|asset| {
+                asset.role == AssetRole::Input && asset.name.as_deref() == Some("simple.fa")
+            })
+            .expect("FASTA import should archive the sequence asset");
+        let logical_path = sequence_asset
+            .logical_path
+            .as_deref()
+            .expect("archived sequence should have a logical path");
+        assert_eq!(
+            logical_path, "inputs/simple.fa",
+            "the FASTA should retain its original workspace path"
+        );
+        let workspace = Workspace::new(repo_root);
+        let sequence_path = sequence_asset
+            .versioned_store_path(&workspace)
+            .expect("should resolve archived FASTA");
+        let sequence_bytes = fs::read(sequence_path).expect("should read archived FASTA");
+        assert!(
+            sequence_bytes.starts_with(&[0x1f, 0x8b, 0x08, 0x04]),
+            "the archived FASTA should contain a BGZF stream"
+        );
+        let materialized_path = repo_root.join(logical_path);
+        let materialized_bytes =
+            fs::read(&materialized_path).expect("should read the materialized source FASTA");
+        let materialized_checksum = calculate_file_checksum(&materialized_path)
+            .expect("should checksum the materialized source FASTA");
+        assert_eq!(
+            sequence_asset.materialized_checksum,
+            Some(materialized_checksum),
+            "materialized checksum should identify the original FASTA bytes"
+        );
+        let mut decoded_sequence = Vec::new();
+        noodles::bgzf::io::Reader::new(
+            fs::File::open(
+                sequence_asset
+                    .versioned_store_path(&workspace)
+                    .expect("should resolve archived FASTA"),
+            )
+            .expect("should open archived FASTA"),
+        )
+        .read_to_end(&mut decoded_sequence)
+        .expect("should decode archived FASTA");
+        assert_eq!(
+            decoded_sequence, materialized_bytes,
+            "materialized source FASTA should match decoded BGZF archive"
+        );
+
+        let index_assets = assets
+            .iter()
+            .filter(|asset| {
+                asset.role == AssetRole::SequenceIndex
+                    && asset.upstream_asset_ref_id == Some(sequence_asset.id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            index_assets.len(),
+            2,
+            "FASTA should have linked FAI and GZI indexes"
+        );
+        for expected_name in ["simple.fa.fai", "simple.fa.gzi"] {
+            let index_asset = index_assets
+                .iter()
+                .find(|asset| asset.name.as_deref() == Some(expected_name))
+                .unwrap_or_else(|| {
+                    panic!("should find linked index {expected_name}: {index_assets:?}")
+                });
+            assert!(
+                index_asset
+                    .logical_path
+                    .as_deref()
+                    .is_some_and(|path| path.starts_with(".gen/assets/")),
+                "linked indexes should use content-addressed paths: {index_asset:?}"
+            );
+            let index_path = index_asset
+                .versioned_store_path(&workspace)
+                .expect("should resolve linked FASTA index");
+            assert!(
+                !fs::read(index_path)
+                    .expect("should read linked FASTA index")
+                    .is_empty(),
+                "linked index files should contain index data"
+            );
+        }
     }
 
     fn managed_asset_payloads(repo_root: &Path) -> HashMap<String, Vec<u8>> {
@@ -3221,8 +3426,10 @@ mod remotes {
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let fasta_fixture_path = fixtures_dir.join("simple.fa");
         let gff_path = fixtures_dir.join("simple.gff");
-        let logical_path = "inputs/simple.fa";
-        let local_fasta_path = local_repo_dir.path().join(logical_path);
+        let fasta_input_path = "inputs/simple.fa";
+        let local_fasta_input_path = local_repo_dir.path().join(fasta_input_path);
+        let versioned_file_logical_path = "inputs/versioned.txt";
+        let local_versioned_file_path = local_repo_dir.path().join(versioned_file_logical_path);
 
         assert_success(
             &run_gen(local_repo_dir.path(), &["init"]),
@@ -3233,12 +3440,12 @@ mod remotes {
             "remote gen init should succeed",
         );
         fs::create_dir_all(
-            local_fasta_path
+            local_fasta_input_path
                 .parent()
                 .expect("local FASTA should have a parent directory"),
         )
         .expect("should create local input directory");
-        fs::copy(&fasta_fixture_path, &local_fasta_path)
+        fs::copy(&fasta_fixture_path, &local_fasta_input_path)
             .expect("should copy FASTA into the local workspace");
         assert_success(
             &run_gen(
@@ -3246,7 +3453,7 @@ mod remotes {
                 &[
                     "import",
                     "fasta",
-                    logical_path,
+                    fasta_input_path,
                     "--collection",
                     "test-collection",
                     "--sample",
@@ -3254,6 +3461,21 @@ mod remotes {
                 ],
             ),
             "local fasta import should succeed",
+        );
+        assert_archived_fasta_and_indices(local_repo_dir.path());
+        fs::write(&local_versioned_file_path, b"push version one\n")
+            .expect("should write the versioned generic asset");
+        assert_success(
+            &run_gen(
+                local_repo_dir.path(),
+                &[
+                    "add-file",
+                    versioned_file_logical_path,
+                    "--message",
+                    "add-versioned-file",
+                ],
+            ),
+            "local add-file should succeed",
         );
         assert_success(
             &run_gen(
@@ -3298,19 +3520,34 @@ mod remotes {
             resolved_ref_hash(local_repo_dir.path(), "main"),
             "post-push fetch should update the accepted tracking ref"
         );
-        let remote_fasta_path = remote_repo_dir.path().join(logical_path);
+        let remote_fasta_input_path = remote_repo_dir.path().join(fasta_input_path);
         assert!(
-            !remote_fasta_path.exists(),
-            "push should not materialize files in the destination workspace"
+            !remote_fasta_input_path.exists(),
+            "push should not materialize the source FASTA at its original input path"
         );
         assert_success(
             &run_gen(remote_repo_dir.path(), &["checkout", "main"]),
             "remote checkout main should materialize pushed assets",
         );
+        assert_archived_fasta_and_indices(remote_repo_dir.path());
+        let expected_logical_paths = materialized_asset_logical_paths(local_repo_dir.path());
+        assert_materialized_assets_match(
+            local_repo_dir.path(),
+            remote_repo_dir.path(),
+            &expected_logical_paths,
+        );
+        let remote_versioned_file_path = remote_repo_dir.path().join(versioned_file_logical_path);
         assert_eq!(
-            fs::read(&remote_fasta_path).expect("should read remote materialized FASTA"),
-            fs::read(&local_fasta_path).expect("should read local logical FASTA"),
-            "the remote should materialize the pushed branch-head asset"
+            fs::read(&remote_versioned_file_path)
+                .expect("should read remote materialized generic asset"),
+            fs::read(&local_versioned_file_path).expect("should read local generic asset"),
+            "the remote should materialize the pushed branch-head generic asset"
+        );
+        assert_eq!(
+            fs::read(&remote_fasta_input_path)
+                .expect("should restore the original plain FASTA during checkout"),
+            fs::read(&local_fasta_input_path).expect("should read original local FASTA"),
+            "checkout should restore the original FASTA bytes at the source path"
         );
 
         assert_success(
@@ -3365,21 +3602,24 @@ mod remotes {
         let clone_parent_dir = tempdir().expect("should create temp clone parent directory");
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let fasta_fixture_path = fixtures_dir.join("simple.fa");
-        let logical_path = "inputs/simple.fa";
-        let remote_fasta_path = remote_repo_dir.path().join(logical_path);
-        let updated_fasta = b">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGATTT\n";
+        let fasta_input_path = "inputs/simple.fa";
+        let remote_fasta_input_path = remote_repo_dir.path().join(fasta_input_path);
+        let versioned_file_logical_path = "inputs/versioned.txt";
+        let remote_versioned_file_path = remote_repo_dir.path().join(versioned_file_logical_path);
+        let first_version = b"file version one\n";
+        let updated_version = b"file version two\n";
 
         assert_success(
             &run_gen(remote_repo_dir.path(), &["init"]),
             "remote gen init should succeed",
         );
         fs::create_dir_all(
-            remote_fasta_path
+            remote_fasta_input_path
                 .parent()
-                .expect("remote FASTA should have a parent directory"),
+                .expect("FASTA path should have a parent"),
         )
         .expect("should create remote input directory");
-        fs::copy(&fasta_fixture_path, &remote_fasta_path)
+        fs::copy(&fasta_fixture_path, &remote_fasta_input_path)
             .expect("should copy FASTA into the remote workspace");
         assert_success(
             &run_gen(
@@ -3387,7 +3627,7 @@ mod remotes {
                 &[
                     "import",
                     "fasta",
-                    logical_path,
+                    fasta_input_path,
                     "--collection",
                     "test-collection",
                     "--sample",
@@ -3395,6 +3635,21 @@ mod remotes {
                 ],
             ),
             "remote fasta import should succeed",
+        );
+        assert_archived_fasta_and_indices(remote_repo_dir.path());
+        fs::write(&remote_versioned_file_path, first_version)
+            .expect("should write the first generic asset version");
+        assert_success(
+            &run_gen(
+                remote_repo_dir.path(),
+                &[
+                    "add-file",
+                    versioned_file_logical_path,
+                    "--message",
+                    "add-version-one",
+                ],
+            ),
+            "first versioned asset commit should succeed",
         );
 
         let remote_url = format!("file://{}", remote_repo_dir.path().display());
@@ -3410,27 +3665,29 @@ mod remotes {
         );
         let cloned_assets_before_pull = asset_store_contents(&cloned_repo_path);
         assert_asset_store_matches(remote_repo_dir.path(), &cloned_repo_path);
+        let expected_logical_paths = materialized_asset_logical_paths(remote_repo_dir.path());
         assert_materialized_assets_match(
             remote_repo_dir.path(),
             &cloned_repo_path,
-            &[logical_path],
+            &expected_logical_paths,
         );
-        let cloned_fasta_before_pull = fs::read(cloned_repo_path.join(logical_path))
-            .expect("file clone should materialize the original FASTA");
+        let cloned_version_before_pull =
+            fs::read(cloned_repo_path.join(versioned_file_logical_path))
+                .expect("file clone should materialize the first generic asset version");
 
-        fs::write(&remote_fasta_path, updated_fasta)
-            .expect("should update the remote logical FASTA");
+        fs::write(&remote_versioned_file_path, updated_version)
+            .expect("should update the remote generic asset");
         assert_success(
             &run_gen(
                 remote_repo_dir.path(),
                 &[
                     "add-file",
-                    logical_path,
+                    versioned_file_logical_path,
                     "--message",
-                    "update-fasta-after-clone",
+                    "update-file-after-clone",
                 ],
             ),
-            "remote FASTA update should succeed",
+            "remote generic asset update should succeed",
         );
         assert_success(
             &run_gen(&cloned_repo_path, &["pull"]),
@@ -3442,23 +3699,25 @@ mod remotes {
             "pull should add the newly committed versioned asset"
         );
         assert_asset_store_matches(remote_repo_dir.path(), &cloned_repo_path);
+        let expected_logical_paths = materialized_asset_logical_paths(remote_repo_dir.path());
         assert_materialized_assets_match(
             remote_repo_dir.path(),
             &cloned_repo_path,
-            &[logical_path],
+            &expected_logical_paths,
         );
-        let cloned_fasta_after_pull = fs::read(cloned_repo_path.join(logical_path))
-            .expect("file pull should materialize the updated FASTA");
-        assert_eq!(cloned_fasta_after_pull, updated_fasta);
+        let cloned_version_after_pull =
+            fs::read(cloned_repo_path.join(versioned_file_logical_path))
+                .expect("file pull should materialize the updated generic asset");
+        assert_eq!(cloned_version_after_pull, updated_version);
         assert_ne!(
-            cloned_fasta_after_pull, cloned_fasta_before_pull,
+            cloned_version_after_pull, cloned_version_before_pull,
             "pull should replace the logical path with its branch-head version"
         );
         assert!(
             asset_store_contents(&cloned_repo_path)
                 .iter()
-                .any(|(_, contents)| contents == &cloned_fasta_before_pull),
-            "the superseded FASTA should remain available only by its versioned filename"
+                .any(|(_, contents)| contents == &cloned_version_before_pull),
+            "the superseded generic asset should remain available by its versioned filename"
         );
     }
 
@@ -3471,9 +3730,12 @@ mod remotes {
         let server_root_dir = tempdir().expect("should create Dolt server root directory");
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let fasta_fixture_path = fixtures_dir.join("simple.fa");
-        let logical_path = "inputs/simple.fa";
-        let source_fasta_path = source_repo_dir.path().join(logical_path);
-        let updated_fasta = b">m123\nATCGATCGATCGATCGATCGGGAACACACAGAGATTT\n";
+        let fasta_input_path = "inputs/simple.fa";
+        let source_fasta_input_path = source_repo_dir.path().join(fasta_input_path);
+        let versioned_file_logical_path = "inputs/versioned.txt";
+        let source_versioned_file_path = source_repo_dir.path().join(versioned_file_logical_path);
+        let first_version = b"file version one\n";
+        let updated_version = b"file version two\n";
 
         // This is setting up a source repository and then setting up a local server to use
         assert_success(
@@ -3481,12 +3743,12 @@ mod remotes {
             "source gen init should succeed",
         );
         fs::create_dir_all(
-            source_fasta_path
+            source_fasta_input_path
                 .parent()
-                .expect("source FASTA should have a parent directory"),
+                .expect("FASTA path should have a parent"),
         )
         .expect("should create source input directory");
-        fs::copy(&fasta_fixture_path, &source_fasta_path)
+        fs::copy(&fasta_fixture_path, &source_fasta_input_path)
             .expect("should copy FASTA into the source workspace");
         assert_success(
             &run_gen(
@@ -3494,7 +3756,7 @@ mod remotes {
                 &[
                     "import",
                     "fasta",
-                    logical_path,
+                    fasta_input_path,
                     "--collection",
                     "test-collection",
                     "--sample",
@@ -3502,6 +3764,21 @@ mod remotes {
                 ],
             ),
             "source fasta import should succeed",
+        );
+        assert_archived_fasta_and_indices(source_repo_dir.path());
+        fs::write(&source_versioned_file_path, first_version)
+            .expect("should write the first generic asset version");
+        assert_success(
+            &run_gen(
+                source_repo_dir.path(),
+                &[
+                    "add-file",
+                    versioned_file_logical_path,
+                    "--message",
+                    "add-version-one",
+                ],
+            ),
+            "first source asset version should succeed",
         );
 
         let dolt_server =
@@ -3527,28 +3804,30 @@ mod remotes {
         // We use this later to verify that we've updated stuff from a pull
         let cloned_assets_before_pull = asset_store_contents(&cloned_repo_path);
         assert_asset_store_matches(source_repo_dir.path(), &cloned_repo_path);
+        let expected_logical_paths = materialized_asset_logical_paths(source_repo_dir.path());
         assert_materialized_assets_match(
             source_repo_dir.path(),
             &cloned_repo_path,
-            &[logical_path],
+            &expected_logical_paths,
         );
-        let cloned_fasta_before_pull = fs::read(cloned_repo_path.join(logical_path))
-            .expect("HTTP clone should materialize the original FASTA");
+        let cloned_version_before_pull =
+            fs::read(cloned_repo_path.join(versioned_file_logical_path))
+                .expect("HTTP clone should materialize the first generic asset version");
 
         // Now we update the source repo, push it, and verify that on pulling changes we get the new files.
-        fs::write(&source_fasta_path, updated_fasta)
-            .expect("should update the source logical FASTA");
+        fs::write(&source_versioned_file_path, updated_version)
+            .expect("should update the source generic asset");
         assert_success(
             &run_gen(
                 source_repo_dir.path(),
                 &[
                     "add-file",
-                    logical_path,
+                    versioned_file_logical_path,
                     "--message",
-                    "update-fasta-after-http-clone",
+                    "update-file-after-http-clone",
                 ],
             ),
-            "source FASTA update should succeed",
+            "source generic asset update should succeed",
         );
         let source_graph = get_connection(source_repo_dir.path().join(".gen/default.db"))
             .expect("should reopen source graph database");
@@ -3566,23 +3845,25 @@ mod remotes {
             "HTTP pull should add the newly committed versioned asset"
         );
         assert_asset_store_matches(source_repo_dir.path(), &cloned_repo_path);
+        let expected_logical_paths = materialized_asset_logical_paths(source_repo_dir.path());
         assert_materialized_assets_match(
             source_repo_dir.path(),
             &cloned_repo_path,
-            &[logical_path],
+            &expected_logical_paths,
         );
-        let cloned_fasta_after_pull = fs::read(cloned_repo_path.join(logical_path))
-            .expect("HTTP pull should materialize the updated FASTA");
-        assert_eq!(cloned_fasta_after_pull, updated_fasta);
+        let cloned_version_after_pull =
+            fs::read(cloned_repo_path.join(versioned_file_logical_path))
+                .expect("HTTP pull should materialize the updated generic asset");
+        assert_eq!(cloned_version_after_pull, updated_version);
         assert_ne!(
-            cloned_fasta_after_pull, cloned_fasta_before_pull,
+            cloned_version_after_pull, cloned_version_before_pull,
             "pull should replace the logical path with its branch-head version"
         );
         assert!(
             asset_store_contents(&cloned_repo_path)
                 .iter()
-                .any(|(_, contents)| contents == &cloned_fasta_before_pull),
-            "the superseded FASTA should remain available only by its versioned filename"
+                .any(|(_, contents)| contents == &cloned_version_before_pull),
+            "the superseded generic asset should remain available by its versioned filename"
         );
 
         server_stop.store(true, Ordering::Release);

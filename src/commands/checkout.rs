@@ -109,3 +109,140 @@ pub fn execute(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        fs,
+        io::{Cursor, Write as _},
+    };
+
+    use gen_core::{HashId, Sha256Hash, config::Workspace};
+    use gen_models::{
+        assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
+        collection::Collection,
+        history::dolt::commit_all,
+        operations::calculate_reader_checksum,
+    };
+    use noodles::bgzf;
+    use tempfile::tempdir;
+
+    use super::materialize_checked_out_assets;
+    use crate::get_connection;
+
+    fn asset(
+        uri: &str,
+        logical_path: &str,
+        archived_contents: &[u8],
+        materialized_checksum: Sha256Hash,
+        created_on: i64,
+    ) -> AssetRef {
+        let checksum = calculate_reader_checksum(Cursor::new(archived_contents))
+            .expect("should checksum archived bytes");
+        let role = AssetRole::Input;
+        let uri = LocalAssetUri::asset_uri(uri);
+        AssetRef {
+            id: AssetRef::id_hash(
+                &uri,
+                "fasta",
+                Some(&checksum),
+                &role,
+                Some(logical_path),
+                None,
+                None,
+            ),
+            uri,
+            file_type: "fasta".to_string(),
+            checksum: Some(checksum),
+            materialized_checksum: Some(materialized_checksum),
+            size: Some(
+                i64::try_from(archived_contents.len())
+                    .expect("should fit archived input size in i64"),
+            ),
+            role,
+            logical_path: Some(logical_path.to_string()),
+            name: Some("reference.fa.bgz".to_string()),
+            created_on,
+            upstream_asset_ref_id: None,
+        }
+    }
+
+    fn archived_fasta(contents: &[u8]) -> Vec<u8> {
+        let mut archived_contents = Vec::new();
+        let mut writer = bgzf::io::Writer::new(&mut archived_contents);
+        writer
+            .write_all(contents)
+            .expect("should write FASTA bytes to BGZF");
+        writer.finish().expect("should finish BGZF stream");
+        archived_contents
+    }
+
+    #[test]
+    fn test_checkout_materializes_bgzf_over_known_previous_plain_file() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let graph = get_connection(workspace.graph_db_path().unwrap())
+            .expect("should create graph database");
+        Collection::create(&graph, "checkout-fixture").expect("should create collection");
+
+        let previous_contents = b">chr1\nAACCGG\n";
+        let previous_archive = archived_fasta(previous_contents);
+        let previous_asset = asset(
+            ".gen/assets/previous.fa.bgz",
+            "reference.fa",
+            &previous_archive,
+            calculate_reader_checksum(Cursor::new(previous_contents))
+                .expect("should checksum previous FASTA"),
+            1,
+        );
+        fs::write(temp.path().join("reference.fa"), previous_contents)
+            .expect("should write previous plain FASTA");
+
+        let current_contents = b">chr1\nTTGGCC\n";
+        let current_archive = archived_fasta(current_contents);
+        let current_asset = asset(
+            ".gen/assets/current.fa.bgz",
+            "reference.fa",
+            &current_archive,
+            calculate_reader_checksum(Cursor::new(current_contents))
+                .expect("should checksum current FASTA"),
+            2,
+        );
+        let current_versioned_path = materialization_destination_path(
+            &workspace,
+            &current_asset.uri,
+            current_asset.checksum.as_ref(),
+            None,
+        )
+        .expect("should resolve current archive path");
+        fs::create_dir_all(
+            current_versioned_path
+                .parent()
+                .expect("should have archive path parent"),
+        )
+        .expect("should create asset directory");
+        fs::write(&current_versioned_path, &current_archive)
+            .expect("should write current BGZF archive");
+        AssetRef::create(&graph, &current_asset).expect("should add current asset ref");
+        let commit_hash =
+            commit_all(&graph, "add archived FASTA").expect("should commit current asset ref");
+        let previous_assets =
+            HashMap::<HashId, AssetRef>::from([(previous_asset.id, previous_asset)]);
+
+        materialize_checked_out_assets(&graph, &workspace, &commit_hash, &previous_assets)
+            .expect("should materialize checked-out FASTA");
+
+        assert_eq!(
+            fs::read(temp.path().join("reference.fa")).expect("should read restored FASTA"),
+            current_contents,
+            "checkout should replace a recognized previous plain file with decoded bytes"
+        );
+        assert_eq!(
+            fs::read(current_versioned_path).expect("should read retained BGZF archive"),
+            current_archive,
+            "checkout should leave archived BGZF bytes intact"
+        );
+    }
+}

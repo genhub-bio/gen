@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::{
     Direction, ModelSelect, ModelSelectError,
     accession::{Accession, AccessionError, AccessionSelect, AccessionSpan, NewAccession},
-    assets::{AssetRef, AssetRole, OperationKind},
+    assets::{AssetRef, AssetRole, LocalAssetUri, OperationKind},
     db::{DbContext, GraphConnection, max_rows_per_batch},
     errors::{FileAdditionError, OperationError},
     file_types::FileTypes,
@@ -814,8 +814,11 @@ pub fn add_annotation_file(
         checksum_overrides.annotation,
         None,
     )?;
-    let annotation_logical_path =
-        OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
+    let annotation_logical_path = if file_addition.materialized_checksum.is_some() {
+        LocalAssetUri::source_logical_path(workspace, path)?
+    } else {
+        OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?
+    };
     let prepared_index =
         if let Some(index_path) = annotation_index_file_path(workspace, path, index) {
             let index_file_type = FileTypes::infer_from_path(&index_path);
@@ -842,10 +845,8 @@ pub fn add_annotation_file(
         };
     let name = name.or_else(|| Path::new(path).file_name().and_then(|value| value.to_str()));
     let name_value = name.unwrap_or_default();
-    let annotation_asset_ref_id = AssetRef::id_hash(
-        &file_addition.asset_uri,
-        file_addition.file_type.as_str(),
-        file_addition.checksum.as_ref(),
+    let annotation_asset_ref_id = AssetRef::id_hash_for_file_addition(
+        &file_addition,
         &AssetRole::Annotation,
         Some(&annotation_logical_path),
         name,
@@ -902,7 +903,7 @@ pub fn add_annotation_file(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs};
+    use std::{collections::HashSet, fs, io::Read as _};
 
     use gen_core::{HashId, region::RegionResolutionError};
 
@@ -912,7 +913,9 @@ mod tests {
         block_group::{BlockGroup, PathCache},
         block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
         errors::OperationError,
-        operations::{calculate_reader_checksum, commit_operation_summary},
+        operations::{
+            calculate_file_checksum, calculate_reader_checksum, commit_operation_summary,
+        },
         path::Path,
         sample::Sample,
         sample_lineage::SampleLineage,
@@ -1583,14 +1586,16 @@ mod tests {
             .join("fixtures")
             .join("annotation-with-index.gff3");
         let index_path = repo_root.join("fixtures").join("annotation-with-index.csi");
+        let annotation_contents = b"##gff-version 3\n";
+        let index_contents = b"index";
         fs::create_dir_all(
             annotation_path
                 .parent()
                 .expect("should have annotation parent directory"),
         )
         .expect("should create fixture directory");
-        fs::write(&annotation_path, "##gff-version 3\n").expect("should write annotation fixture");
-        fs::write(&index_path, "index").expect("should write index fixture");
+        fs::write(&annotation_path, annotation_contents).expect("should write annotation fixture");
+        fs::write(&index_path, index_contents).expect("should write index fixture");
 
         add_annotation_file(
             &context,
@@ -1622,12 +1627,38 @@ mod tests {
         );
         assert_eq!(
             asset_refs[0].checksum,
-            Some(calculate_reader_checksum("##gff-version 3\n".as_bytes()).unwrap())
+            Some(
+                calculate_file_checksum(
+                    asset_refs[0]
+                        .versioned_store_path(context.workspace())
+                        .expect("should resolve retained BGZF annotation")
+                )
+                .expect("should checksum retained BGZF annotation")
+            )
         );
         assert_eq!(
-            asset_refs[1].checksum,
-            Some(calculate_reader_checksum("index".as_bytes()).unwrap())
+            asset_refs[0].materialized_checksum,
+            Some(calculate_reader_checksum(annotation_contents.as_slice()).unwrap())
         );
+        assert!(asset_refs[0].uri.ends_with(".gff3.bgz"));
+        let archive_path = asset_refs[0]
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained BGZF annotation");
+        let mut decoded = noodles::bgzf::io::Reader::new(
+            fs::File::open(archive_path).expect("should open retained BGZF annotation"),
+        );
+        let mut decoded_contents = Vec::new();
+        decoded
+            .read_to_end(&mut decoded_contents)
+            .expect("should decompress retained annotation bytes");
+        assert_eq!(decoded_contents, annotation_contents);
+        assert_eq!(fs::read(&annotation_path).unwrap(), annotation_contents);
+        assert_eq!(fs::read(&index_path).unwrap(), index_contents);
+        assert_eq!(
+            asset_refs[1].checksum,
+            Some(calculate_reader_checksum(index_contents.as_slice()).unwrap())
+        );
+        assert_eq!(asset_refs[1].materialized_checksum, None);
         assert_eq!(asset_refs[1].file_type.as_str(), "none");
         assert_eq!(
             asset_refs[1]

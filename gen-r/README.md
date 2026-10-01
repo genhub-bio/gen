@@ -22,7 +22,7 @@ operations as methods on the returned environment.
 
 | Method | Description |
 |--------|-------------|
-| `import_fasta(filename, sample, collection)` | Import a FASTA file, returns a `gen_sample` |
+| `import_fasta(filename, sample, collection)` | Import a FASTA file as an external asset, returns a `gen_sample` |
 | `import_gfa(filename, sample, collection)` | Import a GFA file, returns a `SequenceGraph` |
 | `import_genbank(filename, sample, collection)` | Import a GenBank file (plain or gzipped), returns a `gen_sample` |
 | `import_library(library_name, parts_list, seq_containers, sample, collection)` | Import a combinatorial sequence library, returns a `SequenceGraph` |
@@ -32,6 +32,8 @@ Every import call returns the sequence graph(s) it just created directly, so
 there's no need to follow up with `get_sequence_graphs()`. A `gen_sample` is a
 list with `collection_name`, `sample_name`, and `block_groups` (a list of
 `SequenceGraph`); index it with `sample$block_groups[[1]]` or `length(sample)`.
+FASTA sequence data is retained as an external BGZF asset; neither
+`import_fasta()` nor `import_reference_fasta()` accepts a `shallow` argument.
 
 See also the standalone `import_bioconductor()` and `import_granges()` helpers for
 Bioconductor `DNAStringSet` / `GRanges` objects.

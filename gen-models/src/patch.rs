@@ -84,7 +84,7 @@ pub fn operation_asset_files_for_logs(
     let asset_refs_table = AssetRef::table_name_with_history_ref(history_ref);
     let query = format!(
         "SELECT asset_refs.id, asset_refs.uri, asset_refs.file_type, asset_refs.checksum, \
-         asset_refs.logical_path, asset_refs.name \
+         asset_refs.materialized_checksum, asset_refs.logical_path, asset_refs.name \
          FROM {operation_assets_table} operation_assets \
          JOIN {asset_refs_table} asset_refs ON asset_refs.id = operation_assets.asset_ref_id \
          WHERE operation_assets.log_id IN rarray(:log_ids) \
@@ -106,8 +106,8 @@ pub fn operation_asset_files_for_logs(
         .query_map(&query_params[..], |row| {
             let asset_uri = row.get::<_, String>(1)?;
             let file_type = row.get::<_, String>(2)?;
-            let logical_path = row.get::<_, Option<String>>(4)?;
-            let name = row.get::<_, Option<String>>(5)?;
+            let logical_path = row.get::<_, Option<String>>(5)?;
+            let name = row.get::<_, Option<String>>(6)?;
             let file_type = FileTypes::from_storage_tag(&file_type);
             let file_path = patch_file_path(&asset_uri, logical_path.as_deref());
             let filename = patch_file_name(&asset_uri, logical_path.as_deref(), name.as_deref());
@@ -118,6 +118,7 @@ pub fn operation_asset_files_for_logs(
                 asset_uri,
                 file_type,
                 checksum: row.get(3)?,
+                materialized_checksum: row.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()
@@ -259,6 +260,7 @@ mod tests {
             name: Some("reference.fa".to_string()),
             created_on: 1,
             upstream_asset_ref_id: None,
+            materialized_checksum: None,
         };
         OperationLog::create(conn, &log).expect("should create operation log");
         AssetRef::create(conn, &asset).expect("should create checksumless asset");
@@ -279,6 +281,7 @@ mod tests {
         assert_eq!(files[0].asset_uri, asset.uri);
         assert_eq!(files[0].file_path, "inputs/reference.fa");
         assert_eq!(files[0].checksum, None);
+        assert_eq!(files[0].materialized_checksum, None);
     }
 
     #[test]

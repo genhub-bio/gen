@@ -678,7 +678,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Cursor, path::PathBuf};
+    use std::{
+        fs,
+        io::{Cursor, Read},
+        path::PathBuf,
+    };
 
     use gen_core::BranchName;
     use gen_models::{
@@ -686,7 +690,9 @@ mod tests {
         assets::{AssetRef, AssetRole, OperationAsset, OperationKind, OperationLog},
         collection::Collection,
         history::dolt::DoltHistoryStore,
-        operations::{OperationFile, add_files_operation, commit_operation_summary},
+        operations::{
+            OperationFile, add_files_operation, calculate_file_checksum, commit_operation_summary,
+        },
     };
     use tempfile::Builder;
 
@@ -1345,47 +1351,200 @@ mod tests {
     }
 
     #[test]
-    fn test_patch_restores_external_assets_into_target_workspace() {
+    fn test_patch_preserves_archived_and_materialized_fasta_checksums() {
         let source_context = setup_gen_on_disk();
 
         let fixture_fasta_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
-
-        let external_file = Builder::new().suffix(".fa").tempfile().unwrap();
-        fs::copy(&fixture_fasta_path, external_file.path()).unwrap();
+        let logical_path = PathBuf::from("inputs/reference.fa");
+        let input_path = source_context
+            .workspace()
+            .repo_root()
+            .expect("should resolve source repository root")
+            .join(&logical_path);
+        fs::create_dir_all(input_path.parent().expect("should have an input directory"))
+            .expect("should create source input directory");
+        fs::copy(&fixture_fasta_path, &input_path).expect("should copy FASTA into source repo");
+        let original_bytes = fs::read(&input_path).expect("should read original FASTA bytes");
+        let original_checksum =
+            calculate_file_checksum(&input_path).expect("should checksum original FASTA bytes");
 
         let operation_hash = add_files_operation(
             &source_context,
-            &[OperationFile::new(external_file.path().to_string_lossy())],
-            Some("track external fasta"),
+            &[OperationFile::new(input_path.to_string_lossy())],
+            Some("track reference fasta"),
         )
         .expect("should commit external fasta");
+        assert_eq!(
+            fs::read(&input_path).expect("should reread source FASTA bytes"),
+            original_bytes,
+            "archiving should leave the source FASTA unchanged"
+        );
+        let source_asset = AssetRef::all(source_context.graph().conn())
+            .expect("should load source asset references")
+            .into_iter()
+            .find(|asset| asset.logical_path.as_deref() == Some("inputs/reference.fa"))
+            .expect("should find archived FASTA asset");
+        let archived_checksum = source_asset
+            .checksum
+            .expect("should record checksum of archived FASTA bytes");
+        assert_ne!(
+            archived_checksum, original_checksum,
+            "BGZF archive and original FASTA should have distinct checksums"
+        );
+        assert_eq!(
+            source_asset.materialized_checksum,
+            Some(original_checksum),
+            "materialized checksum should identify the original source bytes"
+        );
+        let source_asset_path = source_asset
+            .versioned_store_path(source_context.workspace())
+            .expect("should resolve archived FASTA asset");
+        let archived_bytes = fs::read(&source_asset_path).expect("should read archived FASTA");
+        assert_eq!(
+            calculate_file_checksum(&source_asset_path)
+                .expect("should checksum archived FASTA bytes"),
+            archived_checksum,
+            "asset checksum should identify the stored BGZF bytes"
+        );
+        let mut decoded_source = Vec::new();
+        noodles::bgzf::io::Reader::new(
+            fs::File::open(&source_asset_path).expect("should open archived FASTA"),
+        )
+        .read_to_end(&mut decoded_source)
+        .expect("should decode archived BGZF FASTA");
+        assert_eq!(decoded_source, original_bytes);
 
         let mut write_stream = Cursor::new(Vec::new());
         create_patch(&source_context, &[operation_hash], &mut write_stream).unwrap();
         write_stream.set_position(0);
         let patches = load_patches(&mut write_stream);
+        let patch_file = patches[0]
+            .files
+            .iter()
+            .find(|patch_file| patch_file.file.file_type == FileTypes::Fasta)
+            .expect("should include the archived FASTA in the patch");
+        assert_eq!(patch_file.file.checksum, Some(archived_checksum));
+        assert_eq!(
+            patch_file.file.materialized_checksum,
+            Some(original_checksum),
+            "patch manifest should preserve the materialized checksum"
+        );
+        write_stream.set_position(0);
+        let bundled_asset_bytes = {
+            let mut patch_archive =
+                ZipArchive::new(&mut write_stream).expect("should open patch archive");
+            let mut bundled_asset = patch_archive
+                .by_name(&patch_file.archive_path)
+                .expect("should bundle the archived FASTA bytes in the patch");
+            let mut bytes = Vec::new();
+            bundled_asset
+                .read_to_end(&mut bytes)
+                .expect("should read bundled FASTA bytes");
+            bytes
+        };
+        assert_eq!(
+            bundled_asset_bytes, archived_bytes,
+            "patch should carry the exact checksummed archived bytes"
+        );
 
         let mut target_context = setup_gen_on_disk();
 
         write_stream.set_position(0);
         apply_patch_archive(&mut target_context, &mut write_stream).unwrap();
 
-        let restored_file = &patches[0]
-            .files
-            .iter()
-            .find(|patch_file| patch_file.file.file_type == FileTypes::Fasta)
-            .unwrap()
-            .file;
-
-        let restored_asset_path = target_context.workspace().asset_dir().unwrap().join(
-            PatchFile::local_asset_filename(restored_file)
-                .expect("restored archive asset should have a checksum"),
-        );
-        assert!(restored_asset_path.exists());
+        let restored_asset = AssetRef::all(target_context.graph().conn())
+            .expect("should load target asset references")
+            .into_iter()
+            .find(|asset| asset.id == source_asset.id)
+            .expect("should restore the FASTA asset reference from the patch");
+        assert_eq!(restored_asset.checksum, Some(archived_checksum));
         assert_eq!(
-            fs::read(restored_asset_path).unwrap(),
-            fs::read(external_file.path()).unwrap()
+            restored_asset.materialized_checksum,
+            Some(original_checksum),
+            "patch should restore the materialized checksum"
+        );
+        let restored_asset_path = restored_asset
+            .versioned_store_path(target_context.workspace())
+            .expect("should resolve restored archived FASTA");
+        let restored_archived_bytes =
+            fs::read(&restored_asset_path).expect("should read restored archived FASTA");
+        assert_eq!(
+            restored_archived_bytes, archived_bytes,
+            "patch application should preserve the archived BGZF bytes"
+        );
+        let mut decoded_restored = Vec::new();
+        noodles::bgzf::io::Reader::new(
+            fs::File::open(restored_asset_path).expect("should open restored archived FASTA"),
+        )
+        .read_to_end(&mut decoded_restored)
+        .expect("should decode restored BGZF FASTA");
+        assert_eq!(decoded_restored, original_bytes);
+    }
+
+    #[test]
+    fn test_patch_restores_external_assets_into_target_workspace() {
+        let source_context = setup_gen_on_disk();
+        let fixture_fasta_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        let external_file = Builder::new()
+            .suffix(".fa")
+            .tempfile()
+            .expect("should create an external FASTA file");
+        fs::copy(&fixture_fasta_path, external_file.path())
+            .expect("should copy fixture to external FASTA file");
+        let original_bytes = fs::read(external_file.path()).expect("should read external FASTA");
+        let original_checksum =
+            calculate_file_checksum(external_file.path()).expect("should checksum external FASTA");
+        let operation_hash = add_files_operation(
+            &source_context,
+            &[OperationFile::new(external_file.path().to_string_lossy())],
+            Some("track external fasta"),
+        )
+        .expect("should commit external FASTA");
+        assert_eq!(
+            fs::read(external_file.path()).expect("should reread external FASTA"),
+            original_bytes,
+            "archiving should leave the external FASTA unchanged"
+        );
+        let source_asset = AssetRef::all(source_context.graph().conn())
+            .expect("should load source asset references")
+            .into_iter()
+            .find(|asset| asset.materialized_checksum == Some(original_checksum))
+            .expect("should find the archived external FASTA");
+        let source_asset_path = source_asset
+            .versioned_store_path(source_context.workspace())
+            .expect("should resolve external FASTA archive");
+        let archived_bytes =
+            fs::read(&source_asset_path).expect("should read archived external FASTA");
+        let mut decoded_source = Vec::new();
+        noodles::bgzf::io::Reader::new(
+            fs::File::open(source_asset_path).expect("should open archived external FASTA"),
+        )
+        .read_to_end(&mut decoded_source)
+        .expect("should decode archived external FASTA");
+        assert_eq!(decoded_source, original_bytes);
+
+        let mut patch_stream = Cursor::new(Vec::new());
+        create_patch(&source_context, &[operation_hash], &mut patch_stream)
+            .expect("should create a patch for the external FASTA");
+        patch_stream.set_position(0);
+
+        let mut target_context = setup_gen_on_disk();
+        apply_patch_archive(&mut target_context, &mut patch_stream)
+            .expect("should apply the external FASTA patch");
+        let restored_asset = AssetRef::all(target_context.graph().conn())
+            .expect("should load target asset references")
+            .into_iter()
+            .find(|asset| asset.id == source_asset.id)
+            .expect("should restore the external FASTA asset reference");
+        let restored_asset_path = restored_asset
+            .versioned_store_path(target_context.workspace())
+            .expect("should resolve restored external FASTA archive");
+        assert_eq!(
+            fs::read(restored_asset_path).expect("should read restored external FASTA archive"),
+            archived_bytes,
+            "patch application should preserve the archived BGZF bytes"
         );
     }
 
@@ -1399,6 +1558,7 @@ mod tests {
             file_path: "https://example.com/assets/reference.fa.gz".to_string(),
             file_type: FileTypes::Fasta,
             checksum: None,
+            materialized_checksum: None,
         };
 
         let patch_file = PatchFile::from_file_addition(&context, operation_file.clone()).unwrap();
@@ -1422,6 +1582,7 @@ mod tests {
             uri: "file://inputs/reference.fa".to_string(),
             file_type: FileTypes::Fasta.as_str().to_string(),
             checksum: None,
+            materialized_checksum: None,
             size: None,
             role: AssetRole::Input,
             logical_path: Some("inputs/reference.fa".to_string()),
@@ -1470,6 +1631,7 @@ mod tests {
             uri: "s3://private-bucket/reference.fa".to_string(),
             file_type: FileTypes::Fasta.as_str().to_string(),
             checksum: None,
+            materialized_checksum: None,
             size: None,
             role: AssetRole::Input,
             logical_path: Some("inputs/reference.fa".to_string()),
