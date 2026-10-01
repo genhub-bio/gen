@@ -3464,6 +3464,66 @@ mod tests {
         );
     }
 
+    /// A homozygous edit replaces the unedited route (`preserve_edge` false), so a heterozygous
+    /// edit touching it adds the one alternative of its own and does not bring back the allele the
+    /// homozygous edit replaced, whichever edit is made first. The block group spells the
+    /// homozygous allele with and without the heterozygous change, and nothing else.
+    #[test]
+    fn test_heterozygous_edit_next_to_homozygous_edit_does_not_fan_out_the_parent_allele() {
+        let homozygous = (10, 15, "NNNN", false);
+        let heterozygous = (15, 17, "GG", true);
+        for edits in [[homozygous, heterozygous], [heterozygous, homozygous]] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            for (start, end, inserted, preserve_edge) in edits {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(inserted)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{inserted}")),
+                )
+                .unwrap();
+                let block = PathBlock {
+                    node_id,
+                    block_sequence: inserted.to_string(),
+                    sequence_start: 0,
+                    sequence_end: sequence.length,
+                    path_start: start,
+                    path_end: end,
+                    strand: Strand::Forward,
+                };
+                let region =
+                    ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+                let change = BlockGroupChange {
+                    region,
+                    path_accession: None,
+                    block,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                    preserve_edge,
+                };
+                BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+            }
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(sequences.len(), 2, "{edits:?}");
+            assert_eq!(
+                sequences,
+                HashSet::from_iter([
+                    "AAAAAAAAAANNNNTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                    "AAAAAAAAAANNNNGGTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                ]),
+                "{edits:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_changes_against_derivative_diploid_blockgroups() {
         // This test ensures that if we have heterozygous changes that do not introduce frameshifts,
