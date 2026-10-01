@@ -47,6 +47,7 @@ pub fn import_fasta(
         vec![OperationFile::new(fasta.to_string()).set_file_type(FileTypes::Fasta)];
     let mut sequence_asset_ref_id = None;
     let mut checksum_handle = None;
+    let mut fasta_input_uri = fasta.to_string();
     let input: Box<dyn Read> = if shallow {
         let created_on = i64::try_from(
             SystemTime::now()
@@ -55,11 +56,16 @@ pub fn import_fasta(
                 .as_nanos(),
         )
         .expect("should fit sequence asset timestamp in i64");
-        let sequence_asset_ref =
-            operation_files[0].prepare_asset_ref(context.workspace(), created_on)?;
-        if let Some(checksum) = sequence_asset_ref.checksum {
-            operation_files[0] = operation_files[0].clone().set_checksum_override(checksum);
-        }
+        let prepared_assets = operation_files[0].prepare_assets(context.workspace(), created_on)?;
+        let sequence_asset_ref = prepared_assets.parent;
+        operation_files[0] = prepared_assets
+            .operation_files
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::other("prepared FASTA should include its parent file")
+            })?;
+        fasta_input_uri.clone_from(&sequence_asset_ref.uri);
         AssetRef::create(conn, &sequence_asset_ref)
             .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
         sequence_asset_ref_id = Some(sequence_asset_ref.id);
@@ -77,8 +83,9 @@ pub fn import_fasta(
                 .set_file_type(FileTypes::None)
                 .set_role(AssetRole::SequenceIndex)
                 .set_upstream_asset_ref_id(&sequence_asset_ref.id);
-            let index_asset_ref =
-                index_operation_file.prepare_asset_ref(context.workspace(), created_on)?;
+            let index_asset_ref = index_operation_file
+                .prepare_assets(context.workspace(), created_on)?
+                .parent;
             if let Some(checksum) = index_asset_ref.checksum {
                 index_operation_file = index_operation_file.set_checksum_override(checksum);
             }
@@ -94,7 +101,7 @@ pub fn import_fasta(
         Box::new(file)
     };
 
-    let fasta_extension = <dyn AssetUri>::from_uri(fasta)
+    let fasta_extension = <dyn AssetUri>::from_uri(&fasta_input_uri)
         .suffix()
         .and_then(|suffix| suffix.rsplit('.').next().map(str::to_string));
     let reader_stream: Box<dyn BufRead> = match fasta_extension.as_deref() {
@@ -262,7 +269,7 @@ mod tests {
         errors::OperationError,
         history::{HistoryStore, dolt::DoltHistoryStore},
         node::Node,
-        operations::commit_operation_summary,
+        operations::{calculate_file_checksum, commit_operation_summary},
         path::Path,
         sample::Sample,
         sequence::Sequence,
@@ -417,6 +424,7 @@ mod tests {
 
         let mut fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         fasta_path.push("fixtures/simple.fa");
+        let source_checksum = calculate_file_checksum(&fasta_path).unwrap();
 
         let operation_summary = import_fasta(
             &context,
@@ -437,12 +445,20 @@ mod tests {
         );
         let asset_refs = AssetRef::all(conn).expect("should load asset references");
         assert_eq!(asset_refs.len(), 1);
-        assert_eq!(asset_refs[0].uri, "file://.gen/outside_root/simple.fa");
+        assert!(asset_refs[0].uri.ends_with(".fa.bgz"));
+        let archived_path = asset_refs[0]
+            .versioned_store_path(context.workspace())
+            .expect("should resolve retained FASTA archive");
+        assert_eq!(
+            asset_refs[0].checksum,
+            Some(calculate_file_checksum(archived_path).unwrap())
+        );
+        assert_eq!(asset_refs[0].materialized_checksum, Some(source_checksum));
         assert!(
             asset_refs[0]
                 .logical_path
                 .as_deref()
-                .is_some_and(|path| path.starts_with(".gen/assets/"))
+                .is_some_and(|path| path == ".gen/outside_root/simple.fa")
         );
         assert_eq!(asset_refs[0].name.as_deref(), Some("simple.fa"));
 
@@ -693,6 +709,60 @@ mod tests {
                     .any(|operation_asset| operation_asset.asset_ref_id == index_asset.id)
             }),
             "operation should track every retained sequence index"
+        );
+    }
+
+    #[test]
+    fn test_add_plain_fasta_shallow_commits_retained_asset() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let fasta_path = context
+            .workspace()
+            .repo_root()
+            .unwrap()
+            .join("plain-shallow.fa");
+        fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa"),
+            &fasta_path,
+        )
+        .unwrap();
+        let fasta_path_string = fasta_path.to_string_lossy().to_string();
+
+        let operation_summary = import_fasta(
+            &context,
+            &fasta_path_string,
+            "test",
+            Sample::DEFAULT_NAME,
+            true,
+            &[],
+        )
+        .expect("should import a plain FASTA through the retained BGZF asset");
+        commit_operation_summary(&context, &operation_summary)
+            .expect("should commit the retained plain FASTA asset");
+        fs::remove_file(&fasta_path).expect("should remove the original FASTA");
+
+        let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
+        assert_eq!(
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
+                .expect("should load the shallow sequence from the retained asset"),
+            HashSet::from_iter(vec!["ATCGATCGATCGATCGATCGGGAACACACAGAGA".to_string()]),
+            "plain shallow import should remain readable after the source is removed"
+        );
+        let sequence = Sequence::query_by_blockgroup(conn, context.workspace(), &block_group_id)
+            .into_iter()
+            .find(|sequence| sequence.asset_ref_id.is_some())
+            .expect("should store the external sequence asset pointer");
+        let asset_ref = AssetRef::select(conn)
+            .get_by_id(
+                sequence
+                    .asset_ref_id
+                    .expect("should have the external sequence asset pointer"),
+            )
+            .expect("should query the external sequence asset")
+            .expect("should retain the external sequence asset");
+        assert!(
+            asset_ref.uri.ends_with(".fa.bgz"),
+            "plain FASTA should be read from its retained BGZF URI"
         );
     }
 

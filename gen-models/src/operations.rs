@@ -27,12 +27,14 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
     Direction, ModelSelect, ModelSelectError,
     assets::{
-        AssetRef, AssetRole, AssetUri, LocalAssetUri, OperationAsset, OperationKind, OperationLog,
+        AssetRef, AssetRole, AssetUri, InputEncoding, LocalAssetUri, OperationAsset, OperationKind,
+        OperationLog, PreparedAssetSet, should_archive_as_bgzf,
     },
     db::{ConfigConnection, DbContext},
     errors::{
@@ -55,8 +57,12 @@ pub struct OperationFile {
     pub file_path: String,
     pub file_type: FileTypes,
     pub checksum_override: Option<Sha256Hash>,
+    pub materialized_checksum_override: Option<Sha256Hash>,
+    pub logical_path_override: Option<String>,
     pub role: AssetRole,
     pub upstream_asset_ref_id: Option<HashId>,
+    /// Related assets to prepare alongside this operation input, if any.
+    pub related_files: Option<Vec<OperationFile>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -67,13 +73,24 @@ pub struct OperationFileInfo {
     pub asset_uri: String,
     pub file_type: FileTypes,
     pub checksum: Option<Sha256Hash>,
+    #[serde(default)]
+    pub materialized_checksum: Option<Sha256Hash>,
 }
 
 impl OperationFile {
     pub fn new(file_path: impl Into<String>) -> Self {
         let file_path = file_path.into();
-        let file_type = FileTypes::infer_from_path(&file_path);
-        let filename = Path::new(&file_path)
+        let display_path = if LocalAssetUri::is_file_uri(&file_path) {
+            LocalAssetUri::path_from_uri(&file_path).unwrap_or_else(|| file_path.clone())
+        } else {
+            Url::parse(&file_path)
+                .ok()
+                .map(|url| url.path().to_string())
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| file_path.clone())
+        };
+        let file_type = FileTypes::infer_from_path(&display_path);
+        let filename = Path::new(&display_path)
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(&file_path)
@@ -83,8 +100,11 @@ impl OperationFile {
             file_path,
             file_type,
             checksum_override: None,
+            materialized_checksum_override: None,
+            logical_path_override: None,
             role: AssetRole::Input,
             upstream_asset_ref_id: None,
+            related_files: None,
         }
     }
 
@@ -98,6 +118,16 @@ impl OperationFile {
         self
     }
 
+    pub fn set_materialized_checksum_override(mut self, checksum: Sha256Hash) -> Self {
+        self.materialized_checksum_override = Some(checksum);
+        self
+    }
+
+    pub fn set_logical_path_override(mut self, logical_path: impl Into<String>) -> Self {
+        self.logical_path_override = Some(logical_path.into());
+        self
+    }
+
     pub fn set_role(mut self, role: AssetRole) -> Self {
         self.role = role;
         self
@@ -108,41 +138,54 @@ impl OperationFile {
         self
     }
 
-    /// Construct the AssetRef from an OperationFile
-    pub fn prepare_asset_ref(
+    /// Set related assets that should be prepared alongside this operation input.
+    pub fn set_related_files(mut self, related_files: Vec<OperationFile>) -> Self {
+        self.related_files = Some(related_files);
+        self
+    }
+
+    /// Prepare the parent asset and its related assets through the shared asset lifecycle.
+    pub fn prepare_assets(
         &self,
         workspace: &Workspace,
         created_on: i64,
-    ) -> Result<AssetRef, FileAdditionError> {
-        let file_addition = FileAddition::prepare(
+    ) -> Result<PreparedAssetSet, FileAdditionError> {
+        crate::assets::prepare_operation_file(self, workspace, created_on)
+    }
+
+    pub(crate) fn logical_path(
+        &self,
+        workspace: &Workspace,
+        file_addition: &PreparedFileAddition,
+    ) -> Result<String, FileAdditionError> {
+        if let Some(logical_path) = &self.logical_path_override {
+            return Ok(logical_path.clone());
+        }
+        let is_local = LocalAssetUri::is_local_path_or_file_uri(&self.file_path);
+        if is_local
+            && (self.file_type == FileTypes::Fasta
+                || file_addition.addition.materialized_checksum.is_some()
+                || file_addition.transformed
+                || matches!(
+                    file_addition.input_encoding,
+                    InputEncoding::Gzip | InputEncoding::Bgzf
+                ))
+        {
+            return LocalAssetUri::source_logical_path(workspace, &self.file_path);
+        }
+        if !is_local && LocalAssetUri::is_local_path_or_file_uri(&file_addition.addition.asset_uri)
+        {
+            return Self::storage_file_path(
+                workspace,
+                &file_addition.addition.asset_uri,
+                file_addition.addition.checksum.as_ref(),
+            );
+        }
+        Self::storage_file_path(
             workspace,
             &self.file_path,
-            self.file_type,
-            self.checksum_override,
-        )?;
-        let logical_path =
-            Self::storage_file_path(workspace, &self.file_path, file_addition.checksum.as_ref())?;
-        let file_type = file_addition.file_type.as_str();
-        Ok(AssetRef {
-            id: AssetRef::id_hash(
-                &file_addition.asset_uri,
-                file_type,
-                file_addition.checksum.as_ref(),
-                &self.role,
-                Some(&logical_path),
-                Some(&self.filename),
-                self.upstream_asset_ref_id.as_ref(),
-            ),
-            uri: file_addition.asset_uri,
-            file_type: file_type.to_string(),
-            checksum: file_addition.checksum,
-            size: None,
-            role: self.role.clone(),
-            logical_path: Some(logical_path),
-            name: Some(self.filename.clone()),
-            created_on,
-            upstream_asset_ref_id: self.upstream_asset_ref_id,
-        })
+            file_addition.addition.checksum.as_ref(),
+        )
     }
 
     /// Resolves the path stored in operation metadata without materializing remote assets.
@@ -208,10 +251,10 @@ pub fn commit_operation_summary(
     let created_on = chrono::Utc::now()
         .timestamp_nanos_opt()
         .expect("should create operation asset timestamp");
-    let prepared_assets = operation_info
+    let prepared_asset_sets = operation_info
         .files
         .iter()
-        .map(|operation_file| operation_file.prepare_asset_ref(workspace, created_on))
+        .map(|operation_file| operation_file.prepare_assets(workspace, created_on))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| match err {
             FileAdditionError::ConfigError(config_error) => {
@@ -219,6 +262,11 @@ pub fn commit_operation_summary(
             }
             other => OperationError::SQLError(other.to_string()),
         })?;
+    let prepared_assets = prepared_asset_sets
+        .into_iter()
+        .flat_map(|asset_set| std::iter::once(asset_set.parent).chain(asset_set.derived))
+        .unique_by(|asset_ref| asset_ref.id)
+        .collect::<Vec<_>>();
     let operation_kind = OperationKind::Other(operation_info.description.clone());
     track_asset_refs(
         graph_conn,
@@ -289,41 +337,30 @@ pub fn add_files_operation(
 ) -> Result<DoltHashId, AddFilesOperationError> {
     let workspace = context.workspace();
     let graph_conn = context.graph().conn();
+    let created_on = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .expect("should create operation asset timestamp");
 
-    let file_additions = files
+    let prepared_asset_sets = files
         .iter()
-        .map(|operation_file| {
-            let file_addition = FileAddition::prepare(
-                workspace,
-                &operation_file.file_path,
-                operation_file.file_type,
-                operation_file.checksum_override,
-            )?;
-            let operation_file_path = OperationFile::storage_file_path(
-                workspace,
-                &operation_file.file_path,
-                file_addition.checksum.as_ref(),
-            )?;
-            Ok::<(FileAddition, String, String), FileAdditionError>((
-                file_addition,
-                operation_file.filename.clone(),
-                operation_file_path,
-            ))
-        })
+        .map(|operation_file| operation_file.prepare_assets(workspace, created_on))
         .collect::<Result<Vec<_>, _>>()?;
-
-    let unique_file_additions = file_additions
+    let unique_asset_refs = prepared_asset_sets
         .into_iter()
-        .unique_by(|(file_addition, filename, file_path)| {
-            (file_addition.id, filename.clone(), file_path.clone())
-        })
+        .flat_map(|asset_set| std::iter::once(asset_set.parent).chain(asset_set.derived))
+        .unique_by(|asset_ref| asset_ref.id)
         .collect::<Vec<_>>();
 
     let log_id = HashId(calculate_hash(
-        &unique_file_additions
+        &unique_asset_refs
             .iter()
-            .map(|(file_addition, filename, file_path)| {
-                format!("{}:{filename}:{file_path}", file_addition.id)
+            .map(|asset_ref| {
+                format!(
+                    "{}:{}:{}",
+                    asset_ref.id,
+                    asset_ref.name.as_deref().unwrap_or_default(),
+                    asset_ref.logical_path.as_deref().unwrap_or_default()
+                )
             })
             .sorted()
             .join(":"),
@@ -336,28 +373,12 @@ pub fn add_files_operation(
             format!("Add {} files", files.len())
         }
     });
-    let created_on = chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .expect("should create operation asset timestamp");
-    let asset_refs = unique_file_additions
-        .iter()
-        .map(|(file_addition, filename, file_path)| {
-            AssetRef::from_file_addition(
-                file_addition,
-                AssetRole::Input,
-                Some(file_path),
-                Some(filename),
-                None,
-                created_on,
-            )
-        })
-        .collect::<Vec<_>>();
     track_asset_refs(
         graph_conn,
         Some(&log_id),
         &OperationKind::AddFile,
         &summary,
-        &asset_refs,
+        &unique_asset_refs,
     )?;
     let history_store = DoltHistoryStore::new_with_config(graph_conn, context.config().conn());
     if history_store.status()?.is_empty() {
@@ -400,6 +421,18 @@ pub struct FileAddition {
     pub asset_uri: String,
     pub file_type: FileTypes,
     pub checksum: Option<Sha256Hash>,
+    /// SHA-256 of the decoded bytes when the retained archive differs from the source.
+    #[serde(default)]
+    pub materialized_checksum: Option<Sha256Hash>,
+}
+
+/// A retained asset and the source encoding detected while streaming it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedFileAddition {
+    /// The retained asset's prepared metadata and checksums.
+    pub addition: FileAddition,
+    pub(crate) input_encoding: InputEncoding,
+    pub(crate) transformed: bool,
 }
 
 impl FileAddition {
@@ -413,27 +446,105 @@ impl FileAddition {
         feature = "profiling",
         tracing::instrument(skip(workspace, checksum_override))
     )]
-    /// Prepares an asset reference for operation storage without eagerly reading remote content.
+    /// Retains a source asset and verifies any supplied archive or materialized checksum.
     ///
-    /// Local content is copied and hashed as part of retention. Remote content uses an optional
-    /// checksum supplied by a caller that performed useful streaming work.
+    /// Local content is copied and hashed as part of retention. Plain selected text assets are
+    /// archived as BGZF while already-compressed content keeps its original encoding.
     pub fn prepare(
         workspace: &Workspace,
         file_path: &str,
         file_type: FileTypes,
+        role: AssetRole,
         checksum_override: Option<Sha256Hash>,
-    ) -> Result<FileAddition, FileAdditionError> {
+        materialized_checksum_override: Option<Sha256Hash>,
+    ) -> Result<PreparedFileAddition, FileAdditionError> {
         let asset_uri = <dyn AssetUri>::new(workspace, file_path);
-        let checksum = asset_uri.prepare_asset(workspace, checksum_override)?;
-        let stored_asset_uri = match checksum.as_ref() {
-            Some(checksum) => asset_uri.stored_asset_uri(workspace, checksum)?,
-            None => asset_uri.uri().to_string(),
-        };
-        Ok(FileAddition {
+        let is_local = LocalAssetUri::is_local_path_or_file_uri(file_path);
+        let should_inspect = should_archive_as_bgzf(file_type, &role)
+            && !LocalAssetUri::is_index_path(file_path)
+            && is_local;
+
+        let (checksum, materialized_checksum, stored_asset_uri, input_encoding, transformed) =
+            if should_inspect {
+                let source_reader = asset_uri.reader(workspace)?;
+                let (input_encoding, replayed_reader) =
+                    crate::assets::classify_input(source_reader)
+                        .map_err(FileAdditionError::FileReadError)?;
+
+                if input_encoding == InputEncoding::Plain {
+                    let (archive_checksum, source_checksum) = crate::assets::stage_bgzf_asset_copy(
+                        workspace,
+                        file_path,
+                        file_type,
+                        replayed_reader,
+                        input_encoding,
+                        checksum_override,
+                    )?;
+                    if materialized_checksum_override
+                        .is_some_and(|expected| expected != source_checksum)
+                    {
+                        return Err(FileAdditionError::ChecksumError(format!(
+                            "local materialized checksum does not match the provided checksum: {file_path}"
+                        )));
+                    }
+                    let stored_asset_uri =
+                        LocalAssetUri::archive_uri(workspace, &archive_checksum, file_type)?;
+                    (
+                        Some(archive_checksum),
+                        Some(source_checksum),
+                        stored_asset_uri,
+                        input_encoding,
+                        true,
+                    )
+                } else {
+                    let checksum = LocalAssetUri::stage_asset_copy_from_reader(
+                        asset_uri.as_ref(),
+                        workspace,
+                        replayed_reader,
+                        checksum_override,
+                    )?;
+                    let stored_asset_uri = asset_uri.stored_asset_uri(workspace, &checksum)?;
+                    (
+                        Some(checksum),
+                        materialized_checksum_override,
+                        stored_asset_uri,
+                        input_encoding,
+                        false,
+                    )
+                }
+            } else {
+                let checksum = asset_uri.prepare_asset(workspace, checksum_override)?;
+                let stored_asset_uri = match checksum.as_ref() {
+                    Some(checksum) => asset_uri.stored_asset_uri(workspace, checksum)?,
+                    None => asset_uri.uri().to_string(),
+                };
+                (
+                    checksum,
+                    materialized_checksum_override,
+                    stored_asset_uri,
+                    InputEncoding::Uninspected,
+                    false,
+                )
+            };
+
+        if let Some(expected_checksum) = materialized_checksum_override
+            && materialized_checksum.is_some_and(|actual| actual != expected_checksum)
+        {
+            return Err(FileAdditionError::ChecksumError(format!(
+                "materialized checksum does not match the provided checksum: {file_path}"
+            )));
+        }
+        let addition = FileAddition {
             id: LocalAssetUri::generate_file_addition_id(checksum.as_ref(), &stored_asset_uri),
             asset_uri: stored_asset_uri,
             file_type,
             checksum,
+            materialized_checksum,
+        };
+        Ok(PreparedFileAddition {
+            addition,
+            input_encoding,
+            transformed,
         })
     }
 
@@ -1586,9 +1697,12 @@ mod tests {
             context.workspace(),
             &outside_path_string,
             FileTypes::Fasta,
+            AssetRole::Input,
+            None,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .addition;
         let storage_path = OperationFile::storage_file_path(
             context.workspace(),
             &outside_path_string,
@@ -1614,9 +1728,16 @@ mod tests {
         let file1_path = repo_root.join("test_file.txt");
         fs::write(&file1_path, b"Test file content").unwrap();
         let file1_path_str = file1_path.to_string_lossy().to_string();
-        let fa1 =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
-                .expect("should prepare file addition");
+        let fa1 = FileAddition::prepare(
+            context.workspace(),
+            &file1_path_str,
+            FileTypes::None,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare file addition")
+        .addition;
 
         let checksum = calculate_file_checksum(&file1_path_str).unwrap();
         let expected_asset_path = format!(".gen/assets/{checksum}.txt");
@@ -1645,9 +1766,16 @@ mod tests {
         );
 
         // Second call with same file should return the same FileAddition
-        let fa2 =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
-                .expect("should prepare same file addition");
+        let fa2 = FileAddition::prepare(
+            context.workspace(),
+            &file1_path_str,
+            FileTypes::None,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare same file addition")
+        .addition;
 
         assert_eq!(fa1, fa2);
 
@@ -1656,16 +1784,30 @@ mod tests {
         fs::write(&file2_path, b"Test file content").unwrap();
         let file2_path_str = file2_path.to_string_lossy().to_string();
 
-        let fa3 =
-            FileAddition::prepare(context.workspace(), &file2_path_str, FileTypes::Fasta, None)
-                .expect("should prepare matching file addition");
+        let fa3 = FileAddition::prepare(
+            context.workspace(),
+            &file2_path_str,
+            FileTypes::None,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare matching file addition")
+        .addition;
 
         assert_eq!(fa1.id, fa3.id);
 
         fs::write(&file1_path, b"new content").unwrap();
-        let fa1_new =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
-                .expect("should prepare updated file addition");
+        let fa1_new = FileAddition::prepare(
+            context.workspace(),
+            &file1_path_str,
+            FileTypes::None,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare updated file addition")
+        .addition;
 
         assert_ne!(fa1.id, fa1_new.id);
 
@@ -1674,9 +1816,16 @@ mod tests {
         fs::write(&outside_file, b"Outside repo file").unwrap();
         let outside_path = outside_file.to_string_lossy().to_string();
 
-        let outside =
-            FileAddition::prepare(context.workspace(), &outside_path, FileTypes::Fasta, None)
-                .expect("should prepare external file addition");
+        let outside = FileAddition::prepare(
+            context.workspace(),
+            &outside_path,
+            FileTypes::None,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare external file addition")
+        .addition;
 
         assert_eq!(
             outside.asset_uri,
@@ -1698,13 +1847,235 @@ mod tests {
     }
 
     #[test]
+    fn test_plain_selected_text_file_is_archived_as_bgzf_with_both_checksums() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let source_path = repo_root.join("input.vcf");
+        let source_contents = b"##fileformat=VCFv4.3\n#CHROM\tPOS\tID\nchr1\t1\t.\n";
+        fs::write(&source_path, source_contents).expect("should write plain VCF source");
+
+        let file_addition = FileAddition::prepare(
+            context.workspace(),
+            source_path.to_str().expect("should encode VCF source path"),
+            FileTypes::VCF,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should archive plain VCF as BGZF")
+        .addition;
+        let archive_checksum = file_addition
+            .checksum
+            .expect("should calculate archive checksum");
+        let materialized_checksum = file_addition
+            .materialized_checksum
+            .expect("should calculate source checksum");
+        let asset_dir = context.workspace().asset_dir().unwrap();
+        let archive_path = asset_dir.join(
+            file_addition
+                .hashed_filename()
+                .expect("should derive content-addressed archive filename"),
+        );
+
+        assert_eq!(
+            file_addition.asset_uri,
+            LocalAssetUri::asset_uri(&format!(".gen/assets/{archive_checksum}.vcf.bgz"))
+        );
+        assert_eq!(
+            calculate_file_checksum(&source_path).unwrap(),
+            materialized_checksum
+        );
+        assert_eq!(
+            calculate_file_checksum(&archive_path).unwrap(),
+            archive_checksum
+        );
+        assert_ne!(archive_checksum, materialized_checksum);
+        assert_eq!(fs::read(&source_path).unwrap(), source_contents);
+        let verified_addition = FileAddition::prepare(
+            context.workspace(),
+            source_path.to_str().expect("should encode VCF source path"),
+            FileTypes::VCF,
+            AssetRole::Input,
+            Some(materialized_checksum),
+            None,
+        )
+        .expect("should verify the supplied checksum against the plain source bytes")
+        .addition;
+        assert_eq!(verified_addition.checksum, Some(archive_checksum));
+
+        let mut decoded = noodles::bgzf::io::Reader::new(
+            fs::File::open(&archive_path).expect("should open retained BGZF archive"),
+        );
+        let mut decoded_contents = Vec::new();
+        std::io::Read::read_to_end(&mut decoded, &mut decoded_contents)
+            .expect("should decode retained BGZF archive");
+        assert_eq!(decoded_contents, source_contents);
+    }
+
+    #[test]
+    fn test_index_suffixes_are_not_archived_as_bgzf_even_when_file_type_is_text() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let asset_dir = context.workspace().asset_dir().unwrap();
+        let index_contents = b"index bytes\n";
+
+        for extension in ["fai", "gzi", "tbi", "csi"] {
+            let source_path = repo_root.join(format!("reference.fa.{extension}"));
+            fs::write(&source_path, index_contents).expect("should write raw index file");
+
+            let addition = FileAddition::prepare(
+                context.workspace(),
+                source_path.to_str().expect("should encode index path"),
+                FileTypes::Fasta,
+                AssetRole::Input,
+                None,
+                None,
+            )
+            .expect("should retain index bytes without BGZF encoding")
+            .addition;
+            let archived_path = asset_dir.join(
+                addition
+                    .hashed_filename()
+                    .expect("should derive retained index filename"),
+            );
+
+            assert_eq!(addition.materialized_checksum, None);
+            assert_eq!(fs::read(archived_path).unwrap(), index_contents);
+            assert!(addition.asset_uri.ends_with(&format!(".fa.{extension}")));
+        }
+    }
+
+    #[test]
+    fn test_existing_gzip_selected_text_file_is_preserved_byte_for_byte() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let asset_dir = context.workspace().asset_dir().unwrap();
+        let source_path = repo_root.join("variants.vcf.gz");
+        let mut gzip_encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip_encoder
+            .write_all(b"##fileformat=VCFv4.3\nchr1\t1\t.\n")
+            .expect("should write gzip VCF content");
+        let gzip_contents = gzip_encoder
+            .finish()
+            .expect("should finish gzip VCF content");
+        fs::write(&source_path, &gzip_contents).expect("should write compressed VCF bytes");
+
+        let addition = FileAddition::prepare(
+            context.workspace(),
+            source_path
+                .to_str()
+                .expect("should encode compressed VCF path"),
+            FileTypes::VCF,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should retain already-compressed VCF bytes")
+        .addition;
+        let archived_path = asset_dir.join(
+            addition
+                .hashed_filename()
+                .expect("should derive compressed VCF filename"),
+        );
+
+        assert_eq!(addition.materialized_checksum, None);
+        assert_eq!(fs::read(archived_path).unwrap(), gzip_contents);
+        assert!(!addition.asset_uri.ends_with(".bgz"));
+    }
+
+    #[test]
+    fn test_existing_corrupt_content_addressed_bgzf_is_rejected() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let source_path = repo_root.join("input.vcf");
+        fs::write(&source_path, b"##fileformat=VCFv4.3\nchr1\t1\t.\n")
+            .expect("should write plain VCF source");
+        let source_path = source_path.to_string_lossy().into_owned();
+        let addition = FileAddition::prepare(
+            context.workspace(),
+            &source_path,
+            FileTypes::VCF,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should archive plain VCF source")
+        .addition;
+        let archived_path = context
+            .workspace()
+            .asset_dir()
+            .unwrap()
+            .join(addition.hashed_filename().unwrap());
+        fs::write(&archived_path, b"corrupt archive")
+            .expect("should corrupt the content-addressed archive for the test");
+
+        let error = FileAddition::prepare(
+            context.workspace(),
+            &source_path,
+            FileTypes::VCF,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect_err("should not trust corrupt bytes at a content-addressed path");
+
+        assert!(matches!(error, FileAdditionError::ChecksumError(_)));
+    }
+
+    #[test]
+    fn test_existing_corrupt_content_addressed_asset_is_rejected_with_checksum_override() {
+        let context = setup_gen();
+        let source_path = context.workspace().repo_root().unwrap().join("input.txt");
+        fs::write(&source_path, b"source bytes").expect("should write untransformed source bytes");
+        let source_path = source_path.to_string_lossy().into_owned();
+        let addition = FileAddition::prepare(
+            context.workspace(),
+            &source_path,
+            FileTypes::None,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should retain raw source bytes")
+        .addition;
+        let checksum = addition.checksum.expect("should calculate source checksum");
+        let archived_path = context
+            .workspace()
+            .asset_dir()
+            .unwrap()
+            .join(addition.hashed_filename().unwrap());
+        fs::write(&archived_path, b"corrupt asset")
+            .expect("should corrupt the content-addressed asset for the test");
+
+        let error = FileAddition::prepare(
+            context.workspace(),
+            &source_path,
+            FileTypes::None,
+            AssetRole::Input,
+            Some(checksum),
+            None,
+        )
+        .expect_err("should verify bytes even when reusing a checksum-addressed asset");
+
+        assert!(matches!(error, FileAdditionError::ChecksumError(_)));
+    }
+
+    #[test]
     fn test_file_addition_prepare_http_uri() {
         let context = setup_gen();
         let asset_uri = "https://example.com/assets/reference.fa";
 
-        let addition =
-            FileAddition::prepare(context.workspace(), asset_uri, FileTypes::Fasta, None)
-                .expect("should prepare HTTP file addition");
+        let addition = FileAddition::prepare(
+            context.workspace(),
+            asset_uri,
+            FileTypes::Fasta,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare HTTP file addition")
+        .addition;
 
         assert_eq!(addition.asset_uri, asset_uri);
         assert_eq!(addition.file_path(), asset_uri);
@@ -1727,9 +2098,12 @@ mod tests {
             context.workspace(),
             asset_uri,
             FileTypes::Fasta,
+            AssetRole::Input,
             Some(checksum),
+            None,
         )
-        .expect("should prepare remote file addition");
+        .expect("should prepare remote file addition")
+        .addition;
 
         assert_eq!(addition.asset_uri, asset_uri);
         assert_eq!(addition.file_path(), asset_uri);
@@ -1746,7 +2120,9 @@ mod tests {
             context.workspace(),
             path.to_str().expect("should encode local asset path"),
             FileTypes::Fasta,
+            AssetRole::Input,
             Some(Sha256Hash::convert_str("different contents")),
+            None,
         )
         .expect_err("should reject incorrect checksum override");
 
