@@ -114,7 +114,7 @@ use crate::{
             CapabilityRequest, CapabilityResponse, DirectPushCapability, RemoteClientError,
             RemoteOperation, RepositoryRemote, SessionScope as ClientSessionScope,
             acquire_asset_transfers, acquire_capability, acquire_push_capability,
-            complete_asset_transfers, publish_direct_push,
+            complete_asset_transfers, confirm_direct_push_session_stale, publish_direct_push,
         },
         login_origin,
         progress::{
@@ -382,6 +382,16 @@ impl PushCapabilityRenewal {
         })?;
         publish_direct_push(direct_push).map_err(PushGraphTransferError::Client)
     }
+
+    fn confirm_stale_session(&self) -> Result<bool, PushGraphTransferError> {
+        let response = self.capability_response()?;
+        let direct_push = response.direct_push.as_ref().ok_or_else(|| {
+            PushGraphTransferError::Protocol(
+                "GenHub push capability did not include a direct GCS session".to_string(),
+            )
+        })?;
+        confirm_direct_push_session_stale(direct_push).map_err(PushGraphTransferError::Client)
+    }
 }
 
 impl PushCapabilityRenewal {
@@ -406,6 +416,7 @@ fn sanitize_capability_fetch_error(error: RemoteClientError) -> RemoteClientErro
             RemoteClientError::InvalidRepositoryUrl("configured GenHub repository".to_string())
         }
         RemoteClientError::AuthenticationRequired => RemoteClientError::AuthenticationRequired,
+        RemoteClientError::StaleGraphSession => RemoteClientError::StaleGraphSession,
         RemoteClientError::Http { status, .. } => RemoteClientError::Http {
             status,
             message: "direct-push credential renewal failed".to_string(),
@@ -640,6 +651,15 @@ fn is_authorization_error(error: &SqlError) -> bool {
     )
 }
 
+fn is_stale_accepted_session_error(error: &SqlError) -> bool {
+    matches!(
+        error,
+        SqlError::SqliteFailure(code, Some(message))
+            if code.extended_code == rusqlite::ffi::SQLITE_BUSY
+                && message == "published manifest changed since the accepted session head"
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 enum PushGraphTransferError {
     #[error("{phase} failed: {source:?}")]
@@ -650,6 +670,13 @@ enum PushGraphTransferError {
     },
     #[error(transparent)]
     Client(#[from] RemoteClientError),
+    #[error("GenHub confirmed the direct GCS graph session is stale")]
+    StaleSessionConfirmed,
+    #[error("{primary}; GenHub could not verify the stale session: {confirmation}")]
+    StaleSessionCheckFailed {
+        primary: Box<PushGraphTransferError>,
+        confirmation: Box<PushGraphTransferError>,
+    },
     #[error("{0}")]
     Protocol(String),
 }
@@ -665,15 +692,32 @@ impl PushGraphTransferError {
             Self::Client(RemoteClientError::Http { status, .. }) => {
                 matches!(*status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
             }
-            Self::Client(_) | Self::Protocol(_) => false,
+            Self::Client(_)
+            | Self::StaleSessionConfirmed
+            | Self::StaleSessionCheckFailed { .. }
+            | Self::Protocol(_) => false,
         }
     }
 
     fn is_terminal(&self) -> bool {
         match self {
             Self::Client(RemoteClientError::Http { status, .. }) => *status == StatusCode::CONFLICT,
+            Self::Client(RemoteClientError::StaleGraphSession)
+            | Self::StaleSessionConfirmed
+            | Self::StaleSessionCheckFailed { .. } => false,
             Self::Protocol(_) => true,
             Self::Database { .. } | Self::Client(_) => false,
+        }
+    }
+
+    fn is_stale_session(&self) -> bool {
+        match self {
+            Self::Database { source, .. } => is_stale_accepted_session_error(source),
+            Self::Client(RemoteClientError::StaleGraphSession) => true,
+            Self::Client(_)
+            | Self::StaleSessionConfirmed
+            | Self::StaleSessionCheckFailed { .. }
+            | Self::Protocol(_) => false,
         }
     }
 }
@@ -746,6 +790,10 @@ fn safe_graph_error_context(error: &PushGraphTransferError) -> String {
             format!("HTTP {status}")
         }
         PushGraphTransferError::Client(_) => "remote client request".to_string(),
+        PushGraphTransferError::StaleSessionConfirmed
+        | PushGraphTransferError::StaleSessionCheckFailed { .. } => {
+            "stale direct GCS session recovery".to_string()
+        }
         PushGraphTransferError::Protocol(_) => "remote protocol response".to_string(),
     }
 }
@@ -1108,6 +1156,31 @@ fn run_push_graph_transfer(
             Err(error) if attempt == 0 && error.is_authorization_error() => {
                 restore_canonical_url(graph, remote);
                 last_error = Some(error);
+            }
+            Err(error) if error.is_stale_session() => {
+                restore_canonical_url(graph, remote);
+                if matches!(
+                    &error,
+                    PushGraphTransferError::Client(RemoteClientError::StaleGraphSession)
+                ) {
+                    return Err(Box::new(PushGraphTransferError::StaleSessionConfirmed));
+                }
+                let confirmation = {
+                    let _heartbeat = ProgressHeartbeat::waiting(
+                        "confirming the stale graph session with GenHub",
+                    );
+                    renewal.confirm_stale_session()
+                };
+                return match confirmation {
+                    Ok(true) => Err(Box::new(PushGraphTransferError::StaleSessionConfirmed)),
+                    Ok(false) => Err(Box::new(error)),
+                    Err(confirmation) => {
+                        Err(Box::new(PushGraphTransferError::StaleSessionCheckFailed {
+                            primary: Box::new(error),
+                            confirmation: Box::new(confirmation),
+                        }))
+                    }
+                };
             }
             Err(error) => {
                 restore_canonical_url(graph, remote);
@@ -2433,7 +2506,7 @@ pub fn execute_push(
                 .push_session_id
                 .expect("push session UUID should be persisted before transfer");
             let expected_transfer_id = same_destination.then_some(operation.transfer_id).flatten();
-            let graph_transfer = run_push_graph_transfer(
+            let mut graph_transfer = run_push_graph_transfer(
                 &graph,
                 &remote,
                 &branch,
@@ -2442,6 +2515,29 @@ pub fn execute_push(
                 expected_transfer_id,
                 &destination_hash,
             );
+            let confirmed_stale_session = graph_transfer.as_ref().is_err_and(|error| {
+                error
+                    .downcast_ref::<PushGraphTransferError>()
+                    .is_some_and(|error| {
+                        matches!(error, PushGraphTransferError::StaleSessionConfirmed)
+                    })
+            });
+            if confirmed_stale_session {
+                write_progress_line(
+                    "GenHub confirmed the accepted graph session is stale; opening a fresh session...",
+                );
+                let replacement_session_id = Uuid::new_v4();
+                operation.reset_stale_push_session(&config, replacement_session_id)?;
+                graph_transfer = run_push_graph_transfer(
+                    &graph,
+                    &remote,
+                    &branch,
+                    force,
+                    replacement_session_id,
+                    None,
+                    &destination_hash,
+                );
+            }
             let renewal = match graph_transfer {
                 Ok(renewal) => renewal,
                 Err(error) => {
@@ -5124,5 +5220,25 @@ mod tests {
         assert!(!cleanup_context.contains("secret"));
         assert!(!error.to_string().contains("access_token"));
         assert!(!error.to_string().contains("signed"));
+    }
+
+    #[test]
+    fn test_stale_session_classifier_requires_exact_sqlite_busy_error() {
+        let exact = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("published manifest changed since the accepted session head".to_string()),
+        );
+        let other_busy = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_string()),
+        );
+        let other_code = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+            Some("published manifest changed since the accepted session head".to_string()),
+        );
+
+        assert!(super::is_stale_accepted_session_error(&exact));
+        assert!(!super::is_stale_accepted_session_error(&other_busy));
+        assert!(!super::is_stale_accepted_session_error(&other_code));
     }
 }
