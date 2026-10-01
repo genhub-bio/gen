@@ -27,6 +27,10 @@
 
 use std::{env, fmt, io};
 
+use base64::{
+    Engine as _,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
 use chrono::{DateTime, Utc};
 use gen_core::{DoltHashId, HashId};
 use reqwest::{
@@ -415,6 +419,56 @@ fn refresh_tokens(
     })
 }
 
+fn access_token_expired_hint(token: &str, now: DateTime<Utc>) -> bool {
+    let mut segments = token.split('.');
+    let (Some(header_segment), Some(payload_segment), Some(signature_segment), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    if header_segment.is_empty() || payload_segment.is_empty() || signature_segment.is_empty() {
+        return false;
+    }
+
+    let decode_segment = |segment: &str| {
+        URL_SAFE_NO_PAD
+            .decode(segment)
+            .or_else(|_| URL_SAFE.decode(segment))
+            .ok()
+    };
+    let Some(header_bytes) = decode_segment(header_segment) else {
+        return false;
+    };
+    let Ok(header) = serde_json::from_slice::<serde_json::Value>(&header_bytes) else {
+        return false;
+    };
+    if !header
+        .get("alg")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|algorithm| !algorithm.is_empty() && algorithm != "none")
+    {
+        return false;
+    }
+    if decode_segment(signature_segment).is_none() {
+        return false;
+    }
+
+    let Some(payload_bytes) = decode_segment(payload_segment) else {
+        return false;
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) else {
+        return false;
+    };
+    let Some(expiration) = claims.get("exp").and_then(serde_json::Value::as_f64) else {
+        return false;
+    };
+
+    expiration <= now.timestamp() as f64
+}
+
 trait TokenStore {
     fn load(&self, identity: &str) -> io::Result<AuthTokens>;
     fn save(&self, identity: &str, tokens: &AuthTokens) -> io::Result<()>;
@@ -468,6 +522,13 @@ fn acquire_request_with_store<T, Store: TokenStore>(
         }
     }
     if let Ok(tokens) = options.token_store.load(repository.origin()) {
+        let tokens = if access_token_expired_hint(&tokens.jwt, Utc::now()) {
+            let refreshed = refresh_tokens(client, repository, &tokens)?;
+            options.token_store.save(repository.origin(), &refreshed)?;
+            refreshed
+        } else {
+            tokens
+        };
         match send(RequestAuthorization::Bearer(&tokens.jwt)) {
             Ok(response) => return Ok(response),
             Err(RemoteClientError::Http {
@@ -760,6 +821,8 @@ mod tests {
         thread::{self, JoinHandle},
     };
 
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use chrono::Utc;
     use reqwest::{StatusCode, blocking::Client};
     use uuid::Uuid;
 
@@ -767,12 +830,24 @@ mod tests {
         AssetTransferRequest, AuthTokens, CapabilityRequest, CapabilityResponse,
         DirectPushCapability, MAX_DIRECT_PUSH_ERROR_BODY_BYTES, RemoteClientError, RemoteOperation,
         RepositoryRemote, RequestAuthorization, SessionScope, TokenStore,
-        acquire_capability_with_store, acquire_capability_with_store_and_token,
-        confirm_direct_push_session_stale, http_version_label, normalized_origin,
-        publish_direct_push, response_content_type_label, send_asset_transfers,
+        access_token_expired_hint, acquire_capability_with_store,
+        acquire_capability_with_store_and_token, confirm_direct_push_session_stale,
+        http_version_label, normalized_origin, publish_direct_push, response_content_type_label,
+        send_asset_transfers,
     };
 
     const TEST_TRANSFER_ID: Uuid = Uuid::from_u128(1);
+
+    fn test_jwt_with_expiration(expiration: i64) -> String {
+        let header = serde_json::json!({"alg": "HS256", "typ": "JWT"}).to_string();
+        let claims = serde_json::json!({"exp": expiration}).to_string();
+        format!(
+            "{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(header),
+            URL_SAFE_NO_PAD.encode(claims),
+            URL_SAFE_NO_PAD.encode("test-signature")
+        )
+    }
 
     struct MemoryTokenStore {
         tokens: Mutex<Option<AuthTokens>>,
@@ -1412,6 +1487,121 @@ mod tests {
         assert!(requests[2].contains("authorization: Bearer new-access"));
         assert_eq!(stored.jwt, "new-access");
         assert_eq!(stored.refresh_token, "new-refresh");
+    }
+
+    #[test]
+    fn test_expired_jwt_refreshes_before_remote_capability_request() {
+        let (origin, server) = mock_server(vec![
+            (
+                200,
+                serde_json::json!({
+                    "access_token": "refreshed-access",
+                    "refresh_token": "refreshed-token"
+                })
+                .to_string(),
+            ),
+            (
+                200,
+                capability_body("http://127.0.0.1:9000/dolt/write/default.db"),
+            ),
+        ]);
+        let repository = repository(&origin);
+        let store = MemoryTokenStore::with_tokens(AuthTokens {
+            jwt: test_jwt_with_expiration(Utc::now().timestamp() - 60),
+            refresh_token: "old-refresh".to_string(),
+        });
+
+        acquire_capability_with_store(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            None,
+            &store,
+            no_interactive_login,
+        )
+        .expect("expired JWT should refresh before requesting a capability");
+        let requests = server.join().expect("mock GenHub should finish");
+        let stored = store.current().expect("refreshed tokens should be stored");
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /api/auth/cli/token-refresh "));
+        assert!(requests[0].contains("\"refresh_token\":\"old-refresh\""));
+        assert!(requests[1].contains("authorization: Bearer refreshed-access"));
+        assert_eq!(stored.jwt, "refreshed-access");
+        assert_eq!(stored.refresh_token, "refreshed-token");
+    }
+
+    #[test]
+    fn test_access_token_expiry_hint_ignores_malformed_and_opaque_tokens() {
+        let now = Utc::now();
+        for token in [
+            "opaque-access-token",
+            "header.payload.signature",
+            "e30.bm90LWpzb24.c2lnbmF0dXJl",
+            "e30.eyJleHAiOjF9.c2lnbmF0dXJl",
+        ] {
+            assert!(
+                !access_token_expired_hint(token, now),
+                "malformed or opaque access token should not trigger proactive refresh"
+            );
+        }
+        assert!(access_token_expired_hint(
+            &test_jwt_with_expiration(now.timestamp() - 1),
+            now
+        ));
+        assert!(!access_token_expired_hint(
+            &test_jwt_with_expiration(now.timestamp() + 60),
+            now
+        ));
+    }
+
+    #[test]
+    fn test_unexpired_jwt_forbidden_response_keeps_interactive_login_behavior() {
+        let (origin, server) = mock_server(vec![
+            (403, "{\"message\":\"permission denied\"}".to_string()),
+            (
+                200,
+                capability_body("http://127.0.0.1:9000/dolt/write/default.db"),
+            ),
+        ]);
+        let repository = repository(&origin);
+        let token = test_jwt_with_expiration(Utc::now().timestamp() + 3600);
+        let store = MemoryTokenStore::with_tokens(AuthTokens {
+            jwt: token.clone(),
+            refresh_token: "old-refresh".to_string(),
+        });
+        let mut login_attempted = false;
+
+        acquire_capability_with_store(
+            &Client::new(),
+            &repository,
+            &CapabilityRequest {
+                operation: RemoteOperation::Push,
+                branch: Some("main"),
+                force: false,
+            },
+            None,
+            &store,
+            |_| {
+                login_attempted = true;
+                Ok(AuthTokens {
+                    jwt: "login-access".to_string(),
+                    refresh_token: "login-refresh".to_string(),
+                })
+            },
+        )
+        .expect("valid-token authorization rejection should keep existing login behavior");
+        let requests = server.join().expect("mock GenHub should finish");
+
+        assert!(login_attempted);
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains(&format!("authorization: Bearer {token}")));
+        assert!(!requests[0].contains("token-refresh"));
+        assert!(requests[1].contains("authorization: Bearer login-access"));
     }
 
     #[test]
