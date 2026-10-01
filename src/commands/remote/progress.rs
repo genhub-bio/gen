@@ -30,9 +30,27 @@ struct ProgressOutput {
 
 impl ProgressOutput {
     fn stderr() -> Self {
-        let indicatif = io::stderr()
-            .is_terminal()
-            .then(|| Arc::new(IndicatifOutput::new()));
+        Self::stderr_with_active_handler(false)
+    }
+
+    fn active_or_stderr() -> Self {
+        Self::stderr_with_active_handler(true)
+    }
+
+    fn stderr_with_active_handler(use_active: bool) -> Self {
+        let active = use_active.then(|| {
+            ACTIVE_INDICATIF.get().and_then(|active| {
+                active
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .upgrade()
+            })
+        });
+        let indicatif = active.flatten().or_else(|| {
+            io::stderr()
+                .is_terminal()
+                .then(|| Arc::new(IndicatifOutput::new()))
+        });
         Self {
             sink: Arc::new(|line| {
                 let _ = writeln!(io::stderr().lock(), "{line}");
@@ -279,7 +297,7 @@ impl ProgressHeartbeat {
     pub(crate) fn waiting(phase: &str) -> Self {
         let now = Instant::now();
         Self::start(
-            ProgressOutput::stderr(),
+            ProgressOutput::active_or_stderr(),
             Arc::new(Mutex::new(now)),
             phase.to_string(),
             HEARTBEAT_INTERVAL,
