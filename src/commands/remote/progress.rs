@@ -46,11 +46,10 @@ impl ProgressOutput {
                     .upgrade()
             })
         });
-        let indicatif = active.flatten().or_else(|| {
-            io::stderr()
-                .is_terminal()
-                .then(|| Arc::new(IndicatifOutput::new()))
-        });
+        let indicatif =
+            Self::select_indicatif(active.flatten(), io::stderr().is_terminal(), || {
+                Arc::new(IndicatifOutput::new())
+            });
         Self {
             sink: Arc::new(|line| {
                 let _ = writeln!(io::stderr().lock(), "{line}");
@@ -58,6 +57,20 @@ impl ProgressOutput {
             interval: PROGRESS_INTERVAL,
             indicatif,
         }
+    }
+
+    fn select_indicatif(
+        active: Option<Arc<IndicatifOutput>>,
+        stderr_is_terminal: bool,
+        make_terminal: impl FnOnce() -> Arc<IndicatifOutput>,
+    ) -> Option<Arc<IndicatifOutput>> {
+        active
+            .filter(|indicatif| !indicatif.handler.is_hidden())
+            .or_else(|| {
+                stderr_is_terminal
+                    .then(make_terminal)
+                    .filter(|indicatif| !indicatif.handler.is_hidden())
+            })
     }
 
     fn reporter(&self) -> ThrottledOutput {
@@ -82,6 +95,9 @@ impl ProgressOutput {
         let Some(indicatif) = &self.indicatif else {
             return;
         };
+        if indicatif.handler.is_hidden() {
+            return;
+        }
         let active = ACTIVE_INDICATIF.get_or_init(|| Mutex::new(Weak::new()));
         *active
             .lock()
@@ -116,8 +132,12 @@ struct IndicatifOutput {
 
 impl IndicatifOutput {
     fn new() -> Self {
+        Self::with_handler(get_handler())
+    }
+
+    fn with_handler(handler: MultiProgress) -> Self {
         Self {
-            handler: get_handler(),
+            handler,
             bar: Mutex::new(BarState::default()),
             details: Mutex::new(Vec::new()),
         }
@@ -1019,6 +1039,7 @@ pub(crate) fn write_progress_line(message: &str) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .upgrade()
+            .filter(|indicatif| !indicatif.handler.is_hidden())
     }) {
         indicatif.println(message);
     } else {
@@ -1089,20 +1110,95 @@ pub(crate) fn format_elapsed(elapsed: Duration) -> String {
 mod tests {
     use std::{
         io::{Cursor, Read as _},
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, Weak},
         time::{Duration, Instant},
     };
 
-    use indicatif::ProgressBar;
+    use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, TermLike};
     use rusqlite::{
         DoltPushProgressEvent,
         blockcachevfs::{UploadPlan, UploadProgress},
     };
 
     use super::{
-        AssetUploadProgressReporter, BarKind, GraphUploadProgressReporter, IndicatifOutput,
-        LogicalChunkProgress, ProgressHeartbeat, ProgressOutput, UploadBodyReader,
+        ACTIVE_INDICATIF, AssetUploadProgressReporter, BarKind, GraphUploadProgressReporter,
+        IndicatifOutput, LogicalChunkProgress, ProgressHeartbeat, ProgressOutput, UploadBodyReader,
     };
+
+    #[derive(Debug)]
+    struct RecordingTerm {
+        output: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl TermLike for RecordingTerm {
+        fn width(&self) -> u16 {
+            120
+        }
+
+        fn move_cursor_up(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_down(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&self, line: &str) -> std::io::Result<()> {
+            let mut output = self.output.lock().expect("should lock recording terminal");
+            output.extend_from_slice(line.as_bytes());
+            output.push(b'\n');
+            Ok(())
+        }
+
+        fn write_str(&self, text: &str) -> std::io::Result<()> {
+            self.output
+                .lock()
+                .expect("should lock recording terminal")
+                .extend_from_slice(text.as_bytes());
+            Ok(())
+        }
+
+        fn clear_line(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn flush(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ActiveIndicatifGuard {
+        previous: Weak<IndicatifOutput>,
+    }
+
+    impl ActiveIndicatifGuard {
+        fn install(indicatif: &Arc<IndicatifOutput>) -> Self {
+            let active = ACTIVE_INDICATIF.get_or_init(|| Mutex::new(Weak::new()));
+            let previous = std::mem::replace(
+                &mut *active.lock().expect("should lock active indicatif handler"),
+                Arc::downgrade(indicatif),
+            );
+            Self { previous }
+        }
+    }
+
+    impl Drop for ActiveIndicatifGuard {
+        fn drop(&mut self) {
+            if let Some(active) = ACTIVE_INDICATIF.get() {
+                *active
+                    .lock()
+                    .expect("should restore active indicatif handler") = self.previous.clone();
+            }
+        }
+    }
 
     fn captured_output(interval: Duration) -> (ProgressOutput, Arc<Mutex<Vec<String>>>) {
         let lines = Arc::new(Mutex::new(Vec::new()));
@@ -1222,6 +1318,55 @@ mod tests {
     }
 
     #[test]
+    fn test_indicatif_graph_finish_captures_counters_without_completing_failed_upload() {
+        let indicatif = Arc::new(IndicatifOutput::new());
+        let output = ProgressOutput {
+            sink: Arc::new(|_| {}),
+            interval: Duration::ZERO,
+            indicatif: Some(Arc::clone(&indicatif)),
+        };
+        let progress = GraphUploadProgressReporter::with_output(output, 1, 1);
+        progress.report_dolt_progress(DoltPushProgressEvent::Plan {
+            missing_chunk_count: 10,
+            missing_payload_bytes: 1024,
+        });
+        progress.report_dolt_progress(DoltPushProgressEvent::Uploaded {
+            acknowledged_chunk_count: 3,
+            acknowledged_payload_bytes: 256,
+        });
+        progress.report(UploadProgress {
+            uploaded_blocks: 1,
+            uploaded_bytes: 128,
+            reused_blocks: 1,
+            reused_bytes: 128,
+            expected: Some(UploadPlan {
+                blocks: 4,
+                bytes: 512,
+            }),
+        });
+        let bar = indicatif
+            .bar
+            .lock()
+            .expect("should inspect indicatif bar before counter flush")
+            .bar
+            .as_ref()
+            .expect("should create the planned chunk bar")
+            .clone();
+
+        // Operations call finish to flush the last counters even if a later publication stage
+        // fails. That call must preserve the acknowledged position instead of filling the bar.
+        progress.finish();
+
+        assert_eq!(bar.length(), Some(10));
+        assert_eq!(bar.position(), 3);
+        assert_eq!(bar.message(), "Graph block counters captured");
+        assert_ne!(
+            bar.position(),
+            bar.length().expect("should have a fixed chunk plan")
+        );
+    }
+
+    #[test]
     fn test_indicatif_zero_chunk_plan_uses_message_without_a_fake_total() {
         let indicatif = IndicatifOutput::new();
         indicatif.graph_progress(
@@ -1247,6 +1392,100 @@ mod tests {
         assert_eq!(bar.length(), None);
         assert!(bar.message().contains("no destination-missing chunks"));
         assert!(!bar.message().contains("100%"));
+    }
+
+    #[test]
+    fn test_terminal_with_hidden_indicatif_target_uses_bounded_line_output() {
+        let hidden = Arc::new(IndicatifOutput::with_handler(
+            MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
+        ));
+        let (mut output, lines) = captured_output(Duration::ZERO);
+
+        output.indicatif = ProgressOutput::select_indicatif(None, true, || Arc::clone(&hidden));
+        let status_output = output.clone();
+        let progress = GraphUploadProgressReporter::with_output(output, 1, 1);
+        progress.report_dolt_progress(DoltPushProgressEvent::Plan {
+            missing_chunk_count: 2,
+            missing_payload_bytes: 1024,
+        });
+        progress.report_dolt_progress(DoltPushProgressEvent::Uploaded {
+            acknowledged_chunk_count: 1,
+            acknowledged_payload_bytes: 512,
+        });
+        progress.report(UploadProgress {
+            uploaded_blocks: 1,
+            uploaded_bytes: 128,
+            reused_blocks: 1,
+            reused_bytes: 128,
+            expected: Some(UploadPlan {
+                blocks: 4,
+                bytes: 512,
+            }),
+        });
+        progress.finish();
+        status_output.println("Graph staging complete.");
+
+        let lines = lines.lock().expect("should read fallback progress output");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Dolt logical chunk transfer plan 1")),
+            "fallback output should include the native plan: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("GCS blocks handled: 2 of 4")),
+            "fallback output should include current GCS counters: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Graph upload attempt 1/1:")),
+            "fallback output should include the flushed transfer summary: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "Graph staging complete."),
+            "fallback output should retain the staging status line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn test_waiting_phase_and_operation_lines_reuse_the_active_indicatif_handler() {
+        let terminal_output = Arc::new(Mutex::new(Vec::new()));
+        let handler = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
+            RecordingTerm {
+                output: Arc::clone(&terminal_output),
+            },
+        )));
+        let indicatif = Arc::new(IndicatifOutput::with_handler(handler));
+        let _active_handler = ActiveIndicatifGuard::install(&indicatif);
+
+        let heartbeat = ProgressHeartbeat::waiting("publishing graph manifest");
+        assert_eq!(
+            heartbeat
+                .bar
+                .as_ref()
+                .expect("should create a phase bar on the visible handler")
+                .message(),
+            "publishing graph manifest"
+        );
+
+        super::write_progress_line("Graph manifest published.");
+        let rendered = String::from_utf8_lossy(
+            &terminal_output
+                .lock()
+                .expect("should read recorded terminal output"),
+        )
+        .into_owned();
+        assert!(
+            rendered.contains("publishing graph manifest"),
+            "waiting phase should render through the active MultiProgress handler: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Graph manifest published."),
+            "operation status should use the active MultiProgress handler: {rendered:?}"
+        );
     }
 
     #[test]
