@@ -298,6 +298,20 @@ impl IndicatifOutput {
         }
     }
 
+    fn clear_graph_progress(&self) {
+        let mut state = self
+            .bar
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bar) = state.bar.take() {
+            bar.finish_and_clear();
+            self.handler.remove(&bar);
+        }
+        state.kind = None;
+        drop(state);
+        self.set_details(&[]);
+    }
+
     fn println(&self, message: &str) {
         let _ = self.handler.println(message);
     }
@@ -670,6 +684,16 @@ impl GraphUploadProgressReporter {
             phase.to_string(),
             interval,
         )
+    }
+
+    pub(crate) fn waiting_for_local_server_cleanup(&self) {
+        self.output.println("Waiting for local server cleanup...");
+    }
+
+    pub(crate) fn failed_silently(&self) {
+        if let Some(indicatif) = &self.output.output.indicatif {
+            indicatif.clear_graph_progress();
+        }
     }
 
     pub(crate) fn failed(&self) {
@@ -1788,6 +1812,19 @@ mod tests {
         assert!(lines[0].contains("No completed GCS block counters were reported"));
         assert!(!lines[0].contains("0 GCS blocks uploaded"));
         assert!(!lines[0].contains("0 GCS blocks reused"));
+    }
+
+    #[test]
+    fn test_expected_branch_conflict_reports_cleanup_without_transfer_failure_summary() {
+        let (output, lines) = captured_output(Duration::ZERO);
+        let progress = GraphUploadProgressReporter::with_output(output, 1, 2);
+        progress.waiting_for_local_server_cleanup();
+        progress.failed_silently();
+
+        assert_eq!(
+            *lines.lock().expect("should read branch conflict progress"),
+            ["Waiting for local server cleanup..."]
+        );
     }
 
     #[test]
