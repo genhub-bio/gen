@@ -72,7 +72,7 @@ struct Endpoint {
 /// adds each change's edges before planning the next, so edits that meet within one VCF or one
 /// library combine as they would have if applied one at a time. A node's stored edges are loaded
 /// the first time an edit touches that node.
-pub struct PortEdges {
+pub struct EdgeLookup {
     block_group_id: HashId,
     loaded_node_ids: HashSet<HashId>,
     known: HashSet<AugmentedEdgeData>,
@@ -84,9 +84,9 @@ pub struct PortEdges {
     entries_by_node_id: HashMap<HashId, IndexSet<BlockKey>>,
 }
 
-impl PortEdges {
+impl EdgeLookup {
     pub fn new(block_group_id: HashId) -> Self {
-        PortEdges {
+        EdgeLookup {
             block_group_id,
             loaded_node_ids: HashSet::new(),
             known: HashSet::new(),

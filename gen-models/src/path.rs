@@ -949,7 +949,7 @@ impl Path {
     ///
     /// The edit's edges run from the port in front of its first base, or from the nodes whose
     /// edges arrive there, to the port behind its last base, or to the nodes the path leaves
-    /// that port for (see `edit_ports`). Where the edit starts at the start of a path block, the
+    /// that port for (see `edit_planning`). Where the edit starts at the start of a path block, the
     /// path's own edge into that block is replaced by the edit's edge from the same source, which
     /// the edit writes for every route arriving there: after an earlier deletion, the path takes
     /// the edge skipping both. The end is handled the same way with the path's edge out of the

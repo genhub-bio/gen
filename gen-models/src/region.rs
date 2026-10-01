@@ -14,7 +14,7 @@ use crate::{
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
     edge::BlockKey,
-    edit_ports::{EditSpan, PortEdges},
+    edit_planning::{EdgeLookup, EditSpan},
     errors::PathError,
     locus::GraphLocus,
     path::Path,
@@ -711,7 +711,7 @@ impl ResolvedGenRegion {
         workspace: &Workspace,
         change: &BlockGroupChange,
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
-        ports: &mut PortEdges,
+        ports: &mut EdgeLookup,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         match self.kind {
             ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {

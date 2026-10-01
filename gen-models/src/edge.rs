@@ -479,7 +479,7 @@ impl Edge {
     ///
     /// For example, two adjacent deletions of `A` and then `T` from `TAAT|ATGATAA` keep each
     /// original base, and each combination of the deletions is an edge of its own (see
-    /// `edit_ports`):
+    /// `edit_planning`):
     ///
     /// ```text
     /// [TAAT] -> [A] -> [T] -> [GATAA]   the reference

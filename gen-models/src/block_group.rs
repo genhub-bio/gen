@@ -28,7 +28,7 @@ use crate::{
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
     edge::{BlockKey, Edge, EdgeData, GroupBlock},
-    edit_ports::{EditSpan, PortEdges},
+    edit_planning::{EdgeLookup, EditSpan},
     errors::{
         AccessionError, AccessionNodeError, EdgeError, NodeError, PathError, QueryError,
         SequenceError,
@@ -768,7 +768,7 @@ impl BlockGroup {
             HashMap::<HashId, Vec<AugmentedEdgeData>>::new();
         let mut new_accession_edges = HashMap::<(HashId, String), Vec<AugmentedEdgeData>>::new();
         let mut local_tree_map = HashMap::new();
-        let mut ports_by_block_group = HashMap::<HashId, PortEdges>::new();
+        let mut ports_by_block_group = HashMap::<HashId, EdgeLookup>::new();
         let tree_map = match tree_map {
             Some(tree_map) => tree_map,
             None => &mut local_tree_map,
@@ -788,7 +788,7 @@ impl BlockGroup {
             let tree = tree_map.get(&cache_key);
             let ports = ports_by_block_group
                 .entry(change.region.block_group.id)
-                .or_insert_with(|| PortEdges::new(change.region.block_group.id));
+                .or_insert_with(|| EdgeLookup::new(change.region.block_group.id));
             let new_augmented_edges = change
                 .region
                 .plan_edges(conn, workspace, change, tree, ports)?;
@@ -817,7 +817,7 @@ impl BlockGroup {
         workspace: &Workspace,
         change: &BlockGroupChange,
     ) -> Result<(), BlockGroupError> {
-        let mut ports = PortEdges::new(change.region.block_group.id);
+        let mut ports = EdgeLookup::new(change.region.block_group.id);
         let new_augmented_edges = change
             .region
             .plan_edges(conn, workspace, change, None, &mut ports)?;
@@ -915,7 +915,7 @@ impl BlockGroup {
         conn: &GraphConnection,
         change: &BlockGroupChange,
         tree: &IntervalTree<i64, NodeIntervalBlock>,
-        ports: &mut PortEdges,
+        ports: &mut EdgeLookup,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         let (start, end) = (change.region.start, change.region.end);
         let block_at = |position: i64| {
