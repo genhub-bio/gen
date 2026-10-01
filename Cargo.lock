@@ -2919,7 +2919,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libdoltlite-sys"
 version = "0.38.22"
-source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#a214ecd9c0b79514ee2340b69122acbe30ece39e"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#b8616b019e8d628a43cccd1e153da6deaf6ca05a"
 dependencies = [
  "cc",
  "curl-sys",
@@ -5012,7 +5012,7 @@ dependencies = [
 [[package]]
 name = "rusqdoltlite"
 version = "0.40.22"
-source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#a214ecd9c0b79514ee2340b69122acbe30ece39e"
+source = "git+https://github.com/Chris7/rusqdoltlite?branch=direct-gcs-session#b8616b019e8d628a43cccd1e153da6deaf6ca05a"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
