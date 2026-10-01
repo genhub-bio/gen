@@ -830,6 +830,33 @@ impl RemoteOperationRecord {
         Ok(())
     }
 
+    /// Replaces a confirmed stale graph session and clears only its unpublished graph lease.
+    ///
+    /// The asset checkpoint and operation history remain attached to this push so the next graph
+    /// session can resume the same operation.
+    pub fn reset_stale_push_session(
+        &mut self,
+        conn: &ConfigConnection,
+        push_session_id: Uuid,
+    ) -> SQLResult<()> {
+        let updated = conn.execute(
+            "UPDATE remote_operations \
+             SET push_session_id = ?1, to_commit = NULL, transfer_id = NULL, \
+                 transfer_expires_at = NULL \
+             WHERE id = ?2 AND operation = 'push' \
+               AND completed_at IS NULL AND failed_at IS NULL",
+            params![push_session_id, self.id],
+        )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.push_session_id = Some(push_session_id);
+        self.to_commit = None;
+        self.transfer_id = None;
+        self.transfer_expires_at = None;
+        Ok(())
+    }
+
     /// Records the desired end commit an operation is tracking.
     pub fn set_destination(
         &mut self,
@@ -1364,12 +1391,28 @@ mod tests {
             assert_eq!(resumed.push_session_id, Some(push_session_id));
             let replacement_session_id = Uuid::new_v4();
             resumed
-                .set_push_session_id(config, replacement_session_id)
-                .expect("should replace a committed push session before reauthorization");
-            assert_ne!(resumed.push_session_id, Some(push_session_id));
-            resumed
                 .advance_assets_transfer_checkpoint(config, &destination_commit)
-                .expect("should record completed push assets");
+                .expect("should retain the same operation asset checkpoint");
+            resumed
+                .reset_stale_push_session(config, replacement_session_id)
+                .expect("should replace a server-confirmed stale graph session");
+            assert_ne!(resumed.push_session_id, Some(push_session_id));
+            assert_eq!(resumed.to_commit, None);
+            assert_eq!(resumed.transfer_id, None);
+            assert_eq!(resumed.transfer_expires_at, None);
+            assert_eq!(
+                resumed.assets_transfer_checkpoint.as_ref(),
+                Some(&destination_commit),
+                "stale graph recovery should preserve the in-flight operation's asset history"
+            );
+            resumed
+                .set_push_destination(
+                    config,
+                    &destination_commit,
+                    transfer_id,
+                    transfer_expires_at,
+                )
+                .expect("should record the replacement graph session after it is published");
             resumed
                 .complete(config)
                 .expect("should complete push operation");

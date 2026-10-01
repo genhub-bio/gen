@@ -263,6 +263,8 @@ pub enum RemoteClientError {
     AuthenticationRequired,
     #[error("Remote endpoint returned HTTP {status}: {message}")]
     Http { status: StatusCode, message: String },
+    #[error("GenHub confirmed that the direct GCS graph session is stale")]
+    StaleGraphSession,
     #[error(
         "Failed to decode {endpoint} response (HTTP {status}, declared Content-Length {declared_content_length:?}): {source}"
     )]
@@ -586,18 +588,49 @@ pub fn acquire_push_capability(
     )
 }
 
+const MAX_DIRECT_PUSH_ERROR_BODY_BYTES: u64 = 4096;
+const STALE_SESSION_CHECK_HEADER: &str = "x-gen-session-stale-check";
+
 /// Publishes a staged direct-GCS session through its signed GenHub endpoint.
 pub fn publish_direct_push(capability: &DirectPushCapability) -> Result<(), RemoteClientError> {
+    send_direct_push_request(capability, false)
+}
+
+/// Asks GenHub to reopen a session and report whether its accepted base is stale.
+///
+/// A successful response means the session is not stale. The server leaves a valid session and
+/// its transfer lease untouched; only the exact stale-session response returns `true`.
+pub fn confirm_direct_push_session_stale(
+    capability: &DirectPushCapability,
+) -> Result<bool, RemoteClientError> {
+    match send_direct_push_request(capability, true) {
+        Ok(()) => Ok(false),
+        Err(RemoteClientError::StaleGraphSession) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn send_direct_push_request(
+    capability: &DirectPushCapability,
+    stale_check: bool,
+) -> Result<(), RemoteClientError> {
     let client = Client::builder().redirect(Policy::none()).build()?;
-    let response = client
+    let mut request = client
         .post(&capability.publish_url)
-        .header(CONTENT_LENGTH, "0")
+        .header(CONTENT_LENGTH, "0");
+    if stale_check {
+        request = request.header(STALE_SESSION_CHECK_HEADER, "1");
+    }
+    let mut response = request
         .send()
         .map_err(|error| RemoteClientError::Request(error.without_url()))?;
     if !response.status().is_success() {
         let status = response.status();
-        let protocol = http_version_label(response.version());
+        if status == StatusCode::CONFLICT && is_stale_session_response(&mut response) {
+            return Err(RemoteClientError::StaleGraphSession);
+        }
         let content_type = response_content_type_label(response.headers());
+        let protocol = http_version_label(response.version());
         return Err(RemoteClientError::Http {
             status,
             message: format!(
@@ -606,6 +639,38 @@ pub fn publish_direct_push(capability: &DirectPushCapability) -> Result<(), Remo
         });
     }
     Ok(())
+}
+
+fn is_stale_session_response(response: &mut reqwest::blocking::Response) -> bool {
+    let is_json = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type.trim().eq_ignore_ascii_case("application/json")
+            })
+        });
+    if !is_json {
+        return false;
+    }
+    let mut bounded_response = io::Read::take(&mut *response, MAX_DIRECT_PUSH_ERROR_BODY_BYTES + 1);
+    let mut body = Vec::new();
+    if io::Read::read_to_end(&mut bounded_response, &mut body).is_err() {
+        return false;
+    }
+    if body.len() as u64 > MAX_DIRECT_PUSH_ERROR_BODY_BYTES {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|reason| reason == "stale_graph_session")
 }
 
 fn http_version_label(version: Version) -> &'static str {
@@ -700,9 +765,10 @@ mod tests {
 
     use super::{
         AssetTransferRequest, AuthTokens, CapabilityRequest, CapabilityResponse,
-        DirectPushCapability, RemoteClientError, RemoteOperation, RepositoryRemote,
-        RequestAuthorization, SessionScope, TokenStore, acquire_capability_with_store,
-        acquire_capability_with_store_and_token, http_version_label, normalized_origin,
+        DirectPushCapability, MAX_DIRECT_PUSH_ERROR_BODY_BYTES, RemoteClientError, RemoteOperation,
+        RepositoryRemote, RequestAuthorization, SessionScope, TokenStore,
+        acquire_capability_with_store, acquire_capability_with_store_and_token,
+        confirm_direct_push_session_stale, http_version_label, normalized_origin,
         publish_direct_push, response_content_type_label, send_asset_transfers,
     };
 
@@ -1520,6 +1586,86 @@ mod tests {
                 "should hide signed URLs, response bodies, and raw Content-Type values: {rendered_error}"
             );
         }
+    }
+
+    #[test]
+    fn test_stale_session_response_requires_bounded_exact_reason() {
+        let oversized_body = format!(
+            "{{\"reason\":\"stale_graph_session\",\"detail\":\"{}\"}}",
+            "x".repeat(MAX_DIRECT_PUSH_ERROR_BODY_BYTES as usize + 64)
+        );
+        let (origin, server) = mock_server(vec![
+            (
+                409,
+                r#"{"reason":"stale_graph_session","message":"safe"}"#.to_string(),
+            ),
+            (
+                409,
+                r#"{"reason":"another_conflict","message":"private-canary"}"#.to_string(),
+            ),
+            (
+                409,
+                r#"{"reason":"stale_graph_session","message":"safe"}"#.to_string(),
+            ),
+            (409, oversized_body),
+        ]);
+        let capability = DirectPushCapability {
+            database_uri: "gcs://bucket/prefix?access_token=not-used".to_string(),
+            token_expires_at: "2030-01-01T00:00:00Z"
+                .parse()
+                .expect("should parse test token expiration"),
+            session_id: TEST_TRANSFER_ID,
+            session_scope: SessionScope {
+                principal: "alice".to_string(),
+                target_database: "default.db".to_string(),
+                operations: "push".to_string(),
+            },
+            publish_url: format!("{origin}/publish?signature=publish-secret"),
+        };
+
+        assert!(
+            confirm_direct_push_session_stale(&capability)
+                .expect("should parse exact stale-session response")
+        );
+        let unrelated_conflict = confirm_direct_push_session_stale(&capability)
+            .expect_err("should reject an unrelated conflict as stale");
+        assert!(!unrelated_conflict.to_string().contains("private-canary"));
+        assert!(matches!(
+            publish_direct_push(&capability),
+            Err(RemoteClientError::StaleGraphSession)
+        ));
+        let oversized_conflict = confirm_direct_push_session_stale(&capability)
+            .expect_err("should reject an oversized stale response");
+        assert!(
+            !oversized_conflict
+                .to_string()
+                .contains("stale_graph_session")
+        );
+
+        let requests = server
+            .join()
+            .expect("should finish the mock GenHub request");
+        assert_eq!(requests.len(), 4);
+        for request in requests.iter().take(2).chain(requests.iter().skip(3)) {
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("x-gen-session-stale-check: 1")),
+                "stale verification should use the dedicated request header"
+            );
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("content-length: 0")),
+                "stale verification should have an empty request body"
+            );
+        }
+        assert!(
+            !requests[2]
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("x-gen-session-stale-check: 1")),
+            "normal manifest publication should not be sent as a stale probe"
+        );
     }
 
     #[test]
