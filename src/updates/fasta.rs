@@ -4,7 +4,6 @@ use gen_core::{HashId, PathBlock, Strand};
 use gen_models::{
     block_group::BlockGroup,
     db::DbContext,
-    edge::Edge,
     file_types::FileTypes,
     node::Node,
     operations::{OperationFile, OperationInfo, OperationSummary},
@@ -73,7 +72,7 @@ pub fn update_with_fasta(
     struct TargetBlockGroupState {
         block_group_id: HashId,
         path: Option<gen_models::path::Path>,
-        first_node: Option<HashId>,
+        first_node: Option<(HashId, i64)>,
     }
 
     let mut target_states = target_block_groups
@@ -124,7 +123,7 @@ pub fn update_with_fasta(
                     path_block,
                 )?;
                 if index == 0 {
-                    state.first_node = Some(node_id);
+                    state.first_node = Some((node_id, 0));
                 } else if state.first_node.is_some() {
                     state.first_node = None;
                 }
@@ -164,7 +163,7 @@ pub fn update_with_fasta(
                     path_block,
                 )?;
                 if index == 0 {
-                    state.first_node = Some(node_id);
+                    state.first_node = Some((node_id, seq.length));
                 } else if state.first_node.is_some() {
                     state.first_node = None;
                 }
@@ -176,30 +175,11 @@ pub fn update_with_fasta(
     for state in target_states {
         if !disable_reference_path_update
             && resolved_region.kind == ResolvedRegionKind::Path
-            && let Some(node_id) = state.first_node
+            && let Some((node_id, length)) = state.first_node
             && let Some(path) = state.path
         {
-            if node_id == HashId::convert_str("") {
-                let _ = path.new_path_with_deletion(conn, start_coordinate, end_coordinate);
-            } else {
-                let edge_to_new_node = Edge::select(conn)
-                    .target_node_id(node_id)
-                    .load()
-                    .expect("should load edge to inserted node")[0]
-                    .clone();
-                let edge_from_new_node = Edge::select(conn)
-                    .source_node_id(node_id)
-                    .load()
-                    .expect("should load edge from inserted node")[0]
-                    .clone();
-                path.new_path_with(
-                    conn,
-                    start_coordinate,
-                    end_coordinate,
-                    &edge_to_new_node,
-                    &edge_from_new_node,
-                )?;
-            }
+            let allele = (node_id != HashId::convert_str("")).then_some((node_id, 0, length));
+            path.new_path_with_edit(conn, start_coordinate, end_coordinate, allele)?;
         }
     }
 

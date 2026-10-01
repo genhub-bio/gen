@@ -747,7 +747,8 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use gen_models::{
-        accession::Accession, node::Node, sample::Sample, sample_lineage::SampleLineage,
+        accession::Accession, block_group_edge::BlockGroupEdge, node::Node, sample::Sample,
+        sample_lineage::SampleLineage,
     };
 
     use super::*;
@@ -1678,5 +1679,64 @@ mod tests {
         .unwrap();
 
         assert!(SampleLineage::get_parents(conn, "child", None).is_empty());
+    }
+
+    /// Two deletions that meet end to end in one VCF each get an edge, and the route through both
+    /// is an edge of its own. The genotype is homozygous, so the unedited route is retired and
+    /// the one sequence is the one with both deleted.
+    #[test]
+    fn test_adjacent_deletions_in_one_vcf_add_each_deletion_and_their_combination() {
+        let context = setup_gen();
+        let collection = "test".to_string();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        import_fasta(
+            &context,
+            &fixtures.join("simple.fa").to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &fixtures
+                .join("simple_adjacent_deletions.vcf")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let reference = get_sample_bg(conn, &collection, Sample::DEFAULT_NAME);
+        let reference_path = BlockGroup::get_current_path(conn, &reference.id, None).unwrap();
+        let reference_node_id =
+            Path::edges_for_path(conn, &reference_path.id, None)[0].target_node_id;
+        let block_group = get_sample_bg(conn, &collection, "adjacent");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        assert_eq!(sequences.len(), 1);
+        let deletions = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
+            .iter()
+            .filter(|augmented_edge| {
+                augmented_edge.edge.source_node_id == reference_node_id
+                    && augmented_edge.edge.target_node_id == reference_node_id
+                    && augmented_edge.edge.source_coordinate < augmented_edge.edge.target_coordinate
+            })
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(deletions, HashSet::from([(9, 11), (11, 13), (9, 13)]));
     }
 }
