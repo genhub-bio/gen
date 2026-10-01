@@ -684,6 +684,8 @@ pub struct RemoteOperationRecord {
     pub to_commit: Option<DoltHashId>,
     /// GenHub push lease retained by a pending operation.
     pub transfer_id: Option<Uuid>,
+    /// Client-owned session UUID reused until the graph manifest is published.
+    pub push_session_id: Option<Uuid>,
     /// Unix timestamp after which GenHub will reject the retained push lease.
     pub transfer_expires_at: Option<i64>,
     /// Time at which the operation began.
@@ -730,16 +732,18 @@ impl RemoteOperationRecord {
                 |row| row.get::<_, DoltHashId>(0),
             )
             .optional()?;
+        let push_session_id = (operation == RemoteOperationKind::Push).then(Uuid::new_v4);
         conn.execute(
             "INSERT INTO remote_operations \
-             (remote_name, branch_name, operation, from_commit, assets_transfer_checkpoint) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (remote_name, branch_name, operation, from_commit, assets_transfer_checkpoint, push_session_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 remote_name,
                 branch_name,
                 operation.as_str(),
                 from_commit,
-                assets_transfer_checkpoint
+                assets_transfer_checkpoint,
+                push_session_id
             ],
         )?;
         Self::select(conn)
@@ -754,6 +758,47 @@ impl RemoteOperationRecord {
                 }
             })?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
+    /// Replaces the client session UUID before starting a new unpublished graph transfer.
+    pub fn set_push_session_id(
+        &mut self,
+        conn: &ConfigConnection,
+        push_session_id: Uuid,
+    ) -> SQLResult<()> {
+        conn.execute(
+            "UPDATE remote_operations SET push_session_id = ?1 WHERE id = ?2",
+            params![push_session_id, self.id],
+        )?;
+        self.push_session_id = Some(push_session_id);
+        Ok(())
+    }
+
+    /// Replaces a confirmed stale graph session and clears only its unpublished graph lease.
+    ///
+    /// The asset checkpoint and operation history remain attached to this push so the next graph
+    /// session can resume the same operation.
+    pub fn reset_stale_push_session(
+        &mut self,
+        conn: &ConfigConnection,
+        push_session_id: Uuid,
+    ) -> SQLResult<()> {
+        let updated = conn.execute(
+            "UPDATE remote_operations \
+             SET push_session_id = ?1, to_commit = NULL, transfer_id = NULL, \
+                 transfer_expires_at = NULL \
+             WHERE id = ?2 AND operation = 'push' \
+               AND completed_at IS NULL AND failed_at IS NULL",
+            params![push_session_id, self.id],
+        )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.push_session_id = Some(push_session_id);
+        self.to_commit = None;
+        self.transfer_id = None;
+        self.transfer_expires_at = None;
+        Ok(())
     }
 
     /// Records the desired end commit an operation is tracking.
@@ -1253,6 +1298,18 @@ mod tests {
                 None,
             )
             .expect("should begin push operation");
+            let push_session_id = operation
+                .push_session_id
+                .expect("should allocate a stable push session UUID");
+            let pending_resume = RemoteOperationRecord::begin_or_resume(
+                config,
+                "origin",
+                "main",
+                RemoteOperationKind::Push,
+                None,
+            )
+            .expect("should resume push session before graph publication");
+            assert_eq!(pending_resume.push_session_id, Some(push_session_id));
             operation
                 .set_push_destination(
                     config,
@@ -1274,9 +1331,31 @@ mod tests {
             assert_eq!(resumed.to_commit.as_ref(), Some(&destination_commit));
             assert_eq!(resumed.transfer_id, Some(transfer_id));
             assert_eq!(resumed.transfer_expires_at, Some(transfer_expires_at));
+            assert_eq!(resumed.push_session_id, Some(push_session_id));
+            let replacement_session_id = Uuid::new_v4();
             resumed
                 .advance_assets_transfer_checkpoint(config, &destination_commit)
-                .expect("should record completed push assets");
+                .expect("should retain the same operation asset checkpoint");
+            resumed
+                .reset_stale_push_session(config, replacement_session_id)
+                .expect("should replace a server-confirmed stale graph session");
+            assert_ne!(resumed.push_session_id, Some(push_session_id));
+            assert_eq!(resumed.to_commit, None);
+            assert_eq!(resumed.transfer_id, None);
+            assert_eq!(resumed.transfer_expires_at, None);
+            assert_eq!(
+                resumed.assets_transfer_checkpoint.as_ref(),
+                Some(&destination_commit),
+                "stale graph recovery should preserve the in-flight operation's asset history"
+            );
+            resumed
+                .set_push_destination(
+                    config,
+                    &destination_commit,
+                    transfer_id,
+                    transfer_expires_at,
+                )
+                .expect("should record the replacement graph session after it is published");
             resumed
                 .complete(config)
                 .expect("should complete push operation");
