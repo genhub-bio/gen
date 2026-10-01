@@ -746,6 +746,8 @@ mod tests {
     use std::time;
     use std::{collections::HashSet, path::PathBuf};
 
+    use gen_core::{is_end_node, is_start_node};
+    use gen_graph::all_simple_paths;
     use gen_models::{
         accession::Accession, block_group_edge::BlockGroupEdge, node::Node, sample::Sample,
         sample_lineage::SampleLineage,
@@ -1118,6 +1120,363 @@ mod tests {
         );
     }
 
+    /// Two deletions on one haplotype that meet at a coordinate, applied from the same VCF,
+    /// combine into a route that skips both: bases 10-11 and 12-13 of `m123` are both gone.
+    #[test]
+    fn test_adjacent_deletions_in_one_vcf_combine() {
+        let context = setup_gen();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let conn = context.graph().conn();
+        let collection = "test".to_string();
+
+        import_fasta(
+            &context,
+            &fixtures.join("simple.fa").to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &fixtures
+                .join("simple_adjacent_deletions.vcf")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            BlockGroup::get_all_sequences(
+                conn,
+                crate::test_helpers::test_workspace(),
+                &get_sample_bg(conn, &collection, "adjacent").id,
+                false
+            )
+            .unwrap(),
+            HashSet::from(["ATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
+
+    /// `m123` of `simple.fa`.
+    const SIMPLE_REFERENCE: &str = "ATCGATCGATCGATCGATCGGGAACACACAGAGA";
+
+    /// Applies a VCF of `records` on `m123` of `simple.fa`, one genotype column per sample in
+    /// `samples`. Each record is its fields from `POS` on, tab-separated.
+    fn apply_simple_vcf(samples: &[&str], records: &[&str]) -> DbContext {
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        let vcf_path = directory.path().join("variants.vcf");
+        let mut vcf = std::fs::File::create(&vcf_path).unwrap();
+        writeln!(
+            vcf,
+            "##fileformat=VCFv4.1\n##contig=<ID=m123,length=34>\n\
+             ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}",
+            samples.join("\t")
+        )
+        .unwrap();
+        for record in records {
+            writeln!(vcf, "m123\t{record}").unwrap();
+        }
+        drop(vcf);
+        let context = setup_gen();
+        let collection = "test".to_string();
+        let fasta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+        context
+    }
+
+    /// The sequences `sample` spells.
+    fn sample_sequences(context: &DbContext, sample: &str) -> HashSet<String> {
+        let conn = context.graph().conn();
+        BlockGroup::get_all_sequences(
+            conn,
+            context.workspace(),
+            &get_sample_bg(conn, "test", sample).id,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// The deletions in `sample`'s graph, as the bases of `m123` each deletion edge skips: edges
+    /// along the reference node that jump ahead.
+    fn deletion_edges(context: &DbContext, sample: &str) -> HashSet<(usize, usize)> {
+        let conn = context.graph().conn();
+        BlockGroupEdge::edges_for_block_group(conn, &get_sample_bg(conn, "test", sample).id, None)
+            .into_iter()
+            .map(|augmented_edge| augmented_edge.edge)
+            .filter(|edge| {
+                edge.source_node_id == edge.target_node_id
+                    && edge.source_coordinate < edge.target_coordinate
+            })
+            .map(|edge| {
+                (
+                    edge.source_coordinate as usize,
+                    edge.target_coordinate as usize,
+                )
+            })
+            .collect()
+    }
+
+    /// The number of routes from the path start to its end in `sample`'s pruned graph.
+    fn route_count(context: &DbContext, sample: &str) -> usize {
+        let conn = context.graph().conn();
+        let mut graph = BlockGroup::get_graph(
+            conn,
+            context.workspace(),
+            &get_sample_bg(conn, "test", sample).id,
+            None,
+        )
+        .unwrap();
+        BlockGroup::prune_graph(&mut graph);
+        let start = graph
+            .nodes()
+            .find(|node| is_start_node(node.node_id))
+            .expect("should have a start node");
+        graph
+            .nodes()
+            .filter(|node| is_end_node(node.node_id))
+            .map(|end| all_simple_paths(&graph, start, end).count())
+            .sum()
+    }
+
+    /// `m123` with the bases in `deleted` (half-open, sorted, disjoint) removed.
+    fn without(deleted: &[(usize, usize)]) -> String {
+        let mut spelled = String::new();
+        let mut position = 0;
+        for &(start, end) in deleted {
+            spelled.push_str(&SIMPLE_REFERENCE[position..start]);
+            position = end;
+        }
+        spelled.push_str(&SIMPLE_REFERENCE[position..]);
+        spelled
+    }
+
+    /// A VCF record deleting `m123`'s bases `start..end`, anchored on the base before them.
+    fn deletion_record(start: usize, end: usize, genotypes: &str) -> String {
+        format!(
+            "{start}\t.\t{}\t{}\t60\t.\t.\tGT\t{genotypes}",
+            &SIMPLE_REFERENCE[start - 1..end],
+            &SIMPLE_REFERENCE[start - 1..start]
+        )
+    }
+
+    /// However many deletions meet end to end, the route through all of them is spelled, as
+    /// the only route. Each contiguous run of the deletions is an edge of its own, k(k+1)/2 for k
+    /// deletions, so that each combination can be retired on its own.
+    #[test]
+    fn test_chain_of_adjacent_deletions_in_one_vcf() {
+        for count in 1..=10 {
+            let deleted = (0..count)
+                .map(|index| (1 + 2 * index, 3 + 2 * index))
+                .collect::<Vec<_>>();
+            let records = deleted
+                .iter()
+                .map(|&(start, end)| deletion_record(start, end, "1"))
+                .collect::<Vec<_>>();
+            let context = apply_simple_vcf(
+                &["s"],
+                &records.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+
+            assert_eq!(
+                sample_sequences(&context, "s"),
+                HashSet::from([without(&[(1, 1 + 2 * count)])]),
+                "{count} deletions"
+            );
+            assert_eq!(route_count(&context, "s"), 1, "{count} deletions");
+            let runs = (0..count)
+                .flat_map(|first| (first..count).map(move |last| (1 + 2 * first, 3 + 2 * last)))
+                .collect::<HashSet<_>>();
+            assert_eq!(runs.len(), count * (count + 1) / 2);
+            assert_eq!(deletion_edges(&context, "s"), runs, "{count} deletions");
+        }
+    }
+
+    /// The order of the records does not change which deletions combine.
+    #[test]
+    fn test_adjacent_deletions_combine_in_either_record_order() {
+        let context = apply_simple_vcf(
+            &["s"],
+            &[&deletion_record(11, 13, "1"), &deletion_record(9, 11, "1")],
+        );
+        assert_eq!(
+            sample_sequences(&context, "s"),
+            HashSet::from([without(&[(9, 13)])])
+        );
+    }
+
+    /// A homozygous deletion next to a homozygous substitution, on either side and in either
+    /// record order, combines with it, as two adjacent substitutions do: the combination is the
+    /// only route left, each edit retiring the route past the other.
+    #[test]
+    fn test_adjacent_mixed_variants_in_one_vcf_combine() {
+        let cases = [
+            (
+                vec![
+                    deletion_record(9, 11, "1"),
+                    "12\t.\tG\tT\t60\t.\t.\tGT\t1".to_string(),
+                ],
+                format!("{}T{}", &SIMPLE_REFERENCE[..9], &SIMPLE_REFERENCE[12..]),
+            ),
+            (
+                vec![
+                    "10\t.\tT\tG\t60\t.\t.\tGT\t1".to_string(),
+                    deletion_record(10, 12, "1"),
+                ],
+                format!("{}G{}", &SIMPLE_REFERENCE[..9], &SIMPLE_REFERENCE[12..]),
+            ),
+            (
+                vec![
+                    "10\t.\tT\tG\t60\t.\t.\tGT\t1".to_string(),
+                    "11\t.\tC\tA\t60\t.\t.\tGT\t1".to_string(),
+                ],
+                format!("{}GA{}", &SIMPLE_REFERENCE[..9], &SIMPLE_REFERENCE[11..]),
+            ),
+        ];
+        for (records, expected) in cases {
+            for records in [records.clone(), records.iter().rev().cloned().collect()] {
+                let context = apply_simple_vcf(
+                    &["s"],
+                    &records.iter().map(String::as_str).collect::<Vec<_>>(),
+                );
+                assert_eq!(
+                    sample_sequences(&context, "s"),
+                    HashSet::from([expected.clone()]),
+                    "{records:?}"
+                );
+                assert_eq!(route_count(&context, "s"), 1, "{records:?}");
+            }
+        }
+    }
+
+    /// Deletions phased onto different haplotypes never occur together, so no route should
+    /// combine them even though they meet. Main does not use phase on VCF import (it enumerates
+    /// the both-deleted sequence for `1|0` and `0|1`), so edit planning does not enforce it
+    /// either; re-enable this if phase enforcement is added later.
+    #[test]
+    #[ignore = "phase is not enforced on VCF import or in edit planning"]
+    fn test_phased_adjacent_deletions_on_different_haplotypes_do_not_combine() {
+        let context = apply_simple_vcf(
+            &["s"],
+            &[
+                &deletion_record(9, 11, "1|0"),
+                &deletion_record(11, 13, "0|1"),
+            ],
+        );
+        let sequences = sample_sequences(&context, "s");
+        assert!(sequences.contains(&without(&[(9, 11)])), "{sequences:?}");
+        assert!(!sequences.contains(&without(&[(9, 13)])), "{sequences:?}");
+    }
+
+    /// Two samples deleting the same bases share the deletion's edge. Deleting the same bases as
+    /// two adjacent deletions also writes the edge skipping both, which is the edge of deleting
+    /// them at once, so the graph no longer tells the two apart.
+    #[test]
+    fn test_adjacent_deletions_share_the_edge_of_deleting_both_at_once() {
+        let context = apply_simple_vcf(
+            &["two", "first", "one"],
+            &[
+                &deletion_record(9, 11, "1\t1\t0"),
+                &deletion_record(11, 13, "1\t0\t0"),
+                &deletion_record(9, 13, "0\t0\t1"),
+            ],
+        );
+        assert_eq!(
+            sample_sequences(&context, "two"),
+            sample_sequences(&context, "one")
+        );
+        assert_eq!(
+            deletion_edges(&context, "two"),
+            HashSet::from([(9, 11), (11, 13), (9, 13)])
+        );
+        assert_eq!(deletion_edges(&context, "first"), HashSet::from([(9, 11)]));
+        assert_eq!(deletion_edges(&context, "one"), HashSet::from([(9, 13)]));
+    }
+
+    /// Variants that meet across the boundary between two chunks of changes combine as they do
+    /// within one chunk.
+    #[test]
+    fn test_adjacent_deletions_across_a_chunk_boundary_combine() {
+        use std::io::Write;
+
+        // A 12 kb reference with a substitution every other base up to the chunk size, then two
+        // deletions meeting at 11,000 as the last change of one chunk and the first of the next.
+        let substitutions = VCF_CHANGE_APPLY_CHUNK_SIZE - 1;
+        let reference = "AC".repeat(6_000);
+        let directory = tempfile::tempdir().unwrap();
+        let fasta_path = directory.path().join("reference.fa");
+        std::fs::write(&fasta_path, format!(">chr1\n{reference}\n")).unwrap();
+        let vcf_path = directory.path().join("variants.vcf");
+        let mut vcf = std::fs::File::create(&vcf_path).unwrap();
+        writeln!(
+            vcf,
+            "##fileformat=VCFv4.1\n##contig=<ID=chr1,length=12000>\n\
+             ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts"
+        )
+        .unwrap();
+        for index in 0..substitutions {
+            writeln!(vcf, "chr1\t{}\t.\tA\tT\t60\t.\t.\tGT\t1", 1 + 2 * index).unwrap();
+        }
+        writeln!(vcf, "chr1\t10998\t.\tCAC\tC\t60\t.\t.\tGT\t1").unwrap();
+        writeln!(vcf, "chr1\t11000\t.\tCAC\tC\t60\t.\t.\tGT\t1").unwrap();
+        drop(vcf);
+
+        let context = setup_gen();
+        let collection = "test".to_string();
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &vcf_path.to_str().unwrap().to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let mut expected = "TC".repeat(substitutions) + &reference[2 * substitutions..10_998];
+        expected.push_str(&reference[11_002..]);
+        assert_eq!(sample_sequences(&context, "s"), HashSet::from([expected]));
+    }
+
     #[test]
     fn test_parses_cnvs() {
         let context = setup_gen();
@@ -1307,6 +1666,104 @@ mod tests {
         assert!(
             elapsed < max_elapsed,
             "VCF import benchmark failed: Elapsed time is {elapsed}."
+        );
+    }
+
+    /// Applying a VCF grows linearly with its variants, including once it spans more than one
+    /// chunk of changes: 8,000 variants on a synthetic 2 Mb reference take at most ten times as
+    /// long as 2,000. Each edit is planned against the routes cached before the file, not against
+    /// every edge the earlier chunks stored.
+    #[test]
+    #[cfg(feature = "benchmark")]
+    #[ignore = "manual benchmark; timing depends on the machine and its load"]
+    fn test_vcf_update_scales_linearly_with_variant_count() {
+        use std::io::Write;
+
+        let reference_length = 2_000_000usize;
+        let mut state = 12345u64;
+        let mut next_random = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let bases = *b"ACGT";
+        let reference: Vec<u8> = (0..reference_length)
+            .map(|_| bases[(next_random() % 4) as usize])
+            .collect();
+        let mut seconds = vec![];
+        for variant_count in [2_000usize, 8_000] {
+            let directory = tempfile::tempdir().unwrap();
+            let fasta_path = directory.path().join("reference.fa");
+            let mut fasta = std::fs::File::create(&fasta_path).unwrap();
+            writeln!(fasta, ">chr1").unwrap();
+            fasta.write_all(&reference).unwrap();
+            writeln!(fasta).unwrap();
+            let vcf_path = directory.path().join("variants.vcf");
+            let mut vcf = std::fs::File::create(&vcf_path).unwrap();
+            writeln!(
+                vcf,
+                "##fileformat=VCFv4.1\n##contig=<ID=chr1,length={reference_length}>\n\
+                 ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample"
+            )
+            .unwrap();
+            // A SNP, a one-base deletion and a two-base insertion in turn, 100 bases apart.
+            for index in 0..variant_count {
+                let position = 100 + index * 100;
+                let base = reference[position - 1] as char;
+                let (reference_allele, alternative_allele) = match index % 3 {
+                    0 => (
+                        base.to_string(),
+                        if base == 'A' { "C" } else { "A" }.to_string(),
+                    ),
+                    1 => (
+                        format!("{base}{}", reference[position] as char),
+                        base.to_string(),
+                    ),
+                    _ => (base.to_string(), format!("{base}GG")),
+                };
+                writeln!(
+                    vcf,
+                    "chr1\t{position}\t.\t{reference_allele}\t{alternative_allele}\t60\t.\t.\tGT\t1"
+                )
+                .unwrap();
+            }
+            drop(vcf);
+
+            let context = setup_gen();
+            let collection = "test".to_string();
+            import_fasta(
+                &context,
+                &fasta_path.to_str().unwrap().to_string(),
+                &collection,
+                Sample::DEFAULT_NAME,
+                false,
+                &[],
+            )
+            .unwrap();
+            let started = time::Instant::now();
+            update_with_vcf(
+                &context,
+                &vcf_path.to_str().unwrap().to_string(),
+                &collection,
+                "".to_string(),
+                None,
+                vec![Sample::DEFAULT_NAME.to_string()],
+                false,
+            )
+            .unwrap();
+            seconds.push(started.elapsed().as_secs_f64());
+        }
+        println!(
+            "2,000 variants: {:.2} s; 8,000 variants: {:.2} s",
+            seconds[0], seconds[1]
+        );
+        assert!(
+            seconds[1] <= seconds[0] * 10.0,
+            "8,000 variants took {:.2} s against {:.2} s for 2,000",
+            seconds[1],
+            seconds[0]
         );
     }
 
