@@ -114,6 +114,16 @@ impl EdgeData {
             self.target_strand
         )))
     }
+
+    /// Whether both endpoints use the same node and coordinate, which makes the edge a marker
+    /// splitting a node at a port instead of a route between two places.
+    ///
+    /// This is a structural test. Whether the edge is a real path choice or a reference-healing
+    /// edit-site marker remains separate chromosome-index metadata on `AugmentedEdge`.
+    pub fn is_marker(&self) -> bool {
+        self.source_node_id == self.target_node_id
+            && self.source_coordinate == self.target_coordinate
+    }
 }
 
 impl From<&Edge> for EdgeData {
@@ -129,10 +139,20 @@ impl From<&Edge> for EdgeData {
     }
 }
 
-#[derive(Eq, Hash, PartialEq)]
+/// A point on a node: `coordinate` on `node_id`, where blocks start or end and edges attach.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BlockKey {
     pub node_id: HashId,
     pub coordinate: i64,
+}
+
+impl BlockKey {
+    pub fn new(node_id: HashId, coordinate: i64) -> Self {
+        BlockKey {
+            node_id,
+            coordinate,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -192,37 +212,6 @@ pub enum EdgeError {
         starts: HashSet<i64>,
         ends: HashSet<i64>,
     },
-}
-
-/// The edges between nodes, indexed by the ports they meet, for joining an edge that leaves a
-/// node's first coordinate or arrives at its last to the routes meeting it there.
-struct PortRoutes<'a> {
-    arriving_from_other_nodes: HashMap<(HashId, i64), Vec<&'a Edge>>,
-    leaving_for_other_nodes: HashMap<(HashId, i64), Vec<&'a Edge>>,
-}
-
-impl<'a> PortRoutes<'a> {
-    fn new(edges: impl IntoIterator<Item = &'a Edge>) -> Self {
-        let mut routes = PortRoutes {
-            arriving_from_other_nodes: HashMap::new(),
-            leaving_for_other_nodes: HashMap::new(),
-        };
-        for edge in edges {
-            if edge.source_node_id != edge.target_node_id {
-                routes
-                    .arriving_from_other_nodes
-                    .entry((edge.target_node_id, edge.target_coordinate))
-                    .or_default()
-                    .push(edge);
-                routes
-                    .leaving_for_other_nodes
-                    .entry((edge.source_node_id, edge.source_coordinate))
-                    .or_default()
-                    .push(edge);
-            }
-        }
-        routes
-    }
 }
 
 impl Edge {
@@ -638,16 +627,6 @@ impl Edge {
         Ok(blocks)
     }
 
-    /// Checks whether both endpoints use the same node and coordinate.
-    ///
-    /// `block_connections` uses this structural property to tell markers from other edges.
-    /// Whether the edge is a real path choice or a reference-healing edit-site marker remains
-    /// separate chromosome-index metadata on `AugmentedEdge`.
-    fn is_same_coordinate_edge(&self) -> bool {
-        self.source_node_id == self.target_node_id
-            && self.source_coordinate == self.target_coordinate
-    }
-
     /// Builds connections for a same-coordinate edge, a marker splitting a node at a port: the
     /// sequence ending at the port continues into the sequence starting there. Where the node
     /// has no sequence on one side, as at its ends, the marker joins nothing.
@@ -672,7 +651,7 @@ impl Edge {
         source_blocks: &[&'a GroupBlock],
         target_blocks: &[&'a GroupBlock],
     ) -> Vec<(&'a GroupBlock, &'a GroupBlock)> {
-        if self.is_same_coordinate_edge() {
+        if EdgeData::from(self).is_marker() {
             return Self::same_coordinate_block_connections(source_blocks, target_blocks);
         }
         source_blocks
@@ -704,30 +683,38 @@ impl Edge {
         // blocks starting there.
         let blocks_by_start = blocks
             .iter()
-            .map(|block| {
-                (
-                    BlockKey {
-                        node_id: block.node_id,
-                        coordinate: block.start,
-                    },
-                    block,
-                )
-            })
+            .map(|block| (BlockKey::new(block.node_id, block.start), block))
             .into_group_map();
         let blocks_by_end = blocks
             .iter()
-            .map(|block| {
+            .map(|block| (BlockKey::new(block.node_id, block.end), block))
+            .into_group_map();
+
+        // The edges between nodes, indexed by the point they leave or arrive at, for joining an
+        // edge that leaves a node's first coordinate or arrives at its last to the routes meeting
+        // it there.
+        let arriving_from_other_nodes = edges
+            .iter()
+            .map(|augmented_edge| &augmented_edge.edge)
+            .filter(|edge| edge.source_node_id != edge.target_node_id)
+            .map(|edge| {
                 (
-                    BlockKey {
-                        node_id: block.node_id,
-                        coordinate: block.end,
-                    },
-                    block,
+                    BlockKey::new(edge.target_node_id, edge.target_coordinate),
+                    edge,
                 )
             })
             .into_group_map();
-
-        let routes = PortRoutes::new(edges.iter().map(|augmented_edge| &augmented_edge.edge));
+        let leaving_for_other_nodes = edges
+            .iter()
+            .map(|augmented_edge| &augmented_edge.edge)
+            .filter(|edge| edge.source_node_id != edge.target_node_id)
+            .map(|edge| {
+                (
+                    BlockKey::new(edge.source_node_id, edge.source_coordinate),
+                    edge,
+                )
+            })
+            .into_group_map();
         let mut graph = GenGraph::new();
         let mut edges_by_node_pair = HashMap::new();
         for block in blocks {
@@ -735,32 +722,25 @@ impl Edge {
         }
         for augmented_edge in edges {
             let edge = &augmented_edge.edge;
-            let source_key = BlockKey {
-                node_id: edge.source_node_id,
-                coordinate: edge.source_coordinate,
-            };
-            let target_key = BlockKey {
-                node_id: edge.target_node_id,
-                coordinate: edge.target_coordinate,
-            };
+            let source_key = BlockKey::new(edge.source_node_id, edge.source_coordinate);
+            let target_key = BlockKey::new(edge.target_node_id, edge.target_coordinate);
             // An edge leaving a node's first coordinate or arriving at its last has no block on
             // that side; it joins the blocks of the edges from other nodes meeting it there. Edits
             // write such edges from those nodes directly, so this only reads edges stored before.
             // A marker at a node end splits nothing and joins nothing.
-            let resolves_through = !edge.is_same_coordinate_edge();
+            let resolves_through = !EdgeData::from(edge).is_marker();
             let source_blocks = blocks_by_end.get(&source_key).cloned().or_else(|| {
                 if !resolves_through {
                     return None;
                 }
-                let through = routes
-                    .arriving_from_other_nodes
-                    .get(&(edge.source_node_id, edge.source_coordinate))?
+                let through = arriving_from_other_nodes
+                    .get(&source_key)?
                     .iter()
                     .filter_map(|arriving| {
-                        blocks_by_end.get(&BlockKey {
-                            node_id: arriving.source_node_id,
-                            coordinate: arriving.source_coordinate,
-                        })
+                        blocks_by_end.get(&BlockKey::new(
+                            arriving.source_node_id,
+                            arriving.source_coordinate,
+                        ))
                     })
                     .flatten()
                     .copied()
@@ -771,15 +751,14 @@ impl Edge {
                 if !resolves_through {
                     return None;
                 }
-                let through = routes
-                    .leaving_for_other_nodes
-                    .get(&(edge.target_node_id, edge.target_coordinate))?
+                let through = leaving_for_other_nodes
+                    .get(&target_key)?
                     .iter()
                     .filter_map(|leaving| {
-                        blocks_by_start.get(&BlockKey {
-                            node_id: leaving.target_node_id,
-                            coordinate: leaving.target_coordinate,
-                        })
+                        blocks_by_start.get(&BlockKey::new(
+                            leaving.target_node_id,
+                            leaving.target_coordinate,
+                        ))
                     })
                     .flatten()
                     .copied()

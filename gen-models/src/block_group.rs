@@ -27,8 +27,8 @@ use crate::{
     annotations::AnnotationError,
     block_group_edge::{AugmentedEdge, AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::GraphConnection,
-    edge::{Edge, GroupBlock},
-    edit_ports::{EditSpan, Port, PortEdges},
+    edge::{BlockKey, Edge, EdgeData, GroupBlock},
+    edit_ports::{EditSpan, PortEdges},
     errors::{
         AccessionError, AccessionNodeError, EdgeError, NodeError, PathError, QueryError,
         SequenceError,
@@ -645,8 +645,7 @@ impl BlockGroup {
             .iter()
             .filter(|edge| {
                 edge.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-                    && !(edge.edge.source_node_id == edge.edge.target_node_id
-                        && edge.edge.source_coordinate == edge.edge.target_coordinate)
+                    && !EdgeData::from(&edge.edge).is_marker()
             })
             .map(|edge| edge.edge.id)
             .collect::<HashSet<_>>();
@@ -930,7 +929,7 @@ impl BlockGroup {
                 })
         };
         let port_at = |block: NodeIntervalBlock, position: i64| {
-            Port::new(block.node_id, position - block.start + block.sequence_start)
+            BlockKey::new(block.node_id, position - block.start + block.sequence_start)
         };
 
         let start_block = block_at(start)?;

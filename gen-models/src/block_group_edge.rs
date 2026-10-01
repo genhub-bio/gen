@@ -111,11 +111,21 @@ pub struct AugmentedEdge {
     pub created_on: i64,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct AugmentedEdgeData {
     pub edge_data: EdgeData,
     pub chromosome_index: i64,
     pub phased: i64,
+}
+
+impl From<&AugmentedEdge> for AugmentedEdgeData {
+    fn from(item: &AugmentedEdge) -> Self {
+        AugmentedEdgeData {
+            edge_data: EdgeData::from(&item.edge),
+            chromosome_index: item.chromosome_index,
+            phased: item.phased,
+        }
+    }
 }
 
 impl BlockGroupEdge {

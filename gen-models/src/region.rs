@@ -13,7 +13,8 @@ use crate::{
     block_group::{BlockGroup, BlockGroupChange, BlockGroupError, IntervalTreeSource},
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
-    edit_ports::{EditSpan, Port, PortEdges},
+    edge::BlockKey,
+    edit_ports::{EditSpan, PortEdges},
     errors::PathError,
     locus::GraphLocus,
     path::Path,
@@ -768,7 +769,7 @@ impl ResolvedGenRegion {
                 )
             };
         let port = |position: &GraphNodePosition| {
-            Port::new(position.graph_node.node_id, position.coordinate())
+            BlockKey::new(position.graph_node.node_id, position.coordinate())
         };
         let span = EditSpan {
             starts: start_positions.iter().map(port).collect(),

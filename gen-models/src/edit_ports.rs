@@ -41,32 +41,16 @@ use crate::{
     block_group::BlockGroupChange,
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
-    edge::{Edge, EdgeData},
+    edge::{BlockKey, Edge, EdgeData},
     errors::EdgeError,
 };
-
-/// A point on a node between two bases, or at either end of it.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Port {
-    pub node_id: HashId,
-    pub coordinate: i64,
-}
-
-impl Port {
-    pub fn new(node_id: HashId, coordinate: i64) -> Self {
-        Port {
-            node_id,
-            coordinate,
-        }
-    }
-}
 
 /// The ports an edit replaces the sequence between: every port its first base may follow and
 /// every port its last base may precede. An insertion has the same ports on both sides.
 #[derive(Clone, Debug, Default)]
 pub struct EditSpan {
-    pub starts: Vec<Port>,
-    pub ends: Vec<Port>,
+    pub starts: Vec<BlockKey>,
+    pub ends: Vec<BlockKey>,
     /// Whether the span is a coordinate on a linear path rather than a named feature. An
     /// insertion at a path coordinate belongs to the point between the path's blocks, so it
     /// leads into every route leaving that point even when the path enters the next block
@@ -74,31 +58,12 @@ pub struct EditSpan {
     pub along_path: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct PortEdge {
-    edge: EdgeData,
-    chromosome_index: i64,
-    phased: i64,
-}
-
-impl PortEdge {
-    fn is_marker(&self) -> bool {
-        self.edge.source_node_id == self.edge.target_node_id
-            && self.edge.source_coordinate == self.edge.target_coordinate
-    }
-
-    /// Whether this edge belongs to a haplotype other than the one `change` is phased onto.
-    fn conflicts_in_phase_with(&self, change: &BlockGroupChange) -> bool {
-        self.phased != 0 && change.phased != 0 && self.chromosome_index != change.chromosome_index
-    }
-}
-
 /// A port an edit's first edge leaves from or its last edge leads to, and the stored edge whose
 /// route it continues, if any.
 #[derive(Clone, Copy, Debug)]
 struct Endpoint {
-    port: Port,
-    edge: Option<PortEdge>,
+    port: BlockKey,
+    edge: Option<AugmentedEdgeData>,
 }
 
 /// The edges of one block group, stored and planned, indexed by the ports they meet.
@@ -110,13 +75,13 @@ struct Endpoint {
 pub struct PortEdges {
     block_group_id: HashId,
     loaded_node_ids: HashSet<HashId>,
-    known: HashSet<PortEdge>,
+    known: HashSet<AugmentedEdgeData>,
     retired: HashSet<EdgeData>,
-    arriving: HashMap<Port, IndexSet<PortEdge>>,
-    leaving: HashMap<Port, IndexSet<PortEdge>>,
+    arriving: HashMap<BlockKey, IndexSet<AugmentedEdgeData>>,
+    leaving: HashMap<BlockKey, IndexSet<AugmentedEdgeData>>,
     first_arrival: HashMap<HashId, i64>,
     last_departure: HashMap<HashId, i64>,
-    entries_by_node_id: HashMap<HashId, IndexSet<Port>>,
+    entries_by_node_id: HashMap<HashId, IndexSet<BlockKey>>,
 }
 
 impl PortEdges {
@@ -137,32 +102,28 @@ impl PortEdges {
     /// Records edges planned but not stored yet, so later edits in the batch see them.
     pub fn add(&mut self, edges: &[AugmentedEdgeData]) {
         for edge in edges {
-            self.index(PortEdge {
-                edge: edge.edge_data,
-                chromosome_index: edge.chromosome_index,
-                phased: edge.phased,
-            });
+            self.index(*edge);
         }
     }
 
-    fn index(&mut self, port_edge: PortEdge) {
-        if !self.known.insert(port_edge) {
+    fn index(&mut self, augmented_edge_data: AugmentedEdgeData) {
+        if !self.known.insert(augmented_edge_data) {
             return;
         }
-        let edge = port_edge.edge;
-        if port_edge.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
-            && !port_edge.is_marker()
+        let edge = augmented_edge_data.edge_data;
+        if augmented_edge_data.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+            && !augmented_edge_data.edge_data.is_marker()
         {
             self.retired.insert(edge);
         }
         self.leaving
-            .entry(Port::new(edge.source_node_id, edge.source_coordinate))
+            .entry(BlockKey::new(edge.source_node_id, edge.source_coordinate))
             .or_default()
-            .insert(port_edge);
+            .insert(augmented_edge_data);
         self.arriving
-            .entry(Port::new(edge.target_node_id, edge.target_coordinate))
+            .entry(BlockKey::new(edge.target_node_id, edge.target_coordinate))
             .or_default()
-            .insert(port_edge);
+            .insert(augmented_edge_data);
         self.first_arrival
             .entry(edge.target_node_id)
             .and_modify(|first| *first = (*first).min(edge.target_coordinate))
@@ -175,7 +136,7 @@ impl PortEdges {
             self.entries_by_node_id
                 .entry(edge.target_node_id)
                 .or_default()
-                .insert(Port::new(edge.source_node_id, edge.source_coordinate));
+                .insert(BlockKey::new(edge.source_node_id, edge.source_coordinate));
         }
     }
 
@@ -186,39 +147,35 @@ impl PortEdges {
         for augmented_edge in
             Edge::edges_for_block_group_nodes(conn, &self.block_group_id, &[node_id], None)?
         {
-            self.index(PortEdge {
-                edge: EdgeData::from(&augmented_edge.edge),
-                chromosome_index: augmented_edge.chromosome_index,
-                phased: augmented_edge.phased,
-            });
+            self.index(AugmentedEdgeData::from(&augmented_edge));
         }
         Ok(())
     }
 
     /// The live edges arriving at `port` other than markers: retired edges lead nowhere.
-    fn arriving(&self, port: Port) -> Vec<PortEdge> {
+    fn arriving(&self, port: BlockKey) -> Vec<AugmentedEdgeData> {
         self.arriving
             .get(&port)
             .into_iter()
             .flatten()
-            .filter(|edge| !edge.is_marker() && !self.retired.contains(&edge.edge))
+            .filter(|edge| !edge.edge_data.is_marker() && !self.retired.contains(&edge.edge_data))
             .copied()
             .collect()
     }
 
     /// The live edges leaving `port` other than markers.
-    fn leaving(&self, port: Port) -> Vec<PortEdge> {
+    fn leaving(&self, port: BlockKey) -> Vec<AugmentedEdgeData> {
         self.leaving
             .get(&port)
             .into_iter()
             .flatten()
-            .filter(|edge| !edge.is_marker() && !self.retired.contains(&edge.edge))
+            .filter(|edge| !edge.edge_data.is_marker() && !self.retired.contains(&edge.edge_data))
             .copied()
             .collect()
     }
 
     /// Whether some route reaches `port` along its own node, so the port can start an edge.
-    fn has_sequence_before(&self, port: Port) -> bool {
+    fn has_sequence_before(&self, port: BlockKey) -> bool {
         if port.node_id == PATH_START_NODE_ID {
             return true;
         }
@@ -231,7 +188,7 @@ impl PortEdges {
     }
 
     /// Whether some route continues from `port` along its own node, so an edge can end there.
-    fn has_sequence_after(&self, port: Port) -> bool {
+    fn has_sequence_after(&self, port: BlockKey) -> bool {
         if port.node_id == PATH_END_NODE_ID {
             return true;
         }
@@ -246,28 +203,28 @@ impl PortEdges {
     /// Whether every marker at `port` is retired: an earlier edit replaced the node's sequence
     /// on one side of the port for every chromosome copy, so the node's own sequence no longer
     /// runs through it.
-    fn is_split_retired(&self, port: Port) -> bool {
+    fn is_split_retired(&self, port: BlockKey) -> bool {
         let mut markers = self
             .leaving
             .get(&port)
             .into_iter()
             .flatten()
-            .filter(|edge| edge.is_marker())
+            .filter(|edge| edge.edge_data.is_marker())
             .peekable();
         markers.peek().is_some()
             && markers.all(|marker| marker.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX)
     }
 
     /// Loads the nodes at the far end of every edge meeting `port`, so their entries are known.
-    fn load_neighbors(&mut self, conn: &GraphConnection, port: Port) -> Result<(), EdgeError> {
+    fn load_neighbors(&mut self, conn: &GraphConnection, port: BlockKey) -> Result<(), EdgeError> {
         let neighbors = self
             .arriving(port)
             .iter()
-            .map(|edge| edge.edge.source_node_id)
+            .map(|edge| edge.edge_data.source_node_id)
             .chain(
                 self.leaving(port)
                     .iter()
-                    .map(|edge| edge.edge.target_node_id),
+                    .map(|edge| edge.edge_data.target_node_id),
             )
             .collect::<Vec<_>>();
         for node_id in neighbors {
@@ -281,19 +238,24 @@ impl PortEdges {
     /// into each of them like into every other route leaving the port, but does not follow them,
     /// which would close a cycle. Inside a node they are entered from the port itself; at a
     /// node's first base, from the end of a node leading straight into the port.
-    fn siblings(&self, port: Port) -> HashSet<HashId> {
+    fn siblings(&self, port: BlockKey) -> HashSet<HashId> {
         let entry_ports = if self.has_sequence_before(port) {
             vec![port]
         } else {
             self.arriving(port)
                 .iter()
-                .filter(|edge| edge.edge.source_node_id != port.node_id)
-                .map(|edge| Port::new(edge.edge.source_node_id, edge.edge.source_coordinate))
+                .filter(|edge| edge.edge_data.source_node_id != port.node_id)
+                .map(|edge| {
+                    BlockKey::new(
+                        edge.edge_data.source_node_id,
+                        edge.edge_data.source_coordinate,
+                    )
+                })
                 .collect()
         };
         self.arriving(port)
             .iter()
-            .map(|edge| edge.edge.source_node_id)
+            .map(|edge| edge.edge_data.source_node_id)
             .filter(|node_id| {
                 *node_id != port.node_id
                     && self.entries_by_node_id.get(node_id).is_some_and(|entries| {
@@ -305,17 +267,17 @@ impl PortEdges {
 
     /// Where an edit starting at `port` attaches its first edge: the port itself when a route
     /// runs along the node into it, and the source of every live edge arriving there.
-    fn sources(&self, port: Port, rules: &EditRules) -> Vec<Endpoint> {
+    fn sources(&self, port: BlockKey, rules: &EditRules) -> Vec<Endpoint> {
         let mut sources = vec![];
         if self.has_sequence_before(port) {
             sources.push(Endpoint { port, edge: None });
         }
         for arriving in self.arriving(port) {
-            let source = Port::new(
-                arriving.edge.source_node_id,
-                arriving.edge.source_coordinate,
+            let source = BlockKey::new(
+                arriving.edge_data.source_node_id,
+                arriving.edge_data.source_coordinate,
             );
-            if !rules.allows(&arriving, source.node_id)
+            if !rules.allows(source.node_id)
                 || rules.siblings.contains(&source.node_id)
                 || rules.returns_to_end(source)
             {
@@ -331,11 +293,14 @@ impl PortEdges {
 
     /// Where an edit ending at `port` leads its last edge: the port itself when the node's
     /// sequence continues from it, and the target of every live edge leaving there.
-    fn targets(&self, port: Port, rules: &EditRules) -> Vec<Endpoint> {
+    fn targets(&self, port: BlockKey, rules: &EditRules) -> Vec<Endpoint> {
         let mut targets = vec![];
         for leaving in self.leaving(port) {
-            let target = Port::new(leaving.edge.target_node_id, leaving.edge.target_coordinate);
-            if !rules.allows(&leaving, target.node_id) || rules.returns_to_start(target) {
+            let target = BlockKey::new(
+                leaving.edge_data.target_node_id,
+                leaving.edge_data.target_coordinate,
+            );
+            if !rules.allows(target.node_id) || rules.returns_to_start(target) {
                 continue;
             }
             targets.push(Endpoint {
@@ -385,7 +350,7 @@ impl PortEdges {
             starts: &starts,
             ends: &ends,
         };
-        let variant = |source: Port, target: Port| AugmentedEdgeData {
+        let variant = |source: BlockKey, target: BlockKey| AugmentedEdgeData {
             edge_data: EdgeData {
                 source_node_id: source.node_id,
                 source_coordinate: source.coordinate,
@@ -455,13 +420,13 @@ impl PortEdges {
                 for source in &sources {
                     new_edges.insert(variant(
                         source.port,
-                        Port::new(node_id, change.block.sequence_start),
+                        BlockKey::new(node_id, change.block.sequence_start),
                     ));
                     continued.extend(source.edge);
                 }
                 for target in &targets {
                     new_edges.insert(variant(
-                        Port::new(node_id, change.block.sequence_end),
+                        BlockKey::new(node_id, change.block.sequence_end),
                         target.port,
                     ));
                     continued.extend(target.edge);
@@ -475,10 +440,10 @@ impl PortEdges {
                 .collect::<HashSet<_>>();
             for retired in continued
                 .into_iter()
-                .filter(|continued| !written.contains(&continued.edge))
+                .filter(|continued| !written.contains(&continued.edge_data))
             {
                 new_edges.insert(AugmentedEdgeData {
-                    edge_data: retired.edge,
+                    edge_data: retired.edge_data,
                     chromosome_index: PRESERVE_EDIT_SITE_CHROMOSOME_INDEX,
                     phased: 0,
                 });
@@ -506,8 +471,8 @@ struct EditRules<'a> {
     /// For an insertion, the alternatives already inserted at its point, which it goes in front
     /// of.
     siblings: HashSet<HashId>,
-    starts: &'a IndexSet<Port>,
-    ends: &'a IndexSet<Port>,
+    starts: &'a IndexSet<BlockKey>,
+    ends: &'a IndexSet<BlockKey>,
 }
 
 impl EditRules<'_> {
@@ -519,16 +484,17 @@ impl EditRules<'_> {
         }
     }
 
-    /// Whether the edit may continue the route of `edge`, whose far end is on `node_id`: not
-    /// its own allele applied again, and not a route phased onto another chromosome copy.
-    fn allows(&self, edge: &PortEdge, node_id: HashId) -> bool {
-        Some(node_id) != self.allele && !edge.conflicts_in_phase_with(self.change)
+    /// Whether the edit may continue a route whose far end is on `node_id`: not its own allele
+    /// applied again. Chromosome index and phase play no part, since two inputs cannot be assumed
+    /// to give the same index the same haplotype, and library fan-out is unphased.
+    fn allows(&self, node_id: HashId) -> bool {
+        Some(node_id) != self.allele
     }
 
     /// Whether a route to `target` re-enters a node the edit starts on at or before its start,
     /// closing a cycle through the edit. An edit chained onto the end of an earlier insertion
     /// ends where that insertion returns to, and leaves from.
-    fn returns_to_start(&self, target: Port) -> bool {
+    fn returns_to_start(&self, target: BlockKey) -> bool {
         self.starts
             .iter()
             .any(|start| start.node_id == target.node_id && target.coordinate <= start.coordinate)
@@ -536,7 +502,7 @@ impl EditRules<'_> {
 
     /// Whether a route from `source` leaves a node the edit ends on at or after its end, the
     /// mirror of [`EditRules::returns_to_start`].
-    fn returns_to_end(&self, source: Port) -> bool {
+    fn returns_to_end(&self, source: BlockKey) -> bool {
         self.ends
             .iter()
             .any(|end| end.node_id == source.node_id && source.coordinate >= end.coordinate)
