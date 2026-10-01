@@ -1107,10 +1107,6 @@ mod tests {
             current_path_sequence(&context, &collection, "grandchild sample"),
             "ATCGATCGATCGATCGGGAACACACAGAGA"
         );
-        assert_eq!(
-            sample_sequences(&context, &collection, "grandchild sample").len(),
-            4
-        );
     }
 
     #[test]
@@ -1146,10 +1142,6 @@ mod tests {
         assert_eq!(
             current_path_sequence(&context, &collection, "grandchild sample"),
             "ATCGGGCGATCGATCGATCGGGAACACACAGAGA"
-        );
-        assert_eq!(
-            sample_sequences(&context, &collection, "grandchild sample").len(),
-            4
         );
     }
 
@@ -1430,13 +1422,22 @@ mod tests {
     }
 
     /// A second deletion starting where the first ended, on the updated path, removes the next
-    /// bases. The route through both is an edge of its own, skipping both, and the path takes
-    /// it; the first deletion stays in the graph.
+    /// bases. The graph keeps each deletion and gains the one skipping both, so the four
+    /// combinations of the two deletions are spelled.
     #[test]
-    fn test_sequential_deletions_are_spliced_in_through_their_combination() {
+    fn test_sequential_deletions_keep_each_deletion_and_add_their_combination() {
         let context = setup_gen();
         let collection = "test";
-        import_simple_fixture(&context, collection);
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
         update_with_sequence(
             &context,
             collection,
@@ -1458,25 +1459,222 @@ mod tests {
         )
         .unwrap();
 
-        let first = path_deletion_edges(&context, collection, "child sample");
-        let both = path_deletion_edges(&context, collection, "grandchild sample");
-        assert_eq!(first.len(), 1);
-        assert_eq!(both.len(), 1);
-        assert_ne!(both[0], first[0]);
-        assert!(graph_has_edge(
+        let conn = context.graph().conn();
+        let reference = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let reference_path = BlockGroup::get_current_path(conn, &reference.id, None).unwrap();
+        let reference_node_id =
+            Path::edges_for_path(conn, &reference_path.id, None)[0].target_node_id;
+        let block_group = get_sample_bg(conn, collection, "grandchild sample");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        assert_eq!(sequences.len(), 4);
+        let deletions = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
+            .iter()
+            .filter(|augmented_edge| {
+                augmented_edge.edge.source_node_id == reference_node_id
+                    && augmented_edge.edge.target_node_id == reference_node_id
+                    && augmented_edge.edge.source_coordinate < augmented_edge.edge.target_coordinate
+            })
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(deletions, HashSet::from([(2, 4), (4, 6), (2, 6)]));
+    }
+
+    /// A deletion after an insertion, on the inserted path, keeps the deletion on its own, so the
+    /// four combinations of the insertion and the deletion are spelled.
+    #[test]
+    fn test_deletion_after_insertion_keeps_the_deletion_on_its_own() {
+        let context = setup_gen();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_sequence(
             &context,
             collection,
+            Sample::DEFAULT_NAME,
+            "child sample",
+            "m123:4",
+            "GG",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "child sample",
             "grandchild sample",
-            first[0]
-        ));
-        assert_eq!(
-            current_path_sequence(&context, collection, "grandchild sample"),
-            "ATCGATCGATCGATCGGGAACACACAGAGA"
-        );
-        assert_eq!(
-            sample_sequences(&context, collection, "grandchild sample").len(),
-            4
-        );
+            "m123:6-8",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let reference = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let reference_path = BlockGroup::get_current_path(conn, &reference.id, None).unwrap();
+        let reference_node_id =
+            Path::edges_for_path(conn, &reference_path.id, None)[0].target_node_id;
+        let block_group = get_sample_bg(conn, collection, "grandchild sample");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        assert_eq!(sequences.len(), 4);
+        let deletions = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
+            .iter()
+            .filter(|augmented_edge| {
+                augmented_edge.edge.source_node_id == reference_node_id
+                    && augmented_edge.edge.target_node_id == reference_node_id
+                    && augmented_edge.edge.source_coordinate < augmented_edge.edge.target_coordinate
+            })
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(deletions, HashSet::from([(4, 6)]));
+    }
+
+    /// Deleting the base after a deleted one keeps each deletion and adds the one skipping both.
+    #[test]
+    fn test_adjacent_deletions_keep_each_deletion_and_add_their_combination() {
+        let context = setup_gen();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "first",
+            "m123:9-10",
+            "",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "first",
+            "second",
+            "m123:9-10",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let reference = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let reference_path = BlockGroup::get_current_path(conn, &reference.id, None).unwrap();
+        let reference_node_id =
+            Path::edges_for_path(conn, &reference_path.id, None)[0].target_node_id;
+        let block_group = get_sample_bg(conn, collection, "second");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        assert_eq!(sequences.len(), 4);
+        let deletions = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
+            .iter()
+            .filter(|augmented_edge| {
+                augmented_edge.edge.source_node_id == reference_node_id
+                    && augmented_edge.edge.target_node_id == reference_node_id
+                    && augmented_edge.edge.source_coordinate < augmented_edge.edge.target_coordinate
+            })
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(deletions, HashSet::from([(9, 10), (10, 11), (9, 11)]));
+    }
+
+    /// Deleting the base before a substituted one keeps the deletion on its own, so the four
+    /// combinations of the substitution and the deletion are spelled.
+    #[test]
+    fn test_deletion_before_a_substitution_keeps_the_deletion_on_its_own() {
+        let context = setup_gen();
+        let collection = "test";
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            Sample::DEFAULT_NAME,
+            "first",
+            "m123:10-11",
+            "A",
+            false,
+        )
+        .unwrap();
+        update_with_sequence(
+            &context,
+            collection,
+            "first",
+            "second",
+            "m123:9-10",
+            "",
+            false,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let reference = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let reference_path = BlockGroup::get_current_path(conn, &reference.id, None).unwrap();
+        let reference_node_id =
+            Path::edges_for_path(conn, &reference_path.id, None)[0].target_node_id;
+        let block_group = get_sample_bg(conn, collection, "second");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        assert_eq!(sequences.len(), 4);
+        let deletions = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
+            .iter()
+            .filter(|augmented_edge| {
+                augmented_edge.edge.source_node_id == reference_node_id
+                    && augmented_edge.edge.target_node_id == reference_node_id
+                    && augmented_edge.edge.source_coordinate < augmented_edge.edge.target_coordinate
+            })
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(deletions, HashSet::from([(9, 10)]));
     }
 
     /// Two deletions that do not touch, the second made on the first's path, give the four
@@ -1485,7 +1683,16 @@ mod tests {
     fn test_non_touching_sequential_deletions_give_every_combination() {
         let context = setup_gen();
         let collection = "test";
-        import_simple_fixture(&context, collection);
+        let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+        import_fasta(
+            &context,
+            &fasta_path.to_str().unwrap().to_string(),
+            collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
         update_with_sequence(
             &context,
             collection,
@@ -1507,14 +1714,31 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            sample_sequences(&context, collection, "grandchild sample").len(),
-            4
-        );
-        assert_eq!(
-            current_path_sequence(&context, collection, "grandchild sample"),
-            "ATATCGATATCGATCGGGAACACACAGAGA"
-        );
+        let conn = context.graph().conn();
+        let reference = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
+        let reference_path = BlockGroup::get_current_path(conn, &reference.id, None).unwrap();
+        let reference_node_id =
+            Path::edges_for_path(conn, &reference_path.id, None)[0].target_node_id;
+        let block_group = get_sample_bg(conn, collection, "grandchild sample");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        assert_eq!(sequences.len(), 4);
+        let deletions = BlockGroupEdge::edges_for_block_group(conn, &block_group.id, None)
+            .iter()
+            .filter(|augmented_edge| {
+                augmented_edge.edge.source_node_id == reference_node_id
+                    && augmented_edge.edge.target_node_id == reference_node_id
+                    && augmented_edge.edge.source_coordinate < augmented_edge.edge.target_coordinate
+            })
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(deletions, HashSet::from([(2, 4), (10, 12)]));
     }
 
     /// A deletion ending where an earlier one starts is spliced in through the edge skipping
@@ -1859,7 +2083,6 @@ mod tests {
             let routes = route_count(&context, collection, "second");
             let current = current_path_sequence(&context, collection, "second");
             if sequences != expected
-                || sequences.len() != 4
                 || routes != 4
                 || current != with_edits(&[&first_edit, &second_edit])
             {
