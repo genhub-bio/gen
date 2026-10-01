@@ -665,6 +665,15 @@ fn is_stale_accepted_session_error(error: &SqlError) -> bool {
     )
 }
 
+fn is_non_fast_forward_push_error(error: &SqlError) -> bool {
+    matches!(
+        error,
+        SqlError::SqliteFailure(code, Some(message))
+            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT
+                && message == "not a fast-forward of the remote branch (use force to overwrite)"
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 enum PushGraphTransferError {
     #[error("{phase} failed: {source:?}")]
@@ -677,6 +686,8 @@ enum PushGraphTransferError {
     Client(#[from] RemoteClientError),
     #[error("GenHub confirmed the direct GCS graph session is stale")]
     StaleSessionConfirmed,
+    #[error("The branch is not a fast-forward of the remote. Use --force to overwrite the remote.")]
+    NonFastForward,
     #[error("{primary}; GenHub could not verify the stale session: {confirmation}")]
     StaleSessionCheckFailed {
         primary: Box<PushGraphTransferError>,
@@ -699,6 +710,7 @@ impl PushGraphTransferError {
             }
             Self::Client(_)
             | Self::StaleSessionConfirmed
+            | Self::NonFastForward
             | Self::StaleSessionCheckFailed { .. }
             | Self::Protocol(_) => false,
         }
@@ -711,7 +723,7 @@ impl PushGraphTransferError {
             | Self::StaleSessionConfirmed
             | Self::StaleSessionCheckFailed { .. } => false,
             Self::Protocol(_) => true,
-            Self::Database { .. } | Self::Client(_) => false,
+            Self::Database { .. } | Self::Client(_) | Self::NonFastForward => false,
         }
     }
 
@@ -721,9 +733,14 @@ impl PushGraphTransferError {
             Self::Client(RemoteClientError::StaleGraphSession) => true,
             Self::Client(_)
             | Self::StaleSessionConfirmed
+            | Self::NonFastForward
             | Self::StaleSessionCheckFailed { .. }
             | Self::Protocol(_) => false,
         }
+    }
+
+    fn is_non_fast_forward(&self) -> bool {
+        matches!(self, Self::NonFastForward)
     }
 }
 
@@ -799,6 +816,9 @@ fn safe_graph_error_context(error: &PushGraphTransferError) -> String {
         | PushGraphTransferError::StaleSessionCheckFailed { .. } => {
             "stale direct GCS session recovery".to_string()
         }
+        PushGraphTransferError::NonFastForward => {
+            "Dolt rejected a non-fast-forward branch update".to_string()
+        }
         PushGraphTransferError::Protocol(_) => "remote protocol response".to_string(),
     }
 }
@@ -808,10 +828,7 @@ fn close_server_after_graph_failure(
     progress: &GraphUploadProgressReporter,
     primary_error: PushGraphTransferError,
 ) -> PushGraphTransferError {
-    write_progress_line(&format!(
-        "Graph operation failed during {}; waiting for local server cleanup.",
-        safe_graph_error_context(&primary_error),
-    ));
+    progress.waiting_for_local_server_cleanup();
     preserve_graph_error_after_close(
         primary_error,
         close_direct_push_server(server, progress, true),
@@ -848,8 +865,12 @@ fn push_graph_through_direct_session(
         attempt,
     };
     let result = push_graph_through_direct_session_inner(request, &graph_progress);
-    if result.is_err() {
-        graph_progress.failed();
+    if let Err(error) = &result {
+        if error.is_non_fast_forward() {
+            graph_progress.failed_silently();
+        } else {
+            graph_progress.failed();
+        }
     }
     result
 }
@@ -973,13 +994,18 @@ fn push_graph_through_direct_session_inner(
             };
             if let Err(error) = push_result {
                 graph_progress.finish();
-                return Err(close_server_after_graph_failure(
-                    local_server,
-                    graph_progress,
+                let push_error = if is_non_fast_forward_push_error(&error) {
+                    PushGraphTransferError::NonFastForward
+                } else {
                     PushGraphTransferError::database(
                         "running Dolt push through loopback RemoteServer",
                         error,
-                    ),
+                    )
+                };
+                return Err(close_server_after_graph_failure(
+                    local_server,
+                    graph_progress,
+                    push_error,
                 ));
             }
             let validation = {
@@ -1346,7 +1372,9 @@ fn push_graph_branch_with_progress(
         })?;
         push_graph_branch(graph, remote_name, branch, force)
     };
-    progress.finish_dolt_progress(push_result.is_ok());
+    if !matches!(&push_result, Err(error) if is_non_fast_forward_push_error(error)) {
+        progress.finish_dolt_progress(push_result.is_ok());
+    }
     push_result
 }
 
@@ -2485,6 +2513,9 @@ pub enum RemotePushError {
     /// Dolt could not transfer the graph branch.
     #[error("Graph transfer failed: {0}")]
     GraphTransfer(#[source] Box<dyn Error>),
+    /// The remote branch has commits that are not in the local branch.
+    #[error("The branch is not a fast-forward of the remote. Use --force to overwrite the remote.")]
+    NonFastForward,
     /// The branch's assets could not be transferred.
     #[error("Asset transfer failed: {0}")]
     AssetTransfer(#[source] Box<dyn Error>),
@@ -2494,6 +2525,20 @@ pub enum RemotePushError {
     /// A pending push has only part of its persisted transfer lease metadata.
     #[error("Pending push metadata for branch '{branch}' has an incomplete transfer lease")]
     IncompleteTransferLease { branch: String },
+}
+
+fn remote_push_graph_error(error: Box<dyn Error>) -> RemotePushError {
+    if error
+        .downcast_ref::<SqlError>()
+        .is_some_and(is_non_fast_forward_push_error)
+        || error
+            .downcast_ref::<PushGraphTransferError>()
+            .is_some_and(PushGraphTransferError::is_non_fast_forward)
+    {
+        RemotePushError::NonFastForward
+    } else {
+        RemotePushError::GraphTransfer(error)
+    }
 }
 
 pub fn execute_push(
@@ -2534,7 +2579,7 @@ pub fn execute_push(
             force,
             || push_graph_branch(&graph, &remote.name, &branch, force),
         )
-        .map_err(RemotePushError::GraphTransfer)?;
+        .map_err(remote_push_graph_error)?;
         None
     } else {
         let mut operation = RemoteOperationRecord::begin_or_resume(
@@ -2669,7 +2714,7 @@ pub fn execute_push(
                             "Warning: failed to record unsuccessful push operation for branch '{branch}': {metadata_error}"
                         );
                     }
-                    return Err(RemotePushError::GraphTransfer(error));
+                    return Err(remote_push_graph_error(error));
                 }
             };
             let transfer_lease = renewal
@@ -5837,6 +5882,48 @@ mod tests {
         assert!(!cleanup_context.contains("secret"));
         assert!(!error.to_string().contains("access_token"));
         assert!(!error.to_string().contains("signed"));
+    }
+
+    #[test]
+    fn test_non_fast_forward_classifier_requires_exact_sqlite_constraint_error() {
+        let exact = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        let other_constraint = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("constraint failed".to_string()),
+        );
+        let other_code = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        let unique_constraint = SqlError::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+            Some("not a fast-forward of the remote branch (use force to overwrite)".to_string()),
+        );
+        assert!(!super::is_non_fast_forward_push_error(&other_constraint));
+        let wrapped_conflict =
+            super::remote_push_graph_error(Box::new(super::PushGraphTransferError::NonFastForward));
+        let wrapped_unrelated_constraint = super::remote_push_graph_error(Box::new(
+            super::PushGraphTransferError::database("running Dolt push", other_constraint),
+        ));
+
+        assert!(super::is_non_fast_forward_push_error(&exact));
+        assert!(!super::is_non_fast_forward_push_error(&other_code));
+        assert!(!super::is_non_fast_forward_push_error(&unique_constraint));
+        assert!(matches!(
+            wrapped_conflict,
+            super::RemotePushError::NonFastForward
+        ));
+        assert!(matches!(
+            wrapped_unrelated_constraint,
+            super::RemotePushError::GraphTransfer(_)
+        ));
+        assert_eq!(
+            super::remote_push_graph_error(Box::new(exact)).to_string(),
+            "The branch is not a fast-forward of the remote. Use --force to overwrite the remote."
+        );
     }
 
     #[test]
