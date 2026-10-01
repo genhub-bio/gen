@@ -1,7 +1,7 @@
 //! Edits to a sequence graph made through the Python API, each recorded as one operation.
 //!
 //! An edit replaces the span between a set of left ports and a set of right ports with a new
-//! sequence node, or with nothing for a deletion. The edges come from `PortEdges`, the planner
+//! sequence node, or with nothing for a deletion. The edges come from `edit_planning`, the planner
 //! behind `update sequence`, so an edit fans out to every route at its ports and a deletion is an
 //! edge rather than a node.
 //!
@@ -30,7 +30,7 @@ use gen_models::{
     block_group_edge::{AugmentedEdgeData, BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
     edge::{BlockKey, Edge, EdgeData},
-    edit_ports::{EditSpan as PortSpan, PortEdges},
+    edit_planning::{EdgeLookup, EditSpan},
     errors::{OperationError, QueryError},
     locus::GraphLocus,
     node::Node,
@@ -223,7 +223,7 @@ pub(crate) fn insert_at_positions(
                 phased,
                 preserve_edge: stack,
             };
-            let span = PortSpan {
+            let span = EditSpan {
                 starts: ports.iter().map(Anchor::port).collect(),
                 ends: ports.iter().map(Anchor::port).collect(),
                 along_path: false,
@@ -259,11 +259,11 @@ pub(crate) fn insert_at_positions(
 fn write_change(
     conn: &GraphConnection,
     block_group_id: &HashId,
-    span: &PortSpan,
+    span: &EditSpan,
     restriction: Option<Restriction<'_>>,
     change: &BlockGroupChange,
 ) -> PyResult<()> {
-    let mut edges = PortEdges::new(*block_group_id)
+    let mut edges = EdgeLookup::new(*block_group_id)
         .plan(conn, span, change)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     if let Some(restriction) = restriction {
@@ -361,7 +361,7 @@ fn keep_fanned_routes_apart(edges: &mut [AugmentedEdgeData]) {
 fn reactivated_markers(
     conn: &GraphConnection,
     block_group_id: &HashId,
-    span: &PortSpan,
+    span: &EditSpan,
     change: &BlockGroupChange,
 ) -> Vec<AugmentedEdgeData> {
     if change.block.sequence_start != change.block.sequence_end {
@@ -606,7 +606,7 @@ pub(crate) struct EditRequest<'a> {
 }
 
 /// The resolved attachment points of an edit in the destination graph.
-struct EditSpan {
+struct PyEditSpan {
     starts: Vec<GraphNodePosition>,
     ends: Vec<GraphNodePosition>,
     is_reverse: bool,
@@ -719,7 +719,7 @@ fn apply_edit(
                 // Keeps the original route live for a stacked edit.
                 preserve_edge: request.stack,
             };
-            let port_span = PortSpan {
+            let port_span = EditSpan {
                 starts: lefts.iter().map(Anchor::port).collect(),
                 ends: rights.iter().map(Anchor::port).collect(),
                 along_path: false,
@@ -772,7 +772,7 @@ fn validate_request(target: &GraphLocus, request: &EditRequest<'_>) -> PyResult<
 /// Resolve the complete target against the active route before selecting flanking
 /// anchors. Reverse search hits may list slices in graph order, whereas a reverse
 /// complement lists them in reading order; validate connectivity in either order.
-fn locate_span(graph: &GenGraph, canonical: &GraphLocus) -> PyResult<EditSpan> {
+fn locate_span(graph: &GenGraph, canonical: &GraphLocus) -> PyResult<PyEditSpan> {
     let is_reverse = canonical.slices[0].strand == Strand::Reverse;
     if canonical.slices.iter().any(|slice| {
         if is_reverse {
@@ -800,7 +800,7 @@ fn locate_span(graph: &GenGraph, canonical: &GraphLocus) -> PyResult<EditSpan> {
     let first = slices.first().expect("should have a target slice");
     let last = slices.last().expect("should have a target slice");
     let (chromosome_index, phased) = entry_chromosome(graph, first);
-    Ok(EditSpan {
+    Ok(PyEditSpan {
         starts: vec![GraphNodePosition {
             graph_node: first.block,
             offset: first.start as i64,
