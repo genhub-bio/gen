@@ -118,7 +118,9 @@ impl OperationFile {
             workspace,
             &self.file_path,
             self.file_type,
+            self.role.clone(),
             self.checksum_override,
+            None,
         )?;
         let logical_path =
             Self::storage_file_path(workspace, &self.file_path, file_addition.checksum.as_ref())?;
@@ -297,7 +299,9 @@ pub fn add_files_operation(
                 workspace,
                 &operation_file.file_path,
                 operation_file.file_type,
+                operation_file.role.clone(),
                 operation_file.checksum_override,
+                None,
             )?;
             let operation_file_path = OperationFile::storage_file_path(
                 workspace,
@@ -421,7 +425,9 @@ impl FileAddition {
         workspace: &Workspace,
         file_path: &str,
         file_type: FileTypes,
+        role: AssetRole,
         checksum_override: Option<Sha256Hash>,
+        materialized_checksum_override: Option<Sha256Hash>,
     ) -> Result<FileAddition, FileAdditionError> {
         let asset_uri = <dyn AssetUri>::new(workspace, file_path);
         let checksum = asset_uri.prepare_asset(workspace, checksum_override)?;
@@ -1586,6 +1592,8 @@ mod tests {
             context.workspace(),
             &outside_path_string,
             FileTypes::Fasta,
+            AssetRole::Input,
+            None,
             None,
         )
         .unwrap();
@@ -1614,9 +1622,15 @@ mod tests {
         let file1_path = repo_root.join("test_file.txt");
         fs::write(&file1_path, b"Test file content").unwrap();
         let file1_path_str = file1_path.to_string_lossy().to_string();
-        let fa1 =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
-                .expect("should prepare file addition");
+        let fa1 = FileAddition::prepare(
+            context.workspace(),
+            &file1_path_str,
+            FileTypes::Fasta,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare file addition");
 
         let checksum = calculate_file_checksum(&file1_path_str).unwrap();
         let expected_asset_path = format!(".gen/assets/{checksum}.txt");
@@ -1645,9 +1659,15 @@ mod tests {
         );
 
         // Second call with same file should return the same FileAddition
-        let fa2 =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
-                .expect("should prepare same file addition");
+        let fa2 = FileAddition::prepare(
+            context.workspace(),
+            &file1_path_str,
+            FileTypes::Fasta,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare same file addition");
 
         assert_eq!(fa1, fa2);
 
@@ -1656,16 +1676,28 @@ mod tests {
         fs::write(&file2_path, b"Test file content").unwrap();
         let file2_path_str = file2_path.to_string_lossy().to_string();
 
-        let fa3 =
-            FileAddition::prepare(context.workspace(), &file2_path_str, FileTypes::Fasta, None)
-                .expect("should prepare matching file addition");
+        let fa3 = FileAddition::prepare(
+            context.workspace(),
+            &file2_path_str,
+            FileTypes::Fasta,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare matching file addition");
 
         assert_eq!(fa1.id, fa3.id);
 
         fs::write(&file1_path, b"new content").unwrap();
-        let fa1_new =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
-                .expect("should prepare updated file addition");
+        let fa1_new = FileAddition::prepare(
+            context.workspace(),
+            &file1_path_str,
+            FileTypes::Fasta,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare updated file addition");
 
         assert_ne!(fa1.id, fa1_new.id);
 
@@ -1674,9 +1706,15 @@ mod tests {
         fs::write(&outside_file, b"Outside repo file").unwrap();
         let outside_path = outside_file.to_string_lossy().to_string();
 
-        let outside =
-            FileAddition::prepare(context.workspace(), &outside_path, FileTypes::Fasta, None)
-                .expect("should prepare external file addition");
+        let outside = FileAddition::prepare(
+            context.workspace(),
+            &outside_path,
+            FileTypes::Fasta,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare external file addition");
 
         assert_eq!(
             outside.asset_uri,
@@ -1702,9 +1740,15 @@ mod tests {
         let context = setup_gen();
         let asset_uri = "https://example.com/assets/reference.fa";
 
-        let addition =
-            FileAddition::prepare(context.workspace(), asset_uri, FileTypes::Fasta, None)
-                .expect("should prepare HTTP file addition");
+        let addition = FileAddition::prepare(
+            context.workspace(),
+            asset_uri,
+            FileTypes::Fasta,
+            AssetRole::Input,
+            None,
+            None,
+        )
+        .expect("should prepare HTTP file addition");
 
         assert_eq!(addition.asset_uri, asset_uri);
         assert_eq!(addition.file_path(), asset_uri);
@@ -1727,7 +1771,9 @@ mod tests {
             context.workspace(),
             asset_uri,
             FileTypes::Fasta,
+            AssetRole::Input,
             Some(checksum),
+            None,
         )
         .expect("should prepare remote file addition");
 
@@ -1746,7 +1792,9 @@ mod tests {
             context.workspace(),
             path.to_str().expect("should encode local asset path"),
             FileTypes::Fasta,
+            AssetRole::Input,
             Some(Sha256Hash::convert_str("different contents")),
+            None,
         )
         .expect_err("should reject incorrect checksum override");
 

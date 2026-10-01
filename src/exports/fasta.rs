@@ -79,10 +79,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -134,10 +133,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();

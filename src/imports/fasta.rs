@@ -35,10 +35,9 @@ use crate::{
 )]
 pub fn import_fasta(
     context: &DbContext,
-    fasta: &String,
+    fasta: &str,
     collection_name: &str,
     sample: &str,
-    shallow: bool,
     indexes: &[String],
 ) -> Result<OperationSummary, FastaError> {
     let conn = context.graph().conn();
@@ -420,10 +419,9 @@ mod tests {
 
         let operation_summary = import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -471,10 +469,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -495,10 +492,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -521,10 +517,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -546,10 +541,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             "test",
             "new-sample",
-            false,
             &[],
         )
         .unwrap();
@@ -601,10 +595,9 @@ mod tests {
 
         let operation_summary = import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             "test",
             Sample::DEFAULT_NAME,
-            true,
             &[],
         )
         .unwrap();
@@ -726,7 +719,6 @@ mod tests {
             &fasta,
             "test",
             Sample::DEFAULT_NAME,
-            true,
             &indexes,
         )
         .expect("should import a shallow remote BGZF with remote indexes");
@@ -813,10 +805,9 @@ mod tests {
 
         let operation_summary = import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -831,10 +822,9 @@ mod tests {
 
         let operation_summary = import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();

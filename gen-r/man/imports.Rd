@@ -11,8 +11,7 @@ import_fasta(
   db_path = NULL,
   filename,
   name = NULL,
-  sample = "sample",
-  shallow = FALSE
+  sample = "sample"
 )
 
 import_gfa(
@@ -60,8 +59,6 @@ import_library(
   \item{name}{Collection name. Required if no default collection is set.}
 
   \item{sample}{Sample name to import into.}
-
-  \item{shallow}{Whether to store FASTA sequence data by reference instead of inline.}
 
   \item{library_name}{Library name for combinatorial library imports.}
 

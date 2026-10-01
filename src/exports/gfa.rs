@@ -575,15 +575,7 @@ mod tests {
             .expect("should have a UTF-8 library path")
             .to_string();
 
-        import_fasta(
-            &context,
-            &fasta_path,
-            collection,
-            Sample::DEFAULT_NAME,
-            false,
-            &[],
-        )
-        .unwrap();
+        import_fasta(&context, &fasta_path, collection, Sample::DEFAULT_NAME, &[]).unwrap();
         add_annotation(
             &context,
             collection,
@@ -610,13 +602,8 @@ mod tests {
         .unwrap();
 
         let block_group = get_sample_bg(conn, collection, "deleted");
-        let graph = BlockGroup::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            &block_group.id,
-            None,
-        )
-        .unwrap();
+        let graph =
+            BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();
         let node_ids = graph.nodes().map(|node| node.node_id).collect::<Vec<_>>();
         let sequences = Node::get_sequences_by_node_ids(conn, context.workspace(), &node_ids, None);
         let rendered_sequence = |node: GraphNode| {

@@ -1040,10 +1040,9 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         let operation_summary = import_fasta(
             &context,
-            &fasta_path.to_string_lossy().to_string(),
+            fasta_path.to_string_lossy().as_ref(),
             "default",
             "foo",
-            false,
             &[],
         )
         .expect("should import fasta fixture");

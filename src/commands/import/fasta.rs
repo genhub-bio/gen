@@ -20,11 +20,8 @@ pub struct Command {
     /// Override the Dolt commit message
     #[arg(short = 'm', long)]
     message: Option<String>,
-    /// Don't store the sequence in the database, instead store a reference to an asset
-    #[arg(long, action)]
-    shallow: bool,
-    /// Index associated with the shallow FASTA. May be specified multiple times.
-    #[arg(long, requires = "shallow")]
+    /// Index associated with the FASTA. May be specified multiple times.
+    #[arg(long)]
     index: Vec<String>,
     /// The name of the collection to store the entry under
     #[arg(short = 'c', long)]
@@ -72,7 +69,6 @@ pub fn execute(cli_context: &CliContext, cmd: Command) -> Result<()> {
         &cmd.path.clone(),
         collection_name,
         sample_name,
-        cmd.shallow,
         &cmd.index,
     ) {
         Ok(operation_summary) => {
@@ -118,17 +114,16 @@ mod tests {
     }
 
     #[test]
-    fn test_accepts_multiple_remote_fasta_indexes() {
+    fn test_accepts_multiple_fasta_indexes_without_shallow_flag() {
         let cli = TestCli::try_parse_from([
             "test",
             "https://example.test/reference.fa.bgz",
-            "--shallow",
             "--index",
             "https://example.test/reference.fa.bgz.fai",
             "--index",
             "https://example.test/reference.fa.bgz.gzi",
         ])
-        .expect("should parse multiple shallow FASTA indexes");
+        .expect("should parse repeatable FASTA indexes without a mode flag");
 
         assert_eq!(
             cli.command.index,
@@ -138,5 +133,18 @@ mod tests {
             ],
             "repeatable --index values should preserve every supplied URI"
         );
+    }
+
+    #[test]
+    fn test_shallow_flag_is_removed() {
+        let result = TestCli::try_parse_from([
+            "test",
+            "reference.fa",
+            "--shallow",
+            "--reference",
+            "reference",
+        ]);
+
+        assert!(result.is_err(), "removed shallow flag should be rejected");
     }
 }

@@ -768,10 +768,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -787,7 +786,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -798,7 +797,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "G1").id,
                 false
             )
@@ -809,7 +808,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "foo").id,
                 false
             )
@@ -831,10 +830,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -851,7 +849,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -862,7 +860,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "bar").id,
                 false
             )
@@ -876,7 +874,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "baz").id,
                 false
             )
@@ -900,10 +898,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -920,7 +917,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 false,
             )
@@ -930,7 +927,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "sample 1").id,
                 false
             )
@@ -959,10 +956,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -981,7 +977,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "sample 1").id,
                 false
             )
@@ -1002,10 +998,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1038,10 +1033,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1059,7 +1053,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "unknown").id,
                 false
             )
@@ -1084,10 +1078,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1104,7 +1097,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "foo").id,
                 false
             )
@@ -1128,10 +1121,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1150,7 +1142,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "foo").id,
                 true
             )
@@ -1175,10 +1167,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1224,10 +1215,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1282,10 +1272,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1322,10 +1311,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1372,10 +1360,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1438,10 +1425,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -1482,7 +1468,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, Sample::DEFAULT_NAME).id,
                 true,
             )
@@ -1492,7 +1478,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "f1").id,
                 true
             )
@@ -1502,7 +1488,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "f2").id,
                 true
             )
@@ -1512,7 +1498,7 @@ mod tests {
         assert_eq!(
             BlockGroup::get_all_sequences(
                 conn,
-                crate::test_helpers::test_workspace(),
+                context.workspace(),
                 &get_sample_bg(conn, &collection, "f3").id,
                 true
             )
@@ -1532,10 +1518,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             "reference",
-            false,
             &[],
         )
         .unwrap();
@@ -1563,7 +1548,7 @@ mod tests {
 
         let child_sequences = BlockGroup::get_all_sequences(
             conn,
-            crate::test_helpers::test_workspace(),
+            context.workspace(),
             &get_sample_bg(conn, &collection, "child").id,
             true,
         )
@@ -1591,20 +1576,18 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             "parent-a",
-            false,
             &[],
         )
         .unwrap();
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             "parent-b",
-            false,
             &[],
         )
         .unwrap();
@@ -1622,7 +1605,7 @@ mod tests {
 
         let child_sequences = BlockGroup::get_all_sequences(
             conn,
-            crate::test_helpers::test_workspace(),
+            context.workspace(),
             &get_sample_bg(conn, &collection, "child").id,
             true,
         )
@@ -1649,10 +1632,9 @@ mod tests {
 
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             &collection,
             "reference",
-            false,
             &[],
         )
         .unwrap();

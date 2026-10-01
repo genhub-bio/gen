@@ -54,7 +54,7 @@ remove the cache. Local repository files and `.gen/assets` are not affected.
 
 # FASTA import
 
-Use `gen import fasta <path-or-uri> --shallow` to keep sequence data in an
+Use `gen import fasta <path-or-uri>` to keep sequence data in an
 asset rather than the gen database. Local assets are read from their
 repository copy; remote assets remain remote. Supply known FASTA indices with a
 repeatable `--index <path-or-uri>` option. For example, a BGZF FASTA can use both

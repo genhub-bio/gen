@@ -1139,7 +1139,6 @@ impl Repository {
         &self,
         filename: String,
         sample: String,
-        shallow: bool,
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
@@ -1153,7 +1152,6 @@ impl Repository {
             &filename,
             &collection_name,
             &sample,
-            shallow,
             &[],
         ) {
             Ok(operation_summary) => {
@@ -1175,7 +1173,6 @@ impl Repository {
         &self,
         filename: String,
         reference: String,
-        shallow: bool,
         collection: Nullable<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
@@ -1201,7 +1198,6 @@ impl Repository {
             &filename,
             &collection_name,
             &reference,
-            shallow,
             &[],
         ) {
             Ok(operation_summary) => {

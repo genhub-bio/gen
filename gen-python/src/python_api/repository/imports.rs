@@ -23,12 +23,11 @@ use crate::python_api::{
 
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (filename, sample=None, shallow=false, collection=None))]
+    #[pyo3(signature = (filename, sample=None, collection=None))]
     pub fn import_fasta(
         &self,
         filename: String,
         sample: Option<String>,
-        shallow: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
@@ -36,20 +35,18 @@ impl PyRepository {
         run_operation_write(
             self,
             |ctx| {
-                let operation_summary = import_fasta(
-                    ctx,
-                    &filename,
-                    &collection,
-                    &sample,
-                    shallow,
-                    &[],
-                )
-                .map_err(|e| match e {
-                    FastaError::OperationError(OperationError::NoChanges) => {
-                        PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
-                    }
-                    _ => PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename)),
-                })?;
+                let operation_summary = import_fasta(ctx, &filename, &collection, &sample, &[])
+                    .map_err(|e| match e {
+                        FastaError::OperationError(OperationError::NoChanges) => {
+                            PyRuntimeError::new_err(format!(
+                                "'{}': contents already exist",
+                                filename
+                            ))
+                        }
+                        _ => {
+                            PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename))
+                        }
+                    })?;
                 Ok((
                     self.block_groups_in_sample(&collection, &sample),
                     operation_summary,
@@ -64,12 +61,11 @@ impl PyRepository {
         )
     }
 
-    #[pyo3(signature = (filename, reference, shallow=false, collection=None))]
+    #[pyo3(signature = (filename, reference, collection=None))]
     pub fn import_reference_fasta(
         &self,
         filename: String,
         reference: String,
-        shallow: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
@@ -86,20 +82,18 @@ impl PyRepository {
                 .map_err(|e| {
                     PyRuntimeError::new_err(format!("Failed to create reference sample: {e}"))
                 })?;
-                let operation_summary = import_fasta(
-                    ctx,
-                    &filename,
-                    &collection,
-                    &reference,
-                    shallow,
-                    &[],
-                )
-                .map_err(|e| match e {
-                    FastaError::OperationError(OperationError::NoChanges) => {
-                        PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
-                    }
-                    _ => PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename)),
-                })?;
+                let operation_summary = import_fasta(ctx, &filename, &collection, &reference, &[])
+                    .map_err(|e| match e {
+                        FastaError::OperationError(OperationError::NoChanges) => {
+                            PyRuntimeError::new_err(format!(
+                                "'{}': contents already exist",
+                                filename
+                            ))
+                        }
+                        _ => {
+                            PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename))
+                        }
+                    })?;
                 Ok((
                     self.block_groups_in_sample(&collection, &reference),
                     operation_summary,

@@ -169,10 +169,9 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fasta);
         import_fasta(
             &context,
-            &fasta_path.to_str().unwrap().to_string(),
+            fasta_path.to_str().unwrap(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();

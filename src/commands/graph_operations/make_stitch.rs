@@ -116,10 +116,9 @@ mod tests {
         let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
         import_fasta(
             &context,
-            &fasta_path.to_string_lossy().to_string(),
+            fasta_path.to_string_lossy().as_ref(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();

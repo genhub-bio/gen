@@ -806,8 +806,14 @@ pub fn add_annotation_file(
             parse_annotation_file_type(&ext)?
         }
     };
-    let file_addition =
-        FileAddition::prepare(workspace, path, file_type, checksum_overrides.annotation)?;
+    let file_addition = FileAddition::prepare(
+        workspace,
+        path,
+        file_type,
+        AssetRole::Annotation,
+        checksum_overrides.annotation,
+        None,
+    )?;
     let annotation_logical_path =
         OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
     let prepared_index =
@@ -817,7 +823,9 @@ pub fn add_annotation_file(
                 workspace,
                 &index_path,
                 index_file_type,
+                AssetRole::AnnotationIndex,
                 checksum_overrides.index,
+                None,
             )?;
             let logical_path = OperationFile::storage_file_path(
                 workspace,

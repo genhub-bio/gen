@@ -433,7 +433,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -472,7 +471,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -494,17 +492,16 @@ mod python_tests {
 
             py_repo
                 .borrow(py)
-                .import_fasta(path.clone(), Some("test".to_string()), false, None)
+                .import_fasta(path.clone(), Some("test".to_string()), None)
                 .unwrap();
 
-            let err =
-                match py_repo
-                    .borrow(py)
-                    .import_fasta(path, Some("test".to_string()), false, None)
-                {
-                    Err(e) => e.to_string(),
-                    Ok(_) => panic!("expected duplicate import to fail"),
-                };
+            let err = match py_repo
+                .borrow(py)
+                .import_fasta(path, Some("test".to_string()), None)
+            {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected duplicate import to fail"),
+            };
             assert!(
                 err.contains("already exist"),
                 "Expected 'already exist' in error: {err}"
@@ -525,7 +522,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -551,7 +547,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -574,7 +569,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -611,7 +605,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -635,7 +628,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -674,7 +666,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
