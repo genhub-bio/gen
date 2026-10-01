@@ -1422,8 +1422,10 @@ mod tests {
     }
 
     /// A second deletion starting where the first ended, on the updated path, removes the next
-    /// bases. The graph keeps each deletion and gains the one skipping both, so the four
-    /// combinations of the two deletions are spelled.
+    /// bases. `update sequence` stacks its edits on the graph and keeps the unedited route, as a
+    /// heterozygous change does, so the graph keeps each deletion and gains the one skipping both,
+    /// and the four combinations of the two deletions are spelled. An edit that replaced the
+    /// unedited route, as a homozygous call does, would not add routes.
     #[test]
     fn test_sequential_deletions_keep_each_deletion_and_add_their_combination() {
         let context = setup_gen();
@@ -1486,8 +1488,9 @@ mod tests {
         assert_eq!(deletions, HashSet::from([(2, 4), (4, 6), (2, 6)]));
     }
 
-    /// A deletion after an insertion, on the inserted path, keeps the deletion on its own, so the
-    /// four combinations of the insertion and the deletion are spelled.
+    /// A deletion after an insertion, on the inserted path, keeps the deletion on its own, since
+    /// `update sequence` stacks its edits and keeps the unedited route, so the four combinations of
+    /// the insertion and the deletion are spelled.
     #[test]
     fn test_deletion_after_insertion_keeps_the_deletion_on_its_own() {
         let context = setup_gen();
@@ -1550,7 +1553,8 @@ mod tests {
         assert_eq!(deletions, HashSet::from([(4, 6)]));
     }
 
-    /// Deleting the base after a deleted one keeps each deletion and adds the one skipping both.
+    /// Deleting the base after a deleted one keeps each deletion and adds the one skipping both,
+    /// since `update sequence` stacks its edits and keeps the unedited route.
     #[test]
     fn test_adjacent_deletions_keep_each_deletion_and_add_their_combination() {
         let context = setup_gen();
@@ -1613,8 +1617,9 @@ mod tests {
         assert_eq!(deletions, HashSet::from([(9, 10), (10, 11), (9, 11)]));
     }
 
-    /// Deleting the base before a substituted one keeps the deletion on its own, so the four
-    /// combinations of the substitution and the deletion are spelled.
+    /// Deleting the base before a substituted one keeps the deletion on its own, since
+    /// `update sequence` stacks its edits and keeps the unedited route, so the four combinations
+    /// of the substitution and the deletion are spelled.
     #[test]
     fn test_deletion_before_a_substitution_keeps_the_deletion_on_its_own() {
         let context = setup_gen();
