@@ -60,6 +60,13 @@ pub fn import_fasta(
     sample: &str,
     indexes: &[String],
 ) -> Result<OperationSummary, FastaError> {
+    // Fasta imports work by storing a fasta file as an asset, and having a sequence object store a reference to
+    // the file or remote path storing the sequence. This prevents duplicating sequences between disk and the database.
+    // To do this in a scalable way, we make use of bgzip + tabix to ensure all incoming sequences files are compressed
+    // and randomly accessible. So a large part of this code is managing compressing, indexing, and storing the compressed
+    // asset.
+    //
+    // As a side effect, for importing the fasta, we only need to read the index file giving the sequence lengths.
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let source_reader =
