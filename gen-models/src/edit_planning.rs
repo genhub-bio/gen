@@ -508,3 +508,904 @@ impl EditRules<'_> {
             .any(|end| end.node_id == source.node_id && source.coordinate >= end.coordinate)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use gen_core::{
+        HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID,
+        PRESERVE_EDIT_SITE_CHROMOSOME_INDEX, PathBlock, Strand,
+    };
+
+    use crate::{
+        block_group::{BlockGroup, BlockGroupChange},
+        block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+        edge::Edge,
+        node::Node,
+        region::ResolvedGenRegion,
+        sequence::Sequence,
+        test_helpers::{get_connection, setup_block_group, test_workspace},
+    };
+
+    // The test block group is `A` (10 bases), `T` (10), `C` (10) and `G` (10) in a row, and each
+    // edit is made against that path. Every test lists the edges the edits add, leaving out the
+    // zero-width edit-site markers, and counts the sequences the block group spells.
+
+    /// A deletion adds one edge, from where the node before it ends into the node it cuts.
+    #[test]
+    fn test_deletion_adds_one_edge() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .map(|augmented_edge| augmented_edge.edge.id)
+            .collect::<HashSet<_>>();
+        let mut edit_node_ids = vec![];
+        let (start, end, bases) = (10, 12, "");
+        let (node_id, length) = if bases.is_empty() {
+            (HashId::convert_str(""), 0)
+        } else {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(bases)
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(
+                conn,
+                &sequence.hash,
+                &HashId::convert_str(&format!("edit-{bases}-{start}")),
+            )
+            .unwrap();
+            (node_id, sequence.length)
+        };
+        edit_node_ids.push(node_id);
+        let block = PathBlock {
+            node_id,
+            block_sequence: bases.to_string(),
+            sequence_start: 0,
+            sequence_end: length,
+            path_start: start,
+            path_end: end,
+            strand: Strand::Forward,
+        };
+        let region = ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+        let change = BlockGroupChange {
+            region,
+            path_accession: None,
+            block,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge: true,
+        };
+        BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_node_id,
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_node_id,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .filter(
+                |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                    (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                },
+            )
+            .collect::<HashSet<_>>();
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 2);
+        assert_eq!(written, HashSet::from([(a_node_id, 10, t_node_id, 2)]));
+    }
+
+    /// Two deletions that touch each add their own edge, and the route through both is an edge
+    /// of its own: four sequences.
+    #[test]
+    fn test_touching_deletions_add_each_deletion_and_their_combination() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .map(|augmented_edge| augmented_edge.edge.id)
+            .collect::<HashSet<_>>();
+        let mut edit_node_ids = vec![];
+        for (start, end, bases) in [(8, 12, ""), (12, 16, "")] {
+            let (node_id, length) = if bases.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(bases)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                )
+                .unwrap();
+                (node_id, sequence.length)
+            };
+            edit_node_ids.push(node_id);
+            let block = PathBlock {
+                node_id,
+                block_sequence: bases.to_string(),
+                sequence_start: 0,
+                sequence_end: length,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            };
+            let region =
+                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let change = BlockGroupChange {
+                region,
+                path_accession: None,
+                block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        }
+        let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_node_id,
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_node_id,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .filter(
+                |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                    (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                },
+            )
+            .collect::<HashSet<_>>();
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 4);
+        assert_eq!(
+            written,
+            HashSet::from([
+                (a_node_id, 8, t_node_id, 2),
+                (t_node_id, 2, t_node_id, 6),
+                (a_node_id, 8, t_node_id, 6),
+            ])
+        );
+    }
+
+    /// A deletion followed by an insertion or substitution where it ends keeps both edits on
+    /// their own and adds the route through both: four sequences.
+    #[test]
+    fn test_deletion_and_touching_edit_add_each_edit_and_their_combination() {
+        for (start, end, bases) in [(12, 12, "GG"), (12, 13, "A")] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            let a_node_id = HashId::convert_str("test-a-node");
+            let t_node_id = HashId::convert_str("test-t-node");
+            let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+                .iter()
+                .map(|augmented_edge| augmented_edge.edge.id)
+                .collect::<HashSet<_>>();
+            let mut edit_node_ids = vec![];
+            for (start, end, bases) in [(8, 12, ""), (start, end, bases)] {
+                let (node_id, length) = if bases.is_empty() {
+                    (HashId::convert_str(""), 0)
+                } else {
+                    let sequence = Sequence::new()
+                        .sequence_type("DNA")
+                        .sequence(bases)
+                        .save(conn)
+                        .unwrap();
+                    let node_id = Node::create(
+                        conn,
+                        &sequence.hash,
+                        &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                    )
+                    .unwrap();
+                    (node_id, sequence.length)
+                };
+                edit_node_ids.push(node_id);
+                let block = PathBlock {
+                    node_id,
+                    block_sequence: bases.to_string(),
+                    sequence_start: 0,
+                    sequence_end: length,
+                    path_start: start,
+                    path_end: end,
+                    strand: Strand::Forward,
+                };
+                let region =
+                    ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+                let change = BlockGroupChange {
+                    region,
+                    path_accession: None,
+                    block,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                    preserve_edge: true,
+                };
+                BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+            }
+            let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+                .iter()
+                .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+                .map(|augmented_edge| {
+                    (
+                        augmented_edge.edge.source_node_id,
+                        augmented_edge.edge.source_coordinate,
+                        augmented_edge.edge.target_node_id,
+                        augmented_edge.edge.target_coordinate,
+                    )
+                })
+                .filter(
+                    |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                        (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                    },
+                )
+                .collect::<HashSet<_>>();
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(sequences.len(), 4, "{bases}");
+            let edit_node_id = edit_node_ids[1];
+            assert_eq!(
+                written,
+                HashSet::from([
+                    (a_node_id, 8, t_node_id, 2),
+                    (a_node_id, 8, edit_node_id, 0),
+                    (t_node_id, 2, edit_node_id, 0),
+                    (edit_node_id, bases.len() as i64, t_node_id, end - 10),
+                ]),
+                "{bases}"
+            );
+        }
+    }
+
+    /// Two deletions that do not touch add only their own edges, and no route through both.
+    #[test]
+    fn test_non_touching_deletions_add_no_combination() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .map(|augmented_edge| augmented_edge.edge.id)
+            .collect::<HashSet<_>>();
+        let mut edit_node_ids = vec![];
+        for (start, end, bases) in [(10, 12, ""), (20, 22, "")] {
+            let (node_id, length) = if bases.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(bases)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                )
+                .unwrap();
+                (node_id, sequence.length)
+            };
+            edit_node_ids.push(node_id);
+            let block = PathBlock {
+                node_id,
+                block_sequence: bases.to_string(),
+                sequence_start: 0,
+                sequence_end: length,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            };
+            let region =
+                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let change = BlockGroupChange {
+                region,
+                path_accession: None,
+                block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        }
+        let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_node_id,
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_node_id,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .filter(
+                |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                    (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                },
+            )
+            .collect::<HashSet<_>>();
+        let c_node_id = HashId::convert_str("test-c-node");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 4);
+        assert_eq!(
+            written,
+            HashSet::from([(a_node_id, 10, t_node_id, 2), (t_node_id, 10, c_node_id, 2)])
+        );
+    }
+
+    /// The same deletion made twice adds its edge once.
+    #[test]
+    fn test_repeated_deletion_adds_its_edge_once() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .map(|augmented_edge| augmented_edge.edge.id)
+            .collect::<HashSet<_>>();
+        let mut edit_node_ids = vec![];
+        for (start, end, bases) in [(10, 12, ""), (10, 12, "")] {
+            let (node_id, length) = if bases.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(bases)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                )
+                .unwrap();
+                (node_id, sequence.length)
+            };
+            edit_node_ids.push(node_id);
+            let block = PathBlock {
+                node_id,
+                block_sequence: bases.to_string(),
+                sequence_start: 0,
+                sequence_end: length,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            };
+            let region =
+                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let change = BlockGroupChange {
+                region,
+                path_accession: None,
+                block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        }
+        let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_node_id,
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_node_id,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .filter(
+                |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                    (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                },
+            )
+            .collect::<HashSet<_>>();
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 2);
+        assert_eq!(written, HashSet::from([(a_node_id, 10, t_node_id, 2)]));
+    }
+
+    /// A second insertion at the same point goes in front of the first, leading into it: it does
+    /// not follow it, which would close a cycle. Four sequences.
+    #[test]
+    fn test_second_insertion_at_one_point_goes_in_front_of_the_first() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .map(|augmented_edge| augmented_edge.edge.id)
+            .collect::<HashSet<_>>();
+        let mut edit_node_ids = vec![];
+        for (start, end, bases) in [(10, 10, "GG"), (10, 10, "CC")] {
+            let (node_id, length) = if bases.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(bases)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                )
+                .unwrap();
+                (node_id, sequence.length)
+            };
+            edit_node_ids.push(node_id);
+            let block = PathBlock {
+                node_id,
+                block_sequence: bases.to_string(),
+                sequence_start: 0,
+                sequence_end: length,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            };
+            let region =
+                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let change = BlockGroupChange {
+                region,
+                path_accession: None,
+                block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        }
+        let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_node_id,
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_node_id,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .filter(
+                |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                    (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                },
+            )
+            .collect::<HashSet<_>>();
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 4);
+        let first_node_id = edit_node_ids[0];
+        let second_node_id = edit_node_ids[1];
+        assert_eq!(
+            written,
+            HashSet::from([
+                (a_node_id, 10, first_node_id, 0),
+                (first_node_id, 2, t_node_id, 0),
+                (a_node_id, 10, second_node_id, 0),
+                (second_node_id, 2, t_node_id, 0),
+                (second_node_id, 2, first_node_id, 0),
+            ])
+        );
+    }
+
+    /// A homozygous edit retires the edge into the replaced bases and adds only its own
+    /// allele, so the block group spells one sequence.
+    #[test]
+    fn test_homozygous_edit_retires_the_replaced_edge() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .map(|augmented_edge| augmented_edge.edge.id)
+            .collect::<HashSet<_>>();
+        let mut edit_node_ids = vec![];
+        let (start, end, bases) = (10, 12, "NNNN");
+        let (node_id, length) = if bases.is_empty() {
+            (HashId::convert_str(""), 0)
+        } else {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(bases)
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(
+                conn,
+                &sequence.hash,
+                &HashId::convert_str(&format!("edit-{bases}-{start}")),
+            )
+            .unwrap();
+            (node_id, sequence.length)
+        };
+        edit_node_ids.push(node_id);
+        let block = PathBlock {
+            node_id,
+            block_sequence: bases.to_string(),
+            sequence_start: 0,
+            sequence_end: length,
+            path_start: start,
+            path_end: end,
+            strand: Strand::Forward,
+        };
+        let region = ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+        let change = BlockGroupChange {
+            region,
+            path_accession: None,
+            block,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge: false,
+        };
+        BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_node_id,
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_node_id,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .filter(
+                |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                    (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                },
+            )
+            .collect::<HashSet<_>>();
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 1);
+        let retired = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .filter(|augmented_edge| {
+                augmented_edge.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX
+            })
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_node_id,
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_node_id,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .collect::<HashSet<_>>();
+        let allele_node_id = edit_node_ids[0];
+        assert_eq!(
+            written,
+            HashSet::from([
+                (a_node_id, 10, allele_node_id, 0),
+                (allele_node_id, 4, t_node_id, 2)
+            ])
+        );
+        assert!(retired.contains(&(a_node_id, 10, t_node_id, 0)));
+    }
+
+    /// A deletion where three routes arrive at a node adds an edge from each of them.
+    #[test]
+    fn test_deletion_adds_an_edge_from_every_route_arriving_at_the_node() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let mut alternative_node_ids = vec![];
+        for (label, bases) in [
+            ("first-alternative", "GGGG"),
+            ("second-alternative", "CCCC"),
+        ] {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(bases)
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str(label)).unwrap();
+            let into = Edge::create(
+                conn,
+                a_node_id,
+                10,
+                Strand::Forward,
+                node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let out = Edge::create(
+                conn,
+                node_id,
+                4,
+                Strand::Forward,
+                t_node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[into.id, out.id].map(|edge_id| BlockGroupEdgeData {
+                    block_group_id,
+                    edge_id,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                }),
+            );
+            alternative_node_ids.push(node_id);
+        }
+        let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .map(|augmented_edge| augmented_edge.edge.id)
+            .collect::<HashSet<_>>();
+        let mut edit_node_ids = vec![];
+        let (start, end, bases) = (10, 12, "");
+        let (node_id, length) = if bases.is_empty() {
+            (HashId::convert_str(""), 0)
+        } else {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(bases)
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(
+                conn,
+                &sequence.hash,
+                &HashId::convert_str(&format!("edit-{bases}-{start}")),
+            )
+            .unwrap();
+            (node_id, sequence.length)
+        };
+        edit_node_ids.push(node_id);
+        let block = PathBlock {
+            node_id,
+            block_sequence: bases.to_string(),
+            sequence_start: 0,
+            sequence_end: length,
+            path_start: start,
+            path_end: end,
+            strand: Strand::Forward,
+        };
+        let region = ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+        let change = BlockGroupChange {
+            region,
+            path_accession: None,
+            block,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge: true,
+        };
+        BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+            .iter()
+            .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+            .map(|augmented_edge| {
+                (
+                    augmented_edge.edge.source_node_id,
+                    augmented_edge.edge.source_coordinate,
+                    augmented_edge.edge.target_node_id,
+                    augmented_edge.edge.target_coordinate,
+                )
+            })
+            .filter(
+                |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                    (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                },
+            )
+            .collect::<HashSet<_>>();
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 6);
+        assert_eq!(
+            written,
+            HashSet::from([
+                (a_node_id, 10, t_node_id, 2),
+                (alternative_node_ids[0], 4, t_node_id, 2),
+                (alternative_node_ids[1], 4, t_node_id, 2),
+            ])
+        );
+    }
+
+    /// A deletion at either end of the contig attaches to the start or end marker node.
+    #[test]
+    fn test_deletion_at_a_contig_end_attaches_to_the_marker_node() {
+        for (start, end, expected) in [
+            (
+                0,
+                2,
+                (PATH_START_NODE_ID, 0, HashId::convert_str("test-a-node"), 2),
+            ),
+            (
+                38,
+                40,
+                (HashId::convert_str("test-g-node"), 8, PATH_END_NODE_ID, 0),
+            ),
+        ] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+                .iter()
+                .map(|augmented_edge| augmented_edge.edge.id)
+                .collect::<HashSet<_>>();
+            let mut edit_node_ids = vec![];
+            let bases = "";
+            let (node_id, length) = if bases.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(bases)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                )
+                .unwrap();
+                (node_id, sequence.length)
+            };
+            edit_node_ids.push(node_id);
+            let block = PathBlock {
+                node_id,
+                block_sequence: bases.to_string(),
+                sequence_start: 0,
+                sequence_end: length,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            };
+            let region =
+                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let change = BlockGroupChange {
+                region,
+                path_accession: None,
+                block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+            let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+                .iter()
+                .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+                .map(|augmented_edge| {
+                    (
+                        augmented_edge.edge.source_node_id,
+                        augmented_edge.edge.source_coordinate,
+                        augmented_edge.edge.target_node_id,
+                        augmented_edge.edge.target_coordinate,
+                    )
+                })
+                .filter(
+                    |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                        (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                    },
+                )
+                .collect::<HashSet<_>>();
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(sequences.len(), 2, "{start}-{end}");
+            assert_eq!(written, HashSet::from([expected]), "{start}-{end}");
+        }
+    }
+
+    /// An insertion at either end of the contig sits between the start or end marker node and
+    /// the node beside it.
+    #[test]
+    fn test_insertion_at_a_contig_end_sits_next_to_the_marker_node() {
+        for (position, before_edge, after_edge) in [
+            (
+                0,
+                (PATH_START_NODE_ID, 0),
+                (HashId::convert_str("test-a-node"), 0),
+            ),
+            (
+                40,
+                (HashId::convert_str("test-g-node"), 10),
+                (PATH_END_NODE_ID, 0),
+            ),
+        ] {
+            let start = position;
+            let end = position;
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            let before = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+                .iter()
+                .map(|augmented_edge| augmented_edge.edge.id)
+                .collect::<HashSet<_>>();
+            let mut edit_node_ids = vec![];
+            let bases = "GG";
+            let (node_id, length) = if bases.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(bases)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                )
+                .unwrap();
+                (node_id, sequence.length)
+            };
+            edit_node_ids.push(node_id);
+            let block = PathBlock {
+                node_id,
+                block_sequence: bases.to_string(),
+                sequence_start: 0,
+                sequence_end: length,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            };
+            let region =
+                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let change = BlockGroupChange {
+                region,
+                path_accession: None,
+                block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+            let written = BlockGroupEdge::edges_for_block_group(conn, &block_group_id, None)
+                .iter()
+                .filter(|augmented_edge| !before.contains(&augmented_edge.edge.id))
+                .map(|augmented_edge| {
+                    (
+                        augmented_edge.edge.source_node_id,
+                        augmented_edge.edge.source_coordinate,
+                        augmented_edge.edge.target_node_id,
+                        augmented_edge.edge.target_coordinate,
+                    )
+                })
+                .filter(
+                    |(source_node_id, source_coordinate, target_node_id, target_coordinate)| {
+                        (source_node_id, source_coordinate) != (target_node_id, target_coordinate)
+                    },
+                )
+                .collect::<HashSet<_>>();
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(sequences.len(), 2, "{position}");
+            let edit_node_id = edit_node_ids[0];
+            assert_eq!(
+                written,
+                HashSet::from([
+                    (before_edge.0, before_edge.1, edit_node_id, 0),
+                    (edit_node_id, 2, after_edge.0, after_edge.1),
+                ]),
+                "{position}"
+            );
+        }
+    }
+}
