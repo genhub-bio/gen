@@ -910,10 +910,13 @@ fn push_graph_through_direct_session_inner(
                     PushGraphTransferError::database("configuring loopback Dolt remote", error),
                 ));
             }
+            write_progress_line(
+                "Planning destination-missing Dolt chunks before the first logical chunk upload...",
+            );
             let push_result = {
                 let _heartbeat =
                     graph_progress.heartbeat("running Dolt push through loopback RemoteServer");
-                push_graph_branch(graph, &remote.name, branch, force)
+                push_graph_branch_with_progress(graph, &remote.name, branch, force, graph_progress)
             };
             if let Err(error) = push_result {
                 graph_progress.finish();
@@ -1249,6 +1252,24 @@ fn push_graph_branch(
     } else {
         push(graph, remote_name, branch)
     }
+}
+
+fn push_graph_branch_with_progress(
+    graph: &GraphConnection,
+    remote_name: &str,
+    branch: &str,
+    force: bool,
+    progress: &GraphUploadProgressReporter,
+) -> Result<(), SqlError> {
+    let progress_callback = progress.clone();
+    let push_result = {
+        let _progress_callback = graph.dolt_push_progress_callback(move |event| {
+            progress_callback.report_dolt_progress(event);
+        })?;
+        push_graph_branch(graph, remote_name, branch, force)
+    };
+    progress.finish_dolt_progress(push_result.is_ok());
+    push_result
 }
 
 fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
