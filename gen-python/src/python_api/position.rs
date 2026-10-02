@@ -702,7 +702,7 @@ mod tests {
         path::Path,
         sequence::Sequence,
     };
-    use pyo3::{Python, prepare_freethreaded_python};
+    use pyo3::{Python};
 
     use super::{Position, PyPosition, PySuperPosition, current_graph};
     use crate::python_api::block_group::PySequenceGraph;
@@ -797,11 +797,11 @@ mod tests {
 
     #[test]
     fn test_position_add_without_fork_stays_a_position() {
-        prepare_freethreaded_python();
+        Python::initialize();
         let (context, sequence_graph, nodes) = bubble();
         let position = last_position(&context, &sequence_graph, &nodes, "ABCD", 0);
 
-        Python::with_gil(|python| {
+        Python::attach(|python| {
             let stepped = position
                 .__add__(python, 1)
                 .expect("should step within a node");
@@ -829,12 +829,12 @@ mod tests {
 
     #[test]
     fn test_position_add_at_fork_becomes_a_superposition() {
-        prepare_freethreaded_python();
+        Python::initialize();
         let (context, sequence_graph, nodes) = bubble();
         // The last position of ABCD steps into the first position of both EFGH and IJKL.
         let position = last_position(&context, &sequence_graph, &nodes, "ABCD", 3);
 
-        Python::with_gil(|python| {
+        Python::attach(|python| {
             let stepped = position
                 .__add__(python, 1)
                 .expect("should step to the fork");
@@ -855,12 +855,12 @@ mod tests {
 
     #[test]
     fn test_position_add_without_sequence_graph_raises_value_error() {
-        prepare_freethreaded_python();
+        Python::initialize();
         let (context, sequence_graph, nodes) = bubble();
         let mut position = last_position(&context, &sequence_graph, &nodes, "ABCD", 0);
         position.sequence_graph = None;
 
-        Python::with_gil(|python| {
+        Python::attach(|python| {
             let error = position
                 .__add__(python, 1)
                 .expect_err("stepping an unattached position should fail");
@@ -873,11 +873,11 @@ mod tests {
 
     #[test]
     fn test_position_add_past_terminal_raises_index_error() {
-        prepare_freethreaded_python();
+        Python::initialize();
         let (context, sequence_graph, nodes) = bubble();
         let position = last_position(&context, &sequence_graph, &nodes, "MNOP", 3);
 
-        Python::with_gil(|python| {
+        Python::attach(|python| {
             let error = position
                 .__add__(python, 1)
                 .expect_err("stepping past the end of the graph should fail");

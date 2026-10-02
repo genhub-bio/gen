@@ -409,8 +409,8 @@ mod tests {
 
     #[test]
     fn test_branch_merge_and_reset_workflow() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let repository = make_repository();
             Collection::create(repository.context.graph().conn(), "base")
                 .expect("should create base collection");

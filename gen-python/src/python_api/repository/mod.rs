@@ -479,8 +479,8 @@ mod python_tests {
 
     #[test]
     fn test_repository_creation() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let tmp_dir = tempdir().unwrap();
             // Escape backslashes so a Windows path (e.g. `C:\Users\...`) survives
             // interpolation into a double-quoted Python string literal; otherwise
@@ -504,8 +504,8 @@ mod python_tests {
     #[cfg(unix)]
     #[test]
     fn test_clone_returns_open_repository() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let source = make_repo(py);
             let fasta_dir = tempdir().unwrap();
             let fasta = write_fasta(&fasta_dir, "test.fa", "chr1", "ACGTACGT");
@@ -543,8 +543,8 @@ mod python_tests {
 
     #[test]
     fn test_import_fasta_creates_block_group() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
@@ -613,8 +613,8 @@ mod python_tests {
 
     #[test]
     fn test_import_fasta_duplicate_gives_specific_error() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
@@ -644,8 +644,8 @@ mod python_tests {
 
     #[test]
     fn test_import_sequence_returns_graph_and_builds_sample_in_a_loop() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             py_run!(
                 py,
@@ -675,8 +675,8 @@ mod python_tests {
 
     #[test]
     fn test_import_sequence_rejects_bad_input() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             py_run!(
                 py,
@@ -702,8 +702,8 @@ mod python_tests {
 
     #[test]
     fn test_import_sequence_duplicate_gives_specific_error() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             py_run!(
                 py,
@@ -723,8 +723,8 @@ mod python_tests {
 
     #[test]
     fn test_import_sequence_reusing_a_name_with_new_contents_fails() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             py_run!(
                 py,
@@ -745,8 +745,8 @@ mod python_tests {
 
     #[test]
     fn test_import_sequence_circular_and_reference() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             py_run!(
                 py,
@@ -769,8 +769,8 @@ mod python_tests {
 
     #[test]
     fn test_search_finds_exact_match() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -796,8 +796,8 @@ mod python_tests {
 
     #[test]
     fn test_search_no_match() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -820,8 +820,8 @@ mod python_tests {
 
     #[test]
     fn test_build_index_creates_file() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -858,8 +858,8 @@ mod python_tests {
 
     #[test]
     fn test_search_with_index_finds_match() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -883,8 +883,8 @@ mod python_tests {
 
     #[test]
     fn test_clear_index_removes_file() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
@@ -923,8 +923,8 @@ mod python_tests {
 
     #[test]
     fn test_blockgroup_build_and_clear_index() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let py_repo = make_repo(py);
             let dir = tempdir().unwrap();
             let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGTACGT");
