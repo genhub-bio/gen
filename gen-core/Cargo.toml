@@ -24,8 +24,8 @@ hex = "0.4.3"
 rand = "0.10.1"
 uuid = { version = "1.18.1", features = ["v7"] }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-pyo3 = { version = "0.25.1", optional = true }
-pyo3-macros = { version = "0.25.1", optional = true }
+pyo3 = { version = "0.27", optional = true }
+pyo3-macros = { version = "0.27", optional = true }
 
 [dev-dependencies]
 tempfile = "3.20.0"

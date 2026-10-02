@@ -65,7 +65,7 @@ pub fn clone_repository(
         }
     };
     discard_untouched_workspace(&workspace)?;
-    python.allow_threads(|| {
+    python.detach(|| {
         r#gen::commands::clone::clone_to_workspace(url, &workspace)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     })?;
@@ -289,12 +289,12 @@ impl PyRepository {
     }
 
     #[getter]
-    fn get_gen_dir(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn get_gen_dir(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         path_to_py_path(py, &self.context.workspace().ensure_gen_dir())
     }
 
     #[getter]
-    fn get_db_path(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn get_db_path(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let path = self
             .context
             .workspace()
@@ -314,7 +314,7 @@ impl PyRepository {
         Ok(())
     }
 
-    fn query(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Vec<PyObject>>> {
+    fn query(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Vec<Py<PyAny>>>> {
         py_query(py, self.context.graph().conn(), query)
     }
 
@@ -392,9 +392,9 @@ impl PyRepository {
         rows: Option<u32>,
         cols: Option<u32>,
         detail: Option<&str>,
-        colors: Option<PyObject>,
+        colors: Option<Py<PyAny>>,
         show_history: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph, show_history)?;
         if let Some(node_detail) = detail {
             ctrl.set_detail(node_detail)?;
