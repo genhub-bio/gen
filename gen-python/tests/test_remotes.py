@@ -13,14 +13,27 @@ from unittest.mock import patch
 import gen
 
 
-def asset_ids_by_name(repository):
-    """Maps each asset's tracked file name to its content-addressed id.
+def archived_asset_bytes_by_id(repository):
+    """Read reachable local assets from the content-addressed archive directory."""
+    asset_refs = {
+        asset_id: (uri, checksum)
+        for asset_id, uri, checksum in repository.query(
+            "SELECT lower(hex(id)), uri, checksum FROM gen_asset_refs"
+        )
+    }
+    reachable_asset_ids = {asset.id for asset in repository.get_assets()}
+    asset_directory = Path(repository.db_path).parent / "assets"
+    archived_assets = {}
 
-    Every file import (even non-shallow ones) is tracked as a provenance asset, so any test that
-    imports a fixture over an HTTP remote must be prepared to serve that asset's bytes back to the
-    client during clone or pull, and to accept them during push.
-    """
-    return {asset.name: asset.id for asset in repository.get_assets()}
+    for asset_id in reachable_asset_ids:
+        uri, checksum = asset_refs[asset_id]
+        if not uri.startswith("file://"):
+            raise AssertionError(f"asset {asset_id} is not locally archived")
+        suffix = Path(uri.removeprefix("file://")).name.partition(".")[2]
+        filename = f"{checksum.hex()}.{suffix}" if suffix else checksum.hex()
+        archived_assets[asset_id] = (asset_directory / filename).read_bytes()
+
+    return archived_assets
 
 
 @contextmanager
@@ -308,12 +321,9 @@ class RemoteTests(unittest.TestCase):
         self.import_sequence(upstream, "base")
         graph_url = (upstream_path / ".gen" / "default.db").as_uri()
 
-        # Every fasta import is tracked as a provenance asset (see `asset_ids_by_name`), so a
-        # faithful mock must hand back real asset ids and serve or accept their bytes, not an empty
-        # list. `known_asset_ids` grows as new assets are created locally; returning every known id
-        # on each `/asset-transfers` call is always a safe superset (GenHub validates requested
-        # transfers against the branch's full asset history, not just the ones actually needed).
-        known_asset_ids = dict(asset_ids_by_name(upstream))
+        # Return the complete reachable inventory on every transfer query. GenHub validates
+        # requests against branch history, which includes each archived FASTA and its indexes.
+        known_assets = archived_asset_bytes_by_id(upstream)
         server_origin = {}
 
         def respond(path, headers, _body):
@@ -333,26 +343,32 @@ class RemoteTests(unittest.TestCase):
                             "id": asset_id,
                             "url": f"{server_origin['url']}/assets/{asset_id}",
                         }
-                        for asset_id in known_asset_ids.values()
+                        for asset_id in known_assets
                     ]
                 }
             return 200, {"assets": []}
 
         with genhub_server(respond) as (url, requests, served_assets):
             server_origin["url"] = url.split("/repos/", 1)[0]
-            for name, asset_id in known_asset_ids.items():
-                served_assets[asset_id] = (self.root / name).read_bytes()
+            served_assets.update(known_assets)
             with patch.dict(os.environ, {"GENHUB_API_KEY": "accepted-test-key"}):
                 local = gen.clone(url, path=str(self.root / "clone"))
                 self.import_sequence(local, "local_change")
-                local_asset_ids = asset_ids_by_name(local)
-                known_asset_ids["local_change.fa"] = local_asset_ids["local_change.fa"]
-                local.push(force=True)
-                self.assertEqual(
-                    served_assets.get(known_asset_ids["local_change.fa"]),
-                    (self.root / "local_change.fa").read_bytes(),
-                    "push should upload the local-only asset's exact bytes",
+                local_assets = archived_asset_bytes_by_id(local)
+                local_only_asset_ids = local_assets.keys() - known_assets.keys()
+                self.assertTrue(
+                    local_only_asset_ids,
+                    "local import should add archived assets",
                 )
+                known_assets.update(local_assets)
+                local.push(force=True)
+                for asset_id in local_only_asset_ids:
+                    self.assertEqual(
+                        served_assets.get(asset_id),
+                        local_assets[asset_id],
+                        f"push should upload local-only asset {asset_id} "
+                        "with exact archived bytes",
+                    )
                 local.fetch()
                 local.pull()
             authenticated = [

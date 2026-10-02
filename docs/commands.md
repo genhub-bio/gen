@@ -60,6 +60,15 @@ repository copy; remote assets remain remote. Supply known FASTA indices with a
 repeatable `--index <path-or-uri>` option. For example, a BGZF FASTA can use both
 `--index reference.fa.gz.fai` and `--index reference.fa.gz.gzi`.
 
+# Archived inputs
+
+Uncompressed FASTA, VCF, GFA/GAF, GFF/BED, GenBank, and CSV inputs are stored in
+BGZF form and restored as their original plain bytes at their logical paths.
+Ordinary gzip selected text assets are normalized to BGZF, while existing BGZF
+bytes and compressed workspace paths are retained. Binary files and index files
+are retained unchanged. The asset checksum verifies archived bytes, while the
+materialized checksum verifies bytes restored at the logical path.
+
 # View diff
 
 Compare one sequence graph between two samples with:

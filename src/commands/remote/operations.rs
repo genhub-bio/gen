@@ -68,15 +68,20 @@ use std::{
 use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
 use crc32c::crc32c_append;
+use flate2::read::MultiGzDecoder;
 use gen_core::{
     DoltHashId, HashId, Sha256Hash,
     config::{DEFAULT_GRAPH_DB_NAME, Workspace},
     errors::{ConfigError, ConnectionError},
 };
 use gen_models::{
-    assets::{AssetRef, AssetView, LocalAssetUri, materialization_destination_path},
+    assets::{
+        AssetRef, AssetView, ChecksummedWriter, LocalAssetUri, materialization_destination_path,
+        should_archive_as_bgzf,
+    },
     db::{ConfigConnection, GraphConnection},
     errors::{QueryError, RemoteError as ModelRemoteError},
+    file_types::FileTypes,
     history::dolt::{
         active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull, push,
         push_force, remote_rows, set_remote_url,
@@ -88,6 +93,7 @@ use gen_models::{
 };
 use indexmap::IndexMap;
 use md5::Md5;
+use noodles::bgzf;
 use reqwest::{
     StatusCode,
     blocking::{Body, Client, Response},
@@ -335,6 +341,13 @@ fn asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
         .ok_or_else(|| format!("Local asset {} has no checksum", asset.id).into())
 }
 
+fn materialized_asset_checksum(asset: &AssetRef) -> Result<Sha256Hash, Box<dyn Error>> {
+    match asset.materialized_checksum {
+        Some(checksum) => Ok(checksum),
+        None => asset_checksum(asset),
+    }
+}
+
 fn calculate_upload_checksums(path: &Path) -> Result<(Sha256Hash, String, String), std::io::Error> {
     let file = fs::File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -370,6 +383,8 @@ fn upload_asset(
     let uri_path = LocalAssetUri::repo_relative_destination_path(workspace, &relative_path)?;
     let source_path = if uri_path.is_file() {
         uri_path
+    } else if asset.materialized_checksum.is_some() {
+        materialization_destination_path(workspace, &asset.uri, Some(&expected_checksum), None)?
     } else {
         materialization_destination_path(
             workspace,
@@ -452,22 +467,86 @@ fn destination_matches_previous_asset(
     existing_checksum: &Sha256Hash,
     previous_assets: &HashMap<HashId, AssetRef>,
 ) -> Result<bool, Box<dyn Error>> {
+    let mut decoded_destination_checksum = None;
+    let mut destination_decode_failed = false;
     for asset in previous_assets.values() {
-        let checksum = asset_checksum(asset)?;
-        if checksum != *existing_checksum {
-            continue;
-        }
-        let asset_path = materialization_destination_path(
+        let archive_checksum = asset_checksum(asset)?;
+        let logical_path = materialization_destination_path(
             workspace,
             &asset.uri,
-            Some(&checksum),
+            Some(&archive_checksum),
             asset.logical_path.as_deref(),
         )?;
-        if asset_path == destination_path {
+        if logical_path != destination_path {
+            continue;
+        }
+        if materialized_asset_checksum(asset)? == *existing_checksum {
+            return Ok(true);
+        }
+        // Ordinary-gzip sources retain their path while the archive is normalized to BGZF.
+        if asset.materialized_checksum.is_some()
+            || !should_archive_as_bgzf(FileTypes::from_storage_tag(&asset.file_type))
+            || !asset.logical_path.as_deref().is_some_and(|logical_path| {
+                Path::new(logical_path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        extension.eq_ignore_ascii_case("gz")
+                            || extension.eq_ignore_ascii_case("bgz")
+                    })
+            })
+        {
+            continue;
+        }
+        let archived_path =
+            materialization_destination_path(workspace, &asset.uri, Some(&archive_checksum), None)?;
+        if !archived_path.is_file() {
+            continue;
+        }
+        if !calculate_file_checksum(&archived_path)
+            .is_ok_and(|checksum| checksum == archive_checksum)
+        {
+            continue;
+        }
+        if destination_decode_failed {
+            continue;
+        }
+        let existing_decoded_checksum = if let Some(checksum) = decoded_destination_checksum {
+            checksum
+        } else {
+            match decoded_compressed_checksum(destination_path) {
+                Ok(checksum) => {
+                    decoded_destination_checksum = Some(checksum);
+                    checksum
+                }
+                Err(_) => {
+                    destination_decode_failed = true;
+                    continue;
+                }
+            }
+        };
+        let Ok(archived_decoded_checksum) = decoded_compressed_checksum(&archived_path) else {
+            continue;
+        };
+        if existing_decoded_checksum == archived_decoded_checksum {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn decoded_compressed_checksum(path: &Path) -> Result<Sha256Hash, io::Error> {
+    let mut reader = MultiGzDecoder::new(fs::File::open(path)?);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let length = reader.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        hasher.update(&buffer[..length]);
+    }
+    Ok(Sha256Hash(hasher.finalize().into()))
 }
 
 /// If a conflict exists for a file we are pulling/cloning, rename it as .conflict for user resolution
@@ -705,21 +784,19 @@ fn copy_to_versioned_store(
         return Ok((destination_path, false));
     }
 
-    copy_versioned_asset(&source_path, &destination_path)?;
-    if calculate_file_checksum(&destination_path)? != expected_checksum {
-        fs::remove_file(&destination_path)?;
-        return Err(format!("Copied asset {} failed checksum validation", asset.id).into());
-    }
+    copy_versioned_asset(&source_path, &destination_path, None, &expected_checksum)?;
     Ok((destination_path, true))
 }
 
-/// Copies a verified versioned asset to another path through a synced staged file.
+/// Copies a versioned asset through a synced staged file.
 ///
-/// [`materialize_versioned_asset`] uses this for logical and conflict files. The `file://` remote
-/// transport also uses it when moving checksum-addressed versions between workspace stores.
+/// Archive transfers pass no materialized checksum and keep bytes unchanged. Workspace
+/// materialization supplies one to decode BGZF and verify the resulting bytes before rename.
 fn copy_versioned_asset(
     versioned_path: &Path,
     destination_path: &Path,
+    materialized_checksum: Option<&Sha256Hash>,
+    expected_output_checksum: &Sha256Hash,
 ) -> Result<(), Box<dyn Error>> {
     let parent = destination_path.parent().ok_or_else(|| {
         format!(
@@ -735,11 +812,31 @@ fn copy_versioned_asset(
             .write(true)
             .truncate(true)
             .open(&staged_path)?;
-        let mut versioned_file = fs::File::open(versioned_path)?;
-        io::copy(&mut versioned_file, &mut staged_file)?;
-        staged_file.flush()?;
+        let versioned_file = fs::File::open(versioned_path)?;
+        let staged_checksum = {
+            let mut checksummed_writer = ChecksummedWriter::new(&mut staged_file);
+            match materialized_checksum {
+                Some(_) => {
+                    let mut decoded_file = bgzf::io::Reader::new(versioned_file);
+                    io::copy(&mut decoded_file, &mut checksummed_writer)?;
+                }
+                None => {
+                    let mut versioned_file = versioned_file;
+                    io::copy(&mut versioned_file, &mut checksummed_writer)?;
+                }
+            }
+            checksummed_writer.flush()?;
+            checksummed_writer.checksum()
+        };
         staged_file.sync_all()?;
         drop(staged_file);
+        if staged_checksum != *expected_output_checksum {
+            return Err(format!(
+                "Copied asset at {} failed checksum validation",
+                destination_path.display()
+            )
+            .into());
+        }
         fs::rename(&staged_path, destination_path)?;
         Ok::<(), Box<dyn Error>>(())
     })();
@@ -762,9 +859,18 @@ pub(crate) fn materialize_versioned_asset(
     versioned_file_created: bool,
 ) -> Result<DownloadAssetOutcome, Box<dyn Error>> {
     let expected_checksum = asset_checksum(asset)?;
+    let expected_materialized_checksum = materialized_asset_checksum(asset)?;
     if !versioned_path.is_file() {
         return Err(format!(
             "Cannot materialize asset {} because its versioned file is missing: {}",
+            asset.id,
+            versioned_path.display()
+        )
+        .into());
+    }
+    if calculate_file_checksum(versioned_path)? != expected_checksum {
+        return Err(format!(
+            "Versioned asset {} at {} does not match its recorded checksum",
             asset.id,
             versioned_path.display()
         )
@@ -792,7 +898,7 @@ pub(crate) fn materialize_versioned_asset(
     }
     if destination_path.exists()
         && calculate_file_checksum(&destination_path)
-            .is_ok_and(|checksum| checksum == expected_checksum)
+            .is_ok_and(|checksum| checksum == expected_materialized_checksum)
     {
         return Ok(DownloadAssetOutcome::Unchanged);
     }
@@ -809,14 +915,24 @@ pub(crate) fn materialize_versioned_asset(
     let has_conflict = existing_checksum.is_some() && !intended_change;
     if has_conflict {
         let (conflict_path, already_downloaded) =
-            conflict_destination_path(&destination_path, &expected_checksum)?;
+            conflict_destination_path(&destination_path, &expected_materialized_checksum)?;
         if !already_downloaded {
-            copy_versioned_asset(versioned_path, &conflict_path)?;
+            copy_versioned_asset(
+                versioned_path,
+                &conflict_path,
+                asset.materialized_checksum.as_ref(),
+                &expected_materialized_checksum,
+            )?;
         }
         return Ok(DownloadAssetOutcome::Conflict(conflict_path));
     }
 
-    copy_versioned_asset(versioned_path, &destination_path)?;
+    copy_versioned_asset(
+        versioned_path,
+        &destination_path,
+        asset.materialized_checksum.as_ref(),
+        &expected_materialized_checksum,
+    )?;
     Ok(DownloadAssetOutcome::Downloaded)
 }
 
@@ -1536,17 +1652,20 @@ mod tests {
     };
 
     use chrono::Utc;
-    use gen_core::{DoltHashId, HashId, config::Workspace};
+    use flate2::{Compression, write::GzEncoder};
+    use gen_core::{DoltHashId, HashId, Sha256Hash, config::Workspace};
     use gen_models::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
         db::GraphConnection,
+        file_types::FileTypes,
         history::dolt::{clone_remote, commit_all, hash_of, remote_rows, remove_remote},
         operations::{
-            Defaults, Remote, RemoteOperationKind as StoredRemoteOperationKind,
+            Defaults, FileAddition, Remote, RemoteOperationKind as StoredRemoteOperationKind,
             RemoteOperationRecord, calculate_reader_checksum,
         },
     };
+    use noodles::bgzf;
     use reqwest::blocking::Client;
     use rusqlite::{Connection, Error as SqlError};
     use serde_json::json;
@@ -1770,19 +1889,19 @@ mod tests {
         let checksum = calculate_reader_checksum(Cursor::new(contents)).expect("should checksum");
         let uri = LocalAssetUri::asset_uri(logical_path);
         let role = AssetRole::Input;
-        AssetRef {
-            id: AssetRef::id_hash(
-                &uri,
-                "text",
-                Some(&checksum),
-                &role,
-                Some(logical_path),
-                None,
-                None,
-            ),
-            uri,
-            file_type: "text".to_string(),
+        let file_addition = FileAddition {
+            id: HashId::convert_str("remote-test-asset"),
+            asset_uri: uri.clone(),
+            file_type: FileTypes::None,
             checksum: Some(checksum),
+            materialized_checksum: None,
+        };
+        AssetRef {
+            id: AssetRef::id_hash(&file_addition, &role, Some(logical_path), None, None),
+            uri,
+            file_type: FileTypes::None.as_str().to_string(),
+            checksum: Some(checksum),
+            materialized_checksum: None,
             size: Some(i64::try_from(contents.len()).expect("asset should fit in i64")),
             role,
             logical_path: Some(logical_path.to_string()),
@@ -1790,6 +1909,64 @@ mod tests {
             created_on,
             upstream_asset_ref_id: None,
         }
+    }
+
+    fn test_bgzf_asset(
+        contents: &[u8],
+        logical_path: &str,
+        created_on: i64,
+    ) -> (AssetRef, Vec<u8>) {
+        let mut archived_contents = Vec::new();
+        let mut writer = bgzf::io::Writer::new(&mut archived_contents);
+        writer
+            .write_all(contents)
+            .expect("should write test BGZF contents");
+        writer.finish().expect("should finish test BGZF stream");
+
+        let mut asset = test_asset(&archived_contents, logical_path, created_on);
+        asset.materialized_checksum = Some(
+            calculate_reader_checksum(Cursor::new(contents)).expect("should checksum plain bytes"),
+        );
+        set_test_asset_identity(&mut asset, FileTypes::None);
+        (asset, archived_contents)
+    }
+
+    fn set_test_asset_identity(asset: &mut AssetRef, file_type: FileTypes) {
+        asset.file_type = file_type.as_str().to_string();
+        let file_addition = FileAddition {
+            id: HashId::convert_str("remote-test-asset-identity"),
+            asset_uri: asset.uri.clone(),
+            file_type,
+            checksum: asset.checksum,
+            materialized_checksum: asset.materialized_checksum,
+        };
+        asset.id = AssetRef::id_hash(
+            &file_addition,
+            &asset.role,
+            asset.logical_path.as_deref(),
+            asset.name.as_deref(),
+            asset.upstream_asset_ref_id.as_ref(),
+        );
+    }
+
+    fn test_gzip_contents(contents: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(contents)
+            .expect("should write gzip content");
+        encoder.finish().expect("should finish gzip stream")
+    }
+
+    fn write_test_versioned_asset(
+        workspace: &Workspace,
+        asset: &AssetRef,
+        archived_contents: &[u8],
+    ) -> PathBuf {
+        let path = versioned_asset_path(workspace, asset);
+        fs::create_dir_all(path.parent().expect("should have versioned asset parent"))
+            .expect("should create versioned asset directory");
+        fs::write(&path, archived_contents).expect("should write versioned archive");
+        path
     }
 
     fn serve_asset(contents: &[u8]) -> (String, thread::JoinHandle<()>) {
@@ -2136,6 +2313,221 @@ mod tests {
     }
 
     #[test]
+    fn test_download_asset_restores_plain_fasta_and_vcf_from_bgzf() {
+        let inputs = [
+            (
+                "reference.fa",
+                b">chr1\nACGTACGT\n".as_slice(),
+            ),
+            (
+                "variants.vcf",
+                b"##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t2\t.\tC\tT\t.\tPASS\t.\n"
+                    .as_slice(),
+            ),
+            ("ordinary.fa.gz", b">chr2\nTTGGCC\n".as_slice()),
+        ];
+
+        for (logical_path, plain_contents) in inputs {
+            let temp = tempdir().expect("should create workspace");
+            let workspace = Workspace::new(temp.path());
+            workspace.ensure_gen_dir();
+            let (asset, archived_contents) = test_bgzf_asset(plain_contents, logical_path, 1);
+            let (url, server) = serve_asset(&archived_contents);
+
+            let outcome = download_asset(
+                &Client::new(),
+                &workspace,
+                &asset,
+                &HashMap::new(),
+                asset.logical_path.as_deref(),
+                &url,
+            )
+            .expect("should download and decode archived input");
+            server.join().expect("asset server should finish");
+
+            assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
+            assert_eq!(
+                fs::read(temp.path().join(logical_path)).expect("should read plain input"),
+                plain_contents,
+                "the workspace copy should restore the original {logical_path} bytes"
+            );
+            assert_eq!(
+                fs::read(versioned_asset_path(&workspace, &asset))
+                    .expect("should read archived input"),
+                archived_contents,
+                "the checksum-addressed store should retain BGZF bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn test_download_asset_preserves_bgzf_for_untransformed_gzip_source() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let source_contents = b">chr1\nACGTACGT\n";
+        let archived_contents = test_bgzf_asset(source_contents, "ordinary.fa.gz", 1).1;
+        let asset = test_asset(&archived_contents, "ordinary.fa.gz", 1);
+        let (url, server) = serve_asset(&archived_contents);
+
+        let outcome = download_asset(
+            &Client::new(),
+            &workspace,
+            &asset,
+            &HashMap::new(),
+            asset.logical_path.as_deref(),
+            &url,
+        )
+        .expect("should download untransformed compressed source");
+        server.join().expect("should finish asset server");
+
+        assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
+        assert_eq!(
+            fs::read(temp.path().join("ordinary.fa.gz"))
+                .expect("should read preserved compressed source"),
+            archived_contents,
+            "assets without a materialized checksum should retain archived BGZF bytes at their source path"
+        );
+    }
+
+    #[test]
+    fn test_download_asset_replaces_a_known_plain_bgzf_version() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let destination = temp.path().join("reference.fa");
+        let previous_contents = b">chr1\nAACCGG\n";
+        fs::write(&destination, previous_contents).expect("should write previous plain file");
+        let (previous_asset, _) = test_bgzf_asset(previous_contents, "reference.fa", 1);
+        let previous_assets = HashMap::from([(previous_asset.id, previous_asset)]);
+        let current_contents = b">chr1\nTTGGCC\n";
+        let (current_asset, archived_contents) =
+            test_bgzf_asset(current_contents, "reference.fa", 2);
+        let (url, server) = serve_asset(&archived_contents);
+
+        let outcome = download_asset(
+            &Client::new(),
+            &workspace,
+            &current_asset,
+            &previous_assets,
+            current_asset.logical_path.as_deref(),
+            &url,
+        )
+        .expect("should replace a known previous plain file");
+        server.join().expect("asset server should finish");
+
+        assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
+        assert_eq!(
+            fs::read(&destination).expect("should read replaced plain file"),
+            current_contents
+        );
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &current_asset))
+                .expect("should read retained BGZF archive"),
+            archived_contents
+        );
+        assert!(!temp.path().join("reference.fa.conflict").exists());
+    }
+
+    #[test]
+    fn test_download_asset_deduplicates_materialized_file_and_conflict_by_plain_hash() {
+        let plain_contents = b">chr1\nACGTACGT\n";
+        let (asset, archived_contents) = test_bgzf_asset(plain_contents, "reference.fa", 1);
+
+        let matching_temp = tempdir().expect("should create matching workspace");
+        let matching_workspace = Workspace::new(matching_temp.path());
+        matching_workspace.ensure_gen_dir();
+        fs::write(matching_temp.path().join("reference.fa"), plain_contents)
+            .expect("should write matching plain source");
+        let (url, server) = serve_asset(&archived_contents);
+        let outcome = download_asset(
+            &Client::new(),
+            &matching_workspace,
+            &asset,
+            &HashMap::new(),
+            asset.logical_path.as_deref(),
+            &url,
+        )
+        .expect("should recognize matching materialized bytes");
+        server.join().expect("asset server should finish");
+        assert_eq!(outcome, DownloadAssetOutcome::Unchanged);
+        assert_eq!(
+            fs::read(versioned_asset_path(&matching_workspace, &asset))
+                .expect("should read stored archive"),
+            archived_contents
+        );
+
+        let conflict_temp = tempdir().expect("should create conflict workspace");
+        let conflict_workspace = Workspace::new(conflict_temp.path());
+        conflict_workspace.ensure_gen_dir();
+        fs::write(conflict_temp.path().join("reference.fa"), b"local edits\n")
+            .expect("should write locally modified source");
+        let conflict_path = conflict_temp.path().join("reference.fa.conflict");
+        fs::write(&conflict_path, plain_contents).expect("should seed decoded conflict copy");
+        let (url, server) = serve_asset(&archived_contents);
+        let outcome = download_asset(
+            &Client::new(),
+            &conflict_workspace,
+            &asset,
+            &HashMap::new(),
+            asset.logical_path.as_deref(),
+            &url,
+        )
+        .expect("should reuse matching decoded conflict copy");
+        server.join().expect("asset server should finish");
+
+        assert_eq!(
+            outcome,
+            DownloadAssetOutcome::Conflict(conflict_path.clone())
+        );
+        assert_eq!(
+            fs::read(conflict_path).expect("should read reused conflict"),
+            plain_contents
+        );
+        assert!(
+            !conflict_temp
+                .path()
+                .join("reference.fa.conflict.1")
+                .exists(),
+            "matching decoded conflicts should be reused by their plain-byte checksum"
+        );
+        assert_eq!(
+            fs::read(versioned_asset_path(&conflict_workspace, &asset))
+                .expect("should read stored archive"),
+            archived_contents
+        );
+    }
+
+    #[test]
+    fn test_download_asset_fetches_bgzf_without_materializing_workspace_file() {
+        let temp = tempdir().expect("should create workspace");
+        let workspace = Workspace::new(temp.path());
+        workspace.ensure_gen_dir();
+        let plain_contents = b">chr1\nACGT\n";
+        let (asset, archived_contents) = test_bgzf_asset(plain_contents, "reference.fa", 1);
+        let (url, server) = serve_asset(&archived_contents);
+
+        let outcome = download_asset(
+            &Client::new(),
+            &workspace,
+            &asset,
+            &HashMap::new(),
+            None,
+            &url,
+        )
+        .expect("should retain an archived-only historical asset");
+        server.join().expect("asset server should finish");
+
+        assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
+        assert!(!temp.path().join("reference.fa").exists());
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &asset))
+                .expect("should read archived-only BGZF asset"),
+            archived_contents
+        );
+    }
+
+    #[test]
     fn test_download_to_versioned_store_resumes_partial_asset_file() {
         let temp = tempdir().expect("should create workspace");
         let workspace = Workspace::new(temp.path());
@@ -2191,15 +2583,15 @@ mod tests {
         let workspace = Workspace::new(temp.path());
         workspace.ensure_gen_dir();
         let destination = temp.path().join("reference.fa");
-        let older_contents = b"older version\n";
+        let older_contents = b">chr1\nAAAACCCC\n";
         fs::write(&destination, older_contents).expect("should write older managed file");
-        let older_asset = test_asset(older_contents, "reference.fa", 1);
-        let newer_asset = test_asset(b"newer version\n", "reference.fa", 2);
+        let (older_asset, _) = test_bgzf_asset(older_contents, "reference.fa", 1);
+        let (newer_asset, _) = test_bgzf_asset(b">chr1\nGGGGTTTT\n", "reference.fa", 2);
         let previous_assets =
             HashMap::from([(older_asset.id, older_asset), (newer_asset.id, newer_asset)]);
-        let remote_contents = b"remote version\n";
-        let remote_asset = test_asset(remote_contents, "reference.fa", 3);
-        let (url, server) = serve_asset(remote_contents);
+        let remote_contents = b">chr1\nACACACAC\n";
+        let (remote_asset, archived_contents) = test_bgzf_asset(remote_contents, "reference.fa", 3);
+        let (url, server) = serve_asset(&archived_contents);
 
         let outcome = download_asset(
             &Client::new(),
@@ -2214,7 +2606,84 @@ mod tests {
 
         assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
         assert_eq!(fs::read(&destination).unwrap(), remote_contents);
+        assert_eq!(
+            fs::read(versioned_asset_path(&workspace, &remote_asset))
+                .expect("should read archived latest version"),
+            archived_contents
+        );
         assert!(!temp.path().join("reference.fa.conflict").exists());
+    }
+
+    #[test]
+    fn test_download_asset_compares_compressed_source_by_decoded_content() {
+        let logical_path = "variants.vcf.gz";
+        let previous_contents = b"##fileformat=VCFv4.3\nchr1\t2\t.\tC\tT\t.\tPASS\t.\n";
+        let previous_archive = test_bgzf_asset(previous_contents, logical_path, 1).1;
+        let mut previous_asset = test_asset(&previous_archive, logical_path, 1);
+        set_test_asset_identity(&mut previous_asset, FileTypes::VCF);
+        let previous_assets = HashMap::from([(previous_asset.id, previous_asset.clone())]);
+
+        let current_contents = b"##fileformat=VCFv4.3\nchr1\t3\t.\tG\tA\t.\tPASS\t.\n";
+        let current_archive = test_bgzf_asset(current_contents, logical_path, 2).1;
+        let mut current_asset = test_asset(&current_archive, logical_path, 2);
+        set_test_asset_identity(&mut current_asset, FileTypes::VCF);
+
+        for (workspace_contents, should_conflict) in [
+            (previous_contents.as_slice(), false),
+            (
+                b"##fileformat=VCFv4.3\nchr1\t2\t.\tC\tG\t.\tPASS\t.\n".as_slice(),
+                true,
+            ),
+        ] {
+            let temp = tempdir().expect("should create workspace");
+            let workspace = Workspace::new(temp.path());
+            workspace.ensure_gen_dir();
+            write_test_versioned_asset(&workspace, &previous_asset, &previous_archive);
+            let destination = temp.path().join(logical_path);
+            let compressed_source = test_gzip_contents(workspace_contents);
+            fs::write(&destination, &compressed_source)
+                .expect("should write compressed workspace source");
+            let (url, server) = serve_asset(&current_archive);
+
+            let outcome = download_asset(
+                &Client::new(),
+                &workspace,
+                &current_asset,
+                &previous_assets,
+                current_asset.logical_path.as_deref(),
+                &url,
+            )
+            .expect("should compare compressed VCF content");
+            server.join().expect("should finish asset server");
+
+            if should_conflict {
+                let conflict_path = temp.path().join("variants.vcf.gz.conflict");
+                assert_eq!(
+                    outcome,
+                    DownloadAssetOutcome::Conflict(conflict_path.clone())
+                );
+                assert_eq!(
+                    fs::read(&destination).expect("should read preserved compressed source"),
+                    compressed_source,
+                    "changed compressed source should remain untouched"
+                );
+                assert_eq!(
+                    fs::read(conflict_path).expect("should read current conflict asset"),
+                    current_archive
+                );
+            } else {
+                assert_eq!(outcome, DownloadAssetOutcome::Downloaded);
+                assert_eq!(
+                    fs::read(&destination).expect("should read updated compressed path"),
+                    current_archive,
+                    "the updated compressed path should retain BGZF bytes"
+                );
+                assert!(
+                    !temp.path().join("variants.vcf.gz.conflict").exists(),
+                    "matching decoded source should not create a conflict"
+                );
+            }
+        }
     }
 
     // If a file has been edited locally and the user pulls remote changes, ensure
@@ -2230,9 +2699,9 @@ mod tests {
         let previous_asset = test_asset(previous_contents, "reference.fa", 1);
         let previous_assets = HashMap::from([(previous_asset.id, previous_asset)]);
         fs::write(&destination, b"local edits\n").expect("should write dirty local file");
-        let remote_contents = b"remote version\n";
-        let remote_asset = test_asset(remote_contents, "reference.fa", 2);
-        let (url, server) = serve_asset(remote_contents);
+        let remote_contents = b">chr1\nGATTACA\n";
+        let (remote_asset, archived_contents) = test_bgzf_asset(remote_contents, "reference.fa", 2);
+        let (url, server) = serve_asset(&archived_contents);
 
         let outcome = download_asset(
             &Client::new(),
@@ -2252,9 +2721,79 @@ mod tests {
         assert_eq!(
             fs::read(versioned_asset_path(&workspace, &remote_asset))
                 .expect("should read versioned remote asset"),
-            remote_contents,
+            archived_contents,
             "conflicting remote asset should be retained in versioned storage"
         );
+    }
+
+    #[test]
+    fn test_materialize_versioned_bgzf_asset_failures_preserve_destination() {
+        let previous_contents = b"previous plain version\n";
+        let previous_asset = test_asset(previous_contents, "reference.fa", 1);
+        let previous_assets = HashMap::from([(previous_asset.id, previous_asset)]);
+        let cases = [
+            (
+                "checksum mismatch",
+                test_bgzf_asset(b">chr1\nACGT\n", "reference.fa", 2).1,
+                calculate_reader_checksum(Cursor::new(b"wrong decoded bytes\n"))
+                    .expect("should checksum wrong plain bytes"),
+            ),
+            (
+                "invalid BGZF",
+                b"not a BGZF stream".to_vec(),
+                calculate_reader_checksum(Cursor::new(b"expected plain bytes\n"))
+                    .expect("should checksum expected plain bytes"),
+            ),
+        ];
+
+        for (failure, archived_contents, materialized_checksum) in cases {
+            let temp = tempdir().expect("should create workspace");
+            let workspace = Workspace::new(temp.path());
+            workspace.ensure_gen_dir();
+            let destination = temp.path().join("reference.fa");
+            fs::write(&destination, previous_contents).expect("should write previous file");
+            let mut asset = test_asset(&archived_contents, "reference.fa", 2);
+            asset.materialized_checksum = Some(materialized_checksum);
+            let versioned_path = versioned_asset_path(&workspace, &asset);
+            fs::create_dir_all(
+                versioned_path
+                    .parent()
+                    .expect("should resolve versioned asset directory"),
+            )
+            .expect("should create versioned asset directory");
+            fs::write(&versioned_path, &archived_contents).expect("should write versioned archive");
+
+            let error = super::materialize_versioned_asset(
+                &workspace,
+                &asset,
+                &previous_assets,
+                asset.logical_path.as_deref(),
+                &versioned_path,
+                false,
+            )
+            .expect_err("should reject invalid materialized input");
+
+            assert!(
+                !error.to_string().is_empty(),
+                "{failure} should return a useful error"
+            );
+            assert_eq!(
+                fs::read(&destination).expect("should read preserved destination"),
+                previous_contents,
+                "{failure} must not truncate or replace the existing logical file"
+            );
+            assert!(
+                !temporary_path(&destination)
+                    .expect("should resolve materialization staging path")
+                    .exists(),
+                "{failure} should remove its staged workspace file"
+            );
+            assert_eq!(
+                fs::read(&versioned_path).expect("should read retained archive"),
+                archived_contents,
+                "{failure} should leave archived bytes intact"
+            );
+        }
     }
 
     // Ensure that if the staged download is corrupt, it does not end up in the versioned storage or logical path
@@ -2306,9 +2845,15 @@ mod tests {
         let destination_path = temp.path().join("reference.fa");
         fs::write(&destination_path, b"previous logical bytes\n")
             .expect("should write previous logical asset");
+        let expected_checksum = Sha256Hash::convert_str("missing-versioned-asset");
 
-        copy_versioned_asset(&missing_versioned_path, &destination_path)
-            .expect_err("should reject a missing versioned asset");
+        copy_versioned_asset(
+            &missing_versioned_path,
+            &destination_path,
+            None,
+            &expected_checksum,
+        )
+        .expect_err("should reject a missing versioned asset");
 
         assert_eq!(
             fs::read(destination_path).expect("should read preserved logical asset"),

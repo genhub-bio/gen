@@ -22,9 +22,14 @@ use crate::{
     Direction, ModelSelect,
     db::GraphConnection,
     errors::{FileAdditionError, FileStoreError, QueryError},
+    file_types::FileTypes,
     history::dolt::hash_of,
     operations::FileAddition,
 };
+
+mod compression;
+pub use compression::should_archive_as_bgzf;
+pub(crate) use compression::{InputEncoding, classify_input, stage_bgzf_asset_copy};
 
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -192,6 +197,13 @@ pub struct AssetRef {
     pub created_on: i64,
     /// The source asset this asset indexes or otherwise works off.
     pub upstream_asset_ref_id: Option<HashId>,
+    /// SHA-256 of the bytes written to the working tree after archive decoding.
+    ///
+    /// This is the checksum of the file that ends up in/is in the workspace directory,
+    /// not in .assets. If it is `None` it means its the same as the Asset's checksum.
+    /// For some cases, we compress the file when stored in .assets so the asset checksum
+    /// differs from the materialized checksum.
+    pub materialized_checksum: Option<Sha256Hash>,
 }
 
 pub struct Assets;
@@ -290,20 +302,26 @@ impl AssetRef {
         Ok(BufReader::new(reader))
     }
 
+    /// Hashes the normalized asset identity, including both archived and materialized checksums.
     pub fn id_hash(
-        uri: &str,
-        file_type: &str,
-        checksum: Option<&Sha256Hash>,
+        file_addition: &FileAddition,
         role: &AssetRole,
         logical_path: Option<&str>,
         name: Option<&str>,
         upstream_asset_ref_id: Option<&HashId>,
     ) -> HashId {
-        let checksum = checksum
+        let checksum = file_addition
+            .checksum
+            .map(|checksum| checksum.to_string())
+            .unwrap_or_default();
+        let materialized_checksum = file_addition
+            .materialized_checksum
             .map(|checksum| checksum.to_string())
             .unwrap_or_default();
         let mut identity = format!(
-            "{uri}:{file_type}:{checksum}:{role}:{logical_path}:{name}",
+            "{uri}:{file_type}:{checksum}:{materialized_checksum}:{role}:{logical_path}:{name}",
+            uri = file_addition.asset_uri,
+            file_type = file_addition.file_type.as_str(),
             role = role.as_str(),
             logical_path = logical_path.unwrap_or_default(),
             name = name.unwrap_or_default(),
@@ -326,9 +344,7 @@ impl AssetRef {
         let file_type = file_addition.file_type.as_str();
         Self {
             id: Self::id_hash(
-                &file_addition.asset_uri,
-                file_type,
-                file_addition.checksum.as_ref(),
+                file_addition,
                 &role,
                 logical_path,
                 name,
@@ -343,6 +359,7 @@ impl AssetRef {
             name: name.map(str::to_string),
             created_on,
             upstream_asset_ref_id: upstream_asset_ref_id.copied(),
+            materialized_checksum: file_addition.materialized_checksum,
         }
     }
 
@@ -350,8 +367,8 @@ impl AssetRef {
         conn.execute(
             "INSERT OR IGNORE INTO gen_asset_refs \
              (id, uri, file_type, checksum, size, role, logical_path, name, created_on, \
-              upstream_asset_ref_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              upstream_asset_ref_id, materialized_checksum) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 asset_ref.id,
                 asset_ref.uri,
@@ -362,7 +379,8 @@ impl AssetRef {
                 asset_ref.logical_path,
                 asset_ref.name,
                 asset_ref.created_on,
-                asset_ref.upstream_asset_ref_id
+                asset_ref.upstream_asset_ref_id,
+                asset_ref.materialized_checksum
             ],
         )?;
         Ok(())
@@ -410,7 +428,8 @@ impl AssetRef {
                         asset_versions.logical_path, \
                         asset_versions.name, \
                         asset_versions.created_on, \
-                        asset_versions.upstream_asset_ref_id \
+                        asset_versions.upstream_asset_ref_id, \
+                        asset_versions.materialized_checksum \
                  FROM bounded_ancestry \
                  LEFT JOIN asset_versions \
                    ON asset_versions.introduction_commit = bounded_ancestry.commit_hash \
@@ -449,7 +468,8 @@ impl AssetRef {
                         materialized_assets.logical_path, \
                         materialized_assets.name, \
                         materialized_assets.created_on, \
-                        materialized_assets.upstream_asset_ref_id \
+                        materialized_assets.upstream_asset_ref_id, \
+                        materialized_assets.materialized_checksum \
                  FROM bounded_ancestry \
                  LEFT JOIN materialized_assets \
                   ON materialized_assets.introduction_commit = bounded_ancestry.commit_hash \
@@ -500,6 +520,7 @@ impl AssetRef {
                                 historical_assets.name, \
                                 historical_assets.created_on, \
                                 historical_assets.upstream_asset_ref_id, \
+                                historical_assets.materialized_checksum, \
                                 bounded_ancestry.commit_hash AS introduction_commit, \
                                 MAX(bounded_ancestry.depth) AS introduction_depth \
                          FROM bounded_ancestry \
@@ -532,6 +553,7 @@ impl AssetRef {
                         name: row.get("name")?,
                         created_on: row.get("created_on")?,
                         upstream_asset_ref_id: row.get("upstream_asset_ref_id")?,
+                        materialized_checksum: row.get("materialized_checksum")?,
                     })
                 } else {
                     None
@@ -642,6 +664,7 @@ impl Assets {
                     annotation_assets.name AS annotation_name, \
                     annotation_assets.created_on AS annotation_created_on, \
                     annotation_assets.upstream_asset_ref_id AS annotation_upstream_asset_ref_id, \
+                    annotation_assets.materialized_checksum AS annotation_materialized_checksum, \
                     index_assets.id AS index_id, \
                     index_assets.uri AS index_uri, \
                     index_assets.file_type AS index_file_type, \
@@ -651,7 +674,8 @@ impl Assets {
                     index_assets.logical_path AS index_logical_path, \
                     index_assets.name AS index_name, \
                     index_assets.created_on AS index_created_on, \
-                    index_assets.upstream_asset_ref_id AS index_upstream_asset_ref_id \
+                    index_assets.upstream_asset_ref_id AS index_upstream_asset_ref_id, \
+                    index_assets.materialized_checksum AS index_materialized_checksum \
              FROM {operation_logs_table} operation_logs \
              JOIN {operation_assets_table} annotation_operation_assets \
                ON annotation_operation_assets.log_id = operation_logs.id \
@@ -693,6 +717,7 @@ impl Assets {
                     name: row.get("index_name")?,
                     created_on: row.get("index_created_on")?,
                     upstream_asset_ref_id: row.get("index_upstream_asset_ref_id")?,
+                    materialized_checksum: row.get("index_materialized_checksum")?,
                 }),
                 None => None,
             };
@@ -709,6 +734,7 @@ impl Assets {
                     name: row.get("annotation_name")?,
                     created_on: row.get("annotation_created_on")?,
                     upstream_asset_ref_id: row.get("annotation_upstream_asset_ref_id")?,
+                    materialized_checksum: row.get("annotation_materialized_checksum")?,
                 },
                 index,
             })
@@ -830,6 +856,41 @@ impl ChecksummedReader {
             state.checksum = Some(Sha256Hash(finalized.into()));
         }
         state.complete = true;
+    }
+}
+
+/// Writes through to an inner writer while calculating the checksum of accepted bytes.
+pub struct ChecksummedWriter<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W> ChecksummedWriter<W> {
+    /// Creates a writer that hashes the bytes accepted by `inner`.
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// Returns the checksum of bytes written so far.
+    ///
+    /// Finalize and flush any wrapping encoder before reading the checksum.
+    pub fn checksum(&self) -> Sha256Hash {
+        Sha256Hash(self.hasher.clone().finalize().into())
+    }
+}
+
+impl<W: Write> Write for ChecksummedWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.hasher.update(&buffer[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -1167,6 +1228,19 @@ impl LocalAssetUri {
         })
     }
 
+    pub(crate) fn is_index_path(path_or_uri: &str) -> bool {
+        let path = path_or_uri.split(['?', '#']).next().unwrap_or(path_or_uri);
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "fai" | "gzi" | "tbi" | "csi"
+                )
+            })
+    }
+
     pub fn is_file_uri(asset_uri: &str) -> bool {
         asset_uri.starts_with(Self::SCHEME)
     }
@@ -1282,7 +1356,7 @@ impl LocalAssetUri {
             .unwrap_or_else(|| Self::resolve_source_path(workspace, &self.asset_uri))
     }
 
-    fn resolve_input_source_path(
+    pub(crate) fn resolve_input_source_path(
         workspace: &Workspace,
         file_path_or_uri: &str,
     ) -> Result<PathBuf, FileAdditionError> {
@@ -1340,7 +1414,7 @@ impl LocalAssetUri {
         Ok(normalized_path)
     }
 
-    fn logical_file_path(
+    pub(crate) fn logical_file_path(
         workspace: &Workspace,
         source_path: &Path,
     ) -> Result<String, FileAdditionError> {
@@ -1447,7 +1521,7 @@ impl LocalAssetUri {
         }
 
         let asset_path = asset_dir.join(self.asset_filename(&checksum));
-        match staged_file.persist_noclobber(asset_path) {
+        match staged_file.persist_noclobber(&asset_path) {
             Ok(_) => {}
             Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
@@ -1641,9 +1715,129 @@ mod tests {
     use super::*;
     use crate::{
         history::dolt::commit_all,
-        operations::{calculate_file_checksum, calculate_reader_checksum},
+        operations::{FileAddition, calculate_file_checksum, calculate_reader_checksum},
         test_helpers::setup_gen,
     };
+
+    fn test_asset_id_hash(
+        checksum: Option<Sha256Hash>,
+        materialized_checksum: Option<Sha256Hash>,
+        upstream_asset_ref_id: Option<&HashId>,
+    ) -> HashId {
+        let file_addition = FileAddition {
+            id: HashId::convert_str("asset-id-test"),
+            asset_uri: "https://example.test/reference.fa".to_string(),
+            file_type: FileTypes::Fasta,
+            checksum,
+            materialized_checksum,
+        };
+        AssetRef::id_hash(
+            &file_addition,
+            &AssetRole::Input,
+            Some("reference.fa"),
+            Some("reference.fa"),
+            upstream_asset_ref_id,
+        )
+    }
+
+    #[test]
+    fn test_asset_id_hash_includes_optional_checksums_and_upstream() {
+        // This just ensures the hash from various configurations of having a checksum + materialized checksum
+        //
+        //
+        // Missing checksums should serialize as empty fields in the identity.
+        let upstream = None;
+        let id = test_asset_id_hash(None, None, upstream);
+        let expected_identity =
+            "https://example.test/reference.fa:fasta:::input:reference.fa:reference.fa";
+        assert_eq!(
+            id,
+            HashId(calculate_hash(expected_identity)),
+            "None checksums should occupy their fields in the unified identity"
+        );
+
+        // Repeating the same inputs should produce the same identity.
+        assert_eq!(
+            id,
+            test_asset_id_hash(None, None, upstream),
+            "the same asset identity should hash deterministically"
+        );
+
+        // An archive checksum should change identity when there is no materialized checksum.
+        assert_ne!(
+            id,
+            test_asset_id_hash(
+                Some(Sha256Hash::convert_str("archived-content")),
+                None,
+                None,
+            ),
+            "an archive checksum should change the identity"
+        );
+
+        // A materialized checksum should change identity when there is no archive checksum.
+        assert_ne!(
+            id,
+            test_asset_id_hash(
+                None,
+                Some(Sha256Hash::convert_str("materialized-content")),
+                None,
+            ),
+            "a materialized checksum should change the identity"
+        );
+
+        // Different materialized bytes should produce different identities.
+        assert_ne!(
+            test_asset_id_hash(
+                None,
+                Some(Sha256Hash::convert_str("materialized-content")),
+                None,
+            ),
+            test_asset_id_hash(
+                None,
+                Some(Sha256Hash::convert_str("different-materialized-content")),
+                None,
+            ),
+            "different materialized bytes should have different identities"
+        );
+
+        // Both checksums should be included when stored and materialized bytes differ.
+        let both_checksums_id = test_asset_id_hash(
+            Some(Sha256Hash::convert_str("archived-content")),
+            Some(Sha256Hash::convert_str("materialized-content")),
+            None,
+        );
+
+        // Changing only the archive checksum should change identity.
+        assert_ne!(
+            both_checksums_id,
+            test_asset_id_hash(
+                Some(Sha256Hash::convert_str("different-archived-content")),
+                Some(Sha256Hash::convert_str("materialized-content")),
+                None,
+            ),
+            "different archived bytes should change identity with materialized bytes fixed"
+        );
+
+        // Changing only the materialized checksum should change identity.
+        assert_ne!(
+            both_checksums_id,
+            test_asset_id_hash(
+                Some(Sha256Hash::convert_str("archived-content")),
+                Some(Sha256Hash::convert_str("different-materialized-content")),
+                None,
+            ),
+            "different materialized bytes should change identity with archived bytes fixed"
+        );
+
+        // Different upstream assets should produce different identities.
+        let first_upstream = HashId::convert_str("first-upstream");
+        let second_upstream = HashId::convert_str("second-upstream");
+        assert_ne!(
+            test_asset_id_hash(None, None, Some(&first_upstream),),
+            test_asset_id_hash(None, None, Some(&second_upstream),),
+            "the upstream asset should remain part of the identity"
+        );
+    }
 
     #[test]
     fn test_asset_reference_tables_round_trip() {
@@ -1660,6 +1854,7 @@ mod tests {
             name: Some("reference.fa".to_string()),
             created_on: 1,
             upstream_asset_ref_id: None,
+            materialized_checksum: Some(Sha256Hash::convert_str("materialized-checksum")),
         };
         let operation_log = OperationLog {
             id: HashId::convert_str("log"),
@@ -1701,6 +1896,7 @@ mod tests {
             name: Some("reference.fa.bgz".to_string()),
             created_on: 1,
             upstream_asset_ref_id: None,
+            materialized_checksum: None,
         };
         let first_index = AssetRef {
             id: HashId::convert_str("first-index"),
@@ -1713,6 +1909,7 @@ mod tests {
             name: Some("reference.fa.bgz.fai".to_string()),
             created_on: 1,
             upstream_asset_ref_id: Some(upstream.id),
+            materialized_checksum: None,
         };
         let second_index = AssetRef {
             id: HashId::convert_str("second-index"),
@@ -1760,6 +1957,7 @@ mod tests {
             name: Some("genes".to_string()),
             created_on: 1,
             upstream_asset_ref_id: None,
+            materialized_checksum: Some(Sha256Hash::convert_str("annotation-materialized")),
         };
         let index = AssetRef {
             id: HashId::convert_str("annotation-index-asset"),
@@ -1772,6 +1970,7 @@ mod tests {
             name: Some("genes".to_string()),
             created_on: 1,
             upstream_asset_ref_id: Some(annotation.id),
+            materialized_checksum: None,
         };
         OperationLog::create(conn, &log).expect("should insert annotation log");
         AssetRef::create(conn, &annotation).expect("should insert annotation asset");
@@ -1855,6 +2054,7 @@ mod tests {
                     name: Some("alpha.fa".to_string()),
                     created_on: 1,
                     upstream_asset_ref_id: None,
+                    materialized_checksum: None,
                 };
                 let zeta = AssetRef {
                     id: HashId::convert_str("zeta"),
@@ -1995,6 +2195,7 @@ mod tests {
                 name: Some("reference.fa".to_string()),
                 created_on: 1,
                 upstream_asset_ref_id: None,
+                materialized_checksum: Some(Sha256Hash::convert_str("main-materialized")),
             };
             AssetRef::create(conn, &main_asset).expect("should insert main asset");
             commit_all(conn, "add main asset").expect("should commit main asset");
@@ -2178,6 +2379,7 @@ mod tests {
             name: Some("reference.fa".to_string()),
             created_on: 1,
             upstream_asset_ref_id: None,
+            materialized_checksum: None,
         };
         AssetRef::create(conn, &first_asset).expect("should insert first asset");
         commit_all(conn, "add first asset").expect("should commit first asset");

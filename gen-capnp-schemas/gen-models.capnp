@@ -138,6 +138,10 @@ struct FileAddition {
   assetUri @1 :Text;
   fileType @2 :FileType;
   checksum @3 :List(UInt8);
+  materializedChecksum :union {
+    none @4 :Void;
+    some @5 :List(UInt8);
+  }
 }
 
 struct OperationFile {
