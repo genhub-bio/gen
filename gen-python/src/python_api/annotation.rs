@@ -1,10 +1,11 @@
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
+use gen_graph::{GraphNode, GraphNodeSlice};
 use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
 use serde_json::{Map, Value, to_string as json_to_string, to_value as json_to_value};
 
-use super::graph_search::PyGraphLocus;
+use super::{block_group::PySequenceGraph, graph_search::PyGraphLocus};
 
 /// A named genomic annotation.
 ///
@@ -22,6 +23,8 @@ pub struct PyAnnotation {
     /// Pre-computed locus; present only for annotations built from a ``Locus``
     /// via the Python constructor.
     pub locus: Option<GraphLocus>,
+    /// The sequence graph this annotation was read from, which its `locus` positions step through.
+    pub sequence_graph: Option<PySequenceGraph>,
 }
 
 #[pymethods]
@@ -35,8 +38,8 @@ impl PyAnnotation {
     ///     Human-readable label for the annotation.
     #[new]
     pub fn from_locus(locus: PyRef<PyGraphLocus>, name: &str) -> Self {
-        let ann_segments = locus
-            .inner
+        let graph_locus = locus.graph_locus();
+        let ann_segments = graph_locus
             .slices
             .iter()
             .map(|s| AnnotationSegment {
@@ -56,22 +59,23 @@ impl PyAnnotation {
                 accession_id: HashId([0u8; 16]),
                 extra: None,
             },
-            context: None,
+            context: locus.context(),
             ann_segments,
             source_block_group_id: None,
-            locus: Some(locus.inner.clone()),
+            locus: Some(graph_locus),
+            sequence_graph: locus.sequence_graph(),
         }
     }
 
     /// The graph-space locus covered by this annotation.
     ///
-    /// Only available for annotations created with ``Annotation(locus, name)``.
-    /// Returns ``None`` for database annotations from ``SequenceGraph.annotations``.
+    /// For database annotations the locus is rebuilt from the stored node-coordinate
+    /// segments, so it keeps naming the same positions after unrelated graph edits.
+    /// Pass it to ``SequenceGraph.delete()`` and friends to edit them.
     #[getter]
-    fn locus(&self) -> Option<PyGraphLocus> {
-        self.locus
-            .as_ref()
-            .map(|l| PyGraphLocus::from_locus(l.clone()))
+    fn locus(&self) -> PyGraphLocus {
+        PyGraphLocus::with_context(self.graph_locus(), self.context.clone())
+            .attached_to(self.sequence_graph.clone())
     }
 
     /// Hash ID of this annotation.
@@ -183,5 +187,30 @@ impl PyAnnotation {
             "Annotation(name={:?}, track={track}, len={len})",
             self.inner.name
         )
+    }
+}
+
+impl PyAnnotation {
+    /// The locus this annotation was built from, or one rebuilt from its segments.
+    pub fn graph_locus(&self) -> GraphLocus {
+        if let Some(locus) = &self.locus {
+            return locus.clone();
+        }
+        GraphLocus {
+            slices: self
+                .ann_segments
+                .iter()
+                .map(|segment| {
+                    GraphNodeSlice::full(
+                        GraphNode {
+                            node_id: segment.node_id,
+                            sequence_start: segment.range.start,
+                            sequence_end: segment.range.end,
+                        },
+                        segment.strand,
+                    )
+                })
+                .collect(),
+        }
     }
 }

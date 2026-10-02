@@ -16,7 +16,7 @@ use r#gen::{
         annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
         gen_graph_widget::{
             GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
-            draw_annotation_labels, locus_midpoint, reapply_overlays,
+            draw_annotation_labels, reapply_overlays,
         },
         graph_overlay::{
             AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
@@ -32,7 +32,6 @@ use gen_models::{
     block_group::BlockGroup,
     db::GraphConnection,
     history::dolt::active_branch,
-    locus::GraphLocus,
 };
 use gen_tui::{
     LineStyle, graph_controller::GraphController, graph_widget::GraphWidget, layout::VisualDetail,
@@ -49,10 +48,8 @@ use ratatui::{
 use serde::Serialize;
 
 use crate::python_api::{
-    annotation::PyAnnotation,
-    block_group::PySequenceGraph,
-    graph_search::{PyGraphLocus, PyGraphPos},
-    utils::block_group_err_to_pyerr,
+    annotation::PyAnnotation, block_group::PySequenceGraph, graph_search::PyGraphLocus,
+    position::PyPosition, utils::block_group_err_to_pyerr,
 };
 
 /// Convert a ratatui `Color` to a CSS hex string.
@@ -124,17 +121,6 @@ fn parse_hex_color(hex: &str) -> PyResult<ratatui::style::Color> {
 
 fn is_false(b: &bool) -> bool {
     !b
-}
-
-/// Target position for `go_to_pos`: the locus midpoint when `center`, else its first
-/// slice's start (snapped left by the caller). `None` for an empty locus.
-fn locus_target_pos(locus: &GraphLocus, center: bool) -> Option<PyGraphPos> {
-    if center {
-        let (slice, offset) = locus_midpoint(locus)?;
-        return Some(PyGraphPos::new(slice.block, offset));
-    }
-    let slice = locus.slices.first()?;
-    Some(PyGraphPos::new(slice.block, slice.start))
 }
 
 /// Format by which the buffer is to be serialized.
@@ -520,10 +506,10 @@ impl GraphPage {
         let Some(locus) = graph_locus_from_annotation_span(span, self.controller.graph()) else {
             return;
         };
-        let Some(pos) = locus_target_pos(&locus, center) else {
+        let Some(position) = PyGraphLocus::from_locus(locus).target_position(center) else {
             return;
         };
-        self.go_to_pos(&pos, center);
+        self.go_to_pos(&position, center);
     }
 
     /// Render the graph, overlay labels, and annotation tracks into `buf` within `graph_area`.
@@ -675,8 +661,11 @@ impl GraphPage {
         self.controller.sync_cursor_to_closest_node();
     }
 
-    fn go_to_pos(&mut self, pos: &PyGraphPos, center: bool) {
-        let block = pos.inner.block;
+    fn go_to_pos(&mut self, position: &PyPosition, center: bool) {
+        // A position keeps its node offset across edits, so find the block it falls in now.
+        let Some((block, local_offset)) = position.locate(self.controller.graph()) else {
+            return;
+        };
         self.controller.set_detail_level(VisualDetail::Full);
 
         // Find the partition this block is on, load it and anchor it
@@ -698,7 +687,7 @@ impl GraphPage {
         // relative to the area in which the node (block) is represented in the plot.
         let block_len = block.length();
         let frac_x = if block_len > 1 {
-            pos.inner.offset as f64 / (block_len - 1) as f64
+            local_offset as f64 / (block_len - 1) as f64
         } else {
             0.0
         };
@@ -721,7 +710,10 @@ impl GraphPage {
             .with_line_style(LineStyle::Bold)
             .with_merge_glyphs(true);
         self.overlays.push(GraphOverlay {
-            content: OverlayContent::Span(annotation_span_from_graph_locus(&locus.inner, "")),
+            content: OverlayContent::Span(annotation_span_from_graph_locus(
+                &locus.graph_locus(),
+                "",
+            )),
             source: OverlaySource::Adhoc,
             style,
         });
@@ -933,10 +925,10 @@ impl GraphPage {
 
     /// Navigate to a `GraphLocus`.
     pub fn go_to_locus(&mut self, locus: &PyGraphLocus, center: bool) {
-        let Some(pos) = locus_target_pos(&locus.inner, center) else {
+        let Some(position) = locus.target_position(center) else {
             return;
         };
-        self.go_to_pos(&pos, center);
+        self.go_to_pos(&position, center);
     }
 
     /// Return all gene annotations for this sequence graph.
@@ -974,6 +966,7 @@ impl GraphPage {
                 context: None,
                 source_block_group_id: Some(*bg_id),
                 locus: None,
+                sequence_graph: None,
             })
             .collect())
     }
@@ -1312,7 +1305,7 @@ impl PyGraphController {
     }
 
     #[pyo3(signature = (pos, center=false))]
-    fn go_to_pos(&mut self, pos: &PyGraphPos, center: bool) -> PyResult<()> {
+    fn go_to_pos(&mut self, pos: &PyPosition, center: bool) -> PyResult<()> {
         self.active()?.go_to_pos(pos, center);
         Ok(())
     }
@@ -1477,17 +1470,83 @@ impl PyGraphController {
 
 #[cfg(test)]
 mod tests {
-    use r#gen::test_helpers::{setup_block_group, setup_gen_on_disk};
-    use gen_core::BranchName;
+    use r#gen::{
+        test_helpers::{setup_block_group, setup_gen_on_disk},
+        views::graph_overlay::OverlayContent,
+    };
+    use gen_core::{BranchName, Strand};
+    use gen_graph::GraphNodeSlice;
     use gen_models::{
         block_group::BlockGroup,
         history::{HistoryStore as _, dolt::DoltHistoryStore},
+        locus::GraphLocus,
     };
     use pyo3::{exceptions::PyValueError, prelude::*};
     use serde_json::Value;
 
     use super::{PyGraphController, active_branch, current_theme};
-    use crate::python_api::block_group::PySequenceGraph;
+    use crate::python_api::{
+        annotation::PyAnnotation, block_group::PySequenceGraph, graph_search::PyGraphLocus,
+    };
+
+    #[test]
+    fn test_widget_loci_and_annotation_entry_points_use_absolute_spans() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|python| {
+            let mut controller = make_controller(None).expect("should create the widget");
+            let page = controller.active().expect("should load the page");
+            let node = page
+                .controller
+                .graph()
+                .nodes()
+                .find(|node| node.length() > 4)
+                .expect("should have a sequence node");
+            let locus = Py::new(
+                python,
+                PyGraphLocus::from_locus(GraphLocus {
+                    slices: vec![GraphNodeSlice {
+                        block: node,
+                        start: 1,
+                        end: 4,
+                        strand: Strand::Reverse,
+                    }],
+                }),
+            )
+            .expect("should wrap the locus");
+            let ephemeral = PyAnnotation::from_locus(locus.borrow(python), "saved");
+            // Database annotations take the segments path instead of a cached locus.
+            let mut stored = ephemeral.clone();
+            stored.locus = None;
+            let stored = Py::new(python, stored).expect("should wrap the stored annotation");
+            page.highlight_match(&locus.borrow(python), None)
+                .expect("should highlight a locus");
+            page.go_to_locus(&locus.borrow(python), true);
+            page.push_track_as_overlays(super::AnnotationTrack::new(
+                "stored",
+                vec![super::annotation_to_span(&stored.borrow(python))],
+            ));
+            page.highlight_annotation_obj(&stored.borrow(python), None)
+                .expect("should highlight a stored annotation");
+            page.go_to_annotation_obj(&stored.borrow(python), true);
+            assert_eq!(page.overlays.len(), 3);
+            for overlay in &page.overlays {
+                let OverlayContent::Span(span) = &overlay.content else {
+                    panic!("should store annotation spans");
+                };
+                assert_eq!(span.segments.len(), 1);
+                let segment = &span.segments[0];
+                assert_eq!(segment.node_id, node.node_id);
+                assert_eq!(
+                    (segment.start, segment.end),
+                    (node.sequence_start + 1, node.sequence_start + 4)
+                );
+                assert_eq!(segment.strand, Strand::Reverse);
+            }
+            controller
+                .render_frame(80, 24)
+                .expect("should render absolute annotation spans");
+        });
+    }
 
     #[test]
     fn test_widget_keeps_branch_for_annotations_and_lazy_pages() {
