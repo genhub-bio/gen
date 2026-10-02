@@ -1,278 +1,421 @@
-# Gen Python API reference
+# Gen Python API workflows
 
-Signatures below were captured from the installed `gen` module (`help(gen.<Class>)`)
-against the current build. If Gen has been rebuilt since this file was written and a
-call's arguments don't match, re-run `help()` rather than guessing — do not silently
-fall back to the CLI.
+Use this reference for the current repository bindings. Signatures were checked
+against `gen-python/src/python_api/` and the installed development extension.
+Check `help()` in the actual interpreter when using a different release.
 
-## `gen.Repository(path=...)`
+Contents: workspace and history; remotes; imports and return types; direct edits;
+loci and positions; annotations; file-driven updates; search and sequence reads;
+partitioning and libraries; exports; widgets.
 
-The workspace handle. Opens (or creates) a `.gen` directory at `path` (or the current
-working directory if omitted).
+## Workspace and history
 
 ```python
-repo = gen.Repository("path/to/.gen")
+import gen
+
+repo = gen.Repository("path/to/workspace", committer="Name", email="name@example.org")
+repo.gen_dir
+repo.db_path
+repo.samples
+repo.get_sequence_graphs()
+repo.get_sequence_graphs_by_collection(collection_name)
+repo.get_sequence_graph_by_id(graph.id)
+
+repo.current_branch
+repo.get_branches()
+repo.create_branch(name, start=None)
+repo.checkout(branch, create=False)
+repo.delete_branch(branch)
+repo.get_operations(branch=None, limit=None)
+repo.get_assets(branch=None)
+repo.merge(branch)
+repo.apply(operation)
+repo.reset(operation)
 ```
 
-### Import
+`Repository(path=None, committer=None, email=None)` opens or initializes a workspace;
+`path` can be the workspace or its `.gen` directory. Omitted path discovers the
+workspace from the current directory. File APIs below take filename strings.
+
+`repo.samples` is a list of `Sample` objects. A sample is iterable and indexable
+(including negative indices), with `.sample_name`, `.collection_name`, and
+`.sequence_graphs`. Graphs expose `.id` (`HashId`), `.name`, `.sample_name`, and
+`.collection_name`. Pass the typed id to `get_sequence_graph_by_id()`.
+
+Mutating import/update/edit/copy APIs record operations automatically. The public
+API has no transaction context manager. `execute(sql)` returns `None` and
+`query(sql)` returns rows; raw SQL is not a substitute for operation-aware edits.
+
+Branch arguments accept names or `Branch` objects. `create_branch()` creates
+without switching and accepts a string commit ref for `start`.
+`checkout(branch, *, create=False)` switches branches, not arbitrary operation
+hashes. `get_operations()` returns newest-first `Operation` objects.
+`merge()`, `apply()`, and `reset()` return the resulting HEAD `Operation`;
+apply/reset accept an `Operation` or string ref. Reset hard-resets the current
+branch. History actions require a clean working set; do not discard dirty state
+to bypass an error.
+
+`Branch` fields: `name`, `head`, `remote`, `is_current`, `dirty`.
+`Operation` fields: `id`, `parent_id`, `committer`, `email`, `date`, `message`,
+`is_head`. `Asset` fields: `id`, `name`.
 
 ```python
-repo.import_fasta(filename, sample=None, shallow=False, collection=None)
-repo.import_reference_fasta(filename, reference, shallow=False, collection=None)
+original_branch = repo.current_branch
+repo.checkout("design-experiment", create=True)
+graph = repo.import_sequence("AAAACCCC", name="vector", sample="design")
+graph.replace("vector:4-8", "GGGG", message="change downstream motif")
+assert repo.get_operations(limit=1)[0].message == "change downstream motif"
+repo.checkout(original_branch)
+# Merge only when the requested workflow calls for adopting the experiment.
+# repo.merge("design-experiment")
+```
+
+## Remotes
+
+```python
+cloned = gen.clone(url, path=None, committer=None, email=None)
+repo.get_remotes()
+repo.default_remote
+repo.add_remote(name, url)
+repo.remove_remote(remote)
+repo.set_default_remote(remote=None)
+repo.set_branch_remote(remote=None)
+repo.fetch(remote=None, branch=None)
+repo.pull(remote=None, branch=None)
+repo.push(remote=None, branch=None, force=False)
+```
+
+`clone()` returns an open `Repository`. `add_remote()` returns a `Remote` with
+`.name` and `.url`. Remote arguments accept a name or `Remote`; branch arguments
+accept a name or `Branch`. Omitted remote/branch follows repository defaults and
+branch tracking. Passing no remote to the setters clears that configuration.
+`set_branch_remote()` applies to the current branch.
+
+Fetch updates a remote-tracking ref without changing checkout; pull merges remote
+state and transfers assets; push updates the remote. These methods return `None`
+and refresh the repository connection. Re-query graphs and samples after sync or
+history changes instead of relying on previously held handles from another state.
+
+## Imports and return types
+
+```python
+repo.import_fasta(filename, sample=None, collection=None)
+repo.import_reference_fasta(filename, reference, collection=None)
 repo.import_genbank(filename, sample=None, collection=None)
 repo.import_gfa(filename, sample=None, collection=None)
+repo.import_sequence(sequence, name=None, sample=None, circular=False, collection=None)
+repo.import_reference_sequence(sequence, reference, name=None, circular=False, collection=None)
 repo.import_library(library_name, parts_list, sample=None, collection=None)
 repo.import_library_files(library_name, parts, library, sample=None, collection=None)
 ```
 
-- `import_fasta`/`import_reference_fasta` differ only in whether the sample is marked
-  as a reference in the database (`reference=` vs `sample=`).
-- `import_library_files`: `parts` is a FASTA of named parts, `library` is a CSV
-  describing the column layout (see `import_library` for the equivalent in-memory
-  form using `gen.SequencePart`).
-- All import methods return a `Sample`.
+| Import | Return |
+|---|---|
+| FASTA, reference FASTA, GenBank | `Sample` |
+| GFA, library, library files | `SequenceGraph` |
+| sequence, reference sequence | `SequenceGraph` |
+
+There is no Python `shallow=` argument on FASTA imports. GenBank imports load
+features automatically, accessible through `graph.annotations`.
+
+`import_sequence()` accepts a string, Biopython `Seq`, or `SeqRecord`. Strings and
+`Seq` values need `name`; a `SeqRecord` supplies its id unless overridden.
+It imports sequence, not the record's feature annotations. Its `sample` argument
+(and `import_reference_sequence()`'s `reference`) accepts a name or a `Sample`;
+a sample object supplies its collection unless explicitly overridden. Do not
+assume file imports or updates also accept sample objects: their sample arguments
+are strings. Repeated sequence imports add graphs to a sample; duplicate graph
+names fail. Each call records an operation; use FASTA for large file imports.
 
 ```python
-sample = repo.import_genbank("puc19.gbk", sample="wt")
-sg = sample[0]                      # Sample is list-like: index/iterate/len()
-print(sg.name, sg.sample_name)
+graph = repo.import_sequence("AAAACCCCGGGGTTTT", name="vector", sample="parent")
+# Biopython interoperability, when installed:
+# for record in SeqIO.parse("input.fa", "fasta"):
+#     repo.import_sequence(record, sample="records")
 ```
 
-### Update (branch-friendly edits)
+## Copy a sample and edit directly
 
-Every `update_with_*` takes a source `sample` and a `new_sample` (or
-`new_sample_name`) and returns the new `Sample` (or `list[Sample]` for
-`update_with_vcf`/`update_with_gaf`, one per resulting branch). The new sample shares
-the whole graph with the parent except at the edited region.
+```python
+sample.copy(new_name, message=None)
+graph.replace(target, sequence, message=None, stack=False)
+graph.delete(target, message=None, stack=False)
+graph.insert(sequence, before=None, after=None, message=None, stack=False)
+```
+
+`copy()` returns a new `Sample` in the same collection, retaining the parent's
+graphs and annotations for independent editing; an existing sample name fails.
+Replace/delete targets are region strings, loci, or annotations. These methods
+edit the graph's existing sample, not a new sample. Replace and insert return the
+new sequence's `Locus`; delete returns `None`. Each edit records an operation,
+using `message` when supplied. Replacement/insertion require nonempty sequence;
+use delete to remove sequence.
+
+```python
+source = next(sample for sample in repo.samples if sample.sample_name == "parent")
+design = source.copy("design")
+graph = design[0]
+replacement = graph.replace("vector:4-8", "ACAC", message="replace motif")
+assert replacement.sequence == "ACAC"
+inserted = graph.insert("GG", after=replacement.end())
+assert inserted.sequence == "GG"
+graph.delete(inserted)
+assert graph.region("vector:0-16").sequence == "AAAAACACGGGGTTTT"
+assert source[0].region("vector:0-16").sequence == "AAAACCCCGGGGTTTT"
+```
+
+`before` and `after` are keyword-only and each accepts `Position` or
+`SuperPosition`; at least one is required. With one side, insertion connects to
+all current neighbors on that side. With both, the named endpoints must flank
+direct connections. For example, at a fork, insertion after the shared upstream
+base affects all outgoing alternatives, while insertion before one downstream
+option affects only that option. One call adds one shared piece; use separate
+calls to keep independent routes separate.
+
+Edits read sequence on the target strand, so replacement on a reverse locus uses
+the reverse-oriented sequence. Insertion after a reverse position follows that
+strand's reading direction. Targets must remain present in the edited graph;
+canonical locus identity survives node splitting but does not make deleted bases
+valid targets. Re-query current sequence when necessary.
+
+`stack=True` retains original routes and adds the edit as an alternative. It
+leaves the current named path unchanged. Default edits supersede targeted routes
+and update affected current paths. Use all-path reads/exports to inspect stacked
+alternatives; default FASTA alone will still show the original path.
+
+## Loci and positions
+
+```python
+locus = graph.region("vector:4-8")
+len(locus)
+locus.sequence
+locus.strand
+locus.slices
+locus.start()
+locus.end()
+locus[0]
+locus[-1]
+locus[1:3]
+locus.slice(1, 3)
+locus.reverse_complement()
+position = locus.start()
+position.node
+position.offset
+position.strand
+position.sequence_graph
+position + 1
+position - 1
+position.on(other_graph)
+combined = position | locus.end()
+gen.SuperPosition(position, locus.end())
+combined.positions
+combined.sequence_graph
+combined.on(other_graph)
+combined + 1
+```
+
+Region coordinates are 0-based and half-open along a named graph/path or
+annotation. `graph.region()` rejects regions resolved to another graph, ambiguous
+routes, empty intervals, and out-of-range spans. Graph-name regions use the current
+path when available. Locus offsets count bases in reading order, including across
+nodes and on the reverse strand. `start()`/`end()` are the first/last **included
+base**, not interval boundary coordinates.
+
+Integer indexing returns a `Position`; unit-step slicing returns a `Locus`.
+Python slicing supports omitted/negative/clipped bounds; explicit `slice(start,
+end)` requires an in-range nonempty span. Empty slices raise `IndexError` and
+steps other than one fail. Reverse complement changes strand and reading order;
+use `reverse_complement()`, not `[::-1]`.
+
+A `Node` represents a stored-sequence slice: `.id`, `.sequence_start`,
+`.sequence_end`, `.length`. `NodeSlice` has `.node`, `.start`, `.end`, `.strand`.
+`Position.offset` is relative to its graph node slice, not a path coordinate;
+absolute stored-node offset is `position.node.sequence_start + position.offset`.
+Use typed endpoints rather than reconstructing targets from those offsets.
+
+Positions from search, regions, edits, and annotation loci carry graph context.
+Arithmetic walks the current graph in reading order; a fork can turn a
+`Position` into `SuperPosition`. Superpositions retain alternative endpoints;
+stepping beyond a terminal fails. `.on(graph)` attaches the same address to
+another graph (for example a sample copy); it does not translate path coordinates.
+Unions reject attached positions from different graphs.
+
+## Annotations
+
+```python
+graph.annotations
+annotation = graph.add_annotation(locus, "motif", track="motifs")
+repo.import_annotations(filename, format=None, index=None, name=None, message=None)
+ad_hoc = gen.Annotation(locus, "temporary label")
+```
+
+`graph.annotations` returns database and attached-file annotations together.
+`add_annotation()` requires a nonempty `Locus` and returns a persisted
+`Annotation`, recording an operation. `gen.Annotation(locus, name)` constructs
+an ad-hoc annotation, not a persisted feature.
+
+`import_annotations()` records an annotation file as an asset and returns its
+commit hash string. Format is inferred unless supplied; a neighboring tabix
+index is discovered unless explicitly specified. File reference names must match
+the graph context to appear in `.annotations`. Use `format="gff3"`, `"bed"`, or
+`"genbank"` as appropriate. `name` controls the display/group name.
+
+Annotation fields: `.name`, `.id`, `.locus`, `.group`, `.track`, `.metadata`,
+`.segments`. Use `.locus.sequence` to inspect feature sequence and the annotation
+or its locus as a direct edit target.
+
+## File-driven updates
 
 ```python
 repo.update_with_sequence(sequence, sample, new_sample, region_name,
-                           no_reference_path_update=False, collection=None)
+                          no_reference_path_update=False, collection=None)
 repo.update_with_fasta(filename, sample, new_sample, region_name, collection=None)
 repo.update_with_genbank(filename, sample, create_missing=False, collection=None)
 repo.update_with_gfa(filename, sample, new_sample, collection=None)
 repo.update_with_vcf(filename, reference=None, genotype=None, sample=None,
-                      in_place=False, collection=None)
+                     in_place=False, collection=None)
 repo.update_with_gaf(filename, csv, sample, parent_sample=None, collection=None)
 repo.update_with_library(sample, new_sample_name, path_name, parts_list, collection=None)
-repo.update_with_library_files(sample, new_sample, path_name, library, parts,
-                                collection=None)
+repo.update_with_library_files(sample, new_sample, path_name, library, parts, collection=None)
 ```
 
-Recipes (from `gen-python/examples/introduction.ipynb` and
-`gen-python/examples/repository_api.ipynb`):
+VCF/GAF return `list[Sample]`; other updates return a `Sample`. Sequence, FASTA,
+GFA, and library updates create the named output sample. GenBank updates the
+specified sample; `create_missing=True` allows missing graphs. VCF exposes
+`in_place`; do not assume every update creates a new sample.
 
 ```python
-# Replace an explicit region with a literal sequence
-sample_gg = repo.update_with_sequence(
-    "GAATTCGGTCTCAAATGCATCATCATCATGCATTGAGACCAAGCTT",
-    sample="wt",
-    new_sample="gg_design",
-    region_name="pUC19:395-452",   # 0-based, half-open
+edited = repo.update_with_sequence(
+    "ACAC", sample="parent", new_sample="file-style-design",
+    region_name="vector:4-8",
 )
-
-# Apply variants from a VCF against a reference sample
-result_samples = repo.update_with_vcf(
-    "sequenced.vcf",
-    reference="gg_design",
-    sample="sequenced",
-)   # -> list[Sample], one per sample column / branch
-sg_seq = result_samples[0][0]
-
-# reference= names the parent sample; genotype= (e.g. "1/1") fixes a specific GT;
-# sample= selects a VCF sample column for genotype info.
-
-# Merge a GFA walk into an existing sample
-merged = repo.update_with_gfa("walk.gfa", sample="ref", new_sample="gfa_merged")
-
-# GAF: csv describes insertion flanks, parent_sample is the branch point
-gaf_sample = repo.update_with_gaf(
-    "reads.gaf", csv="insert_flanks.csv",
-    sample="gaf_sample", parent_sample="ref",
-)
-
-# Swap a region for a combinatorial library
-lib_updated = repo.update_with_library(
-    sample="ref",
-    new_sample_name="lib_updated",
-    path_name="m123:5-20",
-    parts_list=[
-        [gen.SequencePart("tag_a", "ATGATGATG"), gen.SequencePart("tag_b", "TGATGATGA")],
-    ],
-)
+# VCF reference names the parent/reference; sample selects the VCF sample column.
+# variants = repo.update_with_vcf("variants.vcf", reference="ref", sample="sequenced")
+# variant_graph = variants[0][0]
 ```
 
-### Query / navigate
+## Search and sequence reads
 
 ```python
-repo.get_samples()                              # list[Sample]
-repo.get_sequence_graphs()                       # list[SequenceGraph]
-repo.get_sequence_graphs_by_collection(name)      # list[SequenceGraph]
-repo.get_sequence_graph_by_id(id)                 # SequenceGraph
+graph.search(query, sequence_kind="dna")
+repo.search(query, bgs=None, sequence_kind="dna")
+graph.build_index(sequence_kind="dna", k=16)
+repo.build_index(sequence_kind="dna", k=16, bgs=None)
+graph.clear_index()
+repo.clear_index(bgs=None)
+graph.all_sequences()
+graph.get_node_sequence(node)
 repo.get_node_sequence(node_key)
-repo.search(query, bgs=None, sequence_kind="dna") # exact search across graphs
-repo.execute(query) / repo.query(query)
+graph.to_dict()
+graph.to_networkx()
+graph.to_rustworkx()
 ```
 
-`search()` returns `list[(SequenceGraph, list[Locus])]` — one entry per graph with at
-least one hit. `sequence_kind` is one of `"exact"`, `"dna"`, `"ssdna"`, `"protein"`;
-`"exact"` is case-sensitive raw-byte matching with no IUPAC expansion or
-reverse-complement search. `bgs=None` searches all sequence graphs. Build a seed index
-first with `repo.build_index(sequence_kind="dna", k=16, bgs=None)` to speed up repeat
-searches on large graphs; `clear_index(bgs=None)` removes it.
+Graph search returns `list[Locus]`; repository search returns
+`list[(SequenceGraph, list[Locus])]`. `bgs` is a list of graph objects.
+Kinds: `"exact"`, `"dna"`, `"ssdna"`, `"protein"`. Exact is case-sensitive raw-byte
+matching without IUPAC expansion or reverse-complement search; DNA matches both
+strands with IUPAC support. Check result count and strand before choosing a target.
+Build an index for repeated large-graph searches.
 
-```python
-hits = repo.search("GGTCTC", bgs=[sg_gg], sequence_kind="dna")
-loci = hits[0][1]          # [(SequenceGraph, [Locus]), ...]
-print(f"BsaI sites: {len(loci)}")
-```
+`locus.sequence` is a string in reading order; `str(locus)` also reads sequence.
+`all_sequences()` is an iterator of strings for the current graph alternatives;
+combinatorial enumeration can be exponential. `get_node_sequence()` reads the
+provided graph node's stored-sequence slice. Repository and graph handles cannot
+cross threads; open a repository in the worker and retrieve the graph by its typed
+id instead. NetworkX/rustworkx conversions need
+their optional packages and return `DiGraph`/`PyDiGraph`, respectively.
 
-### Graph partitioning
+## Partitioning, translation, and combinatorial libraries
 
 ```python
 repo.derive_subgraph(sample, new_sample, region, backbone=None, collection=None)
 repo.derive_chunks(sample, new_sample, region, backbone=None, breakpoints=None,
-                    chunk_size=None, collection=None)
-repo.stitch(bgs, new_sample, new_region)          # concatenate SequenceGraphs, same collection+sample
+                   chunk_size=None, collection=None)
 repo.make_stitch(sample, new_sample, regions, new_region, collection=None)
+repo.stitch(bgs, new_sample, new_region)
+graph.subgraph(new_sample, start, end, backbone=None)
+graph.chunks(new_sample, breakpoints=None, chunk_size=None, backbone=None)
+graph.translate_annotation(region=None, output_collection=None, name=None,
+                           strand=None, frame=0, codon_table=1, start=None)
 ```
 
-`region`/`regions` use the same `"<name>:<start>-<end>"` syntax as `region_name=`.
-`stitch()` connects end nodes of each preceding block group to the start nodes of the
-next, in list order.
+`derive_subgraph()`, `make_stitch()`, `stitch()`, and `graph.subgraph()` return a
+`SequenceGraph`. `derive_chunks()` returns a `Sample`; `graph.chunks()` returns
+`list[SequenceGraph]`. Breakpoints are a list of integer coordinates.
+`make_stitch()` takes comma-separated region strings; `stitch()` takes graphs in
+concatenation order, all from the same collection and sample.
 
-### Export
+Translation returns a protein `SequenceGraph` in the source sample. A string
+region resolves first as a path, then an annotation in this graph; passing an
+`Annotation` disambiguates by id. Translation reads from `start` (or the feature's
+entry point) until the first in-frame stop; an end coordinate does not bound it.
+
+Library `parts_list` is a list of columns, each containing alternative
+`gen.SequencePart(name, sequence)` objects. Single-option columns are fixed flanks.
 
 ```python
-repo.export_fasta(filename, sample=None, collection=None)
+parts_list = [
+    [gen.SequencePart("left", "AAAA")],
+    [gen.SequencePart("option-a", "CCCC"), gen.SequencePart("option-b", "GGGG")],
+    [gen.SequencePart("right", "TTTT")],
+]
+library = repo.import_library("cassette", parts_list, sample="library")
+assert set(library.all_sequences()) == {"AAAACCCCTTTT", "AAAAGGGGTTTT"}
+```
+
+For file libraries, `parts` is a named-parts FASTA and `library` is a headerless
+CSV with one slot per column and alternatives in rows. To replace an existing
+region with a library use `update_with_library()`/`update_with_library_files()`.
+
+## Exports
+
+```python
+repo.export_fasta(filename, sample=None, collection=None, all_sequences=False)
 repo.export_genbank(filename, sample=None, collection=None)
 repo.export_gfa(filename, sample=None, node_max=None, collection=None)
+graph.export_fasta(filename, all_sequences=False)
+graph.export_genbank(filename)
+graph.export_gfa(filename, node_max=None)
 ```
 
-### Transactions
+All return `None`. Graph-level exports cover the **entire sample**.
+FASTA defaults to current named paths; `all_sequences=True` enumerates alternatives
+with `"{graph_name}.{index}"` headers (1-based). Use it to inspect stacked edits or
+libraries, mindful of the number of combinations. GenBank preserves annotations;
+GFA preserves graph structure.
+
+## Widgets in agents and Jupyter
 
 ```python
-with repo.transaction():
-    repo.import_fasta("reference.fasta")
-    repo.import_gfa("graph.gfa")
+widget = graph.plot(rows=20, cols=100, show_history=False)
+# sample.plot() pages through the sample's graphs.
+widget.show(locus, color="cyan", center=False)
+widget.go_to(locus.start(), center=False)
+widget.refresh()
+widget.next_page()
+widget.prev_page()
+widget.zoom_in()
+widget.zoom_out()
+widget.scroll_left()
+widget.scroll_right()
+widget.scroll_up()
+widget.scroll_down()
+print(repr(widget))
 ```
 
-## `SequenceGraph`
+Terminals, scripts, and agent REPLs get `TextGraphWidget` even when Jupyter
+packages are installed. A live Jupyter kernel with optional dependencies gets
+`GraphWidget`; otherwise it falls back to text. `show()` navigates and highlights
+loci/annotations; positions/superpositions navigate without highlighting.
+`go_to()` navigates only. Both return the widget. Refresh after graph edits;
+paging switches graphs while scrolling moves within a graph.
 
-One graph (a "block group") within a sample. Cannot cross threads — capture `.id` and
-reopen a fresh `Repository` in a worker thread if needed
-(`repo.get_sequence_graph_by_id(sg_id)`).
+Graph/repository plot supports `detail`, `colors`, and `show_history`; sample plot
+supports `colors` and `show_history`. History display includes retired/pruned
+edges dimmed; it is not an operation diff.
 
-```python
-sg.name / sg.id / sg.sample_name / sg.collection_name
-sg.get_node_sequence(node)
-sg.list_annotations()                              # list[Annotation]
-sg.search(query, sequence_kind="dna")               # list[Locus], scoped to this graph
-sg.translate_annotation(region=None, output_collection=None, name=None,
-                         strand=None, frame=0, codon_table=1, start=None)
-sg.subgraph(new_sample, start, end, backbone=None)  # -> SequenceGraph, shorthand for derive_subgraph
-sg.chunks(new_sample, breakpoints=None, chunk_size=None, backbone=None)  # -> list[SequenceGraph]
-sg.export_fasta(filename) / .export_genbank(filename) / .export_gfa(filename, node_max=None)
-sg.to_dict() / .to_networkx() / .to_rustworkx()
-sg.build_index(sequence_kind="dna", k=16) / .clear_index()
-sg.plot(rows=None, cols=None, detail=None, colors=None)
-```
-
-`export_*` on a `SequenceGraph` exports the whole sample it belongs to, not just this
-one graph.
-
-`translate_annotation`: `region` resolves first as a path name, then an annotation
-name, scoped to this graph only; pass an `Annotation` object directly to disambiguate
-by id. Reads forward from `start` (or the annotation's own entry point) to the first
-in-frame stop codon — not bounded by an end coordinate. Returns a protein
-`SequenceGraph` in this graph's sample.
-
-```python
-chunks = sg_gg.chunks("gg_500bp_chunks", chunk_size=500)
-reassembled = repo.stitch(bgs=chunks, new_sample="gg_reassembled",
-                           new_region="pUC19.reassembled")
-
-protein_sg = sg.translate_annotation(region="lacZ", frame=0, codon_table=1)
-```
-
-## `Sample`
-
-List-like container of the `SequenceGraph`s produced by one call.
-
-```python
-len(sample) / sample[0] / for sg in sample: ...
-sample.sample_name / sample.collection_name / sample.block_groups
-sample.plot(rows=None, cols=None, colors=None)   # pages through every graph in the sample
-```
-
-## `Annotation`
-
-```python
-annotation.name / .id / .locus / .group / .track / .metadata / .segments
-```
-
-Auto-loaded from GenBank imports; also constructible directly for ad-hoc widget
-overlays: `gen.Annotation(locus, name)`.
-
-## `Locus` / `Position` / `NodeSlice`
-
-```python
-locus.start() / locus.end()   # -> Position
-locus.slices                  # -> list[NodeSlice]
-locus.strand                  # "+" / "-"
-
-position.node / position.offset
-node_slice.node / .start / .end / .strand
-```
-
-Pass a `Locus`, `Position`, or `Annotation` directly to `widget.go_to(...)`.
-
-## `SequencePart`
-
-```python
-gen.SequencePart(name, sequence)
-```
-
-Building block for `import_library`/`update_with_library`'s `parts_list`: a list of
-columns, each a list of alternative `SequencePart`s for that position.
-
-## `GraphWidget` (from `.plot()`)
-
-Interactive Jupyter widget; also the headless verification surface — drive it and
-`repr()` it from plain Python, no browser required.
-
-```python
-widget = sg.plot()
-repr(widget)                       # e.g. "[1/20] <name> ..."
-widget.go_to(locus_or_position_or_annotation)
-widget.next_page() / .prev_page()  # switch graphs (Sample-backed widgets only; no-op on single-graph widgets)
-widget.zoom_in() / .zoom_out()
-widget.scroll_left() / .scroll_right() / .scroll_up() / .scroll_down()
-widget.highlight_match(locus, color="cyan")
-widget.clear_highlights()
-widget.add_annotation(gen.Annotation(locus, "label"))
-widget.list_annotations()
-widget.clear_all_annotations()
-widget.show_path()                 # highlight the currently-diverging edited path
-```
-
-All mutators act in place and re-render; re-`repr()` to see the effect. This is the
-preferred way for an agent to confirm a plot's contents without a browser.
-
-## Region string syntax (all `region`/`region_name`/`path_name` args)
-
-`"<path or annotation name>:<start>-<end>"` — 0-based, half-open, resolved first
-against a named path in the target graph, then an annotation name in that graph's
-lineage.
-
-## Graph export interop
-
-```python
-import networkx as nx
-nx_graph = sg.to_networkx()          # DiGraph
-
-import rustworkx as rx
-rx_graph = sg.to_rustworkx()         # PyDiGraph
-```
-
-Both require the corresponding package installed; catch `ImportError` if optional.
+Interactive-only controls include `clear_highlights()`, `show_path()`,
+`hide_path()`, `show_track(name)`, `hide_track(name)`, `.tracks`, and
+`hide_all_tracks()`. They are unavailable on the text widget. Persist annotations
+through the graph API rather than removed widget annotation methods.
