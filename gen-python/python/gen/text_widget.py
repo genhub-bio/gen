@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Self
 
 from .ascii_render import frame_text
 
@@ -168,7 +169,7 @@ class TextGraphWidget:
         self._controller.move_by(0, self.rows)
         self._render()
 
-    def go_to(self, target, *, center: bool = False) -> None:
+    def go_to(self, target, *, center: bool = False) -> Self:
         """Instantly move the camera to a graph position, locus, or annotation.
 
         Parameters
@@ -205,8 +206,9 @@ class TextGraphWidget:
         else:
             self._controller.go_to_pos(target, center)
         self._render()
+        return self
 
-    def show(self, target, color: str | None = None, *, center: bool = False) -> None:
+    def show(self, target, color: str | None = None, *, center: bool = False) -> Self:
         """Navigate to and highlight a graph locus or annotation in one call.
 
         Parameters
@@ -253,6 +255,7 @@ class TextGraphWidget:
             self._controller.go_to_locus(target, center)
             self._controller.highlight_match(target, color)
         self._render()
+        return self
 
     def next_page(self) -> None:
         """Advance to the next sequence graph and refresh the text output."""
