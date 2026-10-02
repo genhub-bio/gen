@@ -11,8 +11,9 @@ extra or outside a live Jupyter kernel, including terminal and AI REPL sessions.
 ## Quick start
 
 `Repository` import/update/query methods return live `Sample` or `SequenceGraph`
-objects directly — never bare ids or names — so you can chain calls instead of
-looking things up afterward:
+objects directly. Each sample can hold multiple sequence graphs that can be
+accessed as a list. If you don't specify `sample=`, imports go into the
+repository's default sample, named `"reference"`:
 
 ```python
 import gen
@@ -21,6 +22,8 @@ repo = gen.Repository("path/to/.gen")
 
 sample = repo.import_fasta("path/to.fa")     # -> Sample
 sg = sample[0]                               # -> SequenceGraph
+part = repo.import_sequence("ATG", "codon")  # -> SequenceGraph
+
 samples = repo.samples                       # -> list[Sample]
 graphs = repo.get_sequence_graphs()          # -> list[SequenceGraph]
 

@@ -441,7 +441,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -480,7 +479,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -502,20 +500,144 @@ mod python_tests {
 
             py_repo
                 .borrow(py)
-                .import_fasta(path.clone(), Some("test".to_string()), false, None)
+                .import_fasta(path.clone(), Some("test".to_string()), None)
                 .unwrap();
 
-            let err =
-                match py_repo
-                    .borrow(py)
-                    .import_fasta(path, Some("test".to_string()), false, None)
-                {
-                    Err(e) => e.to_string(),
-                    Ok(_) => panic!("expected duplicate import to fail"),
-                };
+            let err = match py_repo
+                .borrow(py)
+                .import_fasta(path, Some("test".to_string()), None)
+            {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected duplicate import to fail"),
+            };
             assert!(
                 err.contains("already exist"),
                 "Expected 'already exist' in error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_returns_graph_and_builds_sample_in_a_loop() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                first = py_repo.import_sequence("ACGTACGT", "chr1", sample="wt")
+                assert first.name == "chr1" and first.sample_name == "wt"
+                wt = next(sample for sample in py_repo.samples if sample.sample_name == "wt")
+                second = py_repo.import_sequence("TTTT", "chr2", sample=wt)
+                assert second.sample_name == "wt"
+                third = py_repo.import_sequence("GGGG", "chr3", sample="wt")
+                samples = {sample.sample_name: sample for sample in py_repo.samples}
+                assert sorted(graph.name for graph in samples["wt"]) == ["chr1", "chr2", "chr3"]
+                other = py_repo.import_sequence("GGGG", "chrA", sample="other")
+                assert len(py_repo.get_sequence_graphs()) == 4
+                for not_a_sample in (42, first):
+                    try:
+                        py_repo.import_sequence("ACGT", "x", sample=not_a_sample)
+                    except TypeError as error:
+                        assert "sample must be" in str(error), str(error)
+                    else:
+                        raise AssertionError(f"expected TypeError for {not_a_sample!r}")
+                "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_rejects_bad_input() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                for args, message in [
+                    (("ACGT",), "name is required"),
+                    (("ACGT", ""), "must not be empty"),
+                    (("", "chr1"), "is empty"),
+                    ((42, "chr1"), "must be a string"),
+                ]:
+                    try:
+                        py_repo.import_sequence(*args)
+                    except ValueError as error:
+                        assert message in str(error), str(error)
+                    else:
+                        raise AssertionError(f"expected ValueError for {args!r}")
+                assert len(py_repo.get_sequence_graphs()) == 0
+                "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_duplicate_gives_specific_error() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                py_repo.import_sequence("ACGT", "chr1", sample="a")
+                try:
+                    py_repo.import_sequence("ACGT", "chr1", sample="a")
+                except RuntimeError as error:
+                    assert "already exist" in str(error), str(error)
+                else:
+                    raise AssertionError("expected duplicate import to fail")
+                "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_reusing_a_name_with_new_contents_fails() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                py_repo.import_sequence("ACGT", "chr1", sample="a")
+                try:
+                    py_repo.import_sequence("TTTT", "chr1", sample="a")
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError("expected reusing a name in a sample to fail")
+                assert len(py_repo.get_sequence_graphs()) == 1
+                "#
+            );
+        });
+    }
+
+    #[test]
+    fn test_import_sequence_circular_and_reference() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_repo = make_repo(py);
+            py_run!(
+                py,
+                py_repo,
+                r#"
+                graph = py_repo.import_sequence("ACGTAC", "plasmid", circular=True)
+                assert graph.name == "plasmid"
+                reference = py_repo.import_reference_sequence("GGCC", "ref", name="ring", circular=True)
+                assert reference.name == "ring" and reference.sample_name == "ref"
+                try:
+                    py_repo.import_reference_sequence("TTTT", "ref", name="ring")
+                except RuntimeError as error:
+                    assert "already exists" in str(error), str(error)
+                else:
+                    raise AssertionError("expected reusing a name in a reference sample to fail")
+                "#
             );
         });
     }
@@ -533,7 +655,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -559,7 +680,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -582,7 +702,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -619,7 +738,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -643,7 +761,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
@@ -682,7 +799,6 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
-                    false,
                     None,
                 )
                 .unwrap();
