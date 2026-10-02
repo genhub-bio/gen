@@ -806,19 +806,14 @@ pub fn add_annotation_file(
             parse_annotation_file_type(&ext)?
         }
     };
-    let operation_file = OperationFile::new(path)
-        .set_file_type(file_type)
-        .set_role(AssetRole::Annotation);
-    let prepared_addition = FileAddition::prepare(
+    let file_addition =
+        FileAddition::prepare(workspace, path, file_type, checksum_overrides.annotation)?;
+    let annotation_logical_path = OperationFile::storage_file_path(
         workspace,
         path,
+        file_addition.checksum.as_ref(),
         file_type,
-        AssetRole::Annotation,
-        checksum_overrides.annotation,
-        None,
     )?;
-    let annotation_logical_path = operation_file.logical_path(workspace, &prepared_addition)?;
-    let file_addition = prepared_addition.addition;
     let prepared_index =
         if let Some(index_path) = annotation_index_file_path(workspace, path, index) {
             let index_file_type = FileTypes::infer_from_path(&index_path);
@@ -826,15 +821,13 @@ pub fn add_annotation_file(
                 workspace,
                 &index_path,
                 index_file_type,
-                AssetRole::AnnotationIndex,
                 checksum_overrides.index,
-                None,
-            )?
-            .addition;
+            )?;
             let logical_path = OperationFile::storage_file_path(
                 workspace,
                 &index_path,
                 file_addition.checksum.as_ref(),
+                index_file_type,
             )?;
             let name = Path::new(&index_path)
                 .file_name()
@@ -847,7 +840,12 @@ pub fn add_annotation_file(
     let name = name.or_else(|| Path::new(path).file_name().and_then(|value| value.to_str()));
     let name_value = name.unwrap_or_default();
     let annotation_asset_ref_id = AssetRef::id_hash(
-        &file_addition,
+        &file_addition.asset_uri,
+        file_addition.file_type.as_str(),
+        (
+            file_addition.checksum.as_ref(),
+            file_addition.materialized_checksum.as_ref(),
+        ),
         &AssetRole::Annotation,
         Some(&annotation_logical_path),
         name,

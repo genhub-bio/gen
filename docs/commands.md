@@ -64,9 +64,10 @@ repeatable `--index <path-or-uri>` option. For example, a BGZF FASTA can use bot
 
 Uncompressed FASTA, VCF, GFA/GAF, GFF/BED, GenBank, and CSV inputs are stored in
 BGZF form and restored as their original plain bytes at their logical paths.
-Already-compressed inputs retain their representation and path. Binary files and
-index files are retained unchanged. The asset checksum verifies archived bytes,
-while the materialized checksum verifies bytes restored at the logical path.
+Ordinary gzip selected text assets are normalized to BGZF, while existing BGZF
+bytes and compressed workspace paths are retained. Binary files and index files
+are retained unchanged. The asset checksum verifies archived bytes, while the
+materialized checksum verifies bytes restored at the logical path.
 
 # View diff
 

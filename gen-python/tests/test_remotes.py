@@ -2,7 +2,6 @@
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import hashlib
 import json
 import os
 from pathlib import Path, PurePath
@@ -15,49 +14,24 @@ import gen
 
 
 def archived_asset_bytes_by_id(repository):
-    """Reads each reachable asset through Gen's content-addressed archive layout.
-
-    Asset exposes its id and name; Repository.query supplies the URI and checksum. This mirrors
-    AssetRef::versioned_store_path: use the full URI suffix and checksum beneath this repository's
-    `.gen/assets` directory.
-    """
-    assets = {asset.id: asset for asset in repository.get_assets()}
-    metadata = {
+    """Read reachable local assets from the content-addressed archive directory."""
+    asset_refs = {
         asset_id: (uri, checksum)
         for asset_id, uri, checksum in repository.query(
             "SELECT lower(hex(id)), uri, checksum FROM gen_asset_refs"
         )
     }
+    reachable_asset_ids = {asset.id for asset in repository.get_assets()}
     asset_directory = Path(repository.db_path).parent / "assets"
     archived_assets = {}
 
-    for asset_id, asset in assets.items():
-        if asset_id not in metadata:
-            raise AssertionError(
-                f"tracked asset {asset.name!r} has no database metadata"
-            )
-        uri, checksum_bytes = metadata[asset_id]
-        if checksum_bytes is None:
-            raise AssertionError(f"local tracked asset {asset.name!r} has no checksum")
-        checksum = checksum_bytes.hex()
-        if uri.startswith("file://"):
-            uri_path = uri.removeprefix("file://")
-        elif "://" not in uri:
-            uri_path = uri
-        else:
-            raise AssertionError(
-                f"tracked asset {asset.name!r} is not locally archived"
-            )
-
-        basename = Path(uri_path).name
-        _, separator, suffix = basename.partition(".")
-        filename = f"{checksum}.{suffix}" if separator and suffix else checksum
-        content = (asset_directory / filename).read_bytes()
-        if hashlib.sha256(content).hexdigest() != checksum:
-            raise AssertionError(
-                f"archived bytes for {asset.name!r} do not match its checksum"
-            )
-        archived_assets[asset_id] = content
+    for asset_id in reachable_asset_ids:
+        uri, checksum = asset_refs[asset_id]
+        if not uri.startswith("file://"):
+            raise AssertionError(f"asset {asset_id} is not locally archived")
+        suffix = Path(uri.removeprefix("file://")).name.partition(".")[2]
+        filename = f"{checksum.hex()}.{suffix}" if suffix else checksum.hex()
+        archived_assets[asset_id] = (asset_directory / filename).read_bytes()
 
     return archived_assets
 

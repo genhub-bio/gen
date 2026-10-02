@@ -7,27 +7,26 @@ use gen_core::{Sha256Hash, Workspace};
 use noodles::bgzf;
 use tempfile::NamedTempFile;
 
-use super::{AssetRole, ChecksummedReader, ChecksummedWriter, FileTypes, LocalAssetUri};
+use super::{ChecksummedReader, ChecksummedWriter, FileTypes, LocalAssetUri};
 use crate::errors::FileAdditionError;
 
-pub(crate) fn should_archive_as_bgzf(file_type: FileTypes, role: &AssetRole) -> bool {
-    matches!(role, AssetRole::Input | AssetRole::Annotation)
-        && matches!(
-            file_type,
-            FileTypes::Fasta
-                | FileTypes::VCF
-                | FileTypes::GFA
-                | FileTypes::GAF
-                | FileTypes::Gff3
-                | FileTypes::Bed
-                | FileTypes::GenBank
-                | FileTypes::CSV
-        )
+/// Returns whether a file type is retained as BGZF for efficient indexed access.
+pub fn should_archive_as_bgzf(file_type: FileTypes) -> bool {
+    matches!(
+        file_type,
+        FileTypes::Fasta
+            | FileTypes::VCF
+            | FileTypes::GFA
+            | FileTypes::GAF
+            | FileTypes::Gff3
+            | FileTypes::Bed
+            | FileTypes::GenBank
+            | FileTypes::CSV
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputEncoding {
-    Uninspected,
     Plain,
     Gzip,
     Bgzf,
@@ -35,6 +34,7 @@ pub(crate) enum InputEncoding {
 
 pub(crate) type ReplayedReader<R> = Chain<Cursor<Vec<u8>>, R>;
 
+// Read enough header bytes to distinguish BGZF from ordinary gzip, then replay them into storage.
 pub(crate) fn classify_input<R: Read>(
     mut reader: R,
 ) -> io::Result<(InputEncoding, ReplayedReader<R>)> {
@@ -104,7 +104,7 @@ pub(crate) fn stage_bgzf_asset_copy(
                     .map_err(FileAdditionError::FileReadError)?;
                 checksummed_writer.checksum()
             }
-            InputEncoding::Plain | InputEncoding::Uninspected => {
+            InputEncoding::Plain => {
                 let mut bgzf_writer = bgzf::io::Writer::new(checksummed_writer);
                 let mut source_reader = source_reader;
                 io::copy(&mut source_reader, &mut bgzf_writer)

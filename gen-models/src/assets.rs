@@ -24,26 +24,12 @@ use crate::{
     errors::{FileAdditionError, FileStoreError, QueryError},
     file_types::FileTypes,
     history::dolt::hash_of,
-    operations::{FileAddition, OperationFile},
+    operations::FileAddition,
 };
 
 mod compression;
-mod preparation;
-pub(crate) use compression::{
-    InputEncoding, classify_input, should_archive_as_bgzf, stage_bgzf_asset_copy,
-};
-pub(crate) use preparation::prepare_operation_file;
-
-/// The assets prepared for one operation input and any derived indexes it uses.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PreparedAssetSet {
-    /// The primary asset retained or referenced by the operation.
-    pub parent: AssetRef,
-    /// Index and other derived assets linked to the primary asset.
-    pub derived: Vec<AssetRef>,
-    /// Normalized operation files that can be committed after preparation.
-    pub operation_files: Vec<OperationFile>,
-}
+pub use compression::should_archive_as_bgzf;
+pub(crate) use compression::{InputEncoding, classify_input, stage_bgzf_asset_copy};
 
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -213,7 +199,10 @@ pub struct AssetRef {
     pub upstream_asset_ref_id: Option<HashId>,
     /// SHA-256 of the bytes written to the working tree after archive decoding.
     ///
-    /// `None` means the archived bytes are also the materialized bytes.
+    /// This is the checksum of the file that ends up in/is in the workspace directory,
+    /// not in .assets. If it is `None` it means its the same as the Asset's checksum.
+    /// For some cases, we compress the file when stored in .assets so the asset checksum
+    /// differs from the materialized checksum.
     pub materialized_checksum: Option<Sha256Hash>,
 }
 
@@ -315,24 +304,23 @@ impl AssetRef {
 
     /// Hashes the normalized asset identity, including both archived and materialized checksums.
     pub fn id_hash(
-        file_addition: &FileAddition,
+        uri: &str,
+        file_type: &str,
+        checksums: (Option<&Sha256Hash>, Option<&Sha256Hash>),
         role: &AssetRole,
         logical_path: Option<&str>,
         name: Option<&str>,
         upstream_asset_ref_id: Option<&HashId>,
     ) -> HashId {
-        let checksum = file_addition
-            .checksum
+        let (checksum, materialized_checksum) = checksums;
+        let checksum = checksum
             .map(|checksum| checksum.to_string())
             .unwrap_or_default();
-        let materialized_checksum = file_addition
-            .materialized_checksum
+        let materialized_checksum = materialized_checksum
             .map(|checksum| checksum.to_string())
             .unwrap_or_default();
         let mut identity = format!(
             "{uri}:{file_type}:{checksum}:{materialized_checksum}:{role}:{logical_path}:{name}",
-            uri = file_addition.asset_uri,
-            file_type = file_addition.file_type.as_str(),
             role = role.as_str(),
             logical_path = logical_path.unwrap_or_default(),
             name = name.unwrap_or_default(),
@@ -355,7 +343,12 @@ impl AssetRef {
         let file_type = file_addition.file_type.as_str();
         Self {
             id: Self::id_hash(
-                file_addition,
+                &file_addition.asset_uri,
+                file_type,
+                (
+                    file_addition.checksum.as_ref(),
+                    file_addition.materialized_checksum.as_ref(),
+                ),
                 &role,
                 logical_path,
                 name,
@@ -1519,56 +1512,6 @@ impl LocalAssetUri {
         )))
     }
 
-    pub(crate) fn stage_asset_copy_from_reader(
-        asset_uri: &dyn AssetUri,
-        workspace: &Workspace,
-        reader: impl Read + 'static,
-        checksum_override: Option<Sha256Hash>,
-    ) -> Result<Sha256Hash, FileAdditionError> {
-        let asset_dir = workspace.asset_dir()?;
-        fs::create_dir_all(&asset_dir).map_err(FileAdditionError::FileReadError)?;
-        if let Some(checksum) = checksum_override {
-            let asset_path = asset_dir.join(asset_uri.asset_filename(&checksum));
-            if asset_path.exists() {
-                Self::verify_asset_checksum(&asset_path, checksum, asset_uri.uri())?;
-                return Ok(checksum);
-            }
-        }
-
-        let mut reader = ChecksummedReader::new(reader);
-        let checksum_handle = reader.checksum_handle();
-        let mut staged_file =
-            NamedTempFile::new_in(&asset_dir).map_err(FileAdditionError::FileReadError)?;
-        io::copy(&mut reader, &mut staged_file).map_err(FileAdditionError::FileReadError)?;
-        staged_file
-            .flush()
-            .map_err(FileAdditionError::FileReadError)?;
-        let checksum = checksum_handle.checksum().ok_or_else(|| {
-            FileAdditionError::ChecksumError(format!(
-                "local asset stream did not reach EOF: {}",
-                asset_uri.uri()
-            ))
-        })?;
-        if let Some(expected_checksum) = checksum_override
-            && checksum != expected_checksum
-        {
-            return Err(FileAdditionError::ChecksumError(format!(
-                "local asset checksum does not match the provided checksum: {}",
-                asset_uri.uri()
-            )));
-        }
-
-        let asset_path = asset_dir.join(asset_uri.asset_filename(&checksum));
-        match staged_file.persist_noclobber(&asset_path) {
-            Ok(_) => {}
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                Self::verify_asset_checksum(&asset_path, checksum, asset_uri.uri())?;
-            }
-            Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
-        }
-        Ok(checksum)
-    }
-
     pub(crate) fn verify_asset_checksum(
         archive_path: &Path,
         expected_checksum: Sha256Hash,
@@ -1608,12 +1551,38 @@ impl LocalAssetUri {
             }
         }
 
-        Self::stage_asset_copy_from_reader(
-            self,
-            workspace,
-            self.reader(workspace)?,
-            checksum_override,
-        )
+        let mut reader = ChecksummedReader::new(self.reader(workspace)?);
+        let checksum_handle = reader.checksum_handle();
+        let mut staged_file =
+            NamedTempFile::new_in(&asset_dir).map_err(FileAdditionError::FileReadError)?;
+        io::copy(&mut reader, &mut staged_file).map_err(FileAdditionError::FileReadError)?;
+        staged_file
+            .flush()
+            .map_err(FileAdditionError::FileReadError)?;
+        let checksum = checksum_handle.checksum().ok_or_else(|| {
+            FileAdditionError::ChecksumError(format!(
+                "local asset stream did not reach EOF: {}",
+                self.uri()
+            ))
+        })?;
+        if let Some(expected_checksum) = checksum_override
+            && checksum != expected_checksum
+        {
+            return Err(FileAdditionError::ChecksumError(format!(
+                "local asset checksum does not match the provided checksum: {}",
+                self.uri()
+            )));
+        }
+
+        let asset_path = asset_dir.join(self.asset_filename(&checksum));
+        match staged_file.persist_noclobber(&asset_path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                Self::verify_asset_checksum(&asset_path, checksum, self.uri())?;
+            }
+            Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
+        }
+        Ok(checksum)
     }
 
     fn sanitize_relative_path(path: &Path) -> Result<PathBuf, FileAdditionError> {
@@ -1806,31 +1775,30 @@ mod tests {
         test_helpers::setup_gen,
     };
 
-    fn test_file_addition(
+    fn test_asset_id_hash(
         checksum: Option<Sha256Hash>,
         materialized_checksum: Option<Sha256Hash>,
-    ) -> FileAddition {
-        FileAddition {
-            id: HashId::convert_str("identity-test-file-addition"),
-            asset_uri: "https://example.test/reference.fa".to_string(),
-            file_type: FileTypes::Fasta,
-            checksum,
-            materialized_checksum,
-        }
+        upstream_asset_ref_id: Option<&HashId>,
+    ) -> HashId {
+        AssetRef::id_hash(
+            "https://example.test/reference.fa",
+            FileTypes::Fasta.as_str(),
+            (checksum.as_ref(), materialized_checksum.as_ref()),
+            &AssetRole::Input,
+            Some("reference.fa"),
+            Some("reference.fa"),
+            upstream_asset_ref_id,
+        )
     }
 
     #[test]
-    fn test_asset_id_hash_includes_both_optional_checksums_and_upstream() {
-        let file_addition = test_file_addition(None, None);
-        let role = AssetRole::Input;
+    fn test_asset_id_hash_includes_optional_checksums_and_upstream() {
+        // This just ensures the hash from various configurations of having a checksum + materialized checksum
+        //
+        //
+        // Missing checksums should serialize as empty fields in the identity.
         let upstream = None;
-        let id = AssetRef::id_hash(
-            &file_addition,
-            &role,
-            Some("reference.fa"),
-            Some("reference.fa"),
-            upstream,
-        );
+        let id = test_asset_id_hash(None, None, upstream);
         let expected_identity =
             "https://example.test/reference.fa:fasta:::input:reference.fa:reference.fa";
         assert_eq!(
@@ -1838,82 +1806,86 @@ mod tests {
             HashId(calculate_hash(expected_identity)),
             "None checksums should occupy their fields in the unified identity"
         );
+
+        // Repeating the same inputs should produce the same identity.
         assert_eq!(
             id,
-            AssetRef::id_hash(
-                &test_file_addition(None, None),
-                &role,
-                Some("reference.fa"),
-                Some("reference.fa"),
-                upstream,
-            ),
+            test_asset_id_hash(None, None, upstream),
             "the same asset identity should hash deterministically"
         );
 
-        let archived = test_file_addition(Some(Sha256Hash::convert_str("archived-content")), None);
+        // An archive checksum should change identity when there is no materialized checksum.
         assert_ne!(
             id,
-            AssetRef::id_hash(
-                &archived,
-                &role,
-                Some("reference.fa"),
-                Some("reference.fa"),
-                None
+            test_asset_id_hash(
+                Some(Sha256Hash::convert_str("archived-content")),
+                None,
+                None,
             ),
             "an archive checksum should change the identity"
         );
 
-        let materialized =
-            test_file_addition(None, Some(Sha256Hash::convert_str("materialized-content")));
+        // A materialized checksum should change identity when there is no archive checksum.
         assert_ne!(
             id,
-            AssetRef::id_hash(
-                &materialized,
-                &role,
-                Some("reference.fa"),
-                Some("reference.fa"),
+            test_asset_id_hash(
+                None,
+                Some(Sha256Hash::convert_str("materialized-content")),
                 None,
             ),
             "a materialized checksum should change the identity"
         );
+
+        // Different materialized bytes should produce different identities.
         assert_ne!(
-            AssetRef::id_hash(
-                &materialized,
-                &role,
-                Some("reference.fa"),
-                Some("reference.fa"),
+            test_asset_id_hash(
+                None,
+                Some(Sha256Hash::convert_str("materialized-content")),
                 None,
             ),
-            AssetRef::id_hash(
-                &test_file_addition(
-                    None,
-                    Some(Sha256Hash::convert_str("different-materialized-content")),
-                ),
-                &role,
-                Some("reference.fa"),
-                Some("reference.fa"),
+            test_asset_id_hash(
+                None,
+                Some(Sha256Hash::convert_str("different-materialized-content")),
                 None,
             ),
             "different materialized bytes should have different identities"
         );
 
+        // Both checksums should be included when stored and materialized bytes differ.
+        let both_checksums_id = test_asset_id_hash(
+            Some(Sha256Hash::convert_str("archived-content")),
+            Some(Sha256Hash::convert_str("materialized-content")),
+            None,
+        );
+
+        // Changing only the archive checksum should change identity.
+        assert_ne!(
+            both_checksums_id,
+            test_asset_id_hash(
+                Some(Sha256Hash::convert_str("different-archived-content")),
+                Some(Sha256Hash::convert_str("materialized-content")),
+                None,
+            ),
+            "different archived bytes should change identity with materialized bytes fixed"
+        );
+
+        // Changing only the materialized checksum should change identity.
+        assert_ne!(
+            both_checksums_id,
+            test_asset_id_hash(
+                Some(Sha256Hash::convert_str("archived-content")),
+                Some(Sha256Hash::convert_str("different-materialized-content")),
+                None,
+            ),
+            "different materialized bytes should change identity with archived bytes fixed"
+        );
+
+        // Different upstream assets should produce different identities.
         let first_upstream = HashId::convert_str("first-upstream");
         let second_upstream = HashId::convert_str("second-upstream");
         assert_ne!(
-            AssetRef::id_hash(
-                &file_addition,
-                &role,
-                Some("reference.fa"),
-                Some("reference.fa"),
-                Some(&first_upstream),
-            ),
-            AssetRef::id_hash(
-                &file_addition,
-                &role,
-                Some("reference.fa"),
-                Some("reference.fa"),
-                Some(&second_upstream),
-            ),
+            test_asset_id_hash(None, None, Some(&first_upstream),),
+            test_asset_id_hash(None, None, Some(&second_upstream),),
             "the upstream asset should remain part of the identity"
         );
     }
