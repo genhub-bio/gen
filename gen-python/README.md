@@ -252,6 +252,13 @@ A neighboring `.tbi` index is discovered automatically, or `index=` can specify
 another path. This records the file as an asset; it does not create database
 annotation rows.
 
+Imported files behave like database annotation groups once recorded. A plotted
+widget draws every file's features and lists the file under `widget.tracks`, so
+`show_track(name)` and `hide_track(name)` work with the file's `name`. Indexed
+files are read for the part of the graph in view and reloaded as you scroll.
+`SequenceGraph.annotations` includes the features of every imported file, read in
+full, with the file's name as their `group`.
+
 ## Architecture
 
 The package is built from three layers:
