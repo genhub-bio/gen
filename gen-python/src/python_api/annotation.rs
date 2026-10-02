@@ -1,3 +1,4 @@
+use r#gen::views::annotation_track::AnnotationSpan;
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
 use gen_graph::{GraphNode, GraphNodeSlice};
@@ -27,6 +28,45 @@ pub struct PyAnnotation {
     pub locus: Option<GraphLocus>,
     /// The sequence graph this annotation was read from, which its `locus` positions step through.
     pub sequence_graph: Option<PySequenceGraph>,
+}
+
+impl PyAnnotation {
+    /// Wrap a feature read from an annotation file so it reads like a database annotation.
+    ///
+    /// Files carry no accession, so `accession_id` stays zeroed as it does for annotations built
+    /// from a `Locus`; the file's display name plays the part of the annotation group.
+    pub(crate) fn from_file_span(
+        span: &AnnotationSpan,
+        group: &str,
+        sequence_graph: &PySequenceGraph,
+    ) -> Self {
+        let ann_segments = span
+            .segments
+            .iter()
+            .map(|segment| AnnotationSegment {
+                node_id: segment.node_id,
+                range: Range {
+                    start: segment.start,
+                    end: segment.end,
+                },
+                strand: segment.strand,
+            })
+            .collect();
+        PyAnnotation {
+            inner: Annotation {
+                id: span.id,
+                name: span.name.clone(),
+                group: group.to_string(),
+                accession_id: HashId([0u8; 16]),
+                extra: None,
+            },
+            context: sequence_graph.context.clone(),
+            ann_segments,
+            source_block_group_id: Some(sequence_graph.id),
+            locus: None,
+            sequence_graph: Some(sequence_graph.clone()),
+        }
+    }
 }
 
 #[pymethods]
