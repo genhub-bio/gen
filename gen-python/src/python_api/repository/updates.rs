@@ -13,12 +13,16 @@ use r#gen::{
 };
 use gen_models::{errors::OperationError, sample::Sample};
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::{PyRepository, run_context_operation_write};
 use crate::python_api::{sample::PySample, sequence_part::PySequencePart};
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Replace the region `region_name` of `sample` with the sequence in a FASTA file, storing the
+    /// result as `new_sample`. Returns the new `Sample`.
     #[pyo3(signature = (filename, sample, new_sample, region_name, collection=None))]
     fn update_with_fasta(
         &self,
@@ -66,6 +70,8 @@ impl PyRepository {
         )
     }
 
+    /// Apply the graph in a GFA file to `sample`, storing the result as `new_sample`. Returns the
+    /// new `Sample`.
     #[pyo3(signature = (filename, sample, new_sample, collection=None))]
     fn update_with_gfa(
         &self,
@@ -96,6 +102,8 @@ impl PyRepository {
         )
     }
 
+    /// Apply a GAF alignment file with its CSV of replacement sequences, writing the result to
+    /// `sample` (derived from `parent_sample` when given). Returns that `Sample`.
     #[pyo3(signature = (filename, csv, sample, parent_sample=None, collection=None))]
     fn update_with_gaf(
         &self,
@@ -129,10 +137,16 @@ impl PyRepository {
         )
     }
 
+    /// Apply variants from a VCF file to the `reference` sample (a name or list of names), creating
+    /// one
+    /// `Sample` per VCF sample column (or only `sample`). With `in_place=True` the reference is
+    /// edited
+    /// instead. Returns the list of `Sample` objects.
     #[pyo3(signature = (filename, reference=None, genotype=None, sample=None, in_place=false, collection=None))]
     fn update_with_vcf(
         &self,
         filename: String,
+        #[gen_stub(override_type(type_repr = "str | list[str] | None", imports = ()))]
         reference: Option<Bound<'_, PyAny>>,
         genotype: Option<String>,
         sample: Option<String>,
@@ -190,6 +204,8 @@ impl PyRepository {
         )
     }
 
+    /// Update `sample` with the sequences and features of a GenBank file. `create_missing=True`
+    /// allows graphs not yet in the sample. Returns the updated `Sample`.
     #[pyo3(signature = (filename, sample, create_missing=false, collection=None))]
     fn update_with_genbank(
         &self,
@@ -234,6 +250,9 @@ impl PyRepository {
         )
     }
 
+    /// Replace the region `region_name` of `sample` with a literal sequence string, storing the
+    /// result as `new_sample`. Returns the new `Sample`. For editing a copied sample in place,
+    /// `graph.replace()` is usually simpler.
     #[pyo3(signature = (sequence, sample, new_sample, region_name, no_reference_path_update=false, collection=None))]
     fn update_with_sequence(
         &self,
@@ -267,6 +286,9 @@ impl PyRepository {
         )
     }
 
+    /// Replace the region `path_name` of `sample` with a combinatorial library built from
+    /// `parts_list` (columns of `SequencePart` alternatives), storing the result as
+    /// `new_sample_name`. Returns the new `Sample`.
     #[pyo3(signature = (sample, new_sample_name, path_name, parts_list, collection=None))]
     fn update_with_library(
         &self,
@@ -314,6 +336,8 @@ impl PyRepository {
         )
     }
 
+    /// Like `update_with_library`, with the parts given as a named-parts FASTA (`parts`) and a
+    /// headerless CSV (`library`). Returns the new `Sample`.
     #[pyo3(signature = (sample, new_sample, path_name, library, parts, collection=None))]
     fn update_with_library_files(
         &self,

@@ -1565,8 +1565,8 @@ mod tests {
 
         /// Replaces the sequence of `locus` as a stacked alternative.
         fn edit_stacked(&self, locus: GraphLocus, sequence: &str) -> PyResult<GraphLocus> {
-            prepare_freethreaded_python();
-            Python::with_gil(|python| {
+            Python::initialize();
+            Python::attach(|python| {
                 let locus = Py::new(python, PyGraphLocus::from_locus(locus))
                     .expect("should wrap the locus");
                 edit_sequence_graph(
@@ -1625,7 +1625,8 @@ mod tests {
     }
 
     /// Builds sequence graph `name` from `edges`, each joining the last position of one node to
-    /// the first position of the next on a chromosome index. The current path reads the nodes in `path`.
+    /// the first position of the next on a chromosome index. The current path reads the nodes in
+    /// `path`.
     fn build_graph(
         context: &DbContext,
         name: &str,
@@ -3095,7 +3096,8 @@ assert len(repo.get_operations()) == count
         }
 
         /// `ABCD` reads into `MNOP` directly as well as through `EFGH`, so one step from `ABCD`
-        /// lands on the first position of `EFGH` and on the first position of `MNOP`, which `EFGH` reads
+        /// lands on the first position of `EFGH` and on the first position of `MNOP`, which `EFGH`
+        /// reads
         /// into.
         #[test]
         fn test_step_past_a_skipped_arm_covers_the_arm_and_the_base_after_it() {

@@ -3,6 +3,7 @@ use std::fs;
 use r#gen::graphs::graph_search::{GenGraphMatcher, SeedIndex, SequenceKind};
 use gen_models::block_group::BlockGroup;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::PyRepository;
 use crate::python_api::{
@@ -11,6 +12,7 @@ use crate::python_api::{
     utils::block_group_err_to_pyerr,
 };
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
     /// Build a junction-aware k-mer seed index for a sequence graph and save it

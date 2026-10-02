@@ -9,6 +9,7 @@ use pyo3::{
     exceptions::{PyIndexError, PyRuntimeError, PyValueError},
     prelude::*,
 };
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::python_api::{
     block_group::PySequenceGraph,
@@ -24,13 +25,18 @@ mod metadata;
 ///
 /// Acts like a read-only list of ``SequenceGraph``: index it, iterate it, or
 /// call ``len()`` on it. Indexing out of range raises ``IndexError``.
+#[gen_stub_pyclass]
 #[pyclass(name = "Sample", unsendable)]
 #[derive(Clone)]
 pub struct PySample {
+    /// Collection this sample belongs to.
     #[pyo3(get)]
     pub collection_name: String,
+    /// Name of the sample.
     #[pyo3(get)]
     pub sample_name: String,
+    /// The sample's sequence graphs, in order. A sample can hold several (for example one per
+    /// chromosome or imported record).
     #[pyo3(get)]
     pub sequence_graphs: Vec<PySequenceGraph>,
     pub(crate) context: DbContext,
@@ -52,6 +58,7 @@ impl PySample {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySample {
     /// All sequence graphs held by this sample.
@@ -228,12 +235,14 @@ impl PySample {
     }
 }
 
-#[pyclass(unsendable)]
+#[gen_stub_pyclass]
+#[pyclass(name = "SampleIterator", unsendable)]
 pub struct PySampleIter {
     block_groups: Vec<PySequenceGraph>,
     index: usize,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySampleIter {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {

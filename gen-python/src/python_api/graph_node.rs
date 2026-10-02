@@ -2,11 +2,13 @@ use r#gen::core::HashId;
 use gen_core::Strand;
 use gen_graph::GraphNodeSlice;
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::hash_id::PyHashId;
 
 /// An opaque handle to a graph node, usable as a dict key in Python.
 /// Used to ensure consistent hashing when used as dictionary keys in Python.
+#[gen_stub_pyclass]
 #[pyclass(name = "Node")] // pyclass includes  #[derive(IntoPyObject)]
 #[derive(Clone, Copy)]
 pub struct PyGraphNode {
@@ -29,6 +31,7 @@ impl PyGraphNode {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyGraphNode {
     /// Stable ID of the underlying sequence node, independent of block boundaries.
@@ -88,6 +91,7 @@ impl PyGraphNode {
 }
 
 /// A slice of a single graph block with local byte offsets and strand.
+#[gen_stub_pyclass]
 #[pyclass(name = "NodeSlice")]
 #[derive(Clone, Copy)]
 pub struct PyGraphNodeSlice {
@@ -100,6 +104,7 @@ impl PyGraphNodeSlice {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyGraphNodeSlice {
     #[getter]

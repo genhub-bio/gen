@@ -7,6 +7,7 @@ use gen_models::{
     operations::RemoteBranch,
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::PyRepository;
 
@@ -15,17 +16,23 @@ fn history_err_to_pyerr(error: impl ToString) -> PyErr {
 }
 
 /// A repository branch and its current head operation.
+#[gen_stub_pyclass]
 #[pyclass(name = "Branch")]
 #[derive(Clone, Debug)]
 pub struct PyBranch {
+    /// Branch name.
     #[pyo3(get)]
     pub name: String,
+    /// Hash of the operation at the branch head.
     #[pyo3(get)]
     pub head: String,
+    /// Name of the tracked remote, or `None`.
     #[pyo3(get)]
     pub remote: Option<String>,
+    /// Whether this is the checked-out branch.
     #[pyo3(get)]
     pub is_current: bool,
+    /// Whether the branch has uncommitted working-set changes.
     #[pyo3(get)]
     pub dirty: bool,
 }
@@ -46,6 +53,7 @@ impl PyBranch {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyBranch {
     fn __str__(&self) -> &str {
@@ -61,21 +69,29 @@ impl PyBranch {
 }
 
 /// A committed Gen operation in repository history.
+#[gen_stub_pyclass]
 #[pyclass(name = "Operation")]
 #[derive(Clone)]
 pub struct PyOperation {
+    /// Operation hash.
     #[pyo3(get)]
     pub id: String,
+    /// Hash of the previous operation, or `None` for the first.
     #[pyo3(get)]
     pub parent_id: Option<String>,
+    /// Committer name recorded on the operation.
     #[pyo3(get)]
     pub committer: String,
+    /// Committer email recorded on the operation.
     #[pyo3(get)]
     pub email: String,
+    /// Commit timestamp.
     #[pyo3(get)]
     pub date: String,
+    /// Operation message, such as the `message=` given to an edit.
     #[pyo3(get)]
     pub message: String,
+    /// Whether this is the head operation of the branch.
     #[pyo3(get)]
     pub is_head: bool,
 }
@@ -94,6 +110,7 @@ impl From<HistoryEntry> for PyOperation {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyOperation {
     fn __str__(&self) -> &str {
@@ -110,11 +127,14 @@ impl PyOperation {
 /// Every file import is tracked as an asset for provenance, independent of whether its content is
 /// stored inline in the graph. A custom GenHub-compatible server needs this inventory to answer
 /// asset-transfer requests for clone, push, pull, and fetch.
+#[gen_stub_pyclass]
 #[pyclass(name = "Asset")]
 #[derive(Clone)]
 pub struct PyAsset {
+    /// Content-addressed asset id.
     #[pyo3(get)]
     pub id: String,
+    /// File name the asset was imported from, if known.
     #[pyo3(get)]
     pub name: Option<String>,
 }
@@ -128,6 +148,7 @@ impl From<gen_models::assets::AssetRef> for PyAsset {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyAsset {
     fn __str__(&self) -> &str {
@@ -184,6 +205,7 @@ impl PyRepository {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
     /// Returns every branch, ordered by name.
@@ -220,7 +242,13 @@ impl PyRepository {
     }
 
     /// Deletes a branch.
-    fn delete_branch(&self, branch: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn delete_branch(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Branch", imports = ()))] branch: &Bound<
+            '_,
+            PyAny,
+        >,
+    ) -> PyResult<()> {
         let name = branch_name(branch)?;
         DoltHistoryStore::new(self.context.graph().conn())
             .delete_branch(&BranchName(name))
@@ -232,7 +260,14 @@ impl PyRepository {
     /// Set `create=True` to create a new branch at HEAD before checking it out.
     /// Creating an existing branch is an error.
     #[pyo3(signature = (branch, *, create=false))]
-    fn checkout(&self, branch: &Bound<'_, PyAny>, create: bool) -> PyResult<PyBranch> {
+    fn checkout(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Branch", imports = ()))] branch: &Bound<
+            '_,
+            PyAny,
+        >,
+        create: bool,
+    ) -> PyResult<PyBranch> {
         let name = branch_name(branch)?;
         if create {
             let history_store = DoltHistoryStore::new(self.context.graph().conn());
@@ -255,7 +290,9 @@ impl PyRepository {
     #[pyo3(signature = (branch=None, limit=None))]
     fn get_operations(
         &self,
-        branch: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
+            &Bound<'_, PyAny>,
+        >,
         limit: Option<usize>,
     ) -> PyResult<Vec<PyOperation>> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
@@ -270,7 +307,12 @@ impl PyRepository {
 
     /// Returns the assets reachable from the current branch or a named branch.
     #[pyo3(signature = (branch=None))]
-    fn get_assets(&self, branch: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<PyAsset>> {
+    fn get_assets(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
+            &Bound<'_, PyAny>,
+        >,
+    ) -> PyResult<Vec<PyAsset>> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let name = match branch {
             Some(branch) => branch_name(branch)?,
@@ -288,7 +330,13 @@ impl PyRepository {
     }
 
     /// Merges a branch into the current branch and returns the new HEAD operation.
-    fn merge(&self, branch: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
+    fn merge(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Branch", imports = ()))] branch: &Bound<
+            '_,
+            PyAny,
+        >,
+    ) -> PyResult<PyOperation> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "merge")
             .map_err(history_err_to_pyerr)?;
@@ -303,7 +351,13 @@ impl PyRepository {
     }
 
     /// Applies one operation to the current branch and returns the new HEAD operation.
-    fn apply(&self, operation: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
+    fn apply(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Operation", imports = ()))] operation: &Bound<
+            '_,
+            PyAny,
+        >,
+    ) -> PyResult<PyOperation> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "apply")
             .map_err(history_err_to_pyerr)?;
@@ -319,7 +373,13 @@ impl PyRepository {
     }
 
     /// Hard-resets the current branch to an operation and returns the resulting HEAD.
-    fn reset(&self, operation: &Bound<'_, PyAny>) -> PyResult<PyOperation> {
+    fn reset(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Operation", imports = ()))] operation: &Bound<
+            '_,
+            PyAny,
+        >,
+    ) -> PyResult<PyOperation> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         r#gen::history::ensure_clean_working_set(&history_store, "reset")
             .map_err(history_err_to_pyerr)?;

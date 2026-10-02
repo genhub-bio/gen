@@ -19,6 +19,7 @@ use pyo3::{
     pyclass, pymethods,
     types::{PyAnyMethods as _, PyTuple, PyTupleMethods as _},
 };
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::{
     block_group::PySequenceGraph,
@@ -230,11 +231,13 @@ fn canonical(mut positions: Vec<Position>) -> Vec<Position> {
 /// ``GraphWidget.go_to()``, as ``after`` or ``before`` to ``SequenceGraph.insert()``, or to
 /// ``SuperPosition()`` to step from it.
 ///
-/// A position taken from a ``Locus`` is attached to the sequence graph that locus came from, and can
+/// A position taken from a ``Locus`` is attached to the sequence graph that locus came from, and
+/// can
 /// step with ``pos + n`` and ``pos - n``: the result stays a ``Position`` while the step lands on a
 /// single point, and becomes a ``SuperPosition`` once the step lands at a fork. ``pos.on(sg)``
 /// attaches it to another sequence graph, such as a copy of the sample. ``a | b`` combines a
 /// position with another position or a ``SuperPosition`` into a ``SuperPosition``.
+#[gen_stub_pyclass]
 #[pyclass(name = "Position", unsendable)]
 #[derive(Clone)]
 pub struct PyPosition {
@@ -332,6 +335,7 @@ impl PyPosition {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyPosition {
     /// The node slice this position is in.
@@ -463,14 +467,17 @@ fn canonical_positions(mut positions: Vec<PyPosition>) -> Vec<PyPosition> {
 ///
 /// Build one from positions with ``SuperPosition(pos, ...)`` or ``a | b``. Where the graph holds
 /// several variants a superposition can cover a position on each of them, and ``a | b`` combines
-/// the positions of two superpositions, or of a superposition and a position. ``sp + n`` steps a single position along its strand, splitting
+/// the positions of two superpositions, or of a superposition and a position. ``sp + n`` steps a
+/// single position along its strand, splitting
 /// it across every route leaving a fork, and ``sp - n`` steps back the same way. A superposition
 /// that already covers several positions does not step, so a walk splits only on its last step.
 ///
 /// Stepping needs a sequence graph. A superposition of positions from one locus, or from loci of
 /// one sequence graph, is attached to it already; ``sp.on(sg)`` attaches it to another sequence
-/// graph that shares its nodes, and is invalid there only if one of its positions is not reachable. Pass a superposition as ``after`` or ``before`` to
+/// graph that shares its nodes, and is invalid there only if one of its positions is not reachable.
+/// Pass a superposition as ``after`` or ``before`` to
 /// ``SequenceGraph.insert()`` to insert at every position it covers.
+#[gen_stub_pyclass]
 #[pyclass(name = "SuperPosition", unsendable)]
 #[derive(Clone)]
 pub struct PySuperPosition {
@@ -571,8 +578,10 @@ impl PySuperPosition {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySuperPosition {
+    /// Combine positions into one superposition (same as `position_a | position_b`).
     #[new]
     #[pyo3(signature = (*positions))]
     fn new(positions: &Bound<'_, PyTuple>) -> PyResult<Self> {

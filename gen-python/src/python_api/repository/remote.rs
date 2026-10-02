@@ -5,15 +5,19 @@ use gen_models::{
     operations::{Defaults, Remote as ModelRemote, RemoteBranch},
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::{PyRepository, history::branch_name};
 
 /// A configured Gen repository remote.
+#[gen_stub_pyclass]
 #[pyclass(name = "Remote")]
 #[derive(Clone, Debug)]
 pub struct PyRemote {
+    /// Remote name, such as `origin`.
     #[pyo3(get)]
     pub name: String,
+    /// Remote URL.
     #[pyo3(get)]
     pub url: String,
 }
@@ -27,6 +31,7 @@ impl From<ModelRemote> for PyRemote {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRemote {
     fn __str__(&self) -> &str {
@@ -72,6 +77,7 @@ impl PyRepository {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
     /// Returns every configured remote, ordered by name.
@@ -100,7 +106,13 @@ impl PyRepository {
     }
 
     /// Removes a configured remote and clears references to it.
-    fn remove_remote(&self, remote: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn remove_remote(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Remote", imports = ()))] remote: &Bound<
+            '_,
+            PyAny,
+        >,
+    ) -> PyResult<()> {
         let name = remote_name(remote)?;
         r#gen::commands::remote::remove_remote(self.context.config().conn(), &name)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
@@ -108,7 +120,12 @@ impl PyRepository {
 
     /// Sets the repository default remote, or clears it when omitted.
     #[pyo3(signature = (remote=None))]
-    fn set_default_remote(&self, remote: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    fn set_default_remote(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+    ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         Defaults::set_default_remote(self.context.config().conn(), remote.as_deref())
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
@@ -116,7 +133,12 @@ impl PyRepository {
 
     /// Associates a remote with the current branch, or clears it when omitted.
     #[pyo3(signature = (remote=None))]
-    fn set_branch_remote(&self, remote: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    fn set_branch_remote(
+        &self,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+    ) -> PyResult<()> {
         let history_store = DoltHistoryStore::new(self.context.graph().conn());
         let branch = history_store
             .current_branch()
@@ -136,8 +158,12 @@ impl PyRepository {
     fn push(
         &mut self,
         python: Python<'_>,
-        remote: Option<&Bound<'_, PyAny>>,
-        branch: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+        #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
+            &Bound<'_, PyAny>,
+        >,
         force: bool,
     ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
@@ -160,8 +186,12 @@ impl PyRepository {
     fn pull(
         &mut self,
         python: Python<'_>,
-        remote: Option<&Bound<'_, PyAny>>,
-        branch: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+        #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
+            &Bound<'_, PyAny>,
+        >,
     ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
@@ -182,8 +212,12 @@ impl PyRepository {
     fn fetch(
         &mut self,
         python: Python<'_>,
-        remote: Option<&Bound<'_, PyAny>>,
-        branch: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "str | Remote | None", imports = ()))] remote: Option<
+            &Bound<'_, PyAny>,
+        >,
+        #[gen_stub(override_type(type_repr = "str | Branch | None", imports = ()))] branch: Option<
+            &Bound<'_, PyAny>,
+        >,
     ) -> PyResult<()> {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;

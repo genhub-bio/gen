@@ -1,4 +1,4 @@
-.PHONY: python python-wheel py-package-cli jupyter r r-test release-check-js clean build clippy-fix docker-build gif
+.PHONY: python python-stubs python-wheel py-package-cli jupyter r r-test release-check-js clean build clippy-fix docker-build gif
 python:
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
@@ -8,6 +8,9 @@ py-package-cli:
 	mkdir -p gen.gen.data/scripts
 	cp target/release/gen gen.gen.data/scripts/gen
 	chmod +x gen.gen.data/scripts/gen
+# Regenerates gen-python/python/gen/gen/__init__.pyi from the annotated PyO3 bindings.
+python-stubs:
+	cargo run --manifest-path gen-python/Cargo.toml --features abi3 --bin stub_gen
 python-wheel: py-package-cli
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin

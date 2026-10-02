@@ -10,7 +10,7 @@ publish = false
 
 [lib]
 name = "gen_python"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
@@ -28,6 +28,7 @@ gen-models = { path = "../gen-models", version = "0.3.1" }
 gen-tui = { path = "../gen-tui", version = "0.3.1", default-features = false }
 log = "0.4.26"
 petgraph = "0.6.5"
+pyo3-stub-gen = "0.23"
 ratatui = { version = "0.30.0", default-features = false }
 rusqlite = { package = "rusqdoltlite", version = "0.40.20", features = ["bundled", "array", "limits", "fallible_uint"] }
 serde = { version = "1.0.219", features = ["derive"] }
