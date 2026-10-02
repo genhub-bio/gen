@@ -615,8 +615,8 @@ mod tests {
 
     #[test]
     fn test_import_sequence_circular_closes_graph_and_preserves_path() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let repository = PyRepository {
                 context: setup_gen_on_disk(),
             };

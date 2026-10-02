@@ -342,7 +342,6 @@ mod tests {
     use pyo3::{
         Py, Python,
         ffi::c_str,
-        prepare_freethreaded_python,
         types::{PyDict, PyDictMethods as _},
     };
 
@@ -465,8 +464,8 @@ mod tests {
 
     #[test]
     fn test_python_indexing_empty_loci_and_zero_length_slices() {
-        prepare_freethreaded_python();
-        Python::with_gil(|python| {
+        Python::initialize();
+        Python::attach(|python| {
             let block = GraphNode {
                 node_id: HashId::convert_str("indexing"),
                 sequence_start: 100,
