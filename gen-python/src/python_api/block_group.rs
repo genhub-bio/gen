@@ -39,6 +39,7 @@ use pyo3::{
     prelude::*,
     types::PyDict,
 };
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::{
     annotation::PyAnnotation,
@@ -124,14 +125,19 @@ where
 ///         sg = r.get_sequence_graph_by_id(sg_id)
 ///         ...
 // unsendable because DbContext contains Rc (rusqlite::Connection is !Sync)
+#[gen_stub_pyclass]
 #[pyclass(name = "SequenceGraph", unsendable)]
 #[derive(Clone)]
 pub struct PySequenceGraph {
     pub id: HashId,
+    /// Collection this sequence graph belongs to.
     #[pyo3(get)]
     pub collection_name: String,
+    /// Name of the sample that owns this graph.
     #[pyo3(get)]
     pub sample_name: String,
+    /// Name of the graph, such as the FASTA record or chromosome name. Region strings start with it
+    /// (`"name:start-end"`).
     #[pyo3(get)]
     pub name: String,
     pub context: Option<DbContext>,
@@ -193,9 +199,11 @@ impl PySequenceGraph {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySequenceGraph {
     #[new]
+    #[gen_stub(skip)]
     pub fn new(id: HashId, collection_name: String, name: String, sample_name: String) -> Self {
         PySequenceGraph {
             id,
@@ -496,6 +504,8 @@ impl PySequenceGraph {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
+    /// Return the graph as a dict with `nodes` and `edges` (edge keys are `(source, target)` node
+    /// pairs mapped to lists of edge-weight dicts).
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let context = self.require_context("to_dict()")?;
         let conn = context.graph().conn();
@@ -533,6 +543,7 @@ impl PySequenceGraph {
         Ok(dict.into_pyobject(py)?.into_any().unbind())
     }
 
+    /// Return the graph as a `rustworkx.PyDiGraph`. Requires the optional `rustworkx` package.
     fn to_rustworkx(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let context = self.require_context("to_rustworkx()")?;
         let conn = context.graph().conn();
@@ -576,6 +587,7 @@ impl PySequenceGraph {
         }
     }
 
+    /// Return the graph as a `networkx.DiGraph`. Requires the optional `networkx` package.
     fn to_networkx(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let context = self.require_context("to_networkx()")?;
         let conn = context.graph().conn();
@@ -628,6 +640,7 @@ impl PySequenceGraph {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySequenceGraph {
     /// Export all sequence graphs in this sequence graph's sample to FASTA.
@@ -751,6 +764,7 @@ impl PySequenceGraph {
     #[pyo3(signature = (target, name, track="default"))]
     fn add_annotation(
         &self,
+        #[gen_stub(override_type(type_repr = "str | Locus | Annotation", imports = ()))]
         target: &Bound<'_, PyAny>,
         name: &str,
         track: &str,
@@ -861,6 +875,7 @@ impl PySequenceGraph {
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn translate_annotation(
         &self,
+        #[gen_stub(override_type(type_repr = "str | Annotation | None", imports = ()))]
         region: Option<Bound<'_, PyAny>>,
         output_collection: Option<&str>,
         name: Option<&str>,
@@ -972,6 +987,7 @@ impl PySequenceGraph {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySequenceGraph {
     /// Derive a coordinate-bounded subgraph from this sequence graph.
@@ -1069,6 +1085,7 @@ impl PySequenceGraph {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySequenceGraph {
     /// Replace the sequence covered by ``target`` with ``sequence``.
@@ -1090,6 +1107,7 @@ impl PySequenceGraph {
     #[pyo3(signature = (target, sequence, message=None, stack=false))]
     fn replace(
         &self,
+        #[gen_stub(override_type(type_repr = "str | Locus | Annotation", imports = ()))]
         target: &Bound<'_, PyAny>,
         sequence: &str,
         message: Option<&str>,
@@ -1131,6 +1149,7 @@ impl PySequenceGraph {
     #[pyo3(signature = (target, message=None, stack=false))]
     fn delete(
         &self,
+        #[gen_stub(override_type(type_repr = "str | Locus | Annotation", imports = ()))]
         target: &Bound<'_, PyAny>,
         message: Option<&str>,
         stack: bool,
@@ -1189,7 +1208,9 @@ impl PySequenceGraph {
     fn insert(
         &self,
         sequence: &str,
+        #[gen_stub(override_type(type_repr = "Position | SuperPosition | None", imports = ()))]
         before: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "Position | SuperPosition | None", imports = ()))]
         after: Option<&Bound<'_, PyAny>>,
         message: Option<&str>,
         stack: bool,
@@ -1218,11 +1239,13 @@ impl PySequenceGraph {
     }
 }
 
-#[pyclass(unsendable)]
+#[gen_stub_pyclass]
+#[pyclass(name = "SequenceIterator", unsendable)]
 struct PySequenceIter {
     sequences: SequenceIterator,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySequenceIter {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {

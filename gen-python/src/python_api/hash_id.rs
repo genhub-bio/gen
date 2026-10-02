@@ -1,17 +1,20 @@
 use r#gen::core::HashId;
 use pyo3::{prelude::*, types::PyBytes};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 /// Exposes a HashId to Python.
+#[gen_stub_pyclass]
 #[pyclass(name = "HashId")]
 #[derive(Clone, Copy)]
 pub struct PyHashId {
-    #[pyo3(get)]
     pub hash_id: HashId,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyHashId {
     #[new]
+    #[gen_stub(skip)]
     pub fn new(hash_id: HashId) -> Self {
         PyHashId { hash_id }
     }
@@ -48,7 +51,7 @@ impl PyHashId {
         clippy::wrong_self_convention,
         reason = "exposed to Python as to_bytes(); pyo3 pyclass methods require &self"
     )]
-    fn to_bytes(&self, py: Python<'_>) -> Py<PyBytes> {
-        PyBytes::new(py, &self.hash_id.0).into()
+    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.hash_id.0)
     }
 }
