@@ -7,11 +7,15 @@ use gen_models::{
     collection::Collection,
     db::DbContext,
     errors::OperationError,
+    history::dolt::{set_commit_author_email, set_commit_author_name},
     node::Node,
     operations::{Defaults, OperationSummary, commit_operation_summary},
     sample::Sample,
 };
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3::{
+    exceptions::{PyRuntimeError, PyValueError},
+    prelude::*,
+};
 
 use super::{
     block_group::PySequenceGraph,
@@ -35,12 +39,16 @@ pub mod updates;
 /// When `path` is omitted, the remote repository name is used beneath the
 /// current directory. When supplied, `path` is the exact destination and accepts
 /// strings or Python path-like objects. The destination may be an empty directory.
+/// `committer` and `email`, when given, become the committer identity recorded on operations
+/// made in this repository from now on.
 #[pyfunction(name = "clone")]
-#[pyo3(signature = (url, path=None))]
+#[pyo3(signature = (url, path=None, committer=None, email=None))]
 pub fn clone_repository(
     python: Python<'_>,
     url: &str,
     path: Option<PathBuf>,
+    committer: Option<&str>,
+    email: Option<&str>,
 ) -> PyResult<PyRepository> {
     let workspace = match path {
         Some(path) => Workspace::new(path),
@@ -56,7 +64,9 @@ pub fn clone_repository(
         r#gen::commands::clone::clone_to_workspace(url, &workspace)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     })?;
-    PyRepository::open_workspace(workspace)
+    let repository = PyRepository::open_workspace(workspace)?;
+    repository.set_committer(committer, email)?;
+    Ok(repository)
 }
 
 fn tx_begin(context: &DbContext) -> PyResult<()> {
@@ -221,19 +231,41 @@ impl PyRepository {
             ))
         })
     }
+
+    /// Sets the Dolt commit identity for operations recorded from now on. It applies to this
+    /// repository only, not to the `gen defaults` config, so it is set once at construction or clone.
+    fn set_committer(&self, committer: Option<&str>, email: Option<&str>) -> PyResult<()> {
+        if let Some(committer) = committer {
+            if committer.is_empty() {
+                return Err(PyValueError::new_err("committer must not be empty"));
+            }
+            set_commit_author_name(self.context.graph().conn(), committer)
+                .map_err(sqlite_err_to_pyerr)?;
+        }
+        if let Some(email) = email {
+            if email.is_empty() {
+                return Err(PyValueError::new_err("email must not be empty"));
+            }
+            set_commit_author_email(self.context.graph().conn(), email)
+                .map_err(sqlite_err_to_pyerr)?;
+        }
+        Ok(())
+    }
 }
 
 #[pymethods]
 impl PyRepository {
     #[new]
-    #[pyo3(signature = (path = Option::<String>::None))]
-    fn new(path: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (path = Option::<String>::None, committer = None, email = None))]
+    fn new(path: Option<String>, committer: Option<&str>, email: Option<&str>) -> PyResult<Self> {
         let workspace = match path {
             Some(path_str) => Workspace::new(path_str),
             None => Workspace::from_current_dir(),
         };
 
-        Self::open_workspace(workspace)
+        let repository = Self::open_workspace(workspace)?;
+        repository.set_committer(committer, email)?;
+        Ok(repository)
     }
 
     #[getter]
@@ -297,7 +329,8 @@ impl PyRepository {
     }
 
     /// All samples in the repository, each holding its sequence graphs.
-    fn get_samples(&self) -> PyResult<Vec<PySample>> {
+    #[getter]
+    fn samples(&self) -> PyResult<Vec<PySample>> {
         let conn = self.context.graph().conn();
         let mut samples: Vec<PySample> = Vec::new();
         for bg in BlockGroup::select(conn)
@@ -309,7 +342,7 @@ impl PyRepository {
                 sample.collection_name == py_bg.collection_name
                     && sample.sample_name == py_bg.sample_name
             }) {
-                Some(sample) => sample.block_groups.push(py_bg),
+                Some(sample) => sample.sequence_graphs.push(py_bg),
                 None => samples.push(PySample::new(
                     py_bg.collection_name.clone(),
                     py_bg.sample_name.clone(),
@@ -443,7 +476,7 @@ mod python_tests {
             let destination_parent = tempdir().unwrap();
             let destination = destination_parent.path().join("clone");
             let remote_url = format!("file://{}", source_root.display());
-            let cloned = clone_repository(py, &remote_url, Some(destination))
+            let cloned = clone_repository(py, &remote_url, Some(destination), None, None)
                 .expect("should clone and open repository");
 
             let block_groups = cloned.get_sequence_graphs().unwrap();

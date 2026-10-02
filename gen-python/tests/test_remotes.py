@@ -83,15 +83,8 @@ def genhub_server(respond):
 class RemoteTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="gen-python-remotes-")
-        self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.repository = gen.Repository(str(self.root / "local"))
-        # Release the SQLite handle before the temp directory is removed: Windows
-        # refuses to delete a file that a live handle still has open.
-        self.addCleanup(self._release_repository)
-
-    def _release_repository(self):
-        self.repository = None
 
     def import_sequence(self, repository, name):
         fasta = self.root / f"{name}.fa"
@@ -179,6 +172,22 @@ class RemoteTests(unittest.TestCase):
                     self.assertTrue((destination / ".gen").is_dir())
         with self.assertRaises(TypeError):
             gen.clone(remote_url, path=42)
+
+    @unittest.skipIf(
+        os.name == "nt", "native file remote workflows are currently tested on Unix"
+    )
+    def test_clone_records_the_given_committer(self):
+        self.import_sequence(self.repository, "base")
+        cloned = gen.clone(
+            (self.root / "local").as_uri(),
+            path=str(self.root / "identified-clone"),
+            committer="Ada Lovelace",
+            email="ada@example.com",
+        )
+        self.import_sequence(cloned, "extra")
+        operation = cloned.get_operations()[0]
+        self.assertEqual(operation.committer, "Ada Lovelace")
+        self.assertEqual(operation.email, "ada@example.com")
 
     def test_checkout_creates_branch_and_accepts_names_and_objects(self):
         self.import_sequence(self.repository, "base")
