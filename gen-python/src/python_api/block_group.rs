@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 use r#gen::{
     commands::graph_operations::{
@@ -12,11 +16,17 @@ use r#gen::{
             TranslationError, translate_annotation, translate_block_group, translate_from_path,
         },
     },
+    views::{
+        annotation_files::load_annotation_file_entries,
+        annotations::{AnnotationFileTrackRequest, load_annotation_file_track},
+    },
 };
-use gen_annotations::projection::annotation_segments;
+use gen_annotations::projection::{AnnotationSegment, annotation_segments};
+use gen_core::{is_end_node, is_start_node, range::Range};
 use gen_graph::GraphNode;
 use gen_models::{
-    annotations::Annotation,
+    accession::{Accession, AccessionSpan, NewAccession},
+    annotations::{Annotation, AnnotationGroupSample},
     block_group::BlockGroup,
     db::DbContext,
     node::Node,
@@ -37,7 +47,9 @@ use super::{
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
+    locus::GraphLocusExt as _,
     position::positions_of,
+    repository::run_context_operation_write,
     translation::build_translation_params,
     utils::block_group_err_to_pyerr,
 };
@@ -122,6 +134,62 @@ pub struct PySequenceGraph {
     #[pyo3(get)]
     pub name: String,
     pub context: Option<DbContext>,
+}
+
+impl PySequenceGraph {
+    /// Features of every annotation file in the repository that land on this graph.
+    ///
+    /// Unlike the widget, which reads indexed files a viewport at a time, this reads each file
+    /// across the whole graph so callers can filter by name. A file that can't be read is
+    /// skipped so one missing file doesn't hide the database annotations.
+    fn file_annotations(&self, context: &DbContext) -> PyResult<Vec<PyAnnotation>> {
+        let conn = context.graph().conn();
+        let graph = BlockGroup::get_graph(conn, context.workspace(), &self.id, None)
+            .map_err(block_group_err_to_pyerr)?;
+        let node_filter: HashSet<HashId> = graph
+            .nodes()
+            .filter(|node| !is_start_node(node.node_id) && !is_end_node(node.node_id))
+            .map(|node| node.node_id)
+            .collect();
+        let Some(start) = graph
+            .nodes()
+            .filter(|node| node_filter.contains(&node.node_id))
+            .map(|node| node.sequence_start)
+            .min()
+        else {
+            return Ok(Vec::new());
+        };
+        let end = graph
+            .nodes()
+            .filter(|node| node_filter.contains(&node.node_id))
+            .map(|node| node.sequence_end)
+            .max()
+            .unwrap_or(start);
+        let mut annotations = Vec::new();
+        for entry in load_annotation_file_entries(conn, None) {
+            let Ok(loaded) = load_annotation_file_track(&AnnotationFileTrackRequest {
+                conn,
+                history_ref: None,
+                workspace: context.workspace(),
+                collection_name: &self.collection_name,
+                sample_name: &self.sample_name,
+                block_group_name: Some(&self.name),
+                query_window: Some((start, end)),
+                node_filter: &node_filter,
+                entry: &entry,
+            }) else {
+                continue;
+            };
+            annotations.extend(
+                loaded
+                    .track
+                    .annotations
+                    .iter()
+                    .map(|span| PyAnnotation::from_file_span(span, &entry.display_name, self)),
+            );
+        }
+        Ok(annotations)
+    }
 }
 
 #[pymethods]
@@ -600,10 +668,14 @@ impl PySequenceGraph {
         })
     }
 
-    /// All gene annotations associated with this sequence graph.
+    /// All annotations associated with this sequence graph.
+    ///
+    /// Annotations imported from files (``Repository.import_annotations()``) are read in full
+    /// and listed after the database ones, so they can be searched by name alike. Their
+    /// ``group`` is the file's display name.
     ///
     /// Returns
-    /// list[GeneAnnotation]
+    /// list[Annotation]
     #[getter]
     fn annotations(&self) -> PyResult<Vec<PyAnnotation>> {
         let ctx = self.require_context("annotations")?;
@@ -616,7 +688,7 @@ impl PySequenceGraph {
             &self.name,
         )
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(annotations
+        let mut result: Vec<PyAnnotation> = annotations
             .into_iter()
             .map(|a| PyAnnotation {
                 ann_segments: annotation_segments(conn, &a, None),
@@ -626,7 +698,100 @@ impl PySequenceGraph {
                 locus: None,
                 sequence_graph: Some(self.clone()),
             })
-            .collect())
+            .collect();
+        result.extend(self.file_annotations(ctx)?);
+        Ok(result)
+    }
+
+    /// Persist an annotation over a locus in this sequence graph.
+    ///
+    /// Parameters
+    /// target : Locus
+    ///     Graph-space span to annotate. The locus must cover at least one base
+    ///     and belong to this sequence graph.
+    /// name : str
+    ///     Human-readable annotation name.
+    /// track : str, optional
+    ///     Annotation group in the database. Defaults to ``"default"``.
+    ///
+    /// Returns the database-backed ``Annotation`` that was created.
+    #[pyo3(signature = (target, name, track="default"))]
+    fn add_annotation(
+        &self,
+        target: &Bound<'_, PyAny>,
+        name: &str,
+        track: &str,
+    ) -> PyResult<PyAnnotation> {
+        let target = target
+            .extract::<PyRef<PyGraphLocus>>()
+            .map_err(|_| PyTypeError::new_err("annotation target must be a Locus"))?;
+        let target_locus = target.graph_locus();
+        if target_locus.slices.is_empty() || target_locus.length() == 0 {
+            return Err(PyValueError::new_err(
+                "annotation target must cover at least one base",
+            ));
+        }
+        let context = self.require_context("add_annotation()")?;
+        let annotation_segments: Vec<AnnotationSegment> = target_locus
+            .slices
+            .iter()
+            .map(|slice| AnnotationSegment {
+                node_id: slice.block.node_id,
+                range: Range {
+                    start: slice.block.sequence_start + slice.start as i64,
+                    end: slice.block.sequence_start + slice.end as i64,
+                },
+                strand: slice.strand,
+            })
+            .collect();
+
+        run_context_operation_write(
+            context,
+            |context| {
+                let conn = context.graph().conn();
+                let spans: Vec<AccessionSpan> = annotation_segments
+                    .iter()
+                    .map(|segment| AccessionSpan {
+                        node_id: segment.node_id,
+                        range: segment.range,
+                        strand: segment.strand,
+                    })
+                    .collect();
+                let accession = Accession::get_or_create(
+                    conn,
+                    &NewAccession {
+                        name: name.to_string(),
+                        block_group_id: self.id,
+                        parent_accession_id: None,
+                        spans,
+                    },
+                )
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                let annotation = Annotation::get_or_create(conn, name, track, &accession.id, None)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                AnnotationGroupSample::create(conn, track, &self.sample_name)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                let result = PyAnnotation {
+                    inner: annotation,
+                    context: Some(context.clone()),
+                    ann_segments: annotation_segments.clone(),
+                    source_block_group_id: Some(self.id),
+                    locus: Some(target_locus),
+                    sequence_graph: Some(self.clone()),
+                };
+                Ok((
+                    result,
+                    OperationSummary::new(
+                        OperationInfo {
+                            files: vec![],
+                            description: "add_annotation".to_string(),
+                        },
+                        format!("add annotation '{name}' to track '{track}'"),
+                    ),
+                ))
+            },
+            |error| PyRuntimeError::new_err(format!("failed to add annotation: {error}")),
+        )
     }
 
     /// Translate a sequence graph or annotation into a protein ``SequenceGraph``.

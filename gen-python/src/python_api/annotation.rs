@@ -1,3 +1,4 @@
+use r#gen::views::annotation_track::AnnotationSpan;
 use gen_annotations::projection::AnnotationSegment;
 use gen_core::{HashId, range::Range};
 use gen_graph::{GraphNode, GraphNodeSlice};
@@ -11,8 +12,10 @@ use super::{block_group::PySequenceGraph, graph_search::PyGraphLocus};
 ///
 /// **From a database** — obtain via ``SequenceGraph.annotations``.
 ///
-/// **From a search result** — create with ``Annotation(locus, name)``
-/// where *locus* is a ``Locus`` returned by ``SequenceGraph.search()``.
+/// **From a search result** — create an annotation object with
+/// ``Annotation(locus, name)`` where *locus* is a ``Locus`` returned by
+/// ``SequenceGraph.search()``. To persist it in the repository, use
+/// ``SequenceGraph.add_annotation(locus, name)``.
 #[pyclass(name = "Annotation", unsendable)]
 #[derive(Clone)]
 pub struct PyAnnotation {
@@ -27,9 +30,48 @@ pub struct PyAnnotation {
     pub sequence_graph: Option<PySequenceGraph>,
 }
 
+impl PyAnnotation {
+    /// Wrap a feature read from an annotation file so it reads like a database annotation.
+    ///
+    /// Files carry no accession, so `accession_id` stays zeroed as it does for annotations built
+    /// from a `Locus`; the file's display name plays the part of the annotation group.
+    pub(crate) fn from_file_span(
+        span: &AnnotationSpan,
+        group: &str,
+        sequence_graph: &PySequenceGraph,
+    ) -> Self {
+        let ann_segments = span
+            .segments
+            .iter()
+            .map(|segment| AnnotationSegment {
+                node_id: segment.node_id,
+                range: Range {
+                    start: segment.start,
+                    end: segment.end,
+                },
+                strand: segment.strand,
+            })
+            .collect();
+        PyAnnotation {
+            inner: Annotation {
+                id: span.id,
+                name: span.name.clone(),
+                group: group.to_string(),
+                accession_id: HashId([0u8; 16]),
+                extra: None,
+            },
+            context: sequence_graph.context.clone(),
+            ann_segments,
+            source_block_group_id: Some(sequence_graph.id),
+            locus: None,
+            sequence_graph: Some(sequence_graph.clone()),
+        }
+    }
+}
+
 #[pymethods]
 impl PyAnnotation {
-    /// Create an ephemeral annotation from a search-result locus.
+    /// Create an annotation object from a search-result locus.
     ///
     /// Parameters
     /// locus : Locus
@@ -97,7 +139,7 @@ impl PyAnnotation {
     }
 
     /// Track (annotation group) this annotation was loaded from, or ``None`` for
-    /// ephemeral annotations created with ``Annotation(locus, name)``.
+    /// annotations created with ``Annotation(locus, name)``.
     #[getter]
     fn track(&self) -> Option<&str> {
         if self.inner.group.is_empty() {
