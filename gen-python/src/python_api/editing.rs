@@ -1498,7 +1498,7 @@ mod tests {
         sample::{NewSample, Sample},
         sequence::Sequence,
     };
-    use pyo3::{Py, PyErr, PyResult, Python, prepare_freethreaded_python};
+    use pyo3::{Py, PyErr, PyResult, Python};
 
     use crate::python_api::{
         block_group::PySequenceGraph,
@@ -1539,7 +1539,7 @@ mod tests {
             sequence: &str,
             stack: bool,
         ) -> PyResult<GraphLocus> {
-            prepare_freethreaded_python();
+            Python::initialize();
             insert_at_positions(&self.graph, &site, sequence, None, stack)
         }
 
@@ -1550,8 +1550,8 @@ mod tests {
             kind: EditKind,
             sequence: &str,
         ) -> PyResult<Option<GraphLocus>> {
-            prepare_freethreaded_python();
-            Python::with_gil(|python| {
+            Python::initialize();
+            Python::attach(|python| {
                 let locus = Py::new(python, PyGraphLocus::from_locus(locus))
                     .expect("should wrap the locus");
                 edit_sequence_graph(
@@ -1611,8 +1611,8 @@ mod tests {
     }
 
     fn error_message(error: PyErr) -> String {
-        prepare_freethreaded_python();
-        Python::with_gil(|python| error.value(python).to_string())
+        Python::initialize();
+        Python::attach(|python| error.value(python).to_string())
     }
 
     fn setup_sample(context: &DbContext) {
@@ -1819,15 +1819,15 @@ mod tests {
         use r#gen::test_helpers::setup_gen_on_disk;
         use gen_models::{block_group::BlockGroup, db::DbContext};
         use pyo3::{
-            Py, PyRef, Python, prepare_freethreaded_python,
+            Py, PyRef, Python,
             types::{PyDict, PyDictMethods as _},
         };
 
         use crate::python_api::{block_group::PySequenceGraph, repository::PyRepository};
 
         fn run_edit_test(script: &str, expected: &str) {
-            prepare_freethreaded_python();
-            Python::with_gil(|python| {
+            Python::initialize();
+            Python::attach(|python| {
                 let context = setup_gen_on_disk();
                 let repository = Py::new(
                     python,
@@ -3018,7 +3018,7 @@ assert len(repo.get_operations()) == count
             sequence::reverse_complement,
         };
         use pyo3::{
-            Py, Python, prepare_freethreaded_python,
+            Py, Python,
             types::{PyDict, PyDictMethods as _},
         };
 
@@ -3851,8 +3851,8 @@ assert len(repo.get_operations()) == count
         #[test]
         fn test_python_position_arithmetic_and_insert() {
             let fixture = bubble();
-            prepare_freethreaded_python();
-            Python::with_gil(|python| {
+            Python::initialize();
+            Python::attach(|python| {
                 let graph = Py::new(python, fixture.graph.clone()).expect("should wrap graph");
                 let locals = PyDict::new(python);
                 locals.set_item("graph", &graph).expect("should bind graph");

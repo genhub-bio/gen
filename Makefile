@@ -11,6 +11,7 @@ py-package-cli:
 # Regenerates gen-python/python/gen/gen/__init__.pyi from the annotated PyO3 bindings.
 python-stubs:
 	cargo run --manifest-path gen-python/Cargo.toml --features abi3 --bin stub_gen
+	-ruff format gen-python/python/gen/gen/__init__.pyi
 python-wheel: py-package-cli
 	@[ -d .venv ] || python -m venv .venv
 	@.venv/bin/pip show maturin >/dev/null 2>&1 || .venv/bin/pip install maturin
