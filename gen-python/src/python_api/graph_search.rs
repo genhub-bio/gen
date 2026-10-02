@@ -198,7 +198,7 @@ impl PyGraphLocus {
     fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let python = key.py();
         let length = self.__len__() as isize;
-        if let Ok(slice) = key.downcast::<PySlice>() {
+        if let Ok(slice) = key.cast::<PySlice>() {
             let indices = slice.indices(length)?;
             if indices.step != 1 {
                 return Err(PyValueError::new_err("Locus slices require a step of 1"));

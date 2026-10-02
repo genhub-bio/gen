@@ -143,7 +143,7 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_push(
                 &workspace,
                 remote.as_deref(),
@@ -166,7 +166,7 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_pull(
                 &workspace,
                 remote.as_deref(),
@@ -188,7 +188,7 @@ impl PyRepository {
         let remote = optional_remote_name(remote)?;
         let branch = optional_branch_name(branch)?;
         let workspace = self.context.workspace().clone();
-        let result = python.allow_threads(|| {
+        let result = python.detach(|| {
             r#gen::commands::remote::operations::execute_fetch(
                 &workspace,
                 remote.as_deref(),

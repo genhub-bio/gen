@@ -1505,8 +1505,8 @@ pub fn build_widget(
     ctrl: Py<PyGraphController>,
     rows: Option<u32>,
     cols: Option<u32>,
-    colors: Option<PyObject>,
-) -> PyResult<PyObject> {
+    colors: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let gen_module = py.import("gen")?;
     let widget_cls = gen_module.getattr("GraphWidget")?;
     let kwargs = PyDict::new(py);
