@@ -2,7 +2,11 @@
 
 Use this reference for the current repository bindings. Signatures were checked
 against `gen-python/src/python_api/` and the installed development extension.
-Check `help()` in the actual interpreter when using a different release.
+Check `help()` in the actual interpreter when using a different release. The generated
+stub `gen-python/python/gen/gen/__init__.pyi` has every signature and docstring.
+
+A sequence graph is not one sequence. Read strings with `locus.sequence` (a region),
+`graph.all_sequences()` (every path) and `graph.export_fasta(file, all_sequences=True)`.
 
 Contents: workspace and history; remotes; imports and return types; direct edits;
 loci and positions; annotations; file-driven updates; search and sequence reads;
@@ -43,8 +47,8 @@ workspace from the current directory. File APIs below take filename strings.
 `.collection_name`. Pass the typed id to `get_sequence_graph_by_id()`.
 
 Mutating import/update/edit/copy APIs record operations automatically. The public
-API has no transaction context manager. `execute(sql)` returns `None` and
-`query(sql)` returns rows; raw SQL is not a substitute for operation-aware edits.
+API has no transaction context manager. Raw SQL (`execute`/`query`) is low-level and hidden from the stubs; use the
+operation-aware APIs instead.
 
 Branch arguments accept names or `Branch` objects. `create_branch()` creates
 without switching and accepts a string commit ref for `start`.
@@ -85,7 +89,10 @@ repo.pull(remote=None, branch=None)
 repo.push(remote=None, branch=None, force=False)
 ```
 
-`clone()` returns an open `Repository`. `add_remote()` returns a `Remote` with
+`clone()` returns an open `Repository`. Pass a destination that does not exist, is empty, or
+only holds a freshly initialized workspace; do not copy files into `.gen` by hand. The clone
+is already checked out on the remote's default branch (`checkout("main")` works afterwards).
+`add_remote()` + `pull()` is for a repository that already has history. `add_remote()` returns a `Remote` with
 `.name` and `.url`. Remote arguments accept a name or `Remote`; branch arguments
 accept a name or `Branch`. Omitted remote/branch follows repository defaults and
 branch tracking. Passing no remote to the setters clears that configuration.
@@ -286,7 +293,7 @@ repo.update_with_library(sample, new_sample_name, path_name, parts_list, collect
 repo.update_with_library_files(sample, new_sample, path_name, library, parts, collection=None)
 ```
 
-VCF/GAF return `list[Sample]`; other updates return a `Sample`. Sequence, FASTA,
+VCF returns `list[Sample]`; GAF and other updates return a `Sample`. Sequence, FASTA,
 GFA, and library updates create the named output sample. GenBank updates the
 specified sample; `create_missing=True` allows missing graphs. VCF exposes
 `in_place`; do not assume every update creates a new sample.
@@ -312,7 +319,6 @@ graph.clear_index()
 repo.clear_index(bgs=None)
 graph.all_sequences()
 graph.get_node_sequence(node)
-repo.get_node_sequence(node_key)
 graph.to_dict()
 graph.to_networkx()
 graph.to_rustworkx()
@@ -397,32 +403,28 @@ GFA preserves graph structure.
 ```python
 widget = graph.plot(rows=20, cols=100, show_history=False)
 # sample.plot() pages through the sample's graphs.
-widget.show(locus, color="cyan", center=False)
+widget.show(locus, color="cyan", center=False)    # each returns the widget
 widget.go_to(locus.start(), center=False)
 widget.refresh()
-widget.next_page()
-widget.prev_page()
-widget.zoom_in()
-widget.zoom_out()
-widget.scroll_left()
-widget.scroll_right()
-widget.scroll_up()
-widget.scroll_down()
-print(repr(widget))
+widget.next_page(); widget.prev_page()
+widget.zoom_in(); widget.zoom_out()
+widget.scroll_left(); widget.scroll_right(); widget.scroll_up(); widget.scroll_down()
+print(widget)   # text rendering
 ```
 
-Terminals, scripts, and agent REPLs get `TextGraphWidget` even when Jupyter
-packages are installed. A live Jupyter kernel with optional dependencies gets
-`GraphWidget`; otherwise it falls back to text. `show()` navigates and highlights
-loci/annotations; positions/superpositions navigate without highlighting.
-`go_to()` navigates only. Both return the widget. Refresh after graph edits;
-paging switches graphs while scrolling moves within a graph.
+Terminals, scripts, and agent REPLs get `TextGraphWidget` (no Jupyter needed). A live
+Jupyter kernel with optional dependencies gets `GraphWidget`; otherwise it falls back to text.
+Both have the same methods, and every navigation or display method returns the widget, so
+calls chain: `print(widget.show(locus).zoom_in().scroll_right())`. In notebooks use the
+interactive widget freely. `show()` navigates and highlights loci/annotations;
+positions/superpositions navigate without highlighting. `go_to()` navigates only.
+Refresh after graph edits; paging (`next_page`/`prev_page`) switches graphs while scrolling
+moves within a graph.
 
 Graph/repository plot supports `detail`, `colors`, and `show_history`; sample plot
 supports `colors` and `show_history`. History display includes retired/pruned
 edges dimmed; it is not an operation diff.
 
-Interactive-only controls include `clear_highlights()`, `show_path()`,
-`hide_path()`, `show_track(name)`, `hide_track(name)`, `.tracks`, and
-`hide_all_tracks()`. They are unavailable on the text widget. Persist annotations
-through the graph API rather than removed widget annotation methods.
+Also on both widgets: `clear_highlights()`, `show_path()`, `hide_path()`,
+`show_track(name)`, `hide_track(name)`, `.tracks`, `hide_all_tracks()`, `handle_click(col, row)`.
+Persist annotations through the graph API (`graph.add_annotation`).
