@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, slice::from_ref};
 
 use r#gen::{
     fasta::FastaError,
@@ -8,27 +8,191 @@ use r#gen::{
         genbank::{GenBankImportOptions, import_genbank},
         gfa::{GFAImportError, import_gfa},
         library::{LibraryImportError, import_library},
+        sequences::import_sequences,
     },
 };
+use gen_core::{HashId, NO_CHROMOSOME_INDEX, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
+    block_group::BlockGroup,
+    block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
+    db::GraphConnection,
+    edge::Edge,
     errors::OperationError,
+    path::Path,
     sample::{NewSample, Sample},
 };
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3::{
+    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
+    prelude::*,
+};
 
 use super::{PyRepository, run_operation_write};
 use crate::python_api::{
     block_group::PySequenceGraph, sample::PySample, sequence_part::PySequencePart,
 };
 
+/// FASTA files are copied into the repository and tracked as assets, so their sequences are read
+/// from that copy rather than duplicated into the database.
+const SHALLOW_FASTA_IMPORT: bool = true;
+
+/// Biopython `SeqRecord`s are recognised by shape (`id` and `seq`) so gen never imports Biopython.
+fn is_seq_record(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(value.hasattr("id")? && value.hasattr("seq")?)
+}
+
+/// Plain strings and Biopython `Seq`/`MutableSeq` (recognised by `reverse_complement`) are
+/// sequences; anything else is rejected rather than stringified.
+fn sequence_text(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(text);
+    }
+    if value.hasattr("reverse_complement")? {
+        return value.str()?.extract();
+    }
+    Err(PyValueError::new_err(
+        "sequence must be a string, a Biopython Seq, or a Biopython SeqRecord",
+    ))
+}
+
+/// A sample is given by name or as a `Sample`. Returns the sample name and, for a `Sample`, its
+/// collection. A `SequenceGraph` is rejected because it is unclear whether importing "into" one
+/// would add to its sample or replace it.
+fn sample_reference(sample: &Bound<'_, PyAny>) -> PyResult<(String, Option<String>)> {
+    if let Ok(name) = sample.extract::<String>() {
+        return Ok((name, None));
+    }
+    match sample.extract::<PySample>() {
+        Ok(sample) => Ok((sample.sample_name, Some(sample.collection_name))),
+        Err(_) => Err(PyTypeError::new_err(
+            "sample must be a sample name or a Sample",
+        )),
+    }
+}
+
+/// Resolves the `(name, sequence)` pair for one import. A `SeqRecord` supplies its own name
+/// (overridable with `name`); plain strings and `Seq`s need one.
+fn parse_sequence_entry(
+    sequence: &Bound<'_, PyAny>,
+    name: Option<String>,
+) -> PyResult<(String, String)> {
+    let (name, text) = if is_seq_record(sequence)? {
+        let name = match name {
+            Some(name) => name,
+            None => sequence.getattr("id")?.extract()?,
+        };
+        (name, sequence_text(&sequence.getattr("seq")?)?)
+    } else {
+        let name = name.ok_or_else(|| {
+            PyValueError::new_err("name is required unless sequence is a Biopython SeqRecord")
+        })?;
+        (name, sequence_text(sequence)?)
+    };
+    if name.is_empty() {
+        return Err(PyValueError::new_err("sequence name must not be empty"));
+    }
+    if text.is_empty() {
+        return Err(PyValueError::new_err(format!("sequence '{name}' is empty")));
+    }
+    Ok((name, text))
+}
+
+fn sequence_import_error(error: FastaError) -> PyErr {
+    match error {
+        FastaError::OperationError(OperationError::NoChanges) => {
+            PyRuntimeError::new_err("sequences: contents already exist")
+        }
+        _ => PyRuntimeError::new_err(format!("Failed to import sequences: {error}")),
+    }
+}
+
+/// Close a newly imported path while retaining its linear path for sequence extraction.
+fn circularize(conn: &GraphConnection, block_group_id: &HashId) -> PyResult<()> {
+    let path = BlockGroup::get_current_path(conn, block_group_id, None)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let edges = Path::edges_for_path(conn, &path.id, None);
+    let first_edge = edges
+        .first()
+        .ok_or_else(|| PyRuntimeError::new_err("Cannot circularize an empty path"))?;
+    let last_edge = edges
+        .last()
+        .ok_or_else(|| PyRuntimeError::new_err("Cannot circularize an empty path"))?;
+    let cycle_edge = Edge::create(
+        conn,
+        last_edge.source_node_id,
+        last_edge.source_coordinate,
+        last_edge.source_strand,
+        first_edge.target_node_id,
+        first_edge.target_coordinate,
+        first_edge.target_strand,
+    )
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let sentinel_edge = Edge::create(
+        conn,
+        PATH_END_NODE_ID,
+        0,
+        Strand::Forward,
+        PATH_START_NODE_ID,
+        0,
+        Strand::Forward,
+    )
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let closing_edges = [cycle_edge.id, sentinel_edge.id].map(|edge_id| BlockGroupEdgeData {
+        block_group_id: *block_group_id,
+        edge_id,
+        chromosome_index: NO_CHROMOSOME_INDEX,
+        phased: 0,
+    });
+    BlockGroupEdge::bulk_create(conn, &closing_edges);
+    Ok(())
+}
+
+impl PyRepository {
+    /// Importing a name already present in the sample would silently keep the old graph, so
+    /// callers get an error instead.
+    fn reject_existing_graph(&self, collection: &str, sample: &str, name: &str) -> PyResult<()> {
+        let exists =
+            Sample::get_block_groups(self.context.graph().conn(), collection, sample, None)
+                .iter()
+                .any(|block_group| block_group.name == name);
+        if exists {
+            return Err(PyRuntimeError::new_err(format!(
+                "sequence graph '{name}' already exists in sample '{sample}'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn import_sequence_entry(
+        &self,
+        entry: &(String, String),
+        collection: &str,
+        sample: &str,
+        circular: bool,
+    ) -> PyResult<PySequenceGraph> {
+        self.reject_existing_graph(collection, sample, &entry.0)?;
+        run_operation_write(
+            self,
+            |ctx| {
+                let operation_summary = import_sequences(ctx, from_ref(entry), collection, sample)
+                    .map_err(sequence_import_error)?;
+                let graph = self.get_block_group(collection, sample, &entry.0)?;
+                if circular {
+                    circularize(ctx.graph().conn(), &graph.id)?;
+                }
+                Ok((graph, operation_summary))
+            },
+            |err| sequence_import_error(FastaError::OperationError(err)),
+        )
+    }
+}
+
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (filename, sample=None, shallow=false, collection=None))]
+    #[pyo3(signature = (filename, sample=None, collection=None))]
     pub fn import_fasta(
         &self,
         filename: String,
         sample: Option<String>,
-        shallow: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
@@ -41,7 +205,7 @@ impl PyRepository {
                     &filename,
                     &collection,
                     &sample,
-                    shallow,
+                    SHALLOW_FASTA_IMPORT,
                     &[],
                 )
                 .map_err(|e| match e {
@@ -64,12 +228,11 @@ impl PyRepository {
         )
     }
 
-    #[pyo3(signature = (filename, reference, shallow=false, collection=None))]
+    #[pyo3(signature = (filename, reference, collection=None))]
     pub fn import_reference_fasta(
         &self,
         filename: String,
         reference: String,
-        shallow: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
@@ -91,7 +254,7 @@ impl PyRepository {
                     &filename,
                     &collection,
                     &reference,
-                    shallow,
+                    SHALLOW_FASTA_IMPORT,
                     &[],
                 )
                 .map_err(|e| match e {
@@ -111,6 +274,76 @@ impl PyRepository {
                 }
                 _ => PyRuntimeError::new_err(format!("Failed to import '{}': {err}", filename)),
             },
+        )
+    }
+
+    /// Add one in-memory sequence to a sample as a new sequence graph, without a FASTA file, and
+    /// return that graph.
+    ///
+    /// `sequence` is a string, a Biopython `Seq`, or a Biopython `SeqRecord`; a `SeqRecord`
+    /// supplies its own `name` (its id) unless one is given. `sample` is a name or a `Sample`, and
+    /// defaults to the default sample, "reference"; call it repeatedly with the same `sample` to
+    /// build up a sample from several sequences. With `circular=True` the sequence is stored as a
+    /// circular graph. Each call is its own operation, so use `import_fasta` for large files.
+    #[pyo3(signature = (sequence, name=None, sample=None, circular=false, collection=None))]
+    pub fn import_sequence(
+        &self,
+        sequence: &Bound<'_, PyAny>,
+        name: Option<String>,
+        sample: Option<&Bound<'_, PyAny>>,
+        circular: bool,
+        collection: Option<String>,
+    ) -> PyResult<PySequenceGraph> {
+        let entry = parse_sequence_entry(sequence, name)?;
+        let (sample, sample_collection) = match sample {
+            Some(sample) => sample_reference(sample)?,
+            None => (Sample::DEFAULT_NAME.to_string(), None),
+        };
+        let collection = collection
+            .or(sample_collection)
+            .unwrap_or_else(|| self.get_default_collection());
+        self.import_sequence_entry(&entry, &collection, &sample, circular)
+    }
+
+    /// Like `import_sequence`, but adds to a reference sample.
+    #[pyo3(signature = (sequence, reference, name=None, circular=false, collection=None))]
+    pub fn import_reference_sequence(
+        &self,
+        sequence: &Bound<'_, PyAny>,
+        reference: &Bound<'_, PyAny>,
+        name: Option<String>,
+        circular: bool,
+        collection: Option<String>,
+    ) -> PyResult<PySequenceGraph> {
+        let entry = parse_sequence_entry(sequence, name)?;
+        let (reference, reference_collection) = sample_reference(reference)?;
+        let collection = collection
+            .or(reference_collection)
+            .unwrap_or_else(|| self.get_default_collection());
+        self.reject_existing_graph(&collection, &reference, &entry.0)?;
+        run_operation_write(
+            self,
+            |ctx| {
+                Sample::get_or_create(
+                    ctx.graph().conn(),
+                    NewSample {
+                        name: &reference,
+                        is_reference: true,
+                    },
+                )
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to create reference sample: {e}"))
+                })?;
+                let operation_summary =
+                    import_sequences(ctx, from_ref(&entry), &collection, &reference)
+                        .map_err(sequence_import_error)?;
+                let graph = self.get_block_group(&collection, &reference, &entry.0)?;
+                if circular {
+                    circularize(ctx.graph().conn(), &graph.id)?;
+                }
+                Ok((graph, operation_summary))
+            },
+            |err| sequence_import_error(FastaError::OperationError(err)),
         )
     }
 
@@ -319,5 +552,58 @@ impl PyRepository {
                 )),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use r#gen::test_helpers::setup_gen_on_disk;
+    use gen_core::{NO_CHROMOSOME_INDEX, is_end_node, is_start_node};
+    use gen_models::{block_group::BlockGroup, block_group_edge::BlockGroupEdge, path::Path};
+    use pyo3::{Python, types::PyString};
+
+    use super::PyRepository;
+
+    #[test]
+    fn test_import_sequence_circular_closes_graph_and_preserves_path() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|python| {
+            let repository = PyRepository {
+                context: setup_gen_on_disk(),
+            };
+            let sequence = PyString::new(python, "ATCG");
+            for circular in [false, true] {
+                let name = if circular { "circular" } else { "linear" };
+                let graph = repository
+                    .import_sequence(
+                        sequence.as_any(),
+                        Some(name.to_string()),
+                        None,
+                        circular,
+                        None,
+                    )
+                    .unwrap();
+                let conn = repository.context.graph().conn();
+                let edges = BlockGroupEdge::edges_for_block_group(conn, &graph.id, None);
+                let closing_edges = edges
+                    .iter()
+                    .filter(|edge| edge.chromosome_index == NO_CHROMOSOME_INDEX)
+                    .collect::<Vec<_>>();
+                assert_eq!(closing_edges.len(), if circular { 2 } else { 0 });
+                if circular {
+                    assert!(closing_edges.iter().any(|edge| {
+                        edge.edge.source_node_id == edge.edge.target_node_id
+                            && edge.edge.source_coordinate == 4
+                            && edge.edge.target_coordinate == 0
+                    }));
+                    assert!(closing_edges.iter().any(|edge| {
+                        is_end_node(edge.edge.source_node_id)
+                            && is_start_node(edge.edge.target_node_id)
+                    }));
+                }
+                let path = BlockGroup::get_current_path(conn, &graph.id, None).unwrap();
+                assert_eq!(Path::edges_for_path(conn, &path.id, None).len(), 2);
+            }
+        });
     }
 }
