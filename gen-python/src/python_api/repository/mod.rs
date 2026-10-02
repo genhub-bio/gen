@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use r#gen::{get_config_connection, get_connection_for_branch};
 use gen_core::config::Workspace;
@@ -7,7 +7,10 @@ use gen_models::{
     collection::Collection,
     db::DbContext,
     errors::OperationError,
-    history::dolt::{set_commit_author_email, set_commit_author_name},
+    history::{
+        HistoryStore,
+        dolt::{DoltHistoryStore, set_commit_author_email, set_commit_author_name},
+    },
     node::Node,
     operations::{Defaults, OperationSummary, commit_operation_summary},
     sample::Sample,
@@ -40,7 +43,8 @@ pub mod updates;
 /// current directory. When supplied, `path` is the exact destination and accepts
 /// strings or Python path-like objects. The destination may be an empty directory.
 /// `committer` and `email`, when given, become the committer identity recorded on operations
-/// made in this repository from now on.
+/// made in this repository from now on. A destination that only holds a freshly initialized,
+/// still-empty `.gen` workspace (for example from an earlier `Repository(path)`) is reused.
 #[pyfunction(name = "clone")]
 #[pyo3(signature = (url, path=None, committer=None, email=None))]
 pub fn clone_repository(
@@ -60,6 +64,7 @@ pub fn clone_repository(
             Workspace::new(destination)
         }
     };
+    discard_untouched_workspace(&workspace)?;
     python.allow_threads(|| {
         r#gen::commands::clone::clone_to_workspace(url, &workspace)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
@@ -67,6 +72,45 @@ pub fn clone_repository(
     let repository = PyRepository::open_workspace(workspace)?;
     repository.set_committer(committer, email)?;
     Ok(repository)
+}
+
+const INITIALIZATION_OPERATION_COUNT: usize = 2;
+
+/// Removes a destination's `.gen` directory when it is the only entry and holds no graph data or
+/// operations, so agents that opened `Repository(path)` before cloning do not hit a spurious
+/// "not an empty directory" error. Anything with content is left for the clone to reject.
+fn discard_untouched_workspace(workspace: &Workspace) -> PyResult<()> {
+    let destination = workspace.base_dir();
+    let Ok(mut entries) = fs::read_dir(destination) else {
+        return Ok(());
+    };
+    let only_gen_dir = match (entries.next(), entries.next()) {
+        (Some(Ok(entry)), None) => entry.file_name() == ".gen",
+        _ => false,
+    };
+    if !only_gen_dir {
+        return Ok(());
+    }
+    let untouched = {
+        let repository = PyRepository::open_workspace(Workspace::new(destination))?;
+        let conn = repository.context.graph().conn();
+        let has_graphs = !BlockGroup::select(conn)
+            .load()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            .is_empty();
+        // Initialization itself records the schema-migration and repository-init operations.
+        let has_user_operations = DoltHistoryStore::new(conn)
+            .log(Some(INITIALIZATION_OPERATION_COUNT + 1))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            .len()
+            > INITIALIZATION_OPERATION_COUNT;
+        !has_graphs && !has_user_operations
+    };
+    if untouched {
+        fs::remove_dir_all(destination.join(".gen"))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Runs `op` in one graph transaction and records it as one operation.
