@@ -189,6 +189,21 @@ class RemoteTests(unittest.TestCase):
     @unittest.skipIf(
         os.name == "nt", "native file remote workflows are currently tested on Unix"
     )
+    def test_clone_reuses_freshly_initialized_destination(self):
+        self.import_sequence(self.repository, "base")
+        destination = self.root / "initialized-first"
+        gen.Repository(str(destination))
+        cloned = gen.clone((self.root / "local").as_uri(), path=str(destination))
+        self.assertEqual(len(cloned.get_sequence_graphs()), 1)
+
+        used = self.root / "initialized-and-used"
+        self.import_sequence(gen.Repository(str(used)), "other")
+        with self.assertRaisesRegex(RuntimeError, "not an empty directory"):
+            gen.clone((self.root / "local").as_uri(), path=str(used))
+
+    @unittest.skipIf(
+        os.name == "nt", "native file remote workflows are currently tested on Unix"
+    )
     def test_clone_records_the_given_committer(self):
         self.import_sequence(self.repository, "base")
         cloned = gen.clone(
