@@ -6,12 +6,17 @@ use std::{
 use r#gen::{
     get_connection_for_branch,
     views::{
+        annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
         annotation_groups::{annotation_group_names, load_annotation_group_entries},
         annotation_track::{
             AnnotationSpan, AnnotationTrack, annotation_span_from_graph_locus,
             graph_locus_from_annotation_span,
         },
-        annotations::{AnnotationGroupTrackRequest, load_annotations_for_group},
+        annotations::{
+            AnnotationFileTrackRequest, AnnotationGroupTrackRequest, load_annotation_file_track,
+            load_annotations_for_group,
+        },
+        block_group::{current_view_coordinate_window, expand_query_window},
         gen_graph_widget::{
             GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
             draw_annotation_labels, reapply_overlays,
@@ -266,6 +271,20 @@ struct GraphPage {
     /// Set to `true` once annotation groups have been loaded (auto or with colors).
     /// Survives cloning so that cell-display clones do not double-load.
     annotation_groups_loaded: bool,
+    /// Annotation files recorded in the repository, shown like database groups once loaded.
+    annotation_files: Vec<FileTrack>,
+}
+
+/// An annotation file's display state on one page.
+///
+/// Indexed files are read for a window around the viewport and reloaded when the camera leaves
+/// it, as the full-screen viewer does; unindexed files are read whole when first shown.
+#[derive(Clone)]
+struct FileTrack {
+    entry: AnnotationFileEntry,
+    shown: bool,
+    index_available: bool,
+    loaded_window: Option<(i64, i64)>,
 }
 
 /// The information needed to lazily build a `GraphPage` on first visit,
@@ -319,6 +338,7 @@ impl GraphPage {
             overlays: Vec::new(),
             annotation_colors: AnnotationColorCache::new(),
             annotation_groups_loaded: false,
+            annotation_files: Vec::new(),
         }
     }
 
@@ -374,6 +394,7 @@ impl GraphPage {
                 self.push_track_as_overlays(track);
             }
         }
+        self.show_all_annotation_files(conn);
         self.reapply();
         self.annotation_groups_loaded = true;
     }
@@ -399,6 +420,7 @@ impl GraphPage {
                 self.push_track_as_overlays_with_colors(track, color_map);
             }
         }
+        self.show_all_annotation_files(conn);
         self.reapply();
         self.annotation_groups_loaded = true;
     }
@@ -510,6 +532,13 @@ impl GraphPage {
         self.go_to_pos(&position, center);
     }
 
+    fn draw_graph(&mut self, buf: &mut Buffer, graph_area: Rect) -> PyResult<()> {
+        let conn = self.open_conn()?;
+        let renderer = GenGraphNodeRenderer::new(&conn, &self.workspace);
+        GraphWidget::with_renderer(renderer).render(graph_area, buf, &mut self.controller);
+        Ok(())
+    }
+
     /// Render the graph, overlay labels, and annotation tracks into `buf` within `graph_area`.
     ///
     /// Shared by the standalone `render_frame` pymethod and `PySampleController`,
@@ -517,10 +546,12 @@ impl GraphPage {
     fn render_into(&mut self, buf: &mut Buffer, graph_area: Rect) -> PyResult<()> {
         // Re-register overlays: detail level affects which spans register (see `reapply`).
         self.reapply();
-        {
-            let conn = self.open_conn()?;
-            let renderer = GenGraphNodeRenderer::new(&conn, &self.workspace);
-            GraphWidget::with_renderer(renderer).render(graph_area, buf, &mut self.controller);
+        self.draw_graph(buf, graph_area)?;
+        // The viewport is only known once drawn, so indexed annotation files that the camera has
+        // moved away from are reloaded here and the frame is drawn again with them.
+        if self.refresh_annotation_files_for_viewport() {
+            self.reapply();
+            self.draw_graph(buf, graph_area)?;
         }
 
         // Draw overlay labels after the graph, then a single hint if any were hidden.
@@ -787,13 +818,18 @@ impl GraphPage {
         self.reapply();
     }
 
-    /// Load annotations from the database by group name and add them as inline graph overlays.
+    /// Show a track by name as inline graph overlays: a database annotation group, or failing
+    /// that an annotation file recorded in the repository under that display name.
     pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
         let conn = self.open_conn()?;
-        let track = self
-            .load_group_as_track(&conn, group)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        self.push_track_as_overlays(track);
+        match self.load_group_as_track(&conn, group) {
+            Ok(track) => self.push_track_as_overlays(track),
+            Err(group_error) => {
+                if !self.show_annotation_file(&conn, group) {
+                    return Err(PyRuntimeError::new_err(group_error.to_string()));
+                }
+            }
+        }
         self.reapply();
         Ok(())
     }
@@ -882,12 +918,23 @@ impl GraphPage {
         let conn = self.open_conn()?;
         let block_group = BlockGroup::get_by_id(&conn, &block_group_id, None)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        Ok(annotation_group_names(&conn, &block_group, None))
+        let mut names = annotation_group_names(&conn, &block_group, None);
+        for entry in load_annotation_file_entries(&conn, None) {
+            if !names.contains(&entry.display_name) {
+                names.push(entry.display_name);
+            }
+        }
+        Ok(names)
     }
 
     /// Remove all overlays belonging to the track `name` (loaded via
     /// `add_track_group` / auto-loaded annotation groups).
     pub fn remove_track(&mut self, name: &str) {
+        for file in &mut self.annotation_files {
+            if file.entry.display_name == name {
+                file.shown = false;
+            }
+        }
         self.overlays
             .retain(|overlay| !matches!(&overlay.source, OverlaySource::Track(n) if n == name));
         self.reapply();
@@ -895,6 +942,9 @@ impl GraphPage {
 
     /// Clear all annotations from the graph.
     pub fn clear_all_annotations(&mut self) {
+        for file in &mut self.annotation_files {
+            file.shown = false;
+        }
         // Keep ad hoc/search highlights and the path; drop everything
         // added via a track or `add_annotation`, then repaint what remains.
         self.overlays.retain(|overlay| {
@@ -904,6 +954,135 @@ impl GraphPage {
             )
         });
         self.reapply();
+    }
+}
+
+impl GraphPage {
+    /// Read the repository's annotation files, keeping the display state of ones already known.
+    fn sync_annotation_files(&mut self, conn: &GraphConnection) {
+        let entries = load_annotation_file_entries(conn, None);
+        let mut previous = std::mem::take(&mut self.annotation_files);
+        self.annotation_files = entries
+            .into_iter()
+            .map(|entry| {
+                let known = previous
+                    .iter()
+                    .position(|file| file.entry.file_addition.id == entry.file_addition.id);
+                match known {
+                    Some(index) => FileTrack {
+                        entry,
+                        ..previous.swap_remove(index)
+                    },
+                    None => FileTrack {
+                        entry,
+                        shown: false,
+                        index_available: false,
+                        loaded_window: None,
+                    },
+                }
+            })
+            .collect();
+    }
+
+    /// Load one file for `window`, replacing whatever it showed before.
+    fn load_annotation_file(
+        &mut self,
+        conn: &GraphConnection,
+        index: usize,
+        window: Option<(i64, i64)>,
+    ) -> bool {
+        let Some(block_group_id) = self.block_group_id else {
+            return false;
+        };
+        let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id, None) else {
+            return false;
+        };
+        let node_filter = self.all_node_ids();
+        let entry = self.annotation_files[index].entry.clone();
+        let loaded = load_annotation_file_track(&AnnotationFileTrackRequest {
+            conn,
+            history_ref: None,
+            workspace: &self.workspace,
+            collection_name: &block_group.collection_name,
+            sample_name: &block_group.sample_name,
+            block_group_name: Some(&block_group.name),
+            query_window: window,
+            node_filter: &node_filter,
+            entry: &entry,
+        });
+        let Ok(loaded) = loaded else {
+            return false;
+        };
+        let name = entry.display_name.clone();
+        self.overlays.retain(
+            |overlay| !matches!(&overlay.source, OverlaySource::Track(track) if *track == name),
+        );
+        self.push_track_as_overlays(loaded.track);
+        let file = &mut self.annotation_files[index];
+        file.shown = true;
+        file.index_available = loaded.index_available;
+        file.loaded_window = loaded.loaded_window;
+        true
+    }
+
+    /// The window of sequence coordinates to read an indexed file for: the viewport and as much
+    /// again on each side, so small camera moves don't reload.
+    fn annotation_query_window(&self) -> Option<(i64, i64)> {
+        current_view_coordinate_window(&self.controller).map(expand_query_window)
+    }
+
+    /// Show every annotation file, as database groups are all shown when a graph is plotted.
+    /// A file that can't be read is skipped so it doesn't hide the others.
+    fn show_all_annotation_files(&mut self, conn: &GraphConnection) {
+        self.sync_annotation_files(conn);
+        let window = self.annotation_query_window();
+        for index in 0..self.annotation_files.len() {
+            self.load_annotation_file(conn, index, window);
+        }
+    }
+
+    /// Show the file recorded under `name`, returning whether there is one.
+    fn show_annotation_file(&mut self, conn: &GraphConnection, name: &str) -> bool {
+        self.sync_annotation_files(conn);
+        let Some(index) = self
+            .annotation_files
+            .iter()
+            .position(|file| file.entry.display_name == name)
+        else {
+            return false;
+        };
+        let window = self.annotation_query_window();
+        self.load_annotation_file(conn, index, window)
+    }
+
+    /// Reload shown, indexed files whose loaded window no longer covers the viewport.
+    fn refresh_annotation_files_for_viewport(&mut self) -> bool {
+        let Some(visible) = current_view_coordinate_window(&self.controller) else {
+            return false;
+        };
+        let window = expand_query_window(visible);
+        let stale: Vec<usize> = self
+            .annotation_files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.shown && file.index_available)
+            .filter(|(_, file)| match file.loaded_window {
+                Some((start, end)) => visible.0 < start || visible.1 > end,
+                None => true,
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if stale.is_empty() {
+            return false;
+        }
+        let Ok(conn) = self.open_conn() else {
+            return false;
+        };
+        let mut reloaded = false;
+        for index in stale {
+            reloaded |= self.load_annotation_file(&conn, index, Some(window));
+        }
+        reloaded
     }
 }
 
@@ -1319,6 +1498,31 @@ impl PyGraphController {
     }
 }
 
+/// Instantiate a `GraphWidget` from a controller and optional viewport.
+/// Shared by `PySequenceGraph::plot`, `PyRepository::plot`, and `PySample::plot`.
+pub fn build_widget(
+    py: Python<'_>,
+    ctrl: Py<PyGraphController>,
+    rows: Option<u32>,
+    cols: Option<u32>,
+    colors: Option<PyObject>,
+) -> PyResult<PyObject> {
+    let gen_module = py.import("gen")?;
+    let widget_cls = gen_module.getattr("GraphWidget")?;
+    let kwargs = PyDict::new(py);
+    if let Some(r) = rows {
+        kwargs.set_item("rows", r)?;
+    }
+    if let Some(c) = cols {
+        kwargs.set_item("cols", c)?;
+    }
+    if let Some(c) = colors {
+        kwargs.set_item("colors", c)?;
+    }
+    let widget = widget_cls.call((ctrl,), Some(&kwargs))?;
+    Ok(widget.into())
+}
+
 #[cfg(test)]
 mod tests {
     use r#gen::{
@@ -1510,29 +1714,4 @@ mod tests {
             }
         });
     }
-}
-
-/// Instantiate a `GraphWidget` from a controller and optional viewport.
-/// Shared by `PySequenceGraph::plot`, `PyRepository::plot`, and `PySample::plot`.
-pub fn build_widget(
-    py: Python<'_>,
-    ctrl: Py<PyGraphController>,
-    rows: Option<u32>,
-    cols: Option<u32>,
-    colors: Option<PyObject>,
-) -> PyResult<PyObject> {
-    let gen_module = py.import("gen")?;
-    let widget_cls = gen_module.getattr("GraphWidget")?;
-    let kwargs = PyDict::new(py);
-    if let Some(r) = rows {
-        kwargs.set_item("rows", r)?;
-    }
-    if let Some(c) = cols {
-        kwargs.set_item("cols", c)?;
-    }
-    if let Some(c) = colors {
-        kwargs.set_item("colors", c)?;
-    }
-    let widget = widget_cls.call((ctrl,), Some(&kwargs))?;
-    Ok(widget.into())
 }
