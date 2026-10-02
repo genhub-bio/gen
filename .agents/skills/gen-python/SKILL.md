@@ -1,231 +1,116 @@
 ---
 name: gen-genetic-engineering-python
-description: Help users apply the Gen Python bindings (`import gen`) to genetic engineering workflows, including importing FASTA/GenBank/GFA genomes and plasmids, editing sequences via VCF/GAF/library/explicit-string updates, designing combinatorial libraries, deriving subgraphs and chunks, searching and navigating graphs, translating coding regions to protein, exporting synthesis or cloning artifacts, and verifying results programmatically without a browser.
+description: Use the Gen Python bindings (import gen) for sequence engineering, graph queries, annotations, direct edits, combinatorial libraries, repository history and remote sync, and verification in scripts or agent REPLs.
 ---
 
 # Gen Genetic Engineering (Python)
 
-## Core Approach
+## Approach and source of truth
 
-Write Python against the `gen` module directly. `Repository` methods return live
-`Sample` / `SequenceGraph` objects — never bare ids or strings — so chain calls and
-inspect objects instead of parsing text output. This is the primary way to drive Gen
-as an agent: it lets you compose multi-step workflows, hold state as objects, branch
-on results, and verify outcomes by asserting on returned objects instead of scraping
-stdout.
+Use `import gen` and compose operations on returned `Sample`, `SequenceGraph`,
+`Locus`, and `Position` objects. Prefer Python for agent workflows, including
+branching and remote sync. Use the CLI when requested or for functionality not
+bound in Python, such as patches and operation diffs.
 
-The `gen` CLI exists too (`gen import fasta`, `gen update vcf`, ...) and is a thin
-wrapper over the same engine for everything the Python bindings also cover. Reach for
-it only when the user explicitly wants shell commands, or for the operations below
-that the Python bindings don't expose yet. Otherwise, write Python.
+Read [references/gen-python-workflows.md](references/gen-python-workflows.md) for
+signatures, return types, and recipes. These describe the current repository API;
+an installed release may differ. Check `help(gen.Repository)`,
+`help(gen.SequenceGraph)`, and `help(gen.Sample)` in the interpreter actually used.
+Inside the repository, verify against `gen-python/src/python_api/`,
+`gen-python/python/gen/`, and the focused examples and tests in `gen-python/`.
+Do not guess arguments or silently switch to the CLI after a `TypeError`.
 
-### CLI-only operations
+## Choose the workflow
 
-The Python bindings cover import/update/export/query/search/derive/translate, but not
-version control or remote sync. These have no Python equivalent — use the CLI:
-
-- **History & branching**: `gen branch [--create|--checkout|--delete|--list|--merge] <name>`,
-  `gen merge <branch>`, `gen checkout <hash>`, `gen reset <hash>`, `gen operations`,
-  `gen apply <hash>`.
-- **Remote sync**: `gen clone <url>`, `gen push [--remote <name>]`,
-  `gen pull [--remote <name>]`, `gen remote add|list|remove|set-default <name> [<url>]`.
-- **Patches**: `gen patch-create -n <name> <operation-range>`, `gen patch-apply <file>`,
-  `gen patch-view <file>`, `gen diff --sample1 <a> --sample2 <b> --gfa <out>`,
-  `gen view-diff <from> [<to>]`.
-- **Config**: `gen defaults --database <db> --collection <name>`.
-- **Annotation attachment without importing intervals**: `gen add-annotation -n <name> -s <sample> <region>`,
-  `gen add-annotation-file <path> [--format gff3|bed|genbank]`,
-  `gen propagate-annotations --from-sample <a> --to-sample <b> --gff <in> --output-gff <out>`.
-- **Misc**: `gen add-file <files...>` (attach files as an operation),
-  `gen transform --format-csv-for-gaf <file>`, `gen translate --bed|--gff <file> --sample <s>`
-  (coordinate translation into graph space), `gen add-reference-aliases --reference-name <n> ...`,
-  `gen view [<graph>] [--full]` (interactive TUI explorer — `sg.plot()` covers the
-  scriptable/headless case, but not the full-screen sidebar explorer).
-
-Everything else in this skill (import, update, export, search, derive, translate,
-combinatorial libraries) should be done through Python, not these CLI commands.
-
-The method signatures below were captured directly from the installed `gen` module
-(`help(gen.Repository)`, etc.) — they reflect the actual bound API, not the CLI help
-text. If a call raises `TypeError` about arguments, re-check with `help(gen.<Class>)`
-rather than guessing.
-
-Start by identifying:
-
-- The workspace: an existing `.gen` directory to open, or a fresh path to open (Gen
-  initializes it automatically) — see [Setup](#setup).
-- The input artifacts: FASTA, GenBank, GFA, VCF, GAF, a parts list / library CSV, or
-  raw sequence strings.
-- The desired biological change: replacement, insertion, deletion, variant
-  application, combinatorial library expansion, subgraph extraction, or
-  impact/translation analysis.
-- The coordinate system: region strings are `"<path or annotation name>:<start>-<end>"`,
-  0-based and half-open along that named path — not GraphNode `sequence_start`/
-  `sequence_end`, which are slice offsets into a stored `Node`'s sequence, not graph
-  coordinates.
-- The risk level: `gen` produces and inspects sequences, but primer thermodynamics,
-  vendor constraints, off-target analysis, assembly overhang rules, and
-  regulatory/safety review need domain tools or user confirmation — see
-  [Guardrails](#genetic-engineering-guardrails).
-
-## Setup
+Establish the workspace, collection, source sample, input artifacts, and intended
+change before writing. Open an existing workspace or create one with:
 
 ```python
 import gen
 
-repo = gen.Repository("path/to/.gen")   # opens (or creates) a workspace
+repo = gen.Repository("path/to/workspace")
+samples = repo.samples
 ```
 
-Batch multiple operations into one transaction with `repo.transaction()`:
+- Import FASTA or GenBank to get a `Sample`. Import a string, Biopython `Seq` or
+  `SeqRecord` with `repo.import_sequence()` to get one `SequenceGraph`. GFA and
+  library imports also return a `SequenceGraph` directly.
+- For a series of direct edits, copy the source with `sample.copy("design")`,
+  choose a graph from the copy, and use `graph.replace()`, `graph.delete()`, and
+  `graph.insert()`. These mutate that graph's sample; they do not create a sample.
+- Use `repo.update_with_*()` for file-driven updates, variant application, and
+  region/library workflows. Inspect the return type: VCF/GAF return lists of
+  samples, while most other updates return one sample.
+- Use `repo.checkout("design", create=True)` to isolate repository history.
+  A Gen branch and a copied biological sample serve different purposes; choose
+  either or both according to the requested design workflow.
+- Query `graph.annotations`, persist a feature with `graph.add_annotation()`, or
+  attach an annotation file with `repo.import_annotations()`.
+- Verify sequence with `locus.sequence`, `graph.region()`, search, and exports.
+  Use `graph.all_sequences()` when all graph alternatives matter. Plotting gives
+  a text widget in terminals/agents and an interactive widget in a live Jupyter
+  kernel with the optional dependencies.
+
+Mutating APIs record operations themselves. There is no `repo.transaction()`
+context manager. `repo.get_operations()` provides the audit trail.
+
+## Coordinates and editing invariants
+
+Region strings are `"<name>:<start>-<end>"`, with 0-based, half-open coordinates
+along a named graph/path or annotation. `graph.region()` resolves a read-only
+`Locus`; graph-name coordinates follow the current path when one exists.
+
+A `Locus` reads in strand order: `locus[0]` and `locus[-1]` are positions,
+`locus[2:5]` is a locus, and `locus.sequence` is its sequence on that strand.
+`start()` and `end()` identify the first and **last included base**; `end()` is
+not the exclusive interval boundary. Slice offsets count bases along the locus,
+not stored node or graph coordinates. Empty slices and non-unit steps fail.
+
+`Node.sequence_start` / `sequence_end` slice the stored sequence represented by
+that graph node. `Position.offset` is relative to that node slice. Neither is a
+coordinate along the graph's path. Keep loci/positions as targets instead of
+reconstructing targets from display offsets after edits split nodes.
+
+Replacement and deletion accept a region string, `Locus`, or `Annotation`.
+Replacement sequence is read on the target strand. Insertion needs keyword
+`before=` or `after=` positions, not both. Use replacement to change a span between
+nonadjacent positions.
+
+Position arithmetic can return `SuperPosition` at forks. Combine endpoints with
+`position_a | position_b` or `gen.SuperPosition(...)` only when one shared insert
+should connect all specified alternatives. Separate insert calls preserve
+separate routes. `stack=True` adds an alternative while retaining the original
+routes and current path; ordinary edits supersede the targeted routes. An edit applies
+to every route through its coordinates, so inserting before the first or after the last
+base of a stacked edit's original sequence raises `ValueError`; insert inside it or at
+the alternative's ends.
+
+## Verify and export
+
+For exact assertions use `sequence_kind="exact"`; default `"dna"` search supports
+IUPAC matching and reverse complements. Confirm hit count and strand before editing.
 
 ```python
-with repo.transaction():
-    repo.import_fasta("reference.fasta")
-    repo.import_gfa("graph.gfa")
+parent = repo.import_sequence("AAAACCCCGGGGTTTT", name="vector", sample="parent")
+source = next(sample for sample in repo.samples if sample.sample_name == "parent")
+design = source.copy("design")
+graph = design[0]
+replacement = graph.replace("vector:4-8", "ACAC", message="replace motif")
+assert replacement.sequence == "ACAC"
+assert parent.region("vector:4-8").sequence == "CCCC"
+widget = graph.plot()
+widget.show(replacement)
+print(repr(widget))
+graph.export_fasta("design.fa")
 ```
 
-For detailed method signatures and worked recipes for every import/update/export
-path, read `references/gen-python-workflows.md`.
+Default FASTA export writes current paths; use `all_sequences=True` to export all
+alternatives. Graph-level exports cover the **whole sample**, not just that graph.
+Enumeration of combinatorial paths can be large; consume iterators selectively.
+Call `widget.refresh()` after edits before relying on an existing plot.
 
-## The Object Model
-
-| Type | What it is | Key members |
-|---|---|---|
-| `Repository` | Workspace handle; owns import/update/export/query methods | see reference doc |
-| `Sample` | All sequence graphs produced by one import/update/derive call | list-like: index, iterate, `len()`; `.sample_name`, `.block_groups`, `.plot()` |
-| `SequenceGraph` | One graph within a sample (a "block group") | `.name`, `.id`, `.sample_name`, `.collection_name`, `.plot()`, `.search()`, `.list_annotations()`, `.to_dict()`/`.to_networkx()`/`.to_rustworkx()` |
-| `Annotation` | A stored or ad-hoc feature (gene, promoter, MCS, ...) | `.name`, `.id`, `.locus`, `.group`, `.track`, `.metadata`, `.segments` |
-| `Locus` | A region within a graph (search hit, annotation span) | `.start()`/`.end()` → `Position`, `.slices` → `list[NodeSlice]`, `.strand` |
-| `Position` | A single point in graph space | `.node`, `.offset` |
-| `NodeSlice` | Part of a stored `Node` used by a graph | `.node`, `.start`, `.end`, `.strand` |
-| `SequencePart` | A named sequence used to build a combinatorial library column | `.name`, `.sequence` |
-| `GraphWidget` | Interactive plot returned by `.plot()`; also your headless verification tool | see [Verifying without a browser](#verifying-without-a-browser) |
-
-`Repository` import/update methods generally return a `Sample`; `SequenceGraph`-level
-convenience methods (`subgraph`, `chunks`) return `SequenceGraph` / `list[SequenceGraph]`
-directly. Read the return type in `references/gen-python-workflows.md` before writing
-code that indexes into the result.
-
-## Workflow
-
-1. **Open the workspace** — `gen.Repository(path)`; use `repo.transaction()` to batch
-   related writes.
-
-2. **Import biological context**:
-   - `repo.import_fasta(path, sample=...)` for raw sequence references or samples.
-   - `repo.import_genbank(path, sample=...)` when features/annotations matter — they
-     load automatically and are queryable via `sg.list_annotations()`.
-   - `repo.import_gfa(path, sample=...)` when the graph itself is the source artifact.
-   - `repo.import_reference_fasta(path, reference=...)` to mark a sample as a
-     reference (distinct from a regular `sample=`).
-   - `repo.import_library(name, parts_list, sample=...)` or
-     `repo.import_library_files(name, parts, library, sample=...)` for combinatorial
-     designs — see [Combinatorial libraries](#combinatorial-libraries).
-
-3. **Apply edits, branch-friendly** — every update takes the source `sample` and a
-   `new_sample` (or `new_sample_name`); the new sample shares the whole graph with the
-   parent except where the path diverges through the edit:
-   - `repo.update_with_sequence(seq, sample=, new_sample=, region_name=...)` — replace
-     a region with an explicit string.
-   - `repo.update_with_fasta(path, sample=, new_sample=, region_name=...)`.
-   - `repo.update_with_genbank(path, sample=, create_missing=False)`.
-   - `repo.update_with_vcf(path, reference=, sample=, genotype=None, in_place=False)`.
-   - `repo.update_with_gaf(path, csv=, sample=, parent_sample=...)`.
-   - `repo.update_with_gfa(path, sample=, new_sample=...)`.
-   - `repo.update_with_library(sample=, new_sample_name=, path_name=, parts_list=...)`
-     or `update_with_library_files(..., library=, parts=)` — replace a region with a
-     combinatorial set of variants.
-
-4. **Inspect and verify** — prefer asserting on returned objects over printing text:
-   - `repo.get_samples()`, `repo.get_sequence_graphs()`,
-     `repo.get_sequence_graphs_by_collection(name)`.
-   - `sg.list_annotations()`, `sg.get_node_sequence(node)`, `sg.to_dict()`.
-   - `repo.search(query, bgs=[...], sequence_kind="dna")` /
-     `sg.search(query, sequence_kind="dna")` — returns loci with `.start()`, `.end()`,
-     `.slices`, `.strand`; use these to confirm restriction sites landed, junctions
-     are clean, etc.
-   - `sg.plot()` / `sample.plot()` for a `GraphWidget` you can drive and `repr()`
-     headlessly — see below.
-
-5. **Export for downstream tools**:
-   - `repo.export_fasta(path, sample=...)` for synthesis, primer design, alignment.
-   - `repo.export_genbank(path, sample=...)` to preserve annotations for editors or
-     vendors.
-   - `repo.export_gfa(path, sample=..., node_max=...)` for graph-aware tools.
-
-## Region / path syntax
-
-Region strings used by `region_name=`, `region=`, `path_name=` arguments are
-`"<path or annotation name>:<start>-<end>"`, 0-based and half-open along that named
-path (e.g. `"pUC19:395-452"`, `"m123:5-15"`). The name resolves first against a named
-path in the graph, then against an annotation name. This is unrelated to
-`NodeSlice`/`GraphNode` `sequence_start`/`sequence_end`, which slice a stored `Node`'s
-sequence and are not graph coordinates.
-
-## Combinatorial libraries
-
-`import_library()` / `update_with_library()` take a `parts_list`: a list of columns,
-each column a list of `gen.SequencePart(name, sequence)` alternatives. The resulting
-graph has one path per combination:
-
-```python
-parts_list = [
-    [gen.SequencePart("upstream", "AATTCGGATCCAAGCTT")],
-    [
-        gen.SequencePart("pTrc", "TTGACAATTAATCATCCGGCTCGTATAATGTGTGG"),
-        gen.SequencePart("pLac", "AATTGTGAGCGGATAACAATT"),
-    ],
-    [
-        gen.SequencePart("gfp", "ATGAGTAAAGGAGAAGAACTTTTCACTGG"),
-        gen.SequencePart("rfp", "ATGGCTTCCTCCGAAGACGTTATCAAAGAG"),
-    ],
-]
-cassette_sg = repo.import_library("expression-cassette", parts_list)
-```
-
-Single-option columns act as fixed flanking sequence. To swap a region of an
-*existing* sample with a library instead of building a fresh graph, use
-`update_with_library(sample=, new_sample_name=, path_name=<region>, parts_list=...)`.
-
-## Verifying without a browser
-
-`sample.plot()` / `sg.plot()` return a `GraphWidget` you can drive and inspect from
-plain Python — no browser or JS required:
-
-```python
-widget = sg.plot()
-print(repr(widget))     # ASCII snapshot of current state
-
-widget.go_to(locus)               # jump to a Locus/Position/Annotation
-widget.next_page() / .prev_page() # switch sequence graphs within a Sample-backed widget
-widget.zoom_in() / .zoom_out()
-widget.scroll_left()/.scroll_right()/.scroll_up()/.scroll_down()
-print(repr(widget))     # re-check after mutating
-```
-
-`next_page`/`prev_page` switch *which graph* is shown (only meaningful on a
-`sample.plot()` widget); `scroll_*` pans the viewport within the current graph. Don't
-confuse the two. All of the above mutate the widget in place.
-
-## Guardrails
-
-Do not pretend `gen` alone predicts functional impact. For impact predictions,
-combine `gen` outputs with explicit biological checks:
-
-- Use `sg.translate_annotation(region=..., frame=..., codon_table=...)` when ORFs,
-  frames, start/stop codons, or peptide changes matter — it returns a protein
-  `SequenceGraph`, so inspect its sequence rather than eyeballing codons by hand.
-- Inspect annotations after GenBank imports/updates (`sg.list_annotations()`) and
-  mention whether feature coordinates may need propagation or manual review.
-- Check junction sequences for cloning scars, restriction sites, homology arms,
-  overhangs, or unwanted motifs — use `repo.search()`/`sg.search()` rather than
-  visual inspection.
-- For primer ordering, derive candidate binding regions from exported or extracted
-  sequence, then state plainly that final primer Tm, secondary structure, dimers,
-  off-targets, vendor limits, and assembly chemistry must be checked with appropriate
-  primer-design tools — Gen does not do this.
-
-Avoid giving operational assistance for unsafe or disallowed biological engineering.
-If a request involves pathogenicity, toxin expression, evading detection, or harmful
-organism engineering, refuse that portion and offer benign sequence-management help
-instead.
+For ORFs, frames, and peptide changes, use `graph.translate_annotation()` and
+inspect the returned protein graph. Inspect annotations and junction sequences
+after edits. Gen manages and exposes sequence context; functional predictions and
+final primer thermodynamics, specificity, and assembly constraints need the
+appropriate domain tools.
