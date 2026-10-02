@@ -1,116 +1,89 @@
 ---
 name: gen-genetic-engineering-python
-description: Use the Gen Python bindings (import gen) for sequence engineering, graph queries, annotations, direct edits, combinatorial libraries, repository history and remote sync, and verification in scripts or agent REPLs.
+description: Use the Gen Python bindings (import gen) to edit sequences, query and visualize sequence graphs, import/export files, run combinatorial libraries, manage branches, and clone or sync repositories. Use Gen's own editing methods instead of sed, Biopython or string slicing.
 ---
 
-# Gen Genetic Engineering (Python)
+# Gen (Python)
 
-## Approach and source of truth
+Gen stores sequences as **graphs**, not strings. Edits are recorded operations on the graph,
+so edit through Gen and read the result back as strings. Do not export to FASTA, edit the text
+with `sed`/Biopython/string slicing and re-import: that loses history, annotations and
+alternatives.
 
-Use `import gen` and compose operations on returned `Sample`, `SequenceGraph`,
-`Locus`, and `Position` objects. Prefer Python for agent workflows, including
-branching and remote sync. Use the CLI when requested or for functionality not
-bound in Python, such as patches and operation diffs.
+A **sequence graph can hold many sequences**: after a library import, `stack=True` edit or
+VCF, one graph has many paths. `graph.all_sequences()` yields every path as a string.
+`locus.sequence` is the string for one region. A `Sample` holds several graphs.
 
-Read [references/gen-python-workflows.md](references/gen-python-workflows.md) for
-signatures, return types, and recipes. These describe the current repository API;
-an installed release may differ. Check `help(gen.Repository)`,
-`help(gen.SequenceGraph)`, and `help(gen.Sample)` in the interpreter actually used.
-Inside the repository, verify against `gen-python/src/python_api/`,
-`gen-python/python/gen/`, and the focused examples and tests in `gen-python/`.
-Do not guess arguments or silently switch to the CLI after a `TypeError`.
+## Cheat sheet
 
-## Choose the workflow
+Run `help(gen.Repository)` or read `gen-python/python/gen/gen/__init__.pyi` (full typed
+signatures and docstrings). Longer recipes: [references/gen-python-workflows.md](references/gen-python-workflows.md).
 
-Establish the workspace, collection, source sample, input artifacts, and intended
-change before writing. Open an existing workspace or create one with:
-
+**Open / clone**
 ```python
 import gen
-
-repo = gen.Repository("path/to/workspace")
-samples = repo.samples
+repo = gen.Repository("workspace")                 # open or create
+repo = gen.clone(url, "workspace")                 # clone; the path must not hold data yet
+repo.checkout("branch", create=True); repo.get_branches(); repo.get_operations(limit=5)
+repo.pull(); repo.push()                           # remotes: add_remote(name, url), fetch()
 ```
 
-- Import FASTA or GenBank to get a `Sample`. Import a string, Biopython `Seq` or
-  `SeqRecord` with `repo.import_sequence()` to get one `SequenceGraph`. GFA and
-  library imports also return a `SequenceGraph` directly.
-- For a series of direct edits, copy the source with `sample.copy("design")`,
-  choose a graph from the copy, and use `graph.replace()`, `graph.delete()`, and
-  `graph.insert()`. These mutate that graph's sample; they do not create a sample.
-- Use `repo.update_with_*()` for file-driven updates, variant application, and
-  region/library workflows. Inspect the return type: VCF/GAF return lists of
-  samples, while most other updates return one sample.
-- Use `repo.checkout("design", create=True)` to isolate repository history.
-  A Gen branch and a copied biological sample serve different purposes; choose
-  either or both according to the requested design workflow.
-- Query `graph.annotations`, persist a feature with `graph.add_annotation()`, or
-  attach an annotation file with `repo.import_annotations()`.
-- Verify sequence with `locus.sequence`, `graph.region()`, search, and exports.
-  Use `graph.all_sequences()` when all graph alternatives matter. Plotting gives
-  a text widget in terminals/agents and an interactive widget in a live Jupyter
-  kernel with the optional dependencies.
-
-Mutating APIs record operations themselves. There is no `repo.transaction()`
-context manager. `repo.get_operations()` provides the audit trail.
-
-## Coordinates and editing invariants
-
-Region strings are `"<name>:<start>-<end>"`, with 0-based, half-open coordinates
-along a named graph/path or annotation. `graph.region()` resolves a read-only
-`Locus`; graph-name coordinates follow the current path when one exists.
-
-A `Locus` reads in strand order: `locus[0]` and `locus[-1]` are positions,
-`locus[2:5]` is a locus, and `locus.sequence` is its sequence on that strand.
-`start()` and `end()` identify the first and **last included base**; `end()` is
-not the exclusive interval boundary. Slice offsets count bases along the locus,
-not stored node or graph coordinates. Empty slices and non-unit steps fail.
-
-`Node.sequence_start` / `sequence_end` slice the stored sequence represented by
-that graph node. `Position.offset` is relative to that node slice. Neither is a
-coordinate along the graph's path. Keep loci/positions as targets instead of
-reconstructing targets from display offsets after edits split nodes.
-
-Replacement and deletion accept a region string, `Locus`, or `Annotation`.
-Replacement sequence is read on the target strand. Insertion needs keyword
-`before=` or `after=` positions, not both. Use replacement to change a span between
-nonadjacent positions.
-
-Position arithmetic can return `SuperPosition` at forks. Combine endpoints with
-`position_a | position_b` or `gen.SuperPosition(...)` only when one shared insert
-should connect all specified alternatives. Separate insert calls preserve
-separate routes. `stack=True` adds an alternative while retaining the original
-routes and current path; ordinary edits supersede the targeted routes. An edit applies
-to every route through its coordinates, so inserting before the first or after the last
-base of a stacked edit's original sequence raises `ValueError`; insert inside it or at
-the alternative's ends.
-
-## Verify and export
-
-For exact assertions use `sequence_kind="exact"`; default `"dna"` search supports
-IUPAC matching and reverse complements. Confirm hit count and strand before editing.
-
+**Load sequence** (all return a `Sample` or `SequenceGraph`)
 ```python
-parent = repo.import_sequence("AAAACCCCGGGGTTTT", name="vector", sample="parent")
-source = next(sample for sample in repo.samples if sample.sample_name == "parent")
-design = source.copy("design")
-graph = design[0]
-replacement = graph.replace("vector:4-8", "ACAC", message="replace motif")
-assert replacement.sequence == "ACAC"
-assert parent.region("vector:4-8").sequence == "CCCC"
-widget = graph.plot()
-widget.show(replacement)
-print(repr(widget))
-graph.export_fasta("design.fa")
+graph = repo.import_sequence("ACGT...", name="vector", sample="parent")   # string/Seq/SeqRecord
+sample = repo.import_fasta("in.fa", sample="parent")   # also import_genbank, import_gfa
 ```
 
-Default FASTA export writes current paths; use `all_sequences=True` to export all
-alternatives. Graph-level exports cover the **whole sample**, not just that graph.
-Enumeration of combinatorial paths can be large; consume iterators selectively.
-Call `widget.refresh()` after edits before relying on an existing plot.
+**Edit** (mutates the graph's sample; copy first to keep the original)
+```python
+design = sample.copy("design"); graph = design[0]
+locus = graph.replace("vector:4-8", "ACAC", message="swap motif")  # 0-based, half-open
+graph.insert("GG", after=locus.end());  graph.delete(locus)
+graph.replace(annotation, "ACAC")           # annotations and Loci are valid targets too
+```
+Other edits: `repo.update_with_vcf/fasta/genbank/library`, `repo.import_library` (combinatorial).
 
-For ORFs, frames, and peptide changes, use `graph.translate_annotation()` and
-inspect the returned protein graph. Inspect annotations and junction sequences
-after edits. Gen manages and exposes sequence context; functional predictions and
-final primer thermodynamics, specificity, and assembly constraints need the
-appropriate domain tools.
+**Read back as strings**
+```python
+graph.region("vector:0-16").sequence        # one region, str
+list(graph.all_sequences())                 # every path through the graph, strs
+graph.search("GAATTC")                      # list[Locus]; sequence_kind="exact" for literal
+graph.export_fasta("out.fa", all_sequences=True)   # whole sample; also export_genbank/gfa
+```
+
+**Annotate**
+```python
+graph.annotations;  graph.add_annotation(locus, "motif", track="motifs")
+repo.import_annotations("features.gff3")
+```
+
+**See it** (works in plain scripts and agent REPLs: no Jupyter needed)
+```python
+widget = graph.plot()                       # text rendering in terminals/agents
+print(widget.show(locus).zoom_in().scroll_right())   # every method returns the widget
+```
+`TextGraphWidget` (scripts, terminals, agents) and the Jupyter `GraphWidget` (live notebook
+kernel) have the same methods: `show`, `go_to`, `zoom_in/out`, `scroll_*`, `next_page/prev_page`,
+`refresh`, `show_track/hide_track/tracks`, `show_path/hide_path`, `clear_highlights`. In notebooks
+use the interactive widget freely. `print(widget)` redraws the text view; call `widget.refresh()`
+after graph edits.
+
+## Rules that prevent mistakes
+
+- Coordinates are `"<name>:<start>-<end>"`, 0-based, half-open. `locus.end()` is the last
+  *included* base, not the exclusive bound. Use `Locus`/`Position` objects as targets after edits.
+- Insert takes keyword `before=` or `after=` positions, not both. Choose routes by combining
+  positions into a `SuperPosition` with `|`. Replace a span between positions instead of inserting.
+- `stack=True` keeps original routes as alternatives; default edits supersede them. An edit
+  applies to every route through its coordinates. Inserting before the first or after the last
+  base of a stacked edit's original sequence raises `ValueError`, since the alternative shares
+  those points; insert inside it or at the alternative's ends.
+- Graph-level exports cover the **whole sample**, not only that graph.
+- Mutating calls record operations themselves; there is no transaction API. `repo.get_operations()`
+  is the audit trail.
+- `graph.region()` and `sample.copy()` do not mutate. Inspect the return type before chaining:
+  VCF updates return `list[Sample]`, most other updates return one `Sample`.
+- Don't switch to the CLI after a `TypeError`; check the signature in the `.pyi`.
+- Use the CLI only for patches and operation diffs, which have no Python binding.
+- Gen exposes sequence context; primer thermodynamics, specificity and functional predictions
+  need domain tools.
