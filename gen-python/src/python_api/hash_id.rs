@@ -34,7 +34,7 @@ impl PyHashId {
     }
 
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
-        // Try to extract PyHashId from the PyObject
+        // Try to extract PyHashId from the Py<PyAny>
         if let Ok(other_hash_id) = other.extract::<PyRef<PyHashId>>() {
             Ok(self.hash_id == other_hash_id.hash_id)
         } else {
