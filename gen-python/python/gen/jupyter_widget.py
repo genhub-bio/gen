@@ -331,21 +331,23 @@ class GraphWidget(anywidget.AnyWidget):
         self._render()
         return hit
 
-    def zoom_in(self) -> None:
+    def zoom_in(self) -> Self:
         """Step one zoom level in."""
         if self._frozen:
-            return
+            return self
         self._controller.zoom_in()
         self._render()
+        return self
 
-    def zoom_out(self) -> None:
+    def zoom_out(self) -> Self:
         """Step one zoom level out."""
         if self._frozen:
-            return
+            return self
         self._controller.zoom_out()
         self._render()
+        return self
 
-    def _move_by(self, dx: int, dy: int) -> None:
+    def _move_by(self, dx: int, dy: int) -> Self:
         """Move the viewport like a mouse drag of (dx, dy) terminal cells.
 
         ``dx``/``dy`` follow drag semantics, not camera-direction semantics:
@@ -354,43 +356,50 @@ class GraphWidget(anywidget.AnyWidget):
         *negative* dx here is what moves the camera rightward/downstream.
         """
         if self._frozen:
-            return
+            return self
         self._controller.move_by(dx, dy)
         self._render()
+        return self
 
-    def scroll_right(self) -> None:
+    def scroll_right(self) -> Self:
         """Scroll the view right by one page, to show further-downstream sequence."""
         self._move_by(
             -self.cols, 0
         )  # negative dx -> camera moves downstream (see _move_by)
+        return self
 
-    def scroll_left(self) -> None:
+    def scroll_left(self) -> Self:
         """Scroll the view left by one page, back toward earlier/upstream sequence."""
         self._move_by(
             self.cols, 0
         )  # positive dx -> camera moves upstream (see _move_by)
+        return self
 
-    def scroll_down(self) -> None:
+    def scroll_down(self) -> Self:
         """Scroll the view down by one page, to show content below the current view."""
         self._move_by(0, -self.rows)
+        return self
 
-    def scroll_up(self) -> None:
+    def scroll_up(self) -> Self:
         """Scroll the view up by one page, to show content above the current view."""
         self._move_by(0, self.rows)
+        return self
 
-    def next_page(self) -> None:
+    def next_page(self) -> Self:
         """Advance to the next sequence graph (only meaningful for a ``Sample``-backed widget)."""
         if self._frozen:
-            return
+            return self
         self._controller.next_page()
         self._render()
+        return self
 
-    def prev_page(self) -> None:
+    def prev_page(self) -> Self:
         """Go back to the previous sequence graph (only meaningful for a ``Sample``-backed widget)."""
         if self._frozen:
-            return
+            return self
         self._controller.prev_page()
         self._render()
+        return self
 
     def go_to(self, target, *, center: bool = False) -> Self:
         """Instantly move the camera to a graph position, locus, or annotation.
@@ -484,18 +493,19 @@ class GraphWidget(anywidget.AnyWidget):
         self._render()
         return self
 
-    def clear_highlights(self) -> None:
+    def clear_highlights(self) -> Self:
         """Remove the ephemeral highlights added via :meth:`show`.
 
         Persistent tracks (from :meth:`show_track`) and
         the path highlight from :meth:`show_path` are left untouched.
         """
         if self._frozen:
-            return
+            return self
         self._controller.clear_highlights()
         self._render()
+        return self
 
-    def show_path(self, color: str | None = None) -> None:
+    def show_path(self, color: str | None = None) -> Self:
         """Highlight the most recent path for this block group.
 
         Parameters
@@ -515,37 +525,42 @@ class GraphWidget(anywidget.AnyWidget):
         """
         self._controller.show_path(color)
         self._render()
+        return self
 
-    def hide_path(self) -> None:
+    def hide_path(self) -> Self:
         """Remove path highlighting applied by :meth:`show_path`."""
         self._controller.hide_path()
         self._render()
+        return self
 
-    def refresh(self) -> None:
+    def refresh(self) -> Self:
         """Force a re-render from the current controller state."""
         if self._frozen:
-            return
+            return self
         self._render()
+        return self
 
     # ── Track API ─────────────────────────────────────────────────────────
 
-    def show_track(self, name: str) -> None:
+    def show_track(self, name: str) -> Self:
         """Load and display a DB-stored annotation group by name.
 
         See :attr:`tracks` for the full list of group names available to
         this widget's sequence graph.
         """
         if self._frozen:
-            return
+            return self
         self._controller.add_track_group(name)
         self._render()
+        return self
 
-    def hide_track(self, name: str) -> None:
+    def hide_track(self, name: str) -> Self:
         """Remove a displayed annotation track."""
         if self._frozen:
-            return
+            return self
         self._controller.remove_track(name)
         self._render()
+        return self
 
     @property
     def tracks(self) -> list:
@@ -557,16 +572,17 @@ class GraphWidget(anywidget.AnyWidget):
         """
         return self._controller.track_names
 
-    def hide_all_tracks(self) -> None:
+    def hide_all_tracks(self) -> Self:
         """Suppress every displayed track.
 
         This also suppresses annotations that auto-load from the database
         on first plot, giving a blank canvas to build tracks up from.
         """
         if self._frozen:
-            return
+            return self
         self._controller.clear_all_annotations()
         self._render()
+        return self
 
 
 async def freeze_all_widgets(timeout: float = 10.0, quiet: float = 1.0) -> None:
