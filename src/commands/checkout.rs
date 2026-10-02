@@ -122,8 +122,9 @@ mod tests {
     use gen_models::{
         assets::{AssetRef, AssetRole, LocalAssetUri, materialization_destination_path},
         collection::Collection,
+        file_types::FileTypes,
         history::dolt::commit_all,
-        operations::calculate_reader_checksum,
+        operations::{FileAddition, calculate_reader_checksum},
     };
     use noodles::bgzf;
     use tempfile::tempdir;
@@ -142,11 +143,16 @@ mod tests {
             .expect("should checksum archived bytes");
         let role = AssetRole::Input;
         let uri = LocalAssetUri::asset_uri(uri);
+        let file_addition = FileAddition {
+            id: HashId::convert_str("checkout-test-asset"),
+            asset_uri: uri.clone(),
+            file_type: FileTypes::Fasta,
+            checksum: Some(checksum),
+            materialized_checksum: Some(materialized_checksum),
+        };
         AssetRef {
             id: AssetRef::id_hash(
-                &uri,
-                "fasta",
-                (Some(&checksum), Some(&materialized_checksum)),
+                &file_addition,
                 &role,
                 Some(logical_path),
                 Some("reference.fa.bgz"),

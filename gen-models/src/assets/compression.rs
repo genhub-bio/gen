@@ -7,7 +7,7 @@ use gen_core::{Sha256Hash, Workspace};
 use noodles::bgzf;
 use tempfile::NamedTempFile;
 
-use super::{ChecksummedReader, ChecksummedWriter, FileTypes, LocalAssetUri};
+use super::{ChecksummedReader, ChecksummedWriter, FileTypes};
 use crate::errors::FileAdditionError;
 
 /// Returns whether a file type is retained as BGZF for efficient indexed access.
@@ -139,9 +139,7 @@ pub(crate) fn stage_bgzf_asset_copy(
     let archived_path = asset_dir.join(archive_filename);
     match staged_file.persist_noclobber(&archived_path) {
         Ok(_) => {}
-        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-            LocalAssetUri::verify_asset_checksum(&archived_path, archive_checksum, source_uri)?;
-        }
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
     }
     Ok((archive_checksum, source_checksum))

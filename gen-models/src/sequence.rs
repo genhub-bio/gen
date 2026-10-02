@@ -831,8 +831,9 @@ mod tests {
     use super::{Sequence, SequenceError};
     use crate::{
         assets::{AssetRef, AssetRole},
+        file_types::FileTypes,
         gen_models_capnp::sequence,
-        operations::OperationFile,
+        operations::{FileAddition, OperationFile},
         test_helpers::{get_connection, setup_gen_on_disk},
     };
 
@@ -1065,11 +1066,16 @@ mod tests {
         fs::write(&outside_path, contents).unwrap();
         let checksum = gen_core::Sha256Hash(sha2::Sha256::digest(contents).into());
         let uri = format!("file://{}", outside_path.display());
+        let file_addition = FileAddition {
+            id: gen_core::HashId::convert_str("outside-secret"),
+            asset_uri: uri.clone(),
+            file_type: FileTypes::Fasta,
+            checksum: Some(checksum),
+            materialized_checksum: None,
+        };
         let asset_ref = AssetRef {
             id: AssetRef::id_hash(
-                &uri,
-                "fasta",
-                (Some(&checksum), None),
+                &file_addition,
                 &AssetRole::Input,
                 outside_path.to_str(),
                 Some("secret.fa"),

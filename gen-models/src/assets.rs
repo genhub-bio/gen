@@ -304,23 +304,24 @@ impl AssetRef {
 
     /// Hashes the normalized asset identity, including both archived and materialized checksums.
     pub fn id_hash(
-        uri: &str,
-        file_type: &str,
-        checksums: (Option<&Sha256Hash>, Option<&Sha256Hash>),
+        file_addition: &FileAddition,
         role: &AssetRole,
         logical_path: Option<&str>,
         name: Option<&str>,
         upstream_asset_ref_id: Option<&HashId>,
     ) -> HashId {
-        let (checksum, materialized_checksum) = checksums;
-        let checksum = checksum
+        let checksum = file_addition
+            .checksum
             .map(|checksum| checksum.to_string())
             .unwrap_or_default();
-        let materialized_checksum = materialized_checksum
+        let materialized_checksum = file_addition
+            .materialized_checksum
             .map(|checksum| checksum.to_string())
             .unwrap_or_default();
         let mut identity = format!(
             "{uri}:{file_type}:{checksum}:{materialized_checksum}:{role}:{logical_path}:{name}",
+            uri = file_addition.asset_uri,
+            file_type = file_addition.file_type.as_str(),
             role = role.as_str(),
             logical_path = logical_path.unwrap_or_default(),
             name = name.unwrap_or_default(),
@@ -343,12 +344,7 @@ impl AssetRef {
         let file_type = file_addition.file_type.as_str();
         Self {
             id: Self::id_hash(
-                &file_addition.asset_uri,
-                file_type,
-                (
-                    file_addition.checksum.as_ref(),
-                    file_addition.materialized_checksum.as_ref(),
-                ),
+                file_addition,
                 &role,
                 logical_path,
                 name,
@@ -1245,33 +1241,6 @@ impl LocalAssetUri {
             })
     }
 
-    pub(crate) fn archive_uri(
-        workspace: &Workspace,
-        checksum: &Sha256Hash,
-        file_type: FileTypes,
-    ) -> Result<String, FileAdditionError> {
-        let repo_root = workspace.repo_root()?;
-        let asset_path = workspace
-            .asset_dir()?
-            .join(format!("{checksum}.{}.bgz", FileTypes::suffix(file_type)));
-        let relative_path = asset_path
-            .strip_prefix(&repo_root)
-            .map_err(|_| FileAdditionError::PathOutsideRepo {
-                path: asset_path.clone(),
-                repo_root,
-            })?
-            .to_string_lossy();
-        Ok(Self::asset_uri(&relative_path))
-    }
-
-    pub fn source_logical_path(
-        workspace: &Workspace,
-        path_or_uri: &str,
-    ) -> Result<String, FileAdditionError> {
-        let source_path = Self::resolve_input_source_path(workspace, path_or_uri)?;
-        Self::logical_file_path(workspace, &source_path)
-    }
-
     pub fn is_file_uri(asset_uri: &str) -> bool {
         asset_uri.starts_with(Self::SCHEME)
     }
@@ -1387,7 +1356,7 @@ impl LocalAssetUri {
             .unwrap_or_else(|| Self::resolve_source_path(workspace, &self.asset_uri))
     }
 
-    fn resolve_input_source_path(
+    pub(crate) fn resolve_input_source_path(
         workspace: &Workspace,
         file_path_or_uri: &str,
     ) -> Result<PathBuf, FileAdditionError> {
@@ -1445,7 +1414,7 @@ impl LocalAssetUri {
         Ok(normalized_path)
     }
 
-    fn logical_file_path(
+    pub(crate) fn logical_file_path(
         workspace: &Workspace,
         source_path: &Path,
     ) -> Result<String, FileAdditionError> {
@@ -1512,28 +1481,6 @@ impl LocalAssetUri {
         )))
     }
 
-    pub(crate) fn verify_asset_checksum(
-        archive_path: &Path,
-        expected_checksum: Sha256Hash,
-        asset_uri: &str,
-    ) -> Result<(), FileAdditionError> {
-        let reader = fs::File::open(archive_path).map_err(FileAdditionError::FileReadError)?;
-        let mut reader = ChecksummedReader::new(reader);
-        let checksum_handle = reader.checksum_handle();
-        io::copy(&mut reader, &mut io::sink()).map_err(FileAdditionError::FileReadError)?;
-        let actual_checksum = checksum_handle.checksum().ok_or_else(|| {
-            FileAdditionError::ChecksumError(format!(
-                "existing archived asset could not be fully verified: {asset_uri}"
-            ))
-        })?;
-        if actual_checksum != expected_checksum {
-            return Err(FileAdditionError::ChecksumError(format!(
-                "existing archived asset does not match its content address: {asset_uri}"
-            )));
-        }
-        Ok(())
-    }
-
     // Streams a local asset into content-addressed storage while computing its checksum. Combining
     // those jobs keeps large files to a single pass and leaves no checksum-only temporary output.
     fn stage_asset_copy(
@@ -1546,7 +1493,6 @@ impl LocalAssetUri {
         if let Some(checksum) = checksum_override {
             let asset_path = asset_dir.join(self.asset_filename(&checksum));
             if asset_path.exists() {
-                Self::verify_asset_checksum(&asset_path, checksum, self.uri())?;
                 return Ok(checksum);
             }
         }
@@ -1577,9 +1523,7 @@ impl LocalAssetUri {
         let asset_path = asset_dir.join(self.asset_filename(&checksum));
         match staged_file.persist_noclobber(&asset_path) {
             Ok(_) => {}
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                Self::verify_asset_checksum(&asset_path, checksum, self.uri())?;
-            }
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
         }
         Ok(checksum)
@@ -1771,7 +1715,7 @@ mod tests {
     use super::*;
     use crate::{
         history::dolt::commit_all,
-        operations::{calculate_file_checksum, calculate_reader_checksum},
+        operations::{FileAddition, calculate_file_checksum, calculate_reader_checksum},
         test_helpers::setup_gen,
     };
 
@@ -1780,10 +1724,15 @@ mod tests {
         materialized_checksum: Option<Sha256Hash>,
         upstream_asset_ref_id: Option<&HashId>,
     ) -> HashId {
+        let file_addition = FileAddition {
+            id: HashId::convert_str("asset-id-test"),
+            asset_uri: "https://example.test/reference.fa".to_string(),
+            file_type: FileTypes::Fasta,
+            checksum,
+            materialized_checksum,
+        };
         AssetRef::id_hash(
-            "https://example.test/reference.fa",
-            FileTypes::Fasta.as_str(),
-            (checksum.as_ref(), materialized_checksum.as_ref()),
+            &file_addition,
             &AssetRole::Input,
             Some("reference.fa"),
             Some("reference.fa"),

@@ -840,12 +840,7 @@ pub fn add_annotation_file(
     let name = name.or_else(|| Path::new(path).file_name().and_then(|value| value.to_str()));
     let name_value = name.unwrap_or_default();
     let annotation_asset_ref_id = AssetRef::id_hash(
-        &file_addition.asset_uri,
-        file_addition.file_type.as_str(),
-        (
-            file_addition.checksum.as_ref(),
-            file_addition.materialized_checksum.as_ref(),
-        ),
+        &file_addition,
         &AssetRole::Annotation,
         Some(&annotation_logical_path),
         name,

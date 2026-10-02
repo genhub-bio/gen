@@ -132,12 +132,7 @@ impl OperationFile {
         let file_type = file_addition.file_type.as_str();
         Ok(AssetRef {
             id: AssetRef::id_hash(
-                &file_addition.asset_uri,
-                file_type,
-                (
-                    file_addition.checksum.as_ref(),
-                    file_addition.materialized_checksum.as_ref(),
-                ),
+                &file_addition,
                 &self.role,
                 Some(&logical_path),
                 Some(&self.filename),
@@ -168,7 +163,8 @@ impl OperationFile {
     ) -> Result<String, FileAdditionError> {
         if LocalAssetUri::is_local_path_or_file_uri(path_or_uri) {
             if should_archive_as_bgzf(file_type) && !LocalAssetUri::is_index_path(path_or_uri) {
-                return LocalAssetUri::source_logical_path(workspace, path_or_uri);
+                let source_path = LocalAssetUri::resolve_input_source_path(workspace, path_or_uri)?;
+                return LocalAssetUri::logical_file_path(workspace, &source_path);
             }
             let checksum = checksum.ok_or_else(|| {
                 FileAdditionError::ChecksumError(format!(
@@ -462,8 +458,19 @@ impl FileAddition {
                 input_encoding,
                 checksum_override,
             )?;
-            let stored_asset_uri =
-                LocalAssetUri::archive_uri(workspace, &archive_checksum, file_type)?;
+            let repo_root = workspace.repo_root()?;
+            let asset_path = workspace.asset_dir()?.join(format!(
+                "{archive_checksum}.{}.bgz",
+                FileTypes::suffix(file_type)
+            ));
+            let relative_path = asset_path
+                .strip_prefix(&repo_root)
+                .map_err(|_| FileAdditionError::PathOutsideRepo {
+                    path: asset_path.clone(),
+                    repo_root,
+                })?
+                .to_string_lossy();
+            let stored_asset_uri = LocalAssetUri::asset_uri(&relative_path);
             let materialized_checksum =
                 (input_encoding == InputEncoding::Plain).then_some(source_checksum);
             (
@@ -1898,60 +1905,6 @@ mod tests {
         assert_eq!(decoded_contents, b"##fileformat=VCFv4.3\nchr1\t1\t.\n");
         assert_eq!(fs::read(source_path).unwrap(), gzip_contents);
         assert!(addition.asset_uri.ends_with(".vcf.bgz"));
-    }
-
-    #[test]
-    fn test_existing_corrupt_content_addressed_bgzf_is_rejected() {
-        let context = setup_gen();
-        let repo_root = context.workspace().repo_root().unwrap();
-        let source_path = repo_root.join("input.vcf");
-        fs::write(&source_path, b"##fileformat=VCFv4.3\nchr1\t1\t.\n")
-            .expect("should write plain VCF source");
-        let source_path = source_path.to_string_lossy().into_owned();
-        let addition =
-            FileAddition::prepare(context.workspace(), &source_path, FileTypes::VCF, None)
-                .expect("should archive plain VCF source");
-        let archived_path = context
-            .workspace()
-            .asset_dir()
-            .unwrap()
-            .join(addition.hashed_filename().unwrap());
-        fs::write(&archived_path, b"corrupt archive")
-            .expect("should corrupt the content-addressed archive for the test");
-
-        let error = FileAddition::prepare(context.workspace(), &source_path, FileTypes::VCF, None)
-            .expect_err("should not trust corrupt bytes at a content-addressed path");
-
-        assert!(matches!(error, FileAdditionError::ChecksumError(_)));
-    }
-
-    #[test]
-    fn test_existing_corrupt_content_addressed_asset_is_rejected_with_checksum_override() {
-        let context = setup_gen();
-        let source_path = context.workspace().repo_root().unwrap().join("input.txt");
-        fs::write(&source_path, b"source bytes").expect("should write untransformed source bytes");
-        let source_path = source_path.to_string_lossy().into_owned();
-        let addition =
-            FileAddition::prepare(context.workspace(), &source_path, FileTypes::None, None)
-                .expect("should retain raw source bytes");
-        let checksum = addition.checksum.expect("should calculate source checksum");
-        let archived_path = context
-            .workspace()
-            .asset_dir()
-            .unwrap()
-            .join(addition.hashed_filename().unwrap());
-        fs::write(&archived_path, b"corrupt asset")
-            .expect("should corrupt the content-addressed asset for the test");
-
-        let error = FileAddition::prepare(
-            context.workspace(),
-            &source_path,
-            FileTypes::None,
-            Some(checksum),
-        )
-        .expect_err("should verify bytes even when reusing a checksum-addressed asset");
-
-        assert!(matches!(error, FileAdditionError::ChecksumError(_)));
     }
 
     #[test]

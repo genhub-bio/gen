@@ -1661,7 +1661,7 @@ mod tests {
         file_types::FileTypes,
         history::dolt::{clone_remote, commit_all, hash_of, remote_rows, remove_remote},
         operations::{
-            Defaults, Remote, RemoteOperationKind as StoredRemoteOperationKind,
+            Defaults, FileAddition, Remote, RemoteOperationKind as StoredRemoteOperationKind,
             RemoteOperationRecord, calculate_reader_checksum,
         },
     };
@@ -1889,16 +1889,15 @@ mod tests {
         let checksum = calculate_reader_checksum(Cursor::new(contents)).expect("should checksum");
         let uri = LocalAssetUri::asset_uri(logical_path);
         let role = AssetRole::Input;
+        let file_addition = FileAddition {
+            id: HashId::convert_str("remote-test-asset"),
+            asset_uri: uri.clone(),
+            file_type: FileTypes::None,
+            checksum: Some(checksum),
+            materialized_checksum: None,
+        };
         AssetRef {
-            id: AssetRef::id_hash(
-                &uri,
-                FileTypes::None.as_str(),
-                (Some(&checksum), None),
-                &role,
-                Some(logical_path),
-                None,
-                None,
-            ),
+            id: AssetRef::id_hash(&file_addition, &role, Some(logical_path), None, None),
             uri,
             file_type: FileTypes::None.as_str().to_string(),
             checksum: Some(checksum),
@@ -1934,13 +1933,15 @@ mod tests {
 
     fn set_test_asset_identity(asset: &mut AssetRef, file_type: FileTypes) {
         asset.file_type = file_type.as_str().to_string();
+        let file_addition = FileAddition {
+            id: HashId::convert_str("remote-test-asset-identity"),
+            asset_uri: asset.uri.clone(),
+            file_type,
+            checksum: asset.checksum,
+            materialized_checksum: asset.materialized_checksum,
+        };
         asset.id = AssetRef::id_hash(
-            &asset.uri,
-            file_type.as_str(),
-            (
-                asset.checksum.as_ref(),
-                asset.materialized_checksum.as_ref(),
-            ),
+            &file_addition,
             &asset.role,
             asset.logical_path.as_deref(),
             asset.name.as_deref(),
