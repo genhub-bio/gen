@@ -16,7 +16,7 @@ use gen_models::{
 };
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 
-use super::{PyRepository, run_operation_write};
+use super::{PyRepository, run_context_operation_write};
 use crate::python_api::{
     block_group::PySequenceGraph, sample::PySample, sequence_part::PySequencePart,
 };
@@ -33,8 +33,8 @@ impl PyRepository {
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = import_fasta(
                     ctx,
@@ -73,8 +73,8 @@ impl PyRepository {
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 Sample::get_or_create(
                     ctx.graph().conn(),
@@ -123,8 +123,8 @@ impl PyRepository {
     ) -> PyResult<PySequenceGraph> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = import_gfa(
                     ctx,
@@ -162,8 +162,8 @@ impl PyRepository {
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let mut reader: Box<dyn std::io::Read> = if filename.ends_with(".gz") {
                     let file = File::open(&filename).map_err(|e| {
@@ -226,8 +226,8 @@ impl PyRepository {
                     .collect()
             })
             .collect();
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = import_library(
                     ctx,
@@ -280,8 +280,8 @@ impl PyRepository {
             .map_err(|e| PyRuntimeError::new_err(format!("Problem parsing library files: {e}")))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |ctx| {
                 let operation_summary = import_library(
                     ctx,
