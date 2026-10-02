@@ -26,6 +26,7 @@ use pyo3::{
     exceptions::{PyRuntimeError, PyTypeError, PyValueError},
     prelude::*,
 };
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::{PyRepository, run_context_operation_write};
 use crate::python_api::{
@@ -187,6 +188,7 @@ impl PyRepository {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
     /// Record an annotation file as a repository asset and return its commit hash.
@@ -215,6 +217,9 @@ impl PyRepository {
         .map_err(|error| PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}")))
     }
 
+    /// Import every record of a FASTA file into `sample` (default sample if omitted) and return the
+    /// `Sample` holding one sequence graph per record. Fails if the same contents were already
+    /// imported.
     #[pyo3(signature = (filename, sample=None, collection=None))]
     pub fn import_fasta(
         &self,
@@ -255,6 +260,8 @@ impl PyRepository {
         )
     }
 
+    /// Import a FASTA file as the reference sample `reference`, which other samples (for example
+    /// VCF variants) are derived against. Returns the `Sample`.
     #[pyo3(signature = (filename, reference, collection=None))]
     pub fn import_reference_fasta(
         &self,
@@ -317,7 +324,9 @@ impl PyRepository {
         &self,
         sequence: &Bound<'_, PyAny>,
         name: Option<String>,
-        sample: Option<&Bound<'_, PyAny>>,
+        #[gen_stub(override_type(type_repr = "str | Sample | None", imports = ()))] sample: Option<
+            &Bound<'_, PyAny>,
+        >,
         circular: bool,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
@@ -337,7 +346,10 @@ impl PyRepository {
     pub fn import_reference_sequence(
         &self,
         sequence: &Bound<'_, PyAny>,
-        reference: &Bound<'_, PyAny>,
+        #[gen_stub(override_type(type_repr = "str | Sample", imports = ()))] reference: &Bound<
+            '_,
+            PyAny,
+        >,
         name: Option<String>,
         circular: bool,
         collection: Option<String>,
@@ -374,6 +386,8 @@ impl PyRepository {
         )
     }
 
+    /// Import a GFA file as one sequence graph, preserving its nodes and edges, and return that
+    /// `SequenceGraph`.
     #[pyo3(signature = (filename, sample=None, collection=None))]
     fn import_gfa(
         &self,
@@ -412,6 +426,8 @@ impl PyRepository {
         )
     }
 
+    /// Import a GenBank file, including its features (readable through `graph.annotations`), and
+    /// return the `Sample`.
     #[pyo3(signature = (filename, sample=None, collection=None))]
     fn import_genbank(
         &self,
@@ -463,6 +479,9 @@ impl PyRepository {
         )
     }
 
+    /// Build a combinatorial library from `parts_list`, a list of columns each holding alternative
+    /// `SequencePart` objects, and return the resulting `SequenceGraph`. Every path through the
+    /// graph is one assembled design; read them with `graph.all_sequences()`.
     #[pyo3(signature = (library_name, parts_list, sample=None, collection=None))]
     fn import_library(
         &self,
@@ -527,6 +546,9 @@ impl PyRepository {
         )
     }
 
+    /// Build a combinatorial library from files: `parts` is a FASTA of named parts and `library` a
+    /// headerless CSV with one column per slot and alternatives in rows. Returns the
+    /// `SequenceGraph`.
     #[pyo3(signature = (library_name, parts, library, sample=None, collection=None))]
     fn import_library_files(
         &self,

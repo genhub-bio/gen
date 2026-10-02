@@ -19,6 +19,7 @@ use pyo3::{
     exceptions::{PyRuntimeError, PyValueError},
     prelude::*,
 };
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 use super::{
     block_group::PySequenceGraph,
@@ -45,6 +46,7 @@ pub mod updates;
 /// `committer` and `email`, when given, become the committer identity recorded on operations
 /// made in this repository from now on. A destination that only holds a freshly initialized,
 /// still-empty `.gen` workspace (for example from an earlier `Repository(path)`) is reused.
+#[gen_stub_pyfunction]
 #[pyfunction(name = "clone")]
 #[pyo3(signature = (url, path=None, committer=None, email=None))]
 pub fn clone_repository(
@@ -141,6 +143,7 @@ where
 ///
 /// This class manages the database connection and provides methods for
 /// querying and manipulating the database.
+#[gen_stub_pyclass]
 #[pyclass(name = "Repository", unsendable)]
 pub struct PyRepository {
     pub context: DbContext,
@@ -252,7 +255,8 @@ impl PyRepository {
     }
 
     /// Sets the Dolt commit identity for operations recorded from now on. It applies to this
-    /// repository only, not to the `gen defaults` config, so it is set once at construction or clone.
+    /// repository only, not to the `gen defaults` config, so it is set once at construction or
+    /// clone.
     fn set_committer(&self, committer: Option<&str>, email: Option<&str>) -> PyResult<()> {
         if let Some(committer) = committer {
             if committer.is_empty() {
@@ -272,8 +276,13 @@ impl PyRepository {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Open the workspace at `path`, creating it if it does not exist. `path` may be the workspace
+    /// or its `.gen` directory; when omitted the workspace is discovered from the current
+    /// directory. `committer` and `email` become the identity recorded on operations made through
+    /// this object.
     #[new]
     #[pyo3(signature = (path = Option::<String>::None, committer = None, email = None))]
     fn new(path: Option<String>, committer: Option<&str>, email: Option<&str>) -> PyResult<Self> {
@@ -287,12 +296,16 @@ impl PyRepository {
         Ok(repository)
     }
 
+    /// Path of the `.gen` directory holding this repository's databases and assets.
     #[getter]
+    #[gen_stub(override_return_type(type_repr = "pathlib.Path", imports = ("pathlib")))]
     fn get_gen_dir(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         path_to_py_path(py, &self.context.workspace().ensure_gen_dir())
     }
 
+    /// Path of the graph database file.
     #[getter]
+    #[gen_stub(override_return_type(type_repr = "pathlib.Path", imports = ("pathlib")))]
     fn get_db_path(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let path = self
             .context
@@ -304,6 +317,9 @@ impl PyRepository {
 
     // Raw database access
 
+    /// Run raw SQL against the graph database. Low-level: prefer the editing and import APIs, which
+    /// record operations.
+    #[gen_stub(skip)]
     fn execute(&self, query: &str) -> PyResult<()> {
         self.context
             .graph()
@@ -313,12 +329,17 @@ impl PyRepository {
         Ok(())
     }
 
+    /// Run raw SQL against the graph database and return rows. Low-level: prefer `graph.search()`,
+    /// `graph.region()` and the typed getters.
+    #[gen_stub(skip)]
     fn query(&self, py: Python<'_>, query: &str) -> PyResult<Vec<Vec<Py<PyAny>>>> {
         py_query(py, self.context.graph().conn(), query)
     }
 
     // SequenceGraph queries
 
+    /// Return the sequence graph with this `HashId` (see `SequenceGraph.id`). Use it to rebuild a
+    /// graph handle in another Repository object, for example in a worker thread.
     fn get_sequence_graph_by_id(&self, id: &PyHashId) -> PyResult<PySequenceGraph> {
         let conn = self.context.graph().conn();
         let block_group =
@@ -326,6 +347,8 @@ impl PyRepository {
         Ok(self.to_py_block_group(block_group))
     }
 
+    /// Return every sequence graph in the repository, across all samples and collections. Group
+    /// them by sample with `repo.samples` instead.
     fn get_sequence_graphs(&self) -> PyResult<Vec<PySequenceGraph>> {
         let conn = self.context.graph().conn();
         Ok(BlockGroup::select(conn)
@@ -336,6 +359,7 @@ impl PyRepository {
             .collect())
     }
 
+    /// Return the sequence graphs belonging to one collection.
     fn get_sequence_graphs_by_collection(
         &self,
         collection_name: &str,
@@ -401,6 +425,9 @@ impl PyRepository {
         build_widget(py, ctrl, rows, cols, colors)
     }
 
+    /// Return the stored sequence slice of a node. Prefer `SequenceGraph.get_node_sequence()`,
+    /// `locus.sequence` or `graph.all_sequences()`.
+    #[gen_stub(skip)]
     fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
         let sequences_by_node_id = Node::get_sequences_by_node_ids(
             self.context.graph().conn(),

@@ -4,6 +4,7 @@ use gen_core::{HashId, range::Range};
 use gen_graph::{GraphNode, GraphNodeSlice};
 use gen_models::{annotations::Annotation, db::DbContext, locus::GraphLocus};
 use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyAny};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use serde_json::{Map, Value, to_string as json_to_string, to_value as json_to_value};
 
 use super::{block_group::PySequenceGraph, graph_search::PyGraphLocus};
@@ -16,6 +17,7 @@ use super::{block_group::PySequenceGraph, graph_search::PyGraphLocus};
 /// ``Annotation(locus, name)`` where *locus* is a ``Locus`` returned by
 /// ``SequenceGraph.search()``. To persist it in the repository, use
 /// ``SequenceGraph.add_annotation(locus, name)``.
+#[gen_stub_pyclass]
 #[pyclass(name = "Annotation", unsendable)]
 #[derive(Clone)]
 pub struct PyAnnotation {
@@ -69,6 +71,7 @@ impl PyAnnotation {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyAnnotation {
     /// Create an annotation object from a search-result locus.

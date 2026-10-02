@@ -7,6 +7,7 @@ use pyo3::{
     pyclass, pymethods,
     types::{PyAnyMethods as _, PySlice, PySliceMethods as _},
 };
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::{
     block_group::PySequenceGraph, graph_node::PyGraphNodeSlice, locus::GraphLocusExt as _,
@@ -18,6 +19,7 @@ use super::{
 /// Obtain via `sg.search(query)` or `repo.search(query)`.
 /// Pass it, or its `.start()` or `.end()`, to `widget.go_to()`.
 /// `.sequence` reads the bases it covers fresh from the database on every access.
+#[gen_stub_pyclass]
 #[pyclass(name = "Locus", unsendable)]
 #[derive(Clone)]
 pub struct PyGraphLocus {
@@ -132,6 +134,7 @@ impl PyGraphLocus {
     }
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyGraphLocus {
     /// The first position of the locus in reading order.
@@ -253,7 +256,8 @@ impl PyGraphLocus {
             .is_ok_and(|other| other.ranges == self.ranges)
     }
 
-    /// Strand of this locus: ``"+"`` forward, ``"-"`` reverse, ``"mixed"`` if slices differ, ``"."`` if empty.
+    /// Strand of this locus: ``"+"`` forward, ``"-"`` reverse, ``"mixed"`` if slices differ,
+    /// ``"."`` if empty.
     #[getter]
     fn strand(&self) -> &str {
         let mut iter = self.ranges.iter().map(|range| range.strand);

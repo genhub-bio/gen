@@ -3,9 +3,11 @@ use std::{fs, path::PathBuf};
 use r#gen::exports::{fasta::export_fasta, genbank::export_genbank, gfa::export_gfa};
 use gen_models::sample::Sample;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::PyRepository;
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
     /// Export current paths as FASTA, optionally restricted by sample and collection.
@@ -33,6 +35,8 @@ impl PyRepository {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
     }
 
+    /// Write a sample's graph structure to a GFA file. `node_max` splits nodes longer than that
+    /// many bases.
     #[pyo3(signature = (filename, sample=None, node_max=None, collection=None))]
     fn export_gfa(
         &self,
@@ -56,6 +60,7 @@ impl PyRepository {
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to export '{}': {e}", filename)))
     }
 
+    /// Write a sample's sequences and annotations to a GenBank file.
     #[pyo3(signature = (filename, sample=None, collection=None))]
     fn export_genbank(
         &self,

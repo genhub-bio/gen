@@ -5,12 +5,16 @@ use r#gen::commands::graph_operations::{
 use gen_core::region::Region;
 use gen_models::block_group::BlockGroup;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::PyRepository;
 use crate::python_api::{block_group::PySequenceGraph, sample::PySample};
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Split the region of `sample` into chunks, either at `breakpoints` or every `chunk_size`
+    /// bases, and store them in `new_sample`. Returns the new `Sample`. See also `graph.chunks()`.
     #[pyo3(signature = (sample, new_sample, region, backbone=None, breakpoints=None, chunk_size=None, collection=None))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn derive_chunks(
@@ -38,6 +42,8 @@ impl PyRepository {
         Ok(self.block_groups_in_sample(&collection, &new_sample))
     }
 
+    /// Copy the region of `sample` into `new_sample` as a smaller sequence graph and return the new
+    /// `Sample`. See also `graph.subgraph()`.
     #[pyo3(signature = (sample, new_sample, region, backbone=None, collection=None))]
     fn derive_subgraph(
         &self,
@@ -63,6 +69,8 @@ impl PyRepository {
         self.get_block_group(&collection, &new_sample, &parsed_region.name.to_string())
     }
 
+    /// Concatenate comma-separated region strings from `sample` into one new sequence graph named
+    /// `new_region` in `new_sample`, and return it.
     #[pyo3(signature = (sample, new_sample, regions, new_region, collection=None))]
     fn make_stitch(
         &self,
