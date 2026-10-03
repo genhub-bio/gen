@@ -398,7 +398,7 @@ impl PySequenceGraph {
     /// half-open, counted along the graph's current path. `graph.locus(100, 110)` is the same
     /// as `graph.region("<name>:100-110")` without building the string.
     ///
-    /// Pass it to editing methods, `Locus.on()`, `repo.stitch()` or a widget's `go_to()`. Raises
+    /// Pass it to editing methods, `graph.subgraph()`, `repo.stitch()` or a widget's `go_to()`. Raises
     /// `ValueError` if the span is empty, outside the path, or maps to more than one route.
     // A `backbone` argument naming another path to count along belongs here once named paths are
     // supported; until then coordinates always follow the current path.
@@ -1129,8 +1129,9 @@ impl PySequenceGraph {
     /// - two integers, path coordinates along the current path (0-based, end exclusive):
     ///   `graph.subgraph("mcs", 390, 460)`.
     ///
-    /// Raises `ValueError` if a position is not in this graph, the span is empty or reversed, or
-    /// the end cannot be reached from the start. The new graph gets a current path when this
+    /// A `Locus` may read on either strand; two `Position`s must be forward-strand. Raises
+    /// `ValueError` if a position is not in this graph, the span is empty or reversed, or the end
+    /// cannot be reached from the start. The new graph gets a current path when this
     /// graph's current path runs from start to end.
     ///
     /// Parameters

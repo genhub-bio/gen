@@ -90,9 +90,10 @@ impl PyRepository {
     /// between its first and last positions: stitching `graph.region("chr1:100-200")` keeps all
     /// the alternatives that lie inside that region, not just the sequence that region reads
     /// along the current path. A whole `SequenceGraph` part contributes all of its routes. The
-    /// new graph's current path reads the parts' own routes one after another. Every `SequenceGraph` part needs a current path, which
-    /// a subgraph taken between positions off the current path may lack; stitch a `Locus` of such
-    /// a graph instead.
+    /// new graph's current path reads the parts' own routes one after another.
+    ///
+    /// Every `SequenceGraph` part needs a current path, which a subgraph taken between positions
+    /// off the current path may lack; stitch a `Locus` of such a graph instead.
     ///
     /// Parts must come from one collection, be forward-strand (reverse loci are rejected) and not
     /// overlap, since that would make the result cyclic.
