@@ -25,15 +25,8 @@ fn simple_vcf_sample_diff(query_name: &str, base_name: &str) -> (DbContext, Samp
         .expect("should encode simple VCF fixture path")
         .to_string();
 
-    import_fasta(
-        &context,
-        &fasta_path,
-        collection_name,
-        "reference",
-        false,
-        &[],
-    )
-    .expect("should import simple FASTA fixture");
+    import_fasta(&context, &fasta_path, collection_name, "reference", &[])
+        .expect("should import simple FASTA fixture");
     update_with_vcf(
         &context,
         &vcf_path,

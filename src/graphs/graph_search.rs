@@ -1213,15 +1213,7 @@ mod tests {
             .to_string();
         let collection = "test";
 
-        import_fasta(
-            &context,
-            &fasta_path,
-            collection,
-            Sample::DEFAULT_NAME,
-            false,
-            &[],
-        )
-        .unwrap();
+        import_fasta(&context, &fasta_path, collection, Sample::DEFAULT_NAME, &[]).unwrap();
         update_with_vcf(
             &context,
             &vcf_path,
@@ -1286,15 +1278,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        import_fasta(
-            &context,
-            &fasta_path,
-            collection,
-            Sample::DEFAULT_NAME,
-            false,
-            &[],
-        )
-        .unwrap();
+        import_fasta(&context, &fasta_path, collection, Sample::DEFAULT_NAME, &[]).unwrap();
         let block_group = get_sample_bg(conn, collection, Sample::DEFAULT_NAME);
         let graph =
             BlockGroup::get_graph(conn, context.workspace(), &block_group.id, None).unwrap();

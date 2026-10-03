@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Chain, Cursor, Read, Write},
+    io::{self, Cursor, Read, Write},
 };
 
 use gen_core::{Sha256Hash, Workspace};
@@ -26,18 +26,16 @@ pub fn should_archive_as_bgzf(file_type: FileTypes) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum InputEncoding {
+pub enum InputEncoding {
     Plain,
     Gzip,
     Bgzf,
 }
 
-pub(crate) type ReplayedReader<R> = Chain<Cursor<Vec<u8>>, R>;
-
-// Read enough header bytes to distinguish BGZF from ordinary gzip, then replay them into storage.
-pub(crate) fn classify_input<R: Read>(
+/// Reads a bounded gzip header to distinguish BGZF, then replays the prefix into storage.
+pub fn classify_input<R: Read + 'static>(
     mut reader: R,
-) -> io::Result<(InputEncoding, ReplayedReader<R>)> {
+) -> io::Result<(InputEncoding, impl Read + 'static)> {
     let mut prefix = Vec::with_capacity(12);
     let encoding = if !fill_prefix(&mut reader, &mut prefix, 2)? || prefix[..2] != [0x1f, 0x8b] {
         InputEncoding::Plain

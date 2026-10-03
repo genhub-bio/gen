@@ -22,11 +22,17 @@ operations as methods on the returned environment.
 
 | Method | Description |
 |--------|-------------|
-| `import_fasta(filename, sample, shallow, collection)` | Import a FASTA file, returns a `gen_sample` |
+| `import_fasta(filename, sample, collection, indexes)` | Import a FASTA file, returns a `gen_sample` |
 | `import_gfa(filename, sample, collection)` | Import a GFA file, returns a `SequenceGraph` |
 | `import_genbank(filename, sample, collection)` | Import a GenBank file (plain or gzipped), returns a `gen_sample` |
 | `import_library(library_name, parts_list, seq_containers, sample, collection)` | Import a combinatorial sequence library, returns a `SequenceGraph` |
 | `import_library_files(library_name, parts, library, sample, collection)` | Import a library from parts/library CSV files, returns a `SequenceGraph` |
+
+Local FASTA imports are stored in an indexed BGZF asset, and sequence reads
+use that local archive. A remote BGZF FASTA with usable `.fai` and `.gzi`
+indexes supplied as a character vector to `indexes` remains a remote reference,
+so sequence reads use its URL. Other remote FASTA inputs are downloaded,
+compressed, indexed, and stored locally.
 
 Every import call returns the sequence graph(s) it just created directly, so
 there's no need to follow up with `get_sequence_graphs()`. A `gen_sample` is a

@@ -26,9 +26,9 @@ Repository$get_samples <- function() .Call("wrap__Repository__get_samples", self
 
 Repository$get_node_sequence <- function(node_id, sequence_start, sequence_end) .Call("wrap__Repository__get_node_sequence", self, node_id, sequence_start, sequence_end, PACKAGE = "genr")
 
-Repository$import_fasta <- function(filename, sample, shallow, collection) .Call("wrap__Repository__import_fasta", self, filename, sample, shallow, collection, PACKAGE = "genr")
+Repository$import_fasta <- function(filename, sample, collection, indexes) .Call("wrap__Repository__import_fasta", self, filename, sample, collection, indexes, PACKAGE = "genr")
 
-Repository$import_reference_fasta <- function(filename, reference, shallow, collection) .Call("wrap__Repository__import_reference_fasta", self, filename, reference, shallow, collection, PACKAGE = "genr")
+Repository$import_reference_fasta <- function(filename, reference, collection, indexes) .Call("wrap__Repository__import_reference_fasta", self, filename, reference, collection, indexes, PACKAGE = "genr")
 
 Repository$import_sequences <- function(names, sequences, sample, collection) .Call("wrap__Repository__import_sequences", self, names, sequences, sample, collection, PACKAGE = "genr")
 
