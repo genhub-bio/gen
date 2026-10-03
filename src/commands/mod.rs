@@ -9,8 +9,10 @@ use gen_models::{
 };
 
 pub mod cache;
+#[cfg(not(target_os = "emscripten"))]
 pub mod checkout;
 pub mod cli_context;
+#[cfg(not(target_os = "emscripten"))]
 pub mod clone;
 pub mod derive;
 pub mod export;
@@ -18,6 +20,7 @@ pub mod graph_operations;
 pub mod import;
 #[cfg(feature = "profiling")]
 pub mod profile;
+#[cfg(not(target_os = "emscripten"))]
 pub mod remote;
 pub mod update;
 
@@ -71,6 +74,7 @@ pub fn parse_diff_revisions(
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
     Init {},
+    #[cfg(not(target_os = "emscripten"))]
     /// Clone a GenHub repository
     ///
     /// Example: gen clone https://www.genhub.bio/api/repos/david-genhub-bio/addgene-plasmid-122028-genbank-diff
@@ -263,10 +267,12 @@ pub enum Commands {
         #[arg(long)]
         committer_email: Option<String>,
     },
+    #[cfg(not(target_os = "emscripten"))]
     /// Manage remote repositories
     #[command(subcommand)]
     Remote(remote::RemoteCommand),
 
+    #[cfg(not(target_os = "emscripten"))]
     /// Push the local repo to the remote
     #[command()]
     Push {
@@ -280,6 +286,7 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
+    #[cfg(not(target_os = "emscripten"))]
     #[command()]
     Pull {
         /// The remote to pull from
@@ -289,6 +296,7 @@ pub enum Commands {
         #[arg(short, long)]
         branch: Option<String>,
     },
+    #[cfg(not(target_os = "emscripten"))]
     /// Fetch a remote branch into a remote-tracking ref without changing the checkout
     #[command()]
     Fetch {

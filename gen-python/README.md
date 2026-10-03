@@ -33,6 +33,29 @@ graphs = repo.get_sequence_graphs()          # -> list[SequenceGraph]
 sample.plot()  # or sg.plot()
 ```
 
+## GenHub browser notebooks
+
+The `gen.browser` module opens an authenticated GenHub snapshot in a temporary
+browser workspace. The repository is available through the normal Gen Python
+API, and edits stay local until an explicit commit:
+
+```python
+from gen.browser import NotebookSession
+
+session = await NotebookSession.open(snapshot_url)
+repo = session.repository
+graphs = repo.get_sequence_graphs()
+
+# Save the active notebook into Gen history with the repository changes.
+display(session.commit_widget())
+```
+
+The widget captures the notebook only after `Save notebook` is selected and
+`Commit` is pressed. To reopen a notebook tracked in the repository, pass its
+repository path to `NotebookSession.open(snapshot_url, notebook_path=...)`.
+Code can also add ordinary repository files with `repo.add_file(path)`; the
+operation records the file alongside other Gen assets.
+
 For a remote indexed BGZF FASTA, pass its FASTA and BGZF index files explicitly:
 
 ```python

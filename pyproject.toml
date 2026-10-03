@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin==1.15.0"]
 build-backend = "maturin"
 
 [project]
@@ -30,3 +30,6 @@ manifest-path = "gen-python/Cargo.toml"
 features = ["abi3", "extension-module"]
 python-source = "gen-python/python"
 module-name = "gen.gen"
+
+[tool.pyodide.build]
+rust_toolchain = "1.95.0"
