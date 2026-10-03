@@ -11,8 +11,8 @@ class SampleCopyTests(RepositoryTestCase):
     def test_copy_preserves_sequence_and_records_one_operation(self):
         before = len(self.repository.get_operations())
         child = self.sample.copy("child", message="Copy for review")
-        self.assertEqual(child.sample_name, "child")
-        self.assertEqual(child.collection_name, self.sample.collection_name)
+        self.assertEqual(child.name, "child")
+        self.assertEqual(child.collection, self.sample.collection)
         self.assertEqual(
             [graph.name for graph in child], [graph.name for graph in self.sample]
         )
@@ -25,7 +25,7 @@ class SampleCopyTests(RepositoryTestCase):
     def test_copy_rejects_existing_or_invalid_names_without_an_operation(self):
         self.sample.copy("child")
         before = len(self.repository.get_operations())
-        for name in ("child", "", self.sample.sample_name):
+        for name in ("child", "", self.sample.name):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 self.sample.copy(name)
         self.assertEqual(len(self.repository.get_operations()), before)
@@ -40,7 +40,7 @@ class SampleCopyTests(RepositoryTestCase):
             self.sample.copy("child")
         self.assertEqual(len(self.repository.get_operations()), before)
         self.assertNotIn(
-            "child", [sample.sample_name for sample in self.repository.samples]
+            "child", [sample.name for sample in self.repository.samples]
         )
         self.repository.execute("DROP TRIGGER reject_copy")
-        self.assertEqual(self.sample.copy("child").sample_name, "child")
+        self.assertEqual(self.sample.copy("child").name, "child")

@@ -80,7 +80,8 @@ impl PyRepository {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Returns every configured remote, ordered by name.
+    /// Every configured remote, ordered by name.
+    #[getter(remotes)]
     fn get_remotes(&self) -> Vec<PyRemote> {
         ModelRemote::list_all(self.context.config().conn())
             .into_iter()
@@ -238,7 +239,7 @@ impl PyRepository {
 mod tests {
     use std::path::Path;
 
-    use gen_core::{BranchName, config::Workspace};
+    use gen_core::{BranchName, DoltHashId, config::Workspace};
     use gen_models::{
         collection::Collection,
         history::{
@@ -367,7 +368,7 @@ mod tests {
                 .expect("clone should configure origin");
             let branch = PyBranch {
                 name: "main".to_string(),
-                head: String::new(),
+                head: DoltHashId::default(),
                 remote: Some("origin".to_string()),
                 is_current: true,
                 dirty: false,
@@ -413,7 +414,7 @@ mod tests {
 
             let feature = PyBranch {
                 name: "feature".to_string(),
-                head: String::new(),
+                head: DoltHashId::default(),
                 remote: Some("origin".to_string()),
                 is_current: false,
                 dirty: false,

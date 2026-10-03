@@ -55,6 +55,19 @@ class TextGraphWidgetTests(unittest.TestCase):
                 self.assertTrue(hasattr(jupyter_widget.GraphWidget, name))
                 self.assertTrue(hasattr(text_widget.TextGraphWidget, name))
 
+    def test_both_widgets_expose_the_same_state_attributes(self):
+        from gen import jupyter_widget
+
+        widget = text_widget.TextGraphWidget(FakeController())
+        for name in ("cols", "rows", "page_count", "page_index", "frame"):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(widget, name))
+                self.assertTrue(hasattr(jupyter_widget.GraphWidget, name))
+
+    def test_widgets_are_not_part_of_the_public_namespace(self):
+        self.assertNotIn("GraphWidget", dir(gen))
+        self.assertNotIn("TextGraphWidget", dir(gen))
+
     def test_navigation_methods_return_the_widget_for_chaining(self):
         repository = gen.Repository(tempfile.mkdtemp())
         graph = repository.import_sequence("ACGT" * 40, name="chain", sample="s")

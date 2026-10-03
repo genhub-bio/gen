@@ -26,7 +26,7 @@ class BiopythonSequencesTest(unittest.TestCase):
         return [graph.name for graph in sample]
 
     def sample_named(self, name):
-        return next(s for s in self.repository.samples if s.sample_name == name)
+        return next(s for s in self.repository.samples if s.name == name)
 
     def test_seq_value_needs_a_name(self):
         graph = self.repository.import_sequence(Seq("ACGT"), "a", sample="seq")

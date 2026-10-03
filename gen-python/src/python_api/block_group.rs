@@ -11,7 +11,9 @@ use r#gen::{
     core::HashId,
     exports::{fasta::export_fasta, genbank::export_genbank, gfa::export_gfa},
     graphs::{
+        NodePoint,
         graph_search::{GenGraphMatcher, SeedIndex, SequenceKind},
+        operators::derive_subgraph_between,
         translation::{
             TranslationError, translate_annotation, translate_block_group, translate_from_path,
         },
@@ -22,7 +24,7 @@ use r#gen::{
     },
 };
 use gen_annotations::projection::{AnnotationSegment, annotation_segments};
-use gen_core::{is_end_node, is_start_node, range::Range};
+use gen_core::{Strand, is_end_node, is_start_node, range::Range};
 use gen_graph::GraphNode;
 use gen_models::{
     accession::{Accession, AccessionSpan, NewAccession},
@@ -30,7 +32,6 @@ use gen_models::{
     block_group::{BlockGroup, SequenceIterator},
     db::DbContext,
     locus::GraphLocus,
-    node::Node,
     operations::{OperationInfo, OperationSummary, commit_operation_summary},
     sample::Sample,
 };
@@ -45,13 +46,15 @@ use super::{
     annotation::PyAnnotation,
     editing::{EditKind, EditRequest, InsertSite, edit_sequence_graph, insert_at_positions},
     graph_node::PyGraphNode,
-    graph_read::{current_graph, locus_from_region},
+    graph_read::{current_graph, locus_from_region, shortest_route},
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::{PyGraphController, build_widget},
     locus::GraphLocusExt as _,
-    position::positions_of,
+    position::{PyPosition, positions_of},
     repository::run_context_operation_write,
+    sample::PySample,
+    sequence::PySequence,
     translation::build_translation_params,
     utils::block_group_err_to_pyerr,
 };
@@ -118,11 +121,11 @@ where
 /// open a fresh ``Repository`` in that thread, and look it up by id::
 ///
 ///     sg_id = sg.id
-///     path  = str(repo.db_path)
+///     path  = str(repo.gen_dir)
 ///
 ///     def worker():
 ///         r = gen.Repository(path)
-///         sg = r.get_sequence_graph_by_id(sg_id)
+///         sg = r.get_sequence_graph(sg_id)
 ///         ...
 // unsendable because DbContext contains Rc (rusqlite::Connection is !Sync)
 #[gen_stub_pyclass]
@@ -131,10 +134,8 @@ where
 pub struct PySequenceGraph {
     pub id: HashId,
     /// Collection this sequence graph belongs to.
-    #[pyo3(get)]
+    #[pyo3(get, name = "collection")]
     pub collection_name: String,
-    /// Name of the sample that owns this graph.
-    #[pyo3(get)]
     pub sample_name: String,
     /// Name of the graph, such as the FASTA record or chromosome name. Region strings start with it
     /// (`"name:start-end"`).
@@ -214,9 +215,31 @@ impl PySequenceGraph {
         }
     }
 
+    /// Hash ID of this sequence graph.
     #[getter]
     fn id(&self) -> PyHashId {
         PyHashId::new(self.id)
+    }
+
+    /// The sample that owns this graph.
+    #[getter]
+    fn sample(&self) -> PyResult<PySample> {
+        let context = self.require_context("sample")?;
+        let sequence_graphs = Sample::get_block_groups(
+            context.graph().conn(),
+            &self.collection_name,
+            &self.sample_name,
+            None,
+        )
+        .into_iter()
+        .map(|block_group| self.to_py_block_group(block_group))
+        .collect();
+        Ok(PySample::new(
+            self.collection_name.clone(),
+            self.sample_name.clone(),
+            sequence_graphs,
+            context.clone(),
+        ))
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -301,8 +324,7 @@ impl PySequenceGraph {
     ///
     /// Returns a list of `Locus` objects. Each locus exposes:
     ///   - `.start()` / `.end()` → `Position` (first and last position)
-    ///   - `.slices` → `list[NodeSlice]`
-    ///   - `.sequence` → `str` (the bases it covers, read fresh from the database)
+    ///   - `.sequence` → `str` (the bases it covers)
     ///
     /// Parameters
     /// query : str
@@ -372,12 +394,29 @@ impl PySequenceGraph {
             .collect())
     }
 
+    /// The `Locus` covering path coordinates `start` to `end` of this sequence graph: 0-based,
+    /// half-open, counted along the graph's current path. `graph.locus(100, 110)` is the same
+    /// as `graph.region("<name>:100-110")` without building the string.
+    ///
+    /// Pass it to editing methods, `Locus.on()`, `repo.stitch()` or a widget's `go_to()`. Raises
+    /// `ValueError` if the span is empty, outside the path, or maps to more than one route.
+    // A `backbone` argument naming another path to count along belongs here once named paths are
+    // supported; until then coordinates always follow the current path.
+    pub fn locus(&self, start: i64, end: i64) -> PyResult<PyGraphLocus> {
+        if start < 0 || end <= start {
+            return Err(PyValueError::new_err(format!(
+                "locus needs 0 <= start < end, got start={start}, end={end}"
+            )));
+        }
+        self.region(&format!("{}:{start}-{end}", self.name))
+    }
+
     /// Resolve a region string (e.g. ``"chr1:100-110"``) to a ``Locus`` in this sequence graph.
     ///
     /// Unlike passing a region string to ``replace()``, ``delete()``, or ``insert()``, this
-    /// performs no edit — it only looks up the coordinates, for inspection (``.sequence``,
-    /// ``.slices``) or as an argument to a widget's ``go_to()``. Raises ``ValueError`` if the
-    /// region cannot be resolved in this sequence graph.
+    /// performs no edit — it only looks up the coordinates, for inspection (``.sequence``) or as
+    /// an argument to a widget's ``go_to()``. Raises ``ValueError`` if the region cannot be
+    /// resolved in this sequence graph.
     pub fn region(&self, region: &str) -> PyResult<PyGraphLocus> {
         let context = self.require_context("region()")?;
         let target = locus_from_region(context, region, &self.collection_name, &self.sample_name)?;
@@ -395,8 +434,8 @@ impl PySequenceGraph {
         )
     }
 
-    /// Lazily yields one string per path through the pruned graph.
-    /// Distinct paths may yield identical strings.
+    /// Lazily yields one `Sequence` per path through the graph; `str(sequence)` is its bases.
+    /// Distinct paths may yield identical sequences.
     fn all_sequences(&self, py: Python<'_>) -> PyResult<Py<PySequenceIter>> {
         let context = self.require_context("all_sequences()")?;
         let sequences =
@@ -406,6 +445,7 @@ impl PySequenceGraph {
     }
 
     /// IPython display hook — called when a cell ends with a SequenceGraph.
+    #[gen_stub(skip)]
     fn _ipython_display_(slf: &Bound<'_, PySequenceGraph>) -> PyResult<()> {
         let py = slf.py();
         let widget = slf.call_method0("plot")?;
@@ -479,33 +519,8 @@ impl PySequenceGraph {
         Ok(())
     }
 
-    /// Return the sequence for a graph node.
-    ///
-    /// Parameters
-    /// node : Node
-    ///     A ``Node`` obtained from ``to_dict()["nodes"]``, ``search()`` results,
-    ///     or any other API that returns graph nodes.
-    ///
-    /// Raises ``RuntimeError`` if this sequence graph was not created via a
-    /// ``Repository``.
-    fn get_node_sequence(&self, node: &PyGraphNode) -> PyResult<String> {
-        let context = self.require_context("get_node_sequence()")?;
-        let conn = context.graph().conn();
-        let sequences =
-            Node::get_sequences_by_node_ids(conn, context.workspace(), &[node.node_id], None);
-        let sequence = sequences.get(&node.node_id).ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Node with id {:?} not found",
-                node.node_id
-            ))
-        })?;
-        sequence
-            .get_sequence(node.sequence_start, node.sequence_end)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
-    }
-
-    /// Return the graph as a dict with `nodes` and `edges` (edge keys are `(source, target)` node
-    /// pairs mapped to lists of edge-weight dicts).
+    /// Return the graph as a dict with `nodes` (a list of `Node`) and `edges` (edge keys are
+    /// `(source, target)` node pairs mapped to lists of edge-weight dicts).
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let context = self.require_context("to_dict()")?;
         let conn = context.graph().conn();
@@ -514,7 +529,10 @@ impl PySequenceGraph {
         let dict = PyDict::new(py);
         let nodes: Vec<PyGraphNode> = graph
             .nodes()
-            .map(|node| PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end))
+            .map(|node| {
+                PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end)
+                    .with_context(self.context.clone())
+            })
             .collect();
         dict.set_item("nodes", nodes)?;
         let edges = PyDict::new(py);
@@ -533,8 +551,10 @@ impl PySequenceGraph {
                 .collect();
             edges.set_item(
                 (
-                    PyGraphNode::new(src.node_id, src.sequence_start, src.sequence_end),
-                    PyGraphNode::new(dst.node_id, dst.sequence_start, dst.sequence_end),
+                    PyGraphNode::new(src.node_id, src.sequence_start, src.sequence_end)
+                        .with_context(self.context.clone()),
+                    PyGraphNode::new(dst.node_id, dst.sequence_start, dst.sequence_end)
+                        .with_context(self.context.clone()),
                 ),
                 weights?,
             )?;
@@ -561,7 +581,8 @@ impl PySequenceGraph {
                 let node_data = PyDict::new(py);
                 node_data.set_item(
                     "key",
-                    PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end),
+                    PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end)
+                        .with_context(self.context.clone()),
                 )?;
                 let index: usize = py_digraph
                     .call_method1("add_node", (node_data,))?
@@ -603,11 +624,10 @@ impl PySequenceGraph {
             for node in graph.nodes() {
                 nx_digraph.call_method(
                     "add_node",
-                    (PyGraphNode::new(
-                        node.node_id,
-                        node.sequence_start,
-                        node.sequence_end,
-                    ),),
+                    (
+                        PyGraphNode::new(node.node_id, node.sequence_start, node.sequence_end)
+                            .with_context(self.context.clone()),
+                    ),
                     None,
                 )?;
             }
@@ -629,8 +649,10 @@ impl PySequenceGraph {
                 nx_digraph.call_method(
                     "add_edge",
                     (
-                        PyGraphNode::new(src.node_id, src.sequence_start, src.sequence_end),
-                        PyGraphNode::new(dst.node_id, dst.sequence_start, dst.sequence_end),
+                        PyGraphNode::new(src.node_id, src.sequence_start, src.sequence_end)
+                            .with_context(self.context.clone()),
+                        PyGraphNode::new(dst.node_id, dst.sequence_start, dst.sequence_end)
+                            .with_context(self.context.clone()),
                     ),
                     Some(&kwargs),
                 )?;
@@ -718,7 +740,7 @@ impl PySequenceGraph {
     ///
     /// Annotations imported from files (``Repository.import_annotations()``) are read in full
     /// and listed after the database ones, so they can be searched by name alike. Their
-    /// ``group`` is the file's display name.
+    /// ``track`` is the file's display name.
     ///
     /// Returns
     /// list[Annotation]
@@ -752,9 +774,9 @@ impl PySequenceGraph {
     /// Persist an annotation over a locus in this sequence graph.
     ///
     /// Parameters
-    /// target : Locus
-    ///     Graph-space span to annotate. The locus must cover at least one base
-    ///     and belong to this sequence graph.
+    /// target : str, Locus or Annotation
+    ///     Graph-space span to annotate: a region string, a ``Locus`` or an existing
+    ///     ``Annotation``. It must cover at least one base and belong to this sequence graph.
     /// name : str
     ///     Human-readable annotation name.
     /// track : str, optional
@@ -967,6 +989,111 @@ impl PySequenceGraph {
 }
 
 impl PySequenceGraph {
+    /// `subgraph()` for integer path coordinates.
+    fn subgraph_by_coordinates(
+        &self,
+        ctx: &DbContext,
+        new_sample: String,
+        start: i64,
+        end: i64,
+    ) -> PyResult<PySequenceGraph> {
+        let region = format!("{}:{}-{}", self.name, start, end);
+        derive_subgraph_operation(
+            ctx,
+            Some(self.collection_name.clone()),
+            self.sample_name.clone(),
+            new_sample.clone(),
+            region,
+            None,
+        )
+        .map_err(|e| PyRuntimeError::new_err(format!("Error deriving subgraph: {e}")))?;
+        let conn = ctx.graph().conn();
+        let child_id = BlockGroup::get_id(
+            &self.collection_name,
+            &new_sample,
+            &self.name,
+            Some(&self.id),
+        );
+        let found = BlockGroup::get_by_id(conn, &child_id, None)
+            .map_err(|e| PyRuntimeError::new_err(format!("Subgraph created but not found: {e}")))?;
+        Ok(self.to_py_block_group(found))
+    }
+
+    /// The node points bounding a `Locus`, or a first and last `Position`, in this graph. The end
+    /// point is just past the last base, as the locus' last position names an included base.
+    fn subgraph_points(
+        &self,
+        ctx: &DbContext,
+        start: &Bound<'_, PyAny>,
+        end: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(NodePoint, NodePoint)> {
+        let (first, last) = if let Ok(locus) = start.extract::<PyRef<PyGraphLocus>>() {
+            if end.is_some() {
+                return Err(PyTypeError::new_err(
+                    "subgraph() takes a Locus alone, or a start and an end",
+                ));
+            }
+            let forward = match locus.strand() {
+                "+" => locus.clone(),
+                "-" => locus.reverse_complement(),
+                "mixed" => {
+                    return Err(PyValueError::new_err(
+                        "a locus that reads on both strands has no single span to derive",
+                    ));
+                }
+                _ => return Err(PyValueError::new_err("Locus is empty")),
+            };
+            (forward.start()?, forward.end()?)
+        } else if let (Ok(first), Some(Ok(last))) = (
+            start.extract::<PyRef<PyPosition>>(),
+            end.map(|end| end.extract::<PyRef<PyPosition>>()),
+        ) {
+            if first.strand() != "+" || last.strand() != "+" {
+                return Err(PyValueError::new_err(
+                    "subgraph() takes forward-strand positions; use a Locus for a reverse span",
+                ));
+            }
+            (first.clone(), last.clone())
+        } else {
+            return Err(PyTypeError::new_err(
+                "subgraph() takes a Locus, two Positions, or two integer coordinates",
+            ));
+        };
+
+        let graph = current_graph(ctx, &self.id)?;
+        let locate = |position: &PyPosition, which: &str| {
+            PyPosition::located(&graph, position.position).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "the {which} position is not in this sequence graph"
+                ))
+            })
+        };
+        let first = locate(&first, "start")?;
+        let last = locate(&last, "end")?;
+        let reaches = if first.block == last.block {
+            first.position.coordinate <= last.position.coordinate
+        } else {
+            shortest_route(&graph, first.block, last.block).is_some()
+        };
+        if !reaches {
+            return Err(PyValueError::new_err(
+                "the end position cannot be reached from the start position in this sequence graph",
+            ));
+        }
+        Ok((
+            NodePoint {
+                id: first.position.node_id,
+                coordinate: first.position.coordinate,
+                strand: Strand::Forward,
+            },
+            NodePoint {
+                id: last.position.node_id,
+                coordinate: last.position.coordinate + 1,
+                strand: Strand::Forward,
+            },
+        ))
+    }
+
     pub(crate) fn require_context(&self, method: &str) -> PyResult<&DbContext> {
         self.context.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(format!(
@@ -990,46 +1117,68 @@ impl PySequenceGraph {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PySequenceGraph {
-    /// Derive a coordinate-bounded subgraph from this sequence graph.
+    /// Derive a subgraph of this sequence graph into a new sample, holding every variant route
+    /// between two points.
+    ///
+    /// The span can be given three ways:
+    ///
+    /// - a `Locus`: `graph.subgraph("mcs", graph.region("pUC19:390-460"))`. Only its first and last
+    ///   positions are used, so a locus from another graph works as long as both are still in
+    ///   this one;
+    /// - two `Position`s, the first and last base to include: `graph.subgraph("mcs", first, last)`;
+    /// - two integers, path coordinates along the current path (0-based, end exclusive):
+    ///   `graph.subgraph("mcs", 390, 460)`.
+    ///
+    /// Raises `ValueError` if a position is not in this graph, the span is empty or reversed, or
+    /// the end cannot be reached from the start. The new graph gets a current path when this
+    /// graph's current path runs from start to end.
     ///
     /// Parameters
     /// new_sample : str
     ///     Sample name for the derived sequence graph.
-    /// start : int
-    ///     Start coordinate along the path (inclusive).
-    /// end : int
-    ///     End coordinate along the path (exclusive).
-    /// backbone : str, optional
-    ///     Named path to use as the coordinate backbone.
-    #[pyo3(signature = (new_sample, start, end, backbone=None))]
+    /// start : Locus, Position or int
+    ///     The locus, or the first position (or path coordinate) of the span.
+    /// end : Position or int, optional
+    ///     The last position (or exclusive path coordinate); omit when `start` is a `Locus`.
+    // Integer coordinates follow the current path. A `backbone` argument naming another path to
+    // count along can be added once named paths are supported.
+    #[pyo3(signature = (new_sample, start, end=None))]
     fn subgraph(
         &self,
         new_sample: String,
-        start: i64,
-        end: i64,
-        backbone: Option<String>,
+        #[gen_stub(override_type(type_repr = "Locus | Position | int", imports = ()))]
+        start: &Bound<'_, PyAny>,
+        #[gen_stub(override_type(type_repr = "Position | int | None", imports = ()))] end: Option<
+            &Bound<'_, PyAny>,
+        >,
     ) -> PyResult<PySequenceGraph> {
         let ctx = self.require_context("subgraph()")?;
-        let region = format!("{}:{}-{}", self.name, start, end);
-        derive_subgraph_operation(
+        if let (Ok(start), Some(Ok(end))) =
+            (start.extract::<i64>(), end.map(|end| end.extract::<i64>()))
+        {
+            return self.subgraph_by_coordinates(ctx, new_sample, start, end);
+        }
+        let (start_point, end_point) = self.subgraph_points(ctx, start, end)?;
+        let child = run_context_operation_write(
             ctx,
-            Some(self.collection_name.clone()),
-            self.sample_name.clone(),
-            new_sample.clone(),
-            region,
-            backbone,
-        )
-        .map_err(|e| PyRuntimeError::new_err(format!("Error deriving subgraph: {e}")))?;
-        let conn = ctx.graph().conn();
-        let child_id = BlockGroup::get_id(
-            &self.collection_name,
-            &new_sample,
-            &self.name,
-            Some(&self.id),
-        );
-        let found = BlockGroup::get_by_id(conn, &child_id, None)
-            .map_err(|e| PyRuntimeError::new_err(format!("Subgraph created but not found: {e}")))?;
-        Ok(self.to_py_block_group(found))
+            |context| {
+                let block_group =
+                    derive_subgraph_between(context, &self.id, &new_sample, start_point, end_point)
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("Error deriving subgraph: {e}"))
+                        })?;
+                let summary = OperationSummary::new(
+                    OperationInfo {
+                        files: vec![],
+                        description: "subgraph".to_string(),
+                    },
+                    format!(" {new_sample}: subgraph of {}", self.name),
+                );
+                Ok((block_group, summary))
+            },
+            |error| PyRuntimeError::new_err(format!("Error deriving subgraph: {error}")),
+        )?;
+        Ok(self.to_py_block_group(child))
     }
 
     /// Split this sequence graph into coordinate-bounded subgraphs.
@@ -1037,19 +1186,21 @@ impl PySequenceGraph {
     /// Parameters
     /// new_sample : str
     ///     Sample name for the derived sequence graphs.
-    /// breakpoints : str, optional
-    ///     Comma-separated coordinate values at which to split.
+    /// breakpoints : list[int], optional
+    ///     Coordinates at which to split.
     /// chunk_size : int, optional
     ///     Split into equal-length pieces of this many bases.
-    /// backbone : str, optional
-    ///     Named path to use as the coordinate backbone.
-    #[pyo3(signature = (new_sample, breakpoints=None, chunk_size=None, backbone=None))]
+    ///
+    /// Returns the chunks in order along the graph, so ``repo.stitch(chunks, ...)`` joins them back
+    /// in the order they were cut.
+    // Coordinates follow the current path. A `backbone` argument naming another path to count
+    // along can be added once named paths are supported.
+    #[pyo3(signature = (new_sample, breakpoints=None, chunk_size=None))]
     fn chunks(
         &self,
         new_sample: String,
         breakpoints: Option<Vec<i64>>,
         chunk_size: Option<i64>,
-        backbone: Option<String>,
     ) -> PyResult<Vec<PySequenceGraph>> {
         let ctx = self.require_context("chunks()")?;
         derive_chunks_operation(
@@ -1058,7 +1209,7 @@ impl PySequenceGraph {
             self.sample_name.clone(),
             new_sample.clone(),
             self.name.clone(),
-            backbone,
+            None,
             breakpoints,
             chunk_size,
         )
@@ -1252,8 +1403,8 @@ impl PySequenceIter {
         slf
     }
 
-    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<String> {
-        slf.sequences.next()
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<PySequence> {
+        slf.sequences.next().map(PySequence::unnamed)
     }
 }
 

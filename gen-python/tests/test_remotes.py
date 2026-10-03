@@ -21,7 +21,7 @@ def archived_asset_bytes_by_id(repository):
             "SELECT lower(hex(id)), uri, checksum FROM gen_asset_refs"
         )
     }
-    reachable_asset_ids = {asset.id for asset in repository.get_assets()}
+    reachable_asset_ids = {str(asset.id) for asset in repository.get_assets()}
     asset_directory = Path(repository.db_path).parent / "assets"
     archived_assets = {}
 
@@ -109,7 +109,7 @@ class RemoteTests(unittest.TestCase):
         origin = self.repository.add_remote("origin", (self.root / "upstream").as_uri())
         backup = self.repository.add_remote("backup", (self.root / "backup").as_uri())
         self.assertEqual(
-            [remote.name for remote in self.repository.get_remotes()],
+            [remote.name for remote in self.repository.remotes],
             ["backup", "origin"],
         )
         self.repository.set_default_remote(origin)

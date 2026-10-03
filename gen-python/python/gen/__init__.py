@@ -1,10 +1,11 @@
 """Python bindings to the Gen version control system."""
 
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
+from importlib.metadata import version as _version
 
 try:
-    __version__ = version("gen")
-except PackageNotFoundError:
+    __version__ = _version("gen")
+except _PackageNotFoundError:
     __version__ = "0.0.0"
 
 
@@ -18,14 +19,13 @@ from .gen import (
     HashId,
     Locus,
     Node,
-    NodeSlice,
     Operation,
     Position,
     Remote,
     Repository,
     Sample,
+    Sequence,
     SequenceGraph,
-    SequencePart,
     SuperPosition,
     clone,
 )
@@ -45,23 +45,27 @@ else:
     GraphWidget = TextGraphWidget
     freeze_all_widgets = None
 
+# Widgets are only ever returned by plot(), so they are not part of the public namespace.
 __all__ = [
     "Annotation",
     "Asset",
     "Branch",
-    "GraphWidget",
-    "freeze_all_widgets",
     "HashId",
     "Locus",
     "Node",
-    "NodeSlice",
     "Operation",
     "Position",
     "Remote",
     "Repository",
     "Sample",
+    "Sequence",
     "SequenceGraph",
-    "SequencePart",
     "SuperPosition",
     "clone",
+    "freeze_all_widgets",
 ]
+
+
+def __dir__() -> list[str]:
+    # Keep submodules and helper imports out of dir(gen) and tab completion.
+    return sorted(__all__)

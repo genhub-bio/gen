@@ -1,17 +1,15 @@
 use std::{fs, path::PathBuf};
 
 use r#gen::{get_config_connection, get_connection_for_branch};
-use gen_core::config::Workspace;
+use gen_core::{HashId, config::Workspace};
 use gen_models::{
     block_group::BlockGroup,
-    collection::Collection,
     db::DbContext,
     errors::OperationError,
     history::{
         HistoryStore,
         dolt::{DoltHistoryStore, set_commit_author_email, set_commit_author_name},
     },
-    node::Node,
     operations::{Defaults, OperationSummary, commit_operation_summary},
     sample::Sample,
 };
@@ -23,9 +21,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pyme
 
 use super::{
     block_group::PySequenceGraph,
-    graph_node::PyGraphNode,
     hash_id::PyHashId,
-    jupyter_widget::{PyGraphController, build_widget},
     sample::PySample,
     utils::{block_group_err_to_pyerr, path_to_py_path, py_query, sqlite_err_to_pyerr},
 };
@@ -36,6 +32,7 @@ pub mod history;
 pub mod imports;
 pub mod remote;
 pub mod search;
+pub mod stitch;
 pub mod updates;
 
 /// Clones a remote Gen repository and opens it.
@@ -141,8 +138,10 @@ where
 
 /// The main entry point for the gen Python module.
 ///
-/// This class manages the database connection and provides methods for
-/// querying and manipulating the database.
+/// `Repository(path)` opens, or creates, the repository at `path`. Import sequences into samples
+/// with the `import_*` methods, then edit and read them through the returned `Sample` and
+/// `SequenceGraph` objects. The repository itself holds history (branches and operations), remotes
+/// and search.
 #[gen_stub_pyclass]
 #[pyclass(name = "Repository", unsendable)]
 pub struct PyRepository {
@@ -305,8 +304,8 @@ impl PyRepository {
     }
 
     /// Path of the graph database file.
-    #[getter]
-    #[gen_stub(override_return_type(type_repr = "pathlib.Path", imports = ("pathlib")))]
+    #[getter(_db_path)]
+    #[gen_stub(skip)]
     fn get_db_path(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let path = self
             .context
@@ -339,35 +338,59 @@ impl PyRepository {
 
     // SequenceGraph queries
 
-    /// Return the sequence graph with this `HashId` (see `SequenceGraph.id`). Use it to rebuild a
-    /// graph handle in another Repository object, for example in a worker thread.
-    fn get_sequence_graph_by_id(&self, id: &PyHashId) -> PyResult<PySequenceGraph> {
+    /// Return the sequence graph with this `HashId` (see `SequenceGraph.id`), or its hex string. Use
+    /// it to rebuild a graph handle in another Repository object, for example in a worker thread.
+    fn get_sequence_graph(
+        &self,
+        #[gen_stub(override_type(type_repr = "HashId | str", imports = ()))] id: &Bound<'_, PyAny>,
+    ) -> PyResult<PySequenceGraph> {
+        let hash_id = match id.extract::<PyRef<PyHashId>>() {
+            Ok(hash_id) => hash_id.gen_hash_id()?,
+            Err(_) => HashId::try_from(id.extract::<&str>()?)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+        };
         let conn = self.context.graph().conn();
         let block_group =
-            BlockGroup::get_by_id(conn, &id.hash_id, None).map_err(block_group_err_to_pyerr)?;
+            BlockGroup::get_by_id(conn, &hash_id, None).map_err(block_group_err_to_pyerr)?;
         Ok(self.to_py_block_group(block_group))
     }
 
-    /// Return every sequence graph in the repository, across all samples and collections. Group
-    /// them by sample with `repo.samples` instead.
-    fn get_sequence_graphs(&self) -> PyResult<Vec<PySequenceGraph>> {
+    /// Return the sequence graphs in the repository, across all samples and collections. Pass
+    /// `name`, `sample` (a name or a `Sample`) and `collection` to keep only the matching ones.
+    #[pyo3(signature = (name=None, sample=None, collection=None))]
+    fn get_sequence_graphs(
+        &self,
+        name: Option<&str>,
+        #[gen_stub(override_type(type_repr = "str | Sample | None", imports = ()))] sample: Option<
+            &Bound<'_, PyAny>,
+        >,
+        collection: Option<&str>,
+    ) -> PyResult<Vec<PySequenceGraph>> {
+        let (sample_name, sample_collection) = match sample {
+            Some(sample) => match sample.extract::<PyRef<PySample>>() {
+                Ok(sample) => (
+                    Some(sample.sample_name.clone()),
+                    Some(sample.collection_name.clone()),
+                ),
+                Err(_) => (Some(sample.extract::<String>()?), None),
+            },
+            None => (None, None),
+        };
+        let collection = collection.map(str::to_string).or(sample_collection);
         let conn = self.context.graph().conn();
         Ok(BlockGroup::select(conn)
             .load()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
             .into_iter()
-            .map(|bg| self.to_py_block_group(bg))
-            .collect())
-    }
-
-    /// Return the sequence graphs belonging to one collection.
-    fn get_sequence_graphs_by_collection(
-        &self,
-        collection_name: &str,
-    ) -> PyResult<Vec<PySequenceGraph>> {
-        let conn = self.context.graph().conn();
-        Ok(Collection::get_block_groups(conn, collection_name, None)
-            .into_iter()
+            .filter(|bg| {
+                name.is_none_or(|name| bg.name == name)
+                    && sample_name
+                        .as_ref()
+                        .is_none_or(|sample| bg.sample_name == *sample)
+                    && collection
+                        .as_ref()
+                        .is_none_or(|collection| bg.collection_name == *collection)
+            })
             .map(|bg| self.to_py_block_group(bg))
             .collect())
     }
@@ -396,56 +419,6 @@ impl PyRepository {
             }
         }
         Ok(samples)
-    }
-
-    // Plot
-
-    /// show_history : bool, optional
-    ///     Keep retired edit-site and pruned edges in the graph, dimmed,
-    ///     instead of removing them along with the nodes only they reach.
-    ///     Defaults to ``False``.
-    #[pyo3(signature = (sequence_graph, rows=None, cols=None, detail=None, colors=None, show_history=false))]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "mirrors plot()'s Python signature"
-    )]
-    fn plot(
-        &self,
-        py: Python<'_>,
-        sequence_graph: &PySequenceGraph,
-        rows: Option<u32>,
-        cols: Option<u32>,
-        detail: Option<&str>,
-        colors: Option<Py<PyAny>>,
-        show_history: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let mut ctrl = PyGraphController::for_sequence_graph(sequence_graph, show_history)?;
-        if let Some(node_detail) = detail {
-            ctrl.set_detail(node_detail)?;
-        }
-        let ctrl = Py::new(py, ctrl)?;
-        build_widget(py, ctrl, rows, cols, colors)
-    }
-
-    /// Return the stored sequence slice of a node. Prefer `SequenceGraph.get_node_sequence()`,
-    /// `locus.sequence` or `graph.all_sequences()`.
-    #[gen_stub(skip)]
-    fn get_node_sequence(&self, node_key: &PyGraphNode) -> PyResult<String> {
-        let sequences_by_node_id = Node::get_sequences_by_node_ids(
-            self.context.graph().conn(),
-            self.context.workspace(),
-            &[node_key.node_id],
-            None,
-        );
-        let sequence = sequences_by_node_id.get(&node_key.node_id).ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Node with id {:?} not found",
-                node_key.node_id
-            ))
-        })?;
-        sequence
-            .get_sequence(node_key.sequence_start, node_key.sequence_end)
-            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
     }
 }
 
@@ -494,7 +467,7 @@ mod python_tests {
                     r#"
                     repo = repository("{path}")
                     assert hasattr(repo, "gen_dir")
-                    assert hasattr(repo, "db_path")
+                    assert hasattr(repo, "_db_path")
                     "#
                 )
             );
@@ -528,7 +501,7 @@ mod python_tests {
             let cloned = clone_repository(py, &remote_url, Some(destination), None, None)
                 .expect("should clone and open repository");
 
-            let block_groups = cloned.get_sequence_graphs().unwrap();
+            let block_groups = cloned.get_sequence_graphs(None, None, None).unwrap();
             assert_eq!(
                 block_groups.len(),
                 1,
@@ -560,7 +533,10 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
+            let block_groups = py_repo
+                .borrow(py)
+                .get_sequence_graphs(None, None, None)
+                .unwrap();
             assert_eq!(block_groups.len(), 1);
             assert_eq!(block_groups[0].name, "chr1");
         });
@@ -652,12 +628,12 @@ mod python_tests {
                 py_repo,
                 r#"
                 first = py_repo.import_sequence("ACGTACGT", "chr1", sample="wt")
-                assert first.name == "chr1" and first.sample_name == "wt"
-                wt = next(sample for sample in py_repo.samples if sample.sample_name == "wt")
+                assert first.name == "chr1" and first.sample.name == "wt"
+                wt = next(sample for sample in py_repo.samples if sample.name == "wt")
                 second = py_repo.import_sequence("TTTT", "chr2", sample=wt)
-                assert second.sample_name == "wt"
+                assert second.sample.name == "wt"
                 third = py_repo.import_sequence("GGGG", "chr3", sample="wt")
-                samples = {sample.sample_name: sample for sample in py_repo.samples}
+                samples = {sample.name: sample for sample in py_repo.samples}
                 assert sorted(graph.name for graph in samples["wt"]) == ["chr1", "chr2", "chr3"]
                 other = py_repo.import_sequence("GGGG", "chrA", sample="other")
                 assert len(py_repo.get_sequence_graphs()) == 4
@@ -694,7 +670,7 @@ mod python_tests {
                         assert message in str(error), str(error)
                     else:
                         raise AssertionError(f"expected ValueError for {args!r}")
-                assert len(py_repo.get_sequence_graphs()) == 0
+                assert len(py_repo.get_sequence_graphs(None, None, None)) == 0
                 "#
             );
         });
@@ -737,7 +713,7 @@ mod python_tests {
                     pass
                 else:
                     raise AssertionError("expected reusing a name in a sample to fail")
-                assert len(py_repo.get_sequence_graphs()) == 1
+                assert len(py_repo.get_sequence_graphs(None, None, None)) == 1
                 "#
             );
         });
@@ -755,7 +731,7 @@ mod python_tests {
                 graph = py_repo.import_sequence("ACGTAC", "plasmid", circular=True)
                 assert graph.name == "plasmid"
                 reference = py_repo.import_reference_sequence("GGCC", "ref", name="ring", circular=True)
-                assert reference.name == "ring" and reference.sample_name == "ref"
+                assert reference.name == "ring" and reference.sample.name == "ref"
                 try:
                     py_repo.import_reference_sequence("TTTT", "ref", name="ring")
                 except RuntimeError as error:
@@ -837,10 +813,13 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
+            let block_groups = py_repo
+                .borrow(py)
+                .get_sequence_graphs(None, None, None)
+                .unwrap();
             let bg = &block_groups[0];
 
-            py_repo.borrow(py).build_index("dna", 4, None).unwrap();
+            py_repo.borrow(py).build_index("dna", 4).unwrap();
 
             let index_dir = py_repo
                 .borrow(py)
@@ -875,7 +854,7 @@ mod python_tests {
                 )
                 .unwrap();
 
-            py_repo.borrow(py).build_index("dna", 4, None).unwrap();
+            py_repo.borrow(py).build_index("dna", 4).unwrap();
             let hits = py_repo.borrow(py).search("ACGT", None, "dna").unwrap();
             assert!(!hits.is_empty(), "Expected match when searching with index");
         });
@@ -900,10 +879,13 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
+            let block_groups = py_repo
+                .borrow(py)
+                .get_sequence_graphs(None, None, None)
+                .unwrap();
             let bg = &block_groups[0];
 
-            py_repo.borrow(py).build_index("dna", 4, None).unwrap();
+            py_repo.borrow(py).build_index("dna", 4).unwrap();
             let index_dir = py_repo
                 .borrow(py)
                 .context
@@ -940,7 +922,10 @@ mod python_tests {
                 )
                 .unwrap();
 
-            let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
+            let block_groups = py_repo
+                .borrow(py)
+                .get_sequence_graphs(None, None, None)
+                .unwrap();
             let bg = &block_groups[0];
             let bg_id = bg.id;
 

@@ -20,8 +20,7 @@ use crate::python_api::{
 
 mod metadata;
 
-/// The sequence graphs produced by a single import/update/derive call, all
-/// within one sample.
+/// The sequence graphs of one sample, such as the records of an imported FASTA file.
 ///
 /// Acts like a read-only list of ``SequenceGraph``: index it, iterate it, or
 /// call ``len()`` on it. Indexing out of range raises ``IndexError``.
@@ -30,10 +29,10 @@ mod metadata;
 #[derive(Clone)]
 pub struct PySample {
     /// Collection this sample belongs to.
-    #[pyo3(get)]
+    #[pyo3(get, name = "collection")]
     pub collection_name: String,
     /// Name of the sample.
-    #[pyo3(get)]
+    #[pyo3(get, name = "name")]
     pub sample_name: String,
     /// The sample's sequence graphs, in order. A sample can hold several (for example one per
     /// chromosome or imported record).
@@ -124,6 +123,7 @@ impl PySample {
     }
 
     /// IPython display hook — called when a cell ends with a Sample.
+    #[gen_stub(skip)]
     fn _ipython_display_(slf: &Bound<'_, PySample>) -> PyResult<()> {
         let py = slf.py();
         let widget = slf.call_method0("plot")?;
@@ -173,21 +173,26 @@ impl PySample {
         }
 
         if exist_ok && Sample::get_by_name(context.graph().conn(), &new_name).is_ok() {
-            let existing_graphs =
-                Sample::get_block_groups(context.graph().conn(), &self.collection_name, &new_name, None)
-                    .into_iter()
-                    .map(|block_group| PySequenceGraph {
-                        id: block_group.id,
-                        collection_name: block_group.collection_name,
-                        sample_name: block_group.sample_name,
-                        name: block_group.name,
-                        context: Some(context.clone()),
-                    })
-                    .collect();
+            let existing_graphs = Sample::get_block_groups(
+                context.graph().conn(),
+                &self.collection_name,
+                &new_name,
+                None,
+            )
+            .into_iter()
+            .map(|block_group| PySequenceGraph {
+                id: block_group.id,
+                collection_name: block_group.collection_name,
+                sample_name: block_group.sample_name,
+                name: block_group.name,
+                context: Some(context.clone()),
+            })
+            .collect();
             return Ok(PySample::new(
                 self.collection_name.clone(),
                 new_name,
                 existing_graphs,
+                context.clone(),
             ));
         }
 

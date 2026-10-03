@@ -17,15 +17,15 @@ class LocusIndexingTests(RepositoryTestCase):
         [self.locus] = self.graph.search("GGAACACA", sequence_kind="exact")
 
     def assert_same_graph_coordinate(self, left, right):
-        self.assertEqual(left.node.id, right.node.id)
+        self.assertEqual(left.node._id, right.node._id)
         self.assertEqual(
-            left.node.sequence_start + left.offset,
-            right.node.sequence_start + right.offset,
+            left.node._sequence_start + left.offset,
+            right.node._sequence_start + right.offset,
         )
 
     def assert_reverse_correspondence(self, forward):
         reverse = forward.reverse_complement()
-        self.assertEqual(forward[0].node.id, reverse[-1].node.id)
+        self.assertEqual(forward[0].node._id, reverse[-1].node._id)
         self.assertEqual(forward[0].offset, reverse[-1].offset)
         self.assertEqual(forward[0].strand, "+")
         self.assertEqual(reverse[-1].strand, "-")
@@ -37,12 +37,12 @@ class LocusIndexingTests(RepositoryTestCase):
         self.assertEqual(reverse[-1], reverse.end())
 
     def test_integer_indexing_single_forward_slice(self):
-        self.assertEqual(len(self.locus.slices), 1)
+        self.assertEqual(len(self.node_runs(self.locus)), 1)
         for index in range(len(self.locus)):
             position = self.locus[index]
             self.assertIsInstance(position, gen.Position)
             self.assertEqual(position.offset, 20 + index)
-            self.assertEqual(position.node.id, self.locus.start().node.id)
+            self.assertEqual(position.node._id, self.locus.start().node._id)
             self.assertEqual(position.strand, "+")
         self.assertEqual(self.locus[0], self.locus.start())
         self.assertEqual(self.locus[len(self.locus) - 1], self.locus.end())
@@ -59,7 +59,7 @@ class LocusIndexingTests(RepositoryTestCase):
         self.assertIsInstance(result, gen.Locus)
         self.assertEqual(len(result), 4)
         self.assertEqual(result, self.locus.slice(2, 6))
-        self.assertEqual((result.slices[0].start, result.slices[0].end), (22, 26))
+        self.assertEqual((result.start().offset, result.end().offset + 1), (22, 26))
         self.assertEqual(result[0], self.locus[2])
         self.assertEqual(result[-1], self.locus[5])
 
