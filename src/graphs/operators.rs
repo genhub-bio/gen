@@ -1,20 +1,22 @@
 use core::ops::Range;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gen_core::{
-    HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace, is_end_node, is_start_node,
+    HashId, NodeIntervalBlock, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand, Workspace,
+    is_end_node, is_start_node,
 };
+use gen_graph::GraphNode;
 use gen_models::{
     block_group::{BlockGroup, NewBlockGroup, SubgraphBoundary},
     block_group_edge::{AugmentedEdge, BlockGroupEdge, BlockGroupEdgeData},
     db::{DbContext, GraphConnection},
-    edge::Edge,
+    edge::{Edge, EdgeError},
     errors::{BlockGroupError, OperationError, PathError},
     path::Path,
     region::{Region, resolve},
     sample::Sample,
 };
-use petgraph::algo::is_cyclic_directed;
+use petgraph::algo::{is_cyclic_directed, kosaraju_scc};
 use thiserror::Error;
 
 use crate::graphs::{BlockGroupChunk, GraphError, NodePoint, load_block_group_chunk, stitch};
@@ -39,6 +41,8 @@ pub enum GraphOperationError {
     InvalidStitchInput(String),
     #[error("Stitched block group contains a cycle: {0}")]
     StitchedGraphCycle(String),
+    #[error("Edge creation error: {0}")]
+    EdgeError(#[from] EdgeError),
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
 }
@@ -418,6 +422,374 @@ fn validate_stitch_inputs(stitch_inputs: &[StitchInput<'_>]) -> Result<(), Graph
     Ok(())
 }
 
+/// A point on a node, in the node's own sequence coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SubgraphPoint {
+    pub node_id: HashId,
+    pub coordinate: i64,
+}
+
+/// Creates a block group named like `source_block_group_id` in `new_sample_name` that holds every
+/// route of the source between `start` and `end`, which need no linear coordinates.
+///
+/// The new block group gets a current path when the source's own current path runs from `start`
+/// to `end`; otherwise it has none, since no single route is the obvious one.
+pub fn derive_subgraph_between(
+    context: &DbContext,
+    source_block_group_id: &HashId,
+    new_sample_name: &str,
+    start: SubgraphPoint,
+    end: SubgraphPoint,
+) -> Result<BlockGroup, GraphOperationError> {
+    let conn = context.graph().conn();
+    conn.execute_batch("SAVEPOINT derive_subgraph_between")?;
+    let result =
+        create_subgraph_between(context, source_block_group_id, new_sample_name, start, end);
+    match result {
+        Ok(block_group) => {
+            conn.execute_batch("RELEASE derive_subgraph_between")?;
+            Ok(block_group)
+        }
+        Err(err) => {
+            conn.execute_batch("ROLLBACK TO derive_subgraph_between")?;
+            conn.execute_batch("RELEASE derive_subgraph_between")?;
+            Err(err)
+        }
+    }
+}
+
+fn create_subgraph_between(
+    context: &DbContext,
+    source_block_group_id: &HashId,
+    new_sample_name: &str,
+    start: SubgraphPoint,
+    end: SubgraphPoint,
+) -> Result<BlockGroup, GraphOperationError> {
+    let conn = context.graph().conn();
+    let source = BlockGroup::get_by_id(conn, source_block_group_id, None)?;
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
+    let child = BlockGroup::create(
+        conn,
+        NewBlockGroup {
+            collection_name: &source.collection_name,
+            sample_name: new_sample_name,
+            name: &source.name,
+            parent_block_group_id: Some(source_block_group_id),
+            ..Default::default()
+        },
+    )?;
+
+    let boundary = |point: &SubgraphPoint| NodeIntervalBlock {
+        node_id: point.node_id,
+        start: 0,
+        end: 0,
+        sequence_start: point.coordinate,
+        sequence_end: point.coordinate,
+        strand: Strand::Forward,
+    };
+    let start_block = boundary(&start);
+    let end_block = boundary(&end);
+    BlockGroup::derive_subgraph(
+        conn,
+        context.workspace(),
+        source_block_group_id,
+        SubgraphBoundary {
+            block: &start_block,
+            sequence_coordinate: start.coordinate,
+        },
+        SubgraphBoundary {
+            block: &end_block,
+            sequence_coordinate: end.coordinate,
+        },
+        &child.id,
+        true,
+    )?;
+
+    if let Ok(current_path) = BlockGroup::get_current_path(conn, source_block_group_id, None) {
+        let child_edges = BlockGroupEdge::edges_for_block_group(conn, &child.id, None);
+        let child_edge_ids = child_edges
+            .iter()
+            .map(|edge| edge.edge.id)
+            .collect::<HashSet<_>>();
+        let internal = Path::edges_for_path(conn, &current_path.id, None)
+            .into_iter()
+            .filter(|edge| {
+                !is_start_node(edge.source_node_id)
+                    && !is_end_node(edge.target_node_id)
+                    && child_edge_ids.contains(&edge.id)
+            })
+            .collect::<Vec<_>>();
+        let chained = internal
+            .windows(2)
+            .all(|pair| pair[0].target_node_id == pair[1].source_node_id);
+        let begins_at_start = internal
+            .first()
+            .map_or(start.node_id == end.node_id, |edge| {
+                edge.source_node_id == start.node_id && edge.source_coordinate >= start.coordinate
+            });
+        let ends_at_end = internal
+            .last()
+            .map_or(start.node_id == end.node_id, |edge| {
+                edge.target_node_id == end.node_id && edge.target_coordinate <= end.coordinate
+            });
+        let start_edge = child_edges.iter().find(|edge| {
+            is_start_node(edge.edge.source_node_id)
+                && edge.edge.target_node_id == start.node_id
+                && edge.edge.target_coordinate == start.coordinate
+        });
+        let end_edge = child_edges.iter().find(|edge| {
+            is_end_node(edge.edge.target_node_id)
+                && edge.edge.source_node_id == end.node_id
+                && edge.edge.source_coordinate == end.coordinate
+        });
+        if chained
+            && begins_at_start
+            && ends_at_end
+            && let (Some(start_edge), Some(end_edge)) = (start_edge, end_edge)
+        {
+            let edge_ids = core::iter::once(start_edge.edge.id)
+                .chain(internal.iter().map(|edge| edge.id))
+                .chain(core::iter::once(end_edge.edge.id))
+                .collect::<Vec<_>>();
+            Path::create(conn, &current_path.name, &child.id, &edge_ids)?;
+        }
+    }
+    Ok(child)
+}
+
+/// A node-coordinate span of a forward-strand locus, as read in order along the locus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StitchRange {
+    pub node_id: HashId,
+    pub start: i64,
+    pub end: i64,
+}
+
+/// One piece of a stitch: a whole block group, or the span of a locus within one.
+///
+/// A locus is linear, but stitching it takes every variant route between its first and last
+/// positions, so the result keeps the variation of that part of the graph without first
+/// deriving a subgraph for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StitchSource {
+    BlockGroup(HashId),
+    Locus {
+        block_group_id: HashId,
+        ranges: Vec<StitchRange>,
+    },
+}
+
+/// Creates a new block group in `new_sample_name` by concatenating `sources` in order: the end of
+/// each piece is connected to the start of the next. The result has a current path when every
+/// piece does (a locus contributes the route it spells).
+pub fn stitch_sources(
+    context: &DbContext,
+    collection_name: &str,
+    new_sample_name: &str,
+    new_region_name: &str,
+    sources: &[StitchSource],
+) -> Result<BlockGroup, GraphOperationError> {
+    let conn = context.graph().conn();
+    conn.execute_batch("SAVEPOINT stitch_sources")?;
+    let result = create_stitched_from_sources(
+        context,
+        collection_name,
+        new_sample_name,
+        new_region_name,
+        sources,
+    );
+    match result {
+        Ok(block_group) => {
+            conn.execute_batch("RELEASE stitch_sources")?;
+            Ok(block_group)
+        }
+        Err(err) => {
+            conn.execute_batch("ROLLBACK TO stitch_sources")?;
+            conn.execute_batch("RELEASE stitch_sources")?;
+            Err(err)
+        }
+    }
+}
+
+fn create_stitched_from_sources(
+    context: &DbContext,
+    collection_name: &str,
+    new_sample_name: &str,
+    new_region_name: &str,
+    sources: &[StitchSource],
+) -> Result<BlockGroup, GraphOperationError> {
+    let conn = context.graph().conn();
+    let mut seen_block_group_ids = HashSet::new();
+    let mut seen_edge_ids = HashSet::new();
+    for source in sources {
+        if let StitchSource::BlockGroup(block_group_id) = source {
+            if !seen_block_group_ids.insert(*block_group_id) {
+                return Err(GraphOperationError::InvalidStitchInput(format!(
+                    "sequence graph {block_group_id} appears more than once"
+                )));
+            }
+            // Stitching reads each graph's current path to build the new one.
+            if BlockGroup::get_current_path(conn, block_group_id, None).is_err() {
+                return Err(GraphOperationError::InvalidStitchInput(format!(
+                    "sequence graph {block_group_id} has no current path to stitch"
+                )));
+            }
+            for edge in BlockGroupEdge::edges_for_block_group(conn, block_group_id, None) {
+                if !edge.edge.is_start_edge()
+                    && !edge.edge.is_end_edge()
+                    && !seen_edge_ids.insert(edge.edge.id)
+                {
+                    return Err(GraphOperationError::InvalidStitchInput(format!(
+                        "sequence graphs share edge {}",
+                        edge.edge.id
+                    )));
+                }
+            }
+        }
+    }
+
+    let _new_sample = Sample::get_or_create(
+        conn,
+        gen_models::sample::NewSample {
+            name: new_sample_name,
+            ..Default::default()
+        },
+    );
+    let child_block_group = BlockGroup::create(
+        conn,
+        NewBlockGroup {
+            collection_name,
+            sample_name: new_sample_name,
+            name: new_region_name,
+            ..Default::default()
+        },
+    )?;
+
+    let mut chunks = Vec::with_capacity(sources.len());
+    for source in sources {
+        match source {
+            StitchSource::BlockGroup(block_group_id) => {
+                let bg_edges = BlockGroupEdge::edges_for_block_group(conn, block_group_id, None)
+                    .into_iter()
+                    .filter(|edge| !edge.edge.is_start_edge() && !edge.edge.is_end_edge())
+                    .map(|edge| BlockGroupEdgeData {
+                        block_group_id: child_block_group.id,
+                        edge_id: edge.edge.id,
+                        chromosome_index: edge.chromosome_index,
+                        phased: edge.phased,
+                    })
+                    .collect::<Vec<_>>();
+                BlockGroupEdge::bulk_create(conn, &bg_edges);
+                chunks.push(load_block_group_chunk(conn, *block_group_id));
+            }
+            StitchSource::Locus {
+                block_group_id,
+                ranges,
+            } => chunks.push(add_locus_chunk(
+                context,
+                block_group_id,
+                ranges,
+                &child_block_group.id,
+            )?),
+        }
+    }
+
+    make_stitch_from_block_groups(context, &chunks, child_block_group.id, new_region_name)?;
+    validate_stitched_block_group_is_acyclic(conn, context.workspace(), &child_block_group.id)?;
+    Ok(child_block_group)
+}
+
+/// Copies the subgraph spanned by a locus into `target_block_group_id` and returns the chunk that
+/// stitches it, whose path is the route the locus itself spells.
+fn add_locus_chunk(
+    context: &DbContext,
+    block_group_id: &HashId,
+    ranges: &[StitchRange],
+    target_block_group_id: &HashId,
+) -> Result<BlockGroupChunk, GraphOperationError> {
+    let conn = context.graph().conn();
+    let (Some(first), Some(last)) = (ranges.first(), ranges.last()) else {
+        return Err(GraphOperationError::InvalidStitchInput(
+            "a locus to stitch must cover at least one base".to_string(),
+        ));
+    };
+    let graph = BlockGroup::get_graph(conn, context.workspace(), block_group_id, None)?;
+    let holds = |node_id: HashId, coordinate: i64| {
+        graph.nodes().any(|node| {
+            node.node_id == node_id
+                && node.sequence_start <= coordinate
+                && node.sequence_end >= coordinate
+        })
+    };
+    if !holds(first.node_id, first.start) || !holds(last.node_id, last.end) {
+        return Err(GraphOperationError::InvalidStitchInput(
+            "a locus to stitch is not part of its sequence graph".to_string(),
+        ));
+    }
+
+    let boundary_block = |range: &StitchRange| NodeIntervalBlock {
+        node_id: range.node_id,
+        start: 0,
+        end: 0,
+        sequence_start: range.start,
+        sequence_end: range.end,
+        strand: Strand::Forward,
+    };
+    let start_block = boundary_block(first);
+    let end_block = boundary_block(last);
+    BlockGroup::derive_subgraph(
+        conn,
+        context.workspace(),
+        block_group_id,
+        SubgraphBoundary {
+            block: &start_block,
+            sequence_coordinate: first.start,
+        },
+        SubgraphBoundary {
+            block: &end_block,
+            sequence_coordinate: last.end,
+        },
+        target_block_group_id,
+        false,
+    )?;
+
+    let mut path_edges = Vec::with_capacity(ranges.len().saturating_sub(1));
+    for pair in ranges.windows(2) {
+        path_edges.push(Edge::create(
+            conn,
+            pair[0].node_id,
+            pair[0].end,
+            Strand::Forward,
+            pair[1].node_id,
+            pair[1].start,
+            Strand::Forward,
+        )?);
+    }
+    let start_point = NodePoint {
+        id: first.node_id,
+        coordinate: first.start,
+        strand: Strand::Forward,
+    };
+    let end_point = NodePoint {
+        id: last.node_id,
+        coordinate: last.end,
+        strand: Strand::Forward,
+    };
+    Ok(BlockGroupChunk {
+        entry_node_points: vec![start_point.clone()],
+        exit_node_points: vec![end_point.clone()],
+        path_edges,
+        path_start_point: Some(start_point),
+        path_end_point: Some(end_point),
+    })
+}
+
 fn create_stitched_block_group(
     context: &DbContext,
     collection_name: &str,
@@ -477,10 +849,35 @@ fn validate_stitched_block_group_is_acyclic(
     workspace: &Workspace,
     block_group_id: &HashId,
 ) -> Result<(), GraphOperationError> {
-    let graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)?;
+    let mut graph = BlockGroup::get_graph(conn, workspace, block_group_id, None)?;
+    // An insertion inside a node meets its own routing block again, a loop that reads no bases
+    // twice. Only cycles through sequence blocks come from stitching.
+    BlockGroup::contract_zero_width_blocks(&mut graph);
     if is_cyclic_directed(&graph) {
+        let describe = |block: &GraphNode| {
+            format!(
+                "{}:{}-{}",
+                block.node_id, block.sequence_start, block.sequence_end
+            )
+        };
+        let cycle = kosaraju_scc(&graph)
+            .into_iter()
+            .find(|component| component.len() > 1)
+            .map(|component| {
+                graph
+                    .all_edges()
+                    .filter(|(source, target, _)| {
+                        component.contains(source) && component.contains(target)
+                    })
+                    .map(|(source, target, _)| {
+                        format!("{} -> {}", describe(&source), describe(&target))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
         return Err(GraphOperationError::StitchedGraphCycle(format!(
-            "block group {block_group_id} is cyclic"
+            "block group {block_group_id} is cyclic through {cycle}"
         )));
     }
 

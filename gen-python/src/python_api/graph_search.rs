@@ -9,16 +9,15 @@ use pyo3::{
 };
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use super::{
-    block_group::PySequenceGraph, graph_node::PyGraphNodeSlice, locus::GraphLocusExt as _,
-    position::PyPosition,
-};
+use super::{block_group::PySequenceGraph, locus::GraphLocusExt as _, position::PyPosition};
 
 /// An ordered span in graph space, independent of how nodes are split for display.
 ///
-/// Obtain via `sg.search(query)` or `repo.search(query)`.
-/// Pass it, or its `.start()` or `.end()`, to `widget.go_to()`.
-/// `.sequence` reads the bases it covers fresh from the database on every access.
+/// Obtain via `sg.search(query)`, `sg.region(text)` or `annotation.locus`.
+/// Pass it, or its `.start()` or `.end()`, to `widget.go_to()`, or to an editing method such as
+/// `sg.replace(locus, sequence)`.
+/// `len(locus)` is the number of bases it covers, `locus[i]` is the `Position` of base `i` and
+/// `locus[a:b]` a sub-locus.
 #[gen_stub_pyclass]
 #[pyclass(name = "Locus", unsendable)]
 #[derive(Clone)]
@@ -138,7 +137,7 @@ impl PyGraphLocus {
 #[pymethods]
 impl PyGraphLocus {
     /// The first position of the locus in reading order.
-    fn start(&self) -> PyResult<PyPosition> {
+    pub(crate) fn start(&self) -> PyResult<PyPosition> {
         let slice = self
             .presentation
             .slices
@@ -156,7 +155,7 @@ impl PyGraphLocus {
     }
 
     /// The last position of the locus in reading order.
-    fn end(&self) -> PyResult<PyPosition> {
+    pub(crate) fn end(&self) -> PyResult<PyPosition> {
         let slice = self
             .presentation
             .slices
@@ -171,19 +170,6 @@ impl PyGraphLocus {
         };
         Ok(PyPosition::in_block(slice.block, offset, slice.strand)
             .attached_to(self.sequence_graph.clone()))
-    }
-
-    /// Ordered node slices as displayed when this locus was obtained.
-    ///
-    /// Each `NodeSlice` carries a node, local offsets, and a strand. Later edits
-    /// can split nodes without changing this locus's identity.
-    #[getter]
-    fn slices(&self) -> Vec<PyGraphNodeSlice> {
-        self.presentation
-            .slices
-            .iter()
-            .map(|s| PyGraphNodeSlice::from_slice(*s))
-            .collect()
     }
 
     /// Length of the sequence this locus covers.
@@ -227,7 +213,7 @@ impl PyGraphLocus {
     }
 
     /// The same positions read from the opposite strand.
-    fn reverse_complement(&self) -> PyGraphLocus {
+    pub(crate) fn reverse_complement(&self) -> PyGraphLocus {
         PyGraphLocus::with_context(self.presentation.reverse_complement(), self.context.clone())
             .attached_to(self.sequence_graph.clone())
     }
@@ -259,7 +245,7 @@ impl PyGraphLocus {
     /// Strand of this locus: ``"+"`` forward, ``"-"`` reverse, ``"mixed"`` if slices differ,
     /// ``"."`` if empty.
     #[getter]
-    fn strand(&self) -> &str {
+    pub(crate) fn strand(&self) -> &str {
         let mut iter = self.ranges.iter().map(|range| range.strand);
         match iter.next() {
             None => ".",
@@ -304,7 +290,7 @@ impl PyGraphLocus {
         format!("Locus([{}], strand='{}')", segs.join(", "), strand)
     }
 
-    /// The sequence text this locus covers, read fresh from the database on every call.
+    /// The sequence text this locus covers.
     #[getter]
     fn sequence(&self) -> PyResult<String> {
         let context = self.context.as_ref().ok_or_else(|| {
@@ -400,7 +386,7 @@ mod tests {
             assert!(left.ranges == right.ranges);
             assert_eq!(left.__hash__(), right.__hash__());
             assert_eq!(
-                right.slices().len(),
+                right.presentation.slices.len(),
                 2,
                 "presentation retains the original nodes"
             );
@@ -531,7 +517,7 @@ assert [mixed[i].offset for i in range(len(mixed))] == [2, 3, 8, 7, 6]
 assert [mixed[i].strand for i in range(len(mixed))] == ['+', '+', '-', '-', '-']
 assert mixed[0] == mixed.start()
 assert mixed[-1] == mixed.end()
-assert mixed[2].node.sequence_start + mixed[2].offset == 108
+assert mixed[2].node._sequence_start + mixed[2].offset == 108
 assert [mixed[1:4][i].offset for i in range(3)] == [3, 8, 7]
 "
                     ),

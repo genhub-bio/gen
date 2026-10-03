@@ -2,7 +2,7 @@ use std::{path::PathBuf, slice::from_ref};
 
 use r#gen::{
     fasta::FastaError,
-    graphs::combinatorial_library::{SequencePart, parse_library},
+    graphs::combinatorial_library::parse_library,
     imports::{
         fasta::import_fasta,
         genbank::{GenBankImportOptions, import_genbank},
@@ -30,7 +30,10 @@ use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::{PyRepository, run_context_operation_write};
 use crate::python_api::{
-    block_group::PySequenceGraph, sample::PySample, sequence_part::PySequencePart,
+    block_group::PySequenceGraph,
+    hash_id::PyHashId,
+    sample::PySample,
+    sequence::{PySequence, library_parts},
     utils::block_group_err_to_pyerr,
 };
 
@@ -224,10 +227,12 @@ impl PyRepository {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Record an annotation file as a repository asset and return its commit hash.
+    /// Record an annotation file in the repository and return the `HashId` of the operation that
+    /// recorded it.
     ///
     /// The format is inferred from the filename unless provided. A neighboring tabix index is
-    /// discovered unless an index path is provided. Views match file references to block groups.
+    /// discovered unless an index path is provided. The file's features then appear in
+    /// `graph.annotations` and in plots of every sequence graph they land on.
     #[pyo3(signature = (filename, format=None, index=None, name=None, message=None))]
     fn import_annotations(
         &self,
@@ -236,7 +241,7 @@ impl PyRepository {
         index: Option<&str>,
         name: Option<&str>,
         message: Option<&str>,
-    ) -> PyResult<String> {
+    ) -> PyResult<PyHashId> {
         add_annotation_file(
             &self.context,
             filename,
@@ -246,7 +251,7 @@ impl PyRepository {
             message,
             AnnotationFileChecksumOverrides::default(),
         )
-        .map(|commit_hash| commit_hash.to_string())
+        .map(PyHashId::from_dolt)
         .map_err(|error| PyRuntimeError::new_err(format!("Failed to import '{filename}': {error}")))
     }
 
@@ -517,31 +522,19 @@ impl PyRepository {
     }
 
     /// Build a combinatorial library from `parts_list`, a list of columns each holding alternative
-    /// `SequencePart` objects, and return the resulting `SequenceGraph`. Every path through the
+    /// named `Sequence` objects, and return the resulting `SequenceGraph`. Every path through the
     /// graph is one assembled design; read them with `graph.all_sequences()`.
     #[pyo3(signature = (library_name, parts_list, sample=None, collection=None))]
     fn import_library(
         &self,
         library_name: String,
-        parts_list: Vec<Vec<PySequencePart>>,
+        parts_list: Vec<Vec<PySequence>>,
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        let rust_parts_list: Vec<Vec<SequencePart>> = parts_list
-            .iter()
-            .map(|parts| {
-                parts
-                    .iter()
-                    .map(|p| SequencePart {
-                        name: p.name.clone(),
-                        sequence: p.sequence.clone(),
-                        sequence_length: p.sequence_length,
-                    })
-                    .collect()
-            })
-            .collect();
+        let rust_parts_list = library_parts(&parts_list)?;
         run_context_operation_write(
             &self.context,
             |ctx| {

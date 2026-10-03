@@ -15,18 +15,11 @@ use crate::python_api::{
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
-    /// Build a junction-aware k-mer seed index for a sequence graph and save it
-    /// to `.gen/search_index/{block_group_id}.bin`.
-    ///
-    /// If `sgs` is None or empty, indexes all sequence graphs.
-    /// Subsequent calls to `search()` will load this index automatically.
-    #[pyo3(signature = (sequence_kind="dna", k=16, bgs=None))]
-    pub fn build_index(
-        &self,
-        sequence_kind: &str,
-        k: usize,
-        bgs: Option<Vec<PySequenceGraph>>,
-    ) -> PyResult<()> {
+    /// Build a junction-aware k-mer seed index for every sequence graph in the repository and save
+    /// it to `.gen/search_index/{sequence_graph_id}.bin`. Later calls to `search()` load it
+    /// automatically; `SequenceGraph.build_index()` indexes just one graph.
+    #[pyo3(signature = (sequence_kind="dna", k=16))]
+    pub fn build_index(&self, sequence_kind: &str, k: usize) -> PyResult<()> {
         let kind = parse_sequence_kind(sequence_kind)?;
         let normalized = kind != SequenceKind::Exact;
         let conn = self.context.graph().conn();
@@ -38,15 +31,12 @@ impl PyRepository {
         fs::create_dir_all(&index_dir)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create index dir: {e}")))?;
 
-        let bgs: Vec<_> = match bgs {
-            Some(bgs) if !bgs.is_empty() => bgs,
-            _ => BlockGroup::select(conn)
-                .load()
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
-                .into_iter()
-                .map(|bg| self.to_py_block_group(bg))
-                .collect(),
-        };
+        let bgs: Vec<_> = BlockGroup::select(conn)
+            .load()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            .into_iter()
+            .map(|bg| self.to_py_block_group(bg))
+            .collect();
 
         for bg in bgs {
             let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg.id, None)
@@ -68,19 +58,15 @@ impl PyRepository {
         Ok(())
     }
 
-    /// Search for exact occurrences of `query`.
+    /// Search for occurrences of `query`.
     ///
-    /// Returns a list of `(SequenceGraph, list[Locus])` tuples — one entry per
-    ///   - graph that contains at least one match
-    ///   - `matches` is a list of `GraphLocus` objects. Each locus exposes:
-    ///       - `.start()` / `.end()` → `Position` — pass
-    ///         directly to `widget.go_to()`
-    ///       - `.slices` → `list[NodeSlice]`
+    /// Returns a list of `(SequenceGraph, list[Locus])` tuples, one for each sequence graph that
+    /// contains at least one match. Each `Locus` can be passed to `widget.go_to()` or to an editing
+    /// method such as `graph.replace()`.
     ///
-    /// If `sgs` is None or empty, searches all sequence graphs.
-    /// If a seed index was previously built with `build_index()`, it is loaded
-    /// automatically to accelerate the current-graph search. Falls back to a
-    /// full scan when no index is found.
+    /// If `bgs` is None or empty, searches all sequence graphs. If a seed index was previously
+    /// built with `build_index()`, it is loaded automatically to speed the search up. Falls back to
+    /// a full scan when no index is found. `sequence_kind` is as in `SequenceGraph.search()`.
     #[pyo3(signature = (query, bgs=None, sequence_kind="dna"))]
     pub fn search(
         &self,
@@ -147,8 +133,8 @@ impl PyRepository {
 
     /// Clear the search index cache.
     ///
-    /// If `sgs` is None or empty, clears all indices in `.gen/search_index/`.
-    /// Otherwise, clears only the specified sequence graph indices.
+    /// If `bgs` is None or empty, clears all indices in `.gen/search_index/`. Otherwise, clears
+    /// only the indices of the given sequence graphs.
     #[pyo3(signature = (bgs=None))]
     pub fn clear_index(&self, bgs: Option<Vec<PySequenceGraph>>) -> PyResult<()> {
         let index_dir = self

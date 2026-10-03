@@ -64,7 +64,7 @@ asset transfer, and conflict behavior as the command-line client:
 
 ```python
 # Arguments may be names or the corresponding Remote/Branch objects.
-origin = repo.get_remotes()[0]
+origin = repo.remotes[0]
 main = repo.current_branch
 
 repo.push(remote=origin, branch=main)
@@ -78,7 +78,7 @@ Repositories opened with `gen.Repository(...)` can configure remotes directly:
 origin = repo.add_remote("origin", "file:///path/to/another/repository")
 repo.set_default_remote(origin)  # available as repo.default_remote
 repo.set_branch_remote(origin)  # omit the argument to clear branch tracking
-remotes = repo.get_remotes()
+remotes = repo.remotes
 repo.remove_remote(origin)
 ```
 
@@ -270,8 +270,11 @@ layer owns:
   objects.
 - **`Branch`, `Operation`, `Remote`** — typed version-control values accepted
   directly by the corresponding `Repository` methods.
-- **`Node`, `NodeSlice`, `HashId`, `Annotation`, `SequencePart`** — typed
-  wrappers around internal objects so Python code can work with them safely.
+- **`Node`, `HashId`, `Annotation`, `Sequence`** — typed wrappers around internal
+  objects so Python code can work with them safely. `HashId` identifies sequence
+  graphs, annotations, operations and branch heads alike, and is hashable.
+  `Asset` is a file kept in the repository (`Repository.add_file()`). `Sequence` is a named sequence (library parts, `SequenceGraph.all_sequences()`)
+  that reads like a `str`.
 - **`PyGraphController`** — wraps the GraphController and owns the ratatui render loop for the Jupyter widget. On each
   frame request it renders the graph into a ratatui `Buffer` and serialises the
   result to a JSON structure that the frontend can paint.
@@ -279,8 +282,10 @@ layer owns:
 ### Python (`python/gen/`)
 
 A thin layer on top of the compiled extension. `__init__.py` re-exports everything
-from the native module at the package level. `jupyter_widget.py` contains `GraphWidget`,
-an [anywidget](https://anywidget.dev) subclass that:
+from the native module at the package level and keeps `dir(gen)` to the public names.
+`jupyter_widget.py` contains `GraphWidget`, an [anywidget](https://anywidget.dev) subclass
+returned by `plot()` in a live Jupyter kernel (`text_widget.TextGraphWidget` elsewhere, with the
+same methods and `rows`/`cols`/`page_index`/`page_count`/`frame` attributes). It:
 
 - holds an internal Rust graph controller and requests rendered frames from it,
 - syncs frames to the browser frontend via the `frame` traitlet (plus `page_count`/
@@ -355,7 +360,7 @@ import gen
 repo = gen.Repository("path/to/.gen")
 sample = repo.import_fasta("path/to.fa")  # or repo.samples[0], etc.
 
-widget = sample.plot()       # GraphWidget; pages through the sample's sequence graphs
+widget = sample.plot()       # pages through the sample's sequence graphs
 print(repr(widget))          # plain-text fallback, e.g. "[1/20] <name> ..."
 
 widget.next_page()           # switch graphs: next_page() / prev_page()

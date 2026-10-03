@@ -25,7 +25,7 @@ class ExistOkTests(RepositoryTestCase):
 
     def test_copy_exist_ok_returns_the_existing_sample_unchanged(self):
         graph = self.repository.import_sequence("AAAACCCC", name="v", sample="p")
-        source = next(s for s in self.repository.samples if s.sample_name == "p")
+        source = next(s for s in self.repository.samples if s.name == "p")
         design = source.copy("design")
         design[0].replace("v:0-4", "GGGG")
         again = source.copy("design", exist_ok=True)

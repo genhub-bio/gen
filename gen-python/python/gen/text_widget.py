@@ -101,16 +101,17 @@ class TextGraphWidget:
             assigned = {}
 
             def color_fn(annotation):
-                if annotation.id not in assigned:
-                    assigned[annotation.id] = colors[len(assigned) % len(colors)]
-                return assigned[annotation.id]
+                key = str(annotation.id)
+                if key not in assigned:
+                    assigned[key] = colors[len(assigned) % len(colors)]
+                return assigned[key]
         else:
             raise TypeError(
                 f"colors must be a callable, dict, or list; got {type(colors).__name__}"
             )
 
         color_map = {
-            annotation.id: color_fn(annotation)
+            str(annotation.id): color_fn(annotation)
             for annotation in self._controller.annotations
         }
         self._controller.load_annotation_groups_with_colors(color_map)

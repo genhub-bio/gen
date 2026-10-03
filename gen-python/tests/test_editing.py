@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 import gen
+from test_api import RepositoryTestCase
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 
@@ -27,6 +28,8 @@ class EditingTestCase(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self.repository = gen.Repository(str(self.root / "repository"))
 
+    node_runs = RepositoryTestCase.node_runs
+
     def operation_count(self):
         return len(self.repository.get_operations())
 
@@ -38,14 +41,9 @@ class EditingTestCase(unittest.TestCase):
         sequence_graph.export_fasta(str(path))
         return read_fasta(path)
 
-    def sample_named(self, name):
-        return next(
-            sample for sample in self.repository.samples if sample.sample_name == name
-        )
-
     def is_editable(self, sequence_graph, locus):
         """Whether an edit can still target ``locus``, probed on a copy of the sample."""
-        copy = self.sample_named(sequence_graph.sample_name).copy(
+        copy = sequence_graph.sample.copy(
             f"probe{len(self.repository.samples)}"
         )
         try:
@@ -73,7 +71,7 @@ class SimpleGraphEditingTests(EditingTestCase):
         self.assertEqual(locus.end() - 3, locus.slice(4, 5).start())
         self.assertEqual(locus[5] + 1, locus[6])
         self.assertEqual(
-            self.graph.region("m123:20-28").start().sequence_graph.name, "m123"
+            self.graph.region("m123:20-28").start().graph.name, "m123"
         )
 
     def test_positions_from_an_edit_and_an_annotation_step_without_attaching_a_graph(
@@ -86,14 +84,14 @@ class SimpleGraphEditingTests(EditingTestCase):
 
         self.assertEqual(inserted.start() + 1, inserted.end())
         self.assertEqual(replaced.start() + 1, replaced.end())
-        self.assertEqual(inserted.slice(0, 1).start().sequence_graph.name, "m123")
+        self.assertEqual(inserted.slice(0, 1).start().graph.name, "m123")
 
     def test_an_annotation_made_from_a_locus_keeps_the_loci_graph(self):
         [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
 
         annotation = gen.Annotation(locus, "site")
 
-        self.assertEqual(annotation.locus.start().sequence_graph.name, "m123")
+        self.assertEqual(annotation.locus.start().graph.name, "m123")
         self.assertEqual(annotation.locus.start() + 3, locus.slice(3, 4).start())
         self.assertEqual(annotation.locus.sequence, locus.sequence)
 
@@ -105,7 +103,7 @@ class SimpleGraphEditingTests(EditingTestCase):
 
         self.assertEqual(combined, gen.SuperPosition(first, second))
         self.assertEqual(combined.positions, [first, second])
-        self.assertEqual(combined.sequence_graph.name, "m123")
+        self.assertEqual(combined.graph.name, "m123")
 
     def test_superposition_or_accepts_positions_on_either_side(self):
         [locus] = self.graph.search("GGAACACA", sequence_kind="exact")
@@ -139,7 +137,7 @@ class SimpleGraphEditingTests(EditingTestCase):
 
         moved = locus.start().on(other)
 
-        self.assertEqual(moved.sequence_graph.sample_name, "other")
+        self.assertEqual(moved.graph.sample.name, "other")
         self.assertEqual(moved, locus.start())
         self.assertEqual(moved + 1, locus.slice(1, 2).start().on(other))
 
@@ -241,7 +239,7 @@ class SimpleGraphEditingTests(EditingTestCase):
     def test_delete_locus_crossing_an_earlier_edit(self):
         self.graph.replace("m123:20-22", "TT")
         [locus] = self.graph.search("CGTTAAC", sequence_kind="exact")
-        self.assertEqual(len(locus.slices), 3)
+        self.assertEqual(len(self.node_runs(locus)), 3)
 
         self.graph.delete(locus)
 
@@ -514,7 +512,7 @@ class LibraryGraphEditingTests(EditingTestCase):
 
     def setUp(self):
         super().setUp()
-        part = gen.SequencePart
+        part = gen.Sequence
         self.graph = self.repository.import_library(
             "lib",
             [
