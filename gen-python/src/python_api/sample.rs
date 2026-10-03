@@ -145,12 +145,14 @@ impl PySample {
 
     /// Copy this sample into a new sample with the same sequence graphs.
     ///
-    /// The destination name must not already exist. The returned sample is
+    /// The destination name must not already exist, unless `exist_ok=True`, which returns the
+    /// existing sample as it is now (including any edits) instead of copying again; use that in
+    /// notebook cells that may be run more than once. The returned sample is
     /// ready for explicit in-place edits on its sequence graphs. The copy is
     /// recorded as its own operation, using ``message`` as the operation's
     /// commit message when given, or a generated description otherwise.
-    #[pyo3(signature = (new_name, message=None))]
-    fn copy(&self, new_name: String, message: Option<&str>) -> PyResult<PySample> {
+    #[pyo3(signature = (new_name, message=None, *, exist_ok=false))]
+    fn copy(&self, new_name: String, message: Option<&str>, exist_ok: bool) -> PyResult<PySample> {
         let context = self
             .sequence_graphs
             .first()
@@ -161,6 +163,25 @@ impl PySample {
         if new_name.is_empty() || new_name == self.sample_name {
             return Err(PyValueError::new_err(
                 "copy() requires a different, non-empty sample name",
+            ));
+        }
+
+        if exist_ok && Sample::get_by_name(context.graph().conn(), &new_name).is_ok() {
+            let existing_graphs =
+                Sample::get_block_groups(context.graph().conn(), &self.collection_name, &new_name, None)
+                    .into_iter()
+                    .map(|block_group| PySequenceGraph {
+                        id: block_group.id,
+                        collection_name: block_group.collection_name,
+                        sample_name: block_group.sample_name,
+                        name: block_group.name,
+                        context: Some(context.clone()),
+                    })
+                    .collect();
+            return Ok(PySample::new(
+                self.collection_name.clone(),
+                new_name,
+                existing_graphs,
             ));
         }
 
@@ -177,7 +198,9 @@ impl PySample {
                 )
                 .map_err(|error| match error {
                     SampleError::Duplicate(_) => {
-                        PyValueError::new_err(format!("sample '{new_name}' already exists"))
+                        PyValueError::new_err(format!(
+                            "sample '{new_name}' already exists; fetch it from repo.samples, choose another name, or pass exist_ok=True"
+                        ))
                     }
                     other => PyRuntimeError::new_err(format!("cannot copy sample: {other}")),
                 })?;

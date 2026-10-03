@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path, PurePath
 import tempfile
+from time import sleep
 from threading import Thread
 import unittest
 from unittest.mock import patch
@@ -187,6 +188,18 @@ class RemoteTests(unittest.TestCase):
         self.import_sequence(gen.Repository(str(used)), "other")
         with self.assertRaisesRegex(RuntimeError, "not an empty directory"):
             gen.clone((self.root / "local").as_uri(), path=str(used))
+
+    @unittest.skipIf(
+        os.name == "nt", "native file remote workflows are currently tested on Unix"
+    )
+    def test_pull_into_unrelated_repository_points_to_clone(self):
+        self.import_sequence(self.repository, "base")
+        # Initialization commits are timestamped to the second; wait so the roots differ.
+        sleep(1.1)
+        unrelated = gen.Repository(str(self.root / "unrelated"))
+        unrelated.add_remote("origin", (self.root / "local").as_uri())
+        with self.assertRaisesRegex(RuntimeError, "shares no history.*clone"):
+            unrelated.pull()
 
     @unittest.skipIf(
         os.name == "nt", "native file remote workflows are currently tested on Unix"

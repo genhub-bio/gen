@@ -78,8 +78,8 @@ use gen_models::{
     db::{ConfigConnection, GraphConnection},
     errors::{QueryError, RemoteError as ModelRemoteError},
     history::dolt::{
-        active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull, push,
-        push_force, remote_rows, set_remote_url,
+        active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, merge_base,
+        pull, push, push_force, remote_rows, set_remote_url,
     },
     operations::{
         Defaults, Remote, RemoteBranch, RemoteOperationKind as StoredRemoteOperationKind,
@@ -1413,6 +1413,19 @@ pub fn execute_pull(
             eprintln!(
                 "Warning: failed to record unsuccessful pull operation for branch '{branch}': {metadata_error}"
             );
+        }
+        // A repository initialized locally has its own root commits, so pulling a remote's
+        // history into it fails inside the database with an opaque "unknown operation".
+        let tracking_ref = format!("{}/{branch}", remote.name);
+        let unrelated = hash_of(&graph, &tracking_ref).is_ok()
+            && merge_base(&graph, &branch, &tracking_ref).is_err();
+        if unrelated {
+            return Err(format!(
+                "Local branch '{branch}' shares no history with '{tracking_ref}'; pull only \
+                 updates a repository that came from this remote. Use `gen clone` (Python: \
+                 `gen.clone(url, path)`) to start from the remote's history."
+            )
+            .into());
         }
         return Err(error);
     }
