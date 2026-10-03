@@ -21,7 +21,7 @@ def asset_ids_by_name(repository):
     imports a fixture over an HTTP remote must be prepared to serve that asset's bytes back to the
     client during clone or pull, and to accept them during push.
     """
-    return {asset.name: asset.id for asset in repository.get_assets()}
+    return {asset.name: str(asset.id) for asset in repository.get_assets()}
 
 
 @contextmanager
@@ -97,7 +97,7 @@ class RemoteTests(unittest.TestCase):
         origin = self.repository.add_remote("origin", (self.root / "upstream").as_uri())
         backup = self.repository.add_remote("backup", (self.root / "backup").as_uri())
         self.assertEqual(
-            [remote.name for remote in self.repository.get_remotes()],
+            [remote.name for remote in self.repository.remotes],
             ["backup", "origin"],
         )
         self.repository.set_default_remote(origin)

@@ -1,13 +1,12 @@
 use r#gen::{
     fasta::FastaError,
-    graphs::combinatorial_library::{SequencePart, parse_library},
+    graphs::combinatorial_library::parse_library,
     updates::{
         fasta::update_with_fasta,
         gaf::update_with_gaf,
         genbank::update_with_genbank,
         gfa::update_with_gfa,
         library::update_with_library,
-        sequence::update_with_sequence,
         vcf::{VcfError, update_with_vcf},
     },
 };
@@ -16,7 +15,10 @@ use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::{PyRepository, run_context_operation_write};
-use crate::python_api::{sample::PySample, sequence_part::PySequencePart};
+use crate::python_api::{
+    sample::PySample,
+    sequence::{PySequence, library_parts},
+};
 
 #[gen_stub_pymethods]
 #[pymethods]
@@ -250,44 +252,8 @@ impl PyRepository {
         )
     }
 
-    /// Replace the region `region_name` of `sample` with a literal sequence string, storing the
-    /// result as `new_sample`. Returns the new `Sample`. For editing a copied sample in place,
-    /// `graph.replace()` is usually simpler.
-    #[pyo3(signature = (sequence, sample, new_sample, region_name, no_reference_path_update=false, collection=None))]
-    fn update_with_sequence(
-        &self,
-        sequence: String,
-        sample: String,
-        new_sample: String,
-        region_name: String,
-        no_reference_path_update: bool,
-        collection: Option<String>,
-    ) -> PyResult<PySample> {
-        let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        run_context_operation_write(
-            &self.context,
-            |ctx| {
-                let operation_summary = update_with_sequence(
-                    ctx,
-                    &collection,
-                    &sample,
-                    &new_sample,
-                    &region_name,
-                    &sequence,
-                    no_reference_path_update,
-                )
-                .map_err(|e| PyRuntimeError::new_err(format!("Update failed: {e}")))?;
-                Ok((
-                    self.block_groups_in_sample(&collection, &new_sample),
-                    operation_summary,
-                ))
-            },
-            |err| PyRuntimeError::new_err(format!("Update failed: {err}")),
-        )
-    }
-
     /// Replace the region `path_name` of `sample` with a combinatorial library built from
-    /// `parts_list` (columns of `SequencePart` alternatives), storing the result as
+    /// `parts_list` (columns of named `Sequence` alternatives), storing the result as
     /// `new_sample_name`. Returns the new `Sample`.
     #[pyo3(signature = (sample, new_sample_name, path_name, parts_list, collection=None))]
     fn update_with_library(
@@ -295,24 +261,12 @@ impl PyRepository {
         sample: Option<String>,
         new_sample_name: String,
         path_name: String,
-        parts_list: Vec<Vec<PySequencePart>>,
+        parts_list: Vec<Vec<PySequence>>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        let rust_parts_list: Vec<Vec<SequencePart>> = parts_list
-            .iter()
-            .map(|parts| {
-                parts
-                    .iter()
-                    .map(|p| SequencePart {
-                        name: p.name.clone(),
-                        sequence: p.sequence.clone(),
-                        sequence_length: p.sequence_length,
-                    })
-                    .collect()
-            })
-            .collect();
+        let rust_parts_list = library_parts(&parts_list)?;
         run_context_operation_write(
             &self.context,
             |ctx| {

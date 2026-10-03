@@ -23,6 +23,17 @@ class RepositoryTestCase(unittest.TestCase):
     def contains(self, sequence_graph, query):
         return bool(sequence_graph.search(query, sequence_kind="exact"))
 
+    def node_runs(self, locus):
+        """The `(node, length)` stretches of a locus in reading order."""
+        runs = []
+        for index in range(len(locus)):
+            node = locus[index].node
+            if runs and runs[-1][0] == node:
+                runs[-1][1] += 1
+            else:
+                runs.append([node, 1])
+        return runs
+
 
 class GeneralApiTests(RepositoryTestCase):
     def test_repository_records_the_given_committer(self):
@@ -72,7 +83,7 @@ class GeneralApiTests(RepositoryTestCase):
     def test_sample_properties_keep_indexing_and_iteration(self):
         sample = self.repository.import_fasta(str(FIXTURES / "simple.fa"))
         self.assertEqual(
-            [item.sample_name for item in self.repository.samples], [sample.sample_name]
+            [item.name for item in self.repository.samples], [sample.name]
         )
         self.assertEqual(
             [graph.name for graph in sample.sequence_graphs],

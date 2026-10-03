@@ -1,24 +1,23 @@
 use r#gen::core::HashId;
-use gen_core::Strand;
-use gen_graph::GraphNodeSlice;
-use pyo3::prelude::*;
+use gen_models::{db::DbContext, node::Node};
+use pyo3::{exceptions::PyValueError, prelude::*};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::hash_id::PyHashId;
 
-/// An opaque handle to a graph node, usable as a dict key in Python.
-/// Used to ensure consistent hashing when used as dictionary keys in Python.
+/// A stretch of stored sequence in a sequence graph, usable as a dict key.
+///
+/// Obtain it from `position.node` or the keys of `SequenceGraph.to_dict()`. Read its bases with
+/// `.sequence`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Node")] // pyclass includes  #[derive(IntoPyObject)]
-#[derive(Clone, Copy)]
+#[pyclass(name = "Node", unsendable)] // pyclass includes  #[derive(IntoPyObject)]
+#[derive(Clone)]
 pub struct PyGraphNode {
     pub node_id: HashId,
-    /// Inclusive start of this block in the underlying node's sequence.
-    #[pyo3(get)]
     pub sequence_start: i64,
-    /// Exclusive end of this block in the underlying node's sequence.
-    #[pyo3(get)]
     pub sequence_end: i64,
+    // Database connection `.sequence` reads through; `None` for nodes built without a Repository.
+    context: Option<DbContext>,
 }
 
 impl PyGraphNode {
@@ -27,17 +26,59 @@ impl PyGraphNode {
             node_id,
             sequence_start,
             sequence_end,
+            context: None,
         }
+    }
+
+    /// This node reading its sequence through `context`.
+    pub fn with_context(mut self, context: Option<DbContext>) -> Self {
+        self.context = context;
+        self
     }
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyGraphNode {
+    /// Inclusive start of this block in the underlying node's sequence.
+    #[getter(_sequence_start)]
+    #[gen_stub(skip)]
+    fn py_sequence_start(&self) -> i64 {
+        self.sequence_start
+    }
+
+    /// Exclusive end of this block in the underlying node's sequence.
+    #[getter(_sequence_end)]
+    #[gen_stub(skip)]
+    fn py_sequence_end(&self) -> i64 {
+        self.sequence_end
+    }
+
     /// Stable ID of the underlying sequence node, independent of block boundaries.
-    #[getter]
+    #[getter(_id)]
+    #[gen_stub(skip)]
     fn id(&self) -> PyHashId {
         PyHashId::new(self.node_id)
+    }
+
+    /// The bases this node holds.
+    #[getter]
+    fn sequence(&self) -> PyResult<String> {
+        let context = self.context.as_ref().ok_or_else(|| {
+            PyValueError::new_err("node has no database connection to read its sequence from")
+        })?;
+        let sequences = Node::get_sequences_by_node_ids(
+            context.graph().conn(),
+            context.workspace(),
+            &[self.node_id],
+            None,
+        );
+        let sequence = sequences.get(&self.node_id).ok_or_else(|| {
+            PyValueError::new_err(format!("Node with id {:?} not found", self.node_id))
+        })?;
+        sequence
+            .get_sequence(self.sequence_start, self.sequence_end)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -87,63 +128,5 @@ impl PyGraphNode {
     #[getter]
     fn length(&self) -> i64 {
         self.sequence_end - self.sequence_start
-    }
-}
-
-/// A slice of a single graph block with local byte offsets and strand.
-#[gen_stub_pyclass]
-#[pyclass(name = "NodeSlice")]
-#[derive(Clone, Copy)]
-pub struct PyGraphNodeSlice {
-    pub inner: GraphNodeSlice,
-}
-
-impl PyGraphNodeSlice {
-    pub fn from_slice(s: GraphNodeSlice) -> Self {
-        Self { inner: s }
-    }
-}
-
-#[gen_stub_pymethods]
-#[pymethods]
-impl PyGraphNodeSlice {
-    #[getter]
-    fn node(&self) -> PyGraphNode {
-        PyGraphNode::new(
-            self.inner.block.node_id,
-            self.inner.block.sequence_start,
-            self.inner.block.sequence_end,
-        )
-    }
-
-    #[getter]
-    fn start(&self) -> usize {
-        self.inner.start
-    }
-
-    #[getter]
-    fn end(&self) -> usize {
-        self.inner.end
-    }
-
-    #[getter]
-    fn strand(&self) -> &str {
-        match self.inner.strand {
-            Strand::Forward => "+",
-            Strand::Reverse => "-",
-            _ => ".",
-        }
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "NodeSlice({}[{}..{}], {}..{}, strand={})",
-            self.inner.block.node_id,
-            self.inner.block.sequence_start,
-            self.inner.block.sequence_end,
-            self.inner.start,
-            self.inner.end,
-            self.strand(),
-        )
     }
 }

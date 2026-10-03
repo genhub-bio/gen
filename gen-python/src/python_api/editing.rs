@@ -1897,10 +1897,8 @@ assert len(annotations) == 3
 for annotation in annotations:
     assert annotation.locus is not None
     assert len(annotation.locus) == len(annotation) == 3
-    for segment, part in zip(annotation.segments, annotation.locus.slices):
-        assert len(graph.get_node_sequence(part.node)) == segment['end'] - segment['start']
-        assert part.strand == segment['strand']
-        assert part.start == 0 and part.end == 3
+    assert len(annotation.locus.sequence) == 3
+    assert len(annotation.locus.start().node.sequence) >= 3
 assert any(annotation.metadata for annotation in annotations)
 "#,
                 "AAACCCGGGTTTAAACCCGGGTTT",
@@ -1912,12 +1910,12 @@ assert any(annotation.metadata for annotation in annotations)
             run_edit_test(
                 r#"
 annotation = next(item for item in graph.annotations if item.name == 'second')
-before = annotation.segments
+before = annotation.locus
 locus = annotation.locus
 [whole] = graph.search('AAACCCGGGTTTAAACCCGGGTTT', sequence_kind='exact')
 graph.insert('AG', after=whole.start())
-assert annotation.segments == before
-assert next(item for item in graph.annotations if item.id == annotation.id).segments == before
+assert annotation.locus == before
+assert next(item for item in graph.annotations if item.id == annotation.id).locus == before
 graph.delete(locus)
 "#,
                 "AAGAACCCGGGAAACCCGGGTTT",
@@ -2091,7 +2089,7 @@ assert len(repo.get_operations()) == count + 6
 [whole] = graph.search('AAACCCGGGTTTAAACCCGGGTTT', sequence_kind='exact')
 graph.insert('AG', after=whole.slice(2, 3).start())
 target = graph.search('AAGCC', sequence_kind='exact')[0]
-assert len(target.slices) == 3
+assert len({target[index].node for index in range(len(target))}) == 3
 inserted = graph.replace(target.reverse_complement(), 'TCA')
 assert len(inserted) == 3
 "#,
@@ -3862,7 +3860,7 @@ assert len(repo.get_operations()) == count
                 let script = r#"
 [abcd] = graph.search('ABCD', sequence_kind='exact')
 last = SuperPosition(abcd.end())
-assert len(last) == 1 and last.sequence_graph is not None
+assert len(last) == 1 and last.graph is not None
 assert last + 1 == last.on(graph) + 1
 last = last.on(graph)
 fork = last + 1
@@ -3881,7 +3879,7 @@ join = SuperPosition(efgh.end()).on(graph) + 1
 assert join == SuperPosition(ijkl.end()).on(graph) + 1
 assert len(join) == 1
 arm_ends = SuperPosition(efgh.end(), ijkl.end())
-assert arm_ends.sequence_graph is not None
+assert arm_ends.graph is not None
 assert arm_ends == SuperPosition(efgh.end()) | SuperPosition(ijkl.end())
 assert arm_ends == efgh.end() | ijkl.end()
 assert efgh.end() + 1 == ijkl.end() + 1

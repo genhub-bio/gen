@@ -6,7 +6,7 @@ Check `help()` in the actual interpreter when using a different release. The gen
 stub `gen-python/python/gen/gen/__init__.pyi` has every signature and docstring.
 
 A sequence graph is not one sequence. Read strings with `locus.sequence` (a region),
-`graph.all_sequences()` (every path) and `graph.export_fasta(file, all_sequences=True)`.
+`graph.all_sequences()` (every path, as `Sequence` objects) and `graph.export_fasta(file, all_sequences=True)`.
 
 Contents: workspace and history; remotes; imports and return types; direct edits;
 loci and positions; annotations; file-driven updates; search and sequence reads;
@@ -19,11 +19,9 @@ import gen
 
 repo = gen.Repository("path/to/workspace", committer="Name", email="name@example.org")
 repo.gen_dir
-repo.db_path
 repo.samples
-repo.get_sequence_graphs()
-repo.get_sequence_graphs_by_collection(collection_name)
-repo.get_sequence_graph_by_id(graph.id)
+repo.get_sequence_graphs(name=None, sample=None, collection=None)   # sample: name or Sample
+repo.get_sequence_graph(graph.id)
 
 repo.current_branch
 repo.get_branches()
@@ -42,26 +40,37 @@ repo.reset(operation)
 workspace from the current directory. File APIs below take filename strings.
 
 `repo.samples` is a list of `Sample` objects. A sample is iterable and indexable
-(including negative indices), with `.sample_name`, `.collection_name`, and
-`.sequence_graphs`. Graphs expose `.id` (`HashId`), `.name`, `.sample_name`, and
-`.collection_name`. Pass the typed id to `get_sequence_graph_by_id()`.
+(including negative indices), with `.name`, `.collection`, and
+`.sequence_graphs`. Graphs expose `.id` (`HashId`), `.name`, `.sample` (the owning
+`Sample`), and `.collection`. Pass the typed id, or its string, to `get_sequence_graph()`.
+
+`HashId` is hashable and compares by value; it identifies graphs, annotations, assets,
+operations and branch heads. `str(hash_id)` is the hex digest.
 
 Mutating import/update/edit/copy APIs record operations automatically. The public
 API has no transaction context manager. Raw SQL (`execute`/`query`) is low-level and hidden from the stubs; use the
 operation-aware APIs instead.
 
 Branch arguments accept names or `Branch` objects. `create_branch()` creates
-without switching and accepts a string commit ref for `start`.
+without switching and accepts an `Operation`, its `HashId` or a string commit ref for `start`.
 `checkout(branch, *, create=False)` switches branches, not arbitrary operation
 hashes. `get_operations()` returns newest-first `Operation` objects.
 `merge()`, `apply()`, and `reset()` return the resulting HEAD `Operation`;
-apply/reset accept an `Operation` or string ref. Reset hard-resets the current
+apply/reset accept an `Operation`, its `HashId` or a string ref. Reset hard-resets the current
 branch. History actions require a clean working set; do not discard dirty state
 to bypass an error.
 
-`Branch` fields: `name`, `head`, `remote`, `is_current`, `dirty`.
-`Operation` fields: `id`, `parent_id`, `committer`, `email`, `date`, `message`,
-`is_head`. `Asset` fields: `id`, `name`.
+`Branch` fields: `name`, `head` (`HashId`), `remote`, `is_current`, `dirty`.
+`Operation` fields: `id` (`HashId`), `parent_id`, `committer`, `email`, `date`, `message`,
+`is_head`.
+
+Assets are files kept in the repository: imported files, annotation files, and anything added
+with `repo.add_file(path, message=None)`, which stores a file (a README, a protocol) without
+importing it as sequence and returns its `Asset`. `repo.get_assets()` lists them. `Asset` has
+`id` (`HashId`), `name` (original file name), `path` (the stored copy under `.gen`, which has a
+hashed filename; raises `FileNotFoundError` if not downloaded yet) and
+`save_as(destination, overwrite=False)`, which copies it to a path of your choice (or into a
+directory under `name`).
 
 ```python
 original_branch = repo.current_branch
@@ -78,7 +87,7 @@ repo.checkout(original_branch)
 
 ```python
 cloned = gen.clone(url, path=None, committer=None, email=None)
-repo.get_remotes()
+repo.remotes
 repo.default_remote
 repo.add_remote(name, url)
 repo.remove_remote(remote)
@@ -159,7 +168,7 @@ using `message` when supplied. Replacement/insertion require nonempty sequence;
 use delete to remove sequence.
 
 ```python
-source = next(sample for sample in repo.samples if sample.sample_name == "parent")
+source = next(sample for sample in repo.samples if sample.name == "parent")
 design = source.copy("design")
 graph = design[0]
 replacement = graph.replace("vector:4-8", "ACAC", message="replace motif")
@@ -201,10 +210,10 @@ alternatives; default FASTA alone will still show the original path.
 
 ```python
 locus = graph.region("vector:4-8")
+graph.locus(4, 8)             # same span from path coordinates, no region string
 len(locus)
 locus.sequence
 locus.strand
-locus.slices
 locus.start()
 locus.end()
 locus[0]
@@ -216,14 +225,14 @@ position = locus.start()
 position.node
 position.offset
 position.strand
-position.sequence_graph
+position.graph
 position + 1
 position - 1
 position.on(other_graph)
 combined = position | locus.end()
 gen.SuperPosition(position, locus.end())
 combined.positions
-combined.sequence_graph
+combined.graph
 combined.on(other_graph)
 combined + 1
 ```
@@ -235,17 +244,17 @@ path when available. Locus offsets count bases in reading order, including acros
 nodes and on the reverse strand. `start()`/`end()` are the first/last **included
 base**, not interval boundary coordinates.
 
+`graph.locus(start, end)` takes 0-based half-open path coordinates.
+
 Integer indexing returns a `Position`; unit-step slicing returns a `Locus`.
 Python slicing supports omitted/negative/clipped bounds; explicit `slice(start,
 end)` requires an in-range nonempty span. Empty slices raise `IndexError` and
 steps other than one fail. Reverse complement changes strand and reading order;
 use `reverse_complement()`, not `[::-1]`.
 
-A `Node` represents a stored-sequence slice: `.id`, `.sequence_start`,
-`.sequence_end`, `.length`. `NodeSlice` has `.node`, `.start`, `.end`, `.strand`.
-`Position.offset` is relative to its graph node slice, not a path coordinate;
-absolute stored-node offset is `position.node.sequence_start + position.offset`.
-Use typed endpoints rather than reconstructing targets from those offsets.
+A `Node` is a stretch of stored sequence: `.sequence` (its bases) and `.length`.
+`Position.offset` is relative to its node, not a path coordinate. Use typed endpoints
+rather than reconstructing targets from offsets.
 
 Positions from search, regions, edits, and annotation loci carry graph context.
 Arithmetic walks the current graph in reading order; a fork can turn a
@@ -268,21 +277,19 @@ ad_hoc = gen.Annotation(locus, "temporary label")
 `Annotation`, recording an operation. `gen.Annotation(locus, name)` constructs
 an ad-hoc annotation, not a persisted feature.
 
-`import_annotations()` records an annotation file as an asset and returns its
-commit hash string. Format is inferred unless supplied; a neighboring tabix
+`import_annotations()` records an annotation file as an asset and returns the
+`HashId` of the operation that recorded it. Format is inferred unless supplied; a neighboring tabix
 index is discovered unless explicitly specified. File reference names must match
 the graph context to appear in `.annotations`. Use `format="gff3"`, `"bed"`, or
-`"genbank"` as appropriate. `name` controls the display/group name.
+`"genbank"` as appropriate. `name` controls the display/track name.
 
-Annotation fields: `.name`, `.id`, `.locus`, `.group`, `.track`, `.metadata`,
-`.segments`. Use `.locus.sequence` to inspect feature sequence and the annotation
+Annotation fields: `.name`, `.id` (`HashId`), `.locus`, `.track`, `.metadata`.
+Annotations hash and compare by id and location. Use `.locus.sequence` to inspect feature sequence and the annotation
 or its locus as a direct edit target.
 
 ## File-driven updates
 
 ```python
-repo.update_with_sequence(sequence, sample, new_sample, region_name,
-                          no_reference_path_update=False, collection=None)
 repo.update_with_fasta(filename, sample, new_sample, region_name, collection=None)
 repo.update_with_genbank(filename, sample, create_missing=False, collection=None)
 repo.update_with_gfa(filename, sample, new_sample, collection=None)
@@ -293,14 +300,15 @@ repo.update_with_library(sample, new_sample_name, path_name, parts_list, collect
 repo.update_with_library_files(sample, new_sample, path_name, library, parts, collection=None)
 ```
 
-VCF returns `list[Sample]`; GAF and other updates return a `Sample`. Sequence, FASTA,
-GFA, and library updates create the named output sample. GenBank updates the
+VCF returns `list[Sample]`; GAF and other updates return a `Sample`. FASTA,
+GFA, and library updates create the named output sample. To replace a region with a literal
+sequence, `sample.copy()` it and call `graph.replace()` on the copy. GenBank updates the
 specified sample; `create_missing=True` allows missing graphs. VCF exposes
 `in_place`; do not assume every update creates a new sample.
 
 ```python
-edited = repo.update_with_sequence(
-    "ACAC", sample="parent", new_sample="file-style-design",
+edited = repo.update_with_fasta(
+    "parts.fa", sample="parent", new_sample="file-style-design",
     region_name="vector:4-8",
 )
 # VCF reference names the parent/reference; sample selects the VCF sample column.
@@ -314,11 +322,10 @@ edited = repo.update_with_sequence(
 graph.search(query, sequence_kind="dna")
 repo.search(query, bgs=None, sequence_kind="dna")
 graph.build_index(sequence_kind="dna", k=16)
-repo.build_index(sequence_kind="dna", k=16, bgs=None)
+repo.build_index(sequence_kind="dna", k=16)         # every sequence graph
 graph.clear_index()
 repo.clear_index(bgs=None)
 graph.all_sequences()
-graph.get_node_sequence(node)
 graph.to_dict()
 graph.to_networkx()
 graph.to_rustworkx()
@@ -332,9 +339,9 @@ strands with IUPAC support. Check result count and strand before choosing a targ
 Build an index for repeated large-graph searches.
 
 `locus.sequence` is a string in reading order; `str(locus)` also reads sequence.
-`all_sequences()` is an iterator of strings for the current graph alternatives;
-combinatorial enumeration can be exponential. `get_node_sequence()` reads the
-provided graph node's stored-sequence slice. Repository and graph handles cannot
+`all_sequences()` is an iterator of `Sequence` objects for the current graph alternatives
+(`str(sequence)` is the bases; they also compare, hash, slice and sort like that string);
+combinatorial enumeration can be exponential. `node.sequence` reads a `Node`'s bases. Repository and graph handles cannot
 cross threads; open a repository in the worker and retrieve the graph by its typed
 id instead. NetworkX/rustworkx conversions need
 their optional packages and return `DiGraph`/`PyDiGraph`, respectively.
@@ -342,22 +349,27 @@ their optional packages and return `DiGraph`/`PyDiGraph`, respectively.
 ## Partitioning, translation, and combinatorial libraries
 
 ```python
-repo.derive_subgraph(sample, new_sample, region, backbone=None, collection=None)
-repo.derive_chunks(sample, new_sample, region, backbone=None, breakpoints=None,
-                   chunk_size=None, collection=None)
-repo.make_stitch(sample, new_sample, regions, new_region, collection=None)
-repo.stitch(bgs, new_sample, new_region)
-graph.subgraph(new_sample, start, end, backbone=None)
-graph.chunks(new_sample, breakpoints=None, chunk_size=None, backbone=None)
+graph.subgraph(new_sample, locus)            # or (new_sample, start_position, end_position)
+graph.subgraph(new_sample, start, end)       # integer path coordinates
+graph.chunks(new_sample, breakpoints=None, chunk_size=None)
+repo.stitch(parts, new_sample, new_region)
 graph.translate_annotation(region=None, output_collection=None, name=None,
                            strand=None, frame=0, codon_table=1, start=None)
 ```
 
-`derive_subgraph()`, `make_stitch()`, `stitch()`, and `graph.subgraph()` return a
-`SequenceGraph`. `derive_chunks()` returns a `Sample`; `graph.chunks()` returns
+`graph.subgraph()` takes a `Locus` (only its first and last positions are used, so a locus from
+another graph works if both are still in this one), two `Position`s, or two integer path
+coordinates, keeps every variant route between the ends, and returns a `SequenceGraph` in
+`new_sample` (with a current path when this graph's path runs from start to end); `graph.chunks()` returns
 `list[SequenceGraph]`. Breakpoints are a list of integer coordinates.
-`make_stitch()` takes comma-separated region strings; `stitch()` takes graphs in
-concatenation order, all from the same collection and sample.
+
+`repo.stitch(parts, new_sample, new_region)` joins `SequenceGraph` and `Locus` parts end to end
+into a new `SequenceGraph`, e.g. `repo.stitch([a.region("a:0-100"), b], "asm", "construct")`.
+A `Locus` is linear, but the subgraph of **every variant** between its first and last positions
+is stitched, so no subgraph needs deriving first. Parts must share a collection, be forward-strand
+and not overlap. A `SequenceGraph` part must have a current path;
+a subgraph taken between positions off the current path may not, so stitch a `Locus` of it
+instead (a `Locus` part needs no path).
 
 Translation returns a protein `SequenceGraph` in the source sample. A string
 region resolves first as a path, then an annotation in this graph; passing an
@@ -365,16 +377,16 @@ region resolves first as a path, then an annotation in this graph; passing an
 entry point) until the first in-frame stop; an end coordinate does not bound it.
 
 Library `parts_list` is a list of columns, each containing alternative
-`gen.SequencePart(name, sequence)` objects. Single-option columns are fixed flanks.
+named `gen.Sequence(name, sequence)` objects. Single-option columns are fixed flanks.
 
 ```python
 parts_list = [
-    [gen.SequencePart("left", "AAAA")],
-    [gen.SequencePart("option-a", "CCCC"), gen.SequencePart("option-b", "GGGG")],
-    [gen.SequencePart("right", "TTTT")],
+    [gen.Sequence("left", "AAAA")],
+    [gen.Sequence("option-a", "CCCC"), gen.Sequence("option-b", "GGGG")],
+    [gen.Sequence("right", "TTTT")],
 ]
 library = repo.import_library("cassette", parts_list, sample="library")
-assert set(library.all_sequences()) == {"AAAACCCCTTTT", "AAAAGGGGTTTT"}
+assert {str(s) for s in library.all_sequences()} == {"AAAACCCCTTTT", "AAAAGGGGTTTT"}
 ```
 
 For file libraries, `parts` is a named-parts FASTA and `library` is a headerless
@@ -384,9 +396,6 @@ region with a library use `update_with_library()`/`update_with_library_files()`.
 ## Exports
 
 ```python
-repo.export_fasta(filename, sample=None, collection=None, all_sequences=False)
-repo.export_genbank(filename, sample=None, collection=None)
-repo.export_gfa(filename, sample=None, node_max=None, collection=None)
 graph.export_fasta(filename, all_sequences=False)
 graph.export_genbank(filename)
 graph.export_gfa(filename, node_max=None)
@@ -421,7 +430,7 @@ positions/superpositions navigate without highlighting. `go_to()` navigates only
 Refresh after graph edits; paging (`next_page`/`prev_page`) switches graphs while scrolling
 moves within a graph.
 
-Graph/repository plot supports `detail`, `colors`, and `show_history`; sample plot
+Graph plot supports `detail`, `colors`, and `show_history`; sample plot
 supports `colors` and `show_history`. History display includes retired/pruned
 edges dimmed; it is not an operation diff.
 

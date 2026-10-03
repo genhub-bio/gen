@@ -11,7 +11,7 @@ with `sed`/Biopython/string slicing and re-import: that loses history, annotatio
 alternatives.
 
 A **sequence graph can hold many sequences**: after a library import, `stack=True` edit or
-VCF, one graph has many paths. `graph.all_sequences()` yields every path as a string.
+VCF, one graph has many paths. `graph.all_sequences()` yields every path as a `Sequence` (`str(sequence)` is its bases).
 `locus.sequence` is the string for one region. A `Sample` holds several graphs.
 
 ## Cheat sheet
@@ -46,7 +46,7 @@ Other edits: `repo.update_with_vcf/fasta/genbank/library`, `repo.import_library`
 **Read back as strings**
 ```python
 graph.region("vector:0-16").sequence        # one region, str
-list(graph.all_sequences())                 # every path through the graph, strs
+[str(s) for s in graph.all_sequences()]   # every path through the graph, strs
 graph.search("GAATTC")                      # list[Locus]; sequence_kind="exact" for literal
 graph.export_fasta("out.fa", all_sequences=True)   # whole sample; also export_genbank/gfa
 ```

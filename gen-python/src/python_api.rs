@@ -12,14 +12,14 @@ pub mod locus;
 pub mod position;
 pub mod repository;
 pub mod sample;
-pub mod sequence_part;
+pub mod sequence;
 pub mod translation;
 pub mod utils;
 
 use crate::python_api::{
     annotation::PyAnnotation,
     block_group::PySequenceGraph,
-    graph_node::{PyGraphNode, PyGraphNodeSlice},
+    graph_node::PyGraphNode,
     graph_search::PyGraphLocus,
     hash_id::PyHashId,
     jupyter_widget::PyGraphController,
@@ -30,7 +30,7 @@ use crate::python_api::{
         remote::PyRemote,
     },
     sample::{PySample, PySampleIter},
-    sequence_part::PySequencePart,
+    sequence::PySequence,
 };
 
 /// Adds functions and classes to the Python module.
@@ -47,11 +47,10 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAnnotation>()?;
     m.add_class::<PyHashId>()?;
     m.add_class::<PyGraphNode>()?;
-    m.add_class::<PyGraphNodeSlice>()?;
     m.add_class::<PyPosition>()?;
     m.add_class::<PyGraphLocus>()?;
     m.add_class::<PySuperPosition>()?;
-    m.add_class::<PySequencePart>()?;
+    m.add_class::<PySequence>()?;
     m.add_class::<PyGraphController>()?;
     m.add_class::<PySample>()?;
     m.add_class::<PySampleIter>()?;

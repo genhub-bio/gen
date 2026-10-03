@@ -1,20 +1,29 @@
-use r#gen::commands::graph_operations::{
-    derive_chunks::derive_chunks_operation, derive_subgraph::derive_subgraph_operation,
-    make_stitch::make_stitch_operation,
+use r#gen::{
+    commands::graph_operations::{
+        derive_chunks::derive_chunks_operation, derive_subgraph::derive_subgraph_operation,
+    },
+    graphs::operators::{StitchRange, StitchSource, stitch_sources},
 };
-use gen_core::region::Region;
-use gen_models::block_group::BlockGroup;
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use gen_core::{Strand, region::Region};
+use gen_models::operations::{OperationInfo, OperationSummary};
+use pyo3::{
+    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
+    prelude::*,
+};
 use pyo3_stub_gen::derive::gen_stub_pymethods;
 
-use super::PyRepository;
-use crate::python_api::{block_group::PySequenceGraph, sample::PySample};
+use super::{PyRepository, run_context_operation_write};
+use crate::python_api::{
+    block_group::PySequenceGraph, graph_search::PyGraphLocus, sample::PySample,
+};
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
     /// Split the region of `sample` into chunks, either at `breakpoints` or every `chunk_size`
     /// bases, and store them in `new_sample`. Returns the new `Sample`. See also `graph.chunks()`.
+    #[pyo3(name = "_derive_chunks")]
+    #[gen_stub(skip)]
     #[pyo3(signature = (sample, new_sample, region, backbone=None, breakpoints=None, chunk_size=None, collection=None))]
     #[expect(clippy::too_many_arguments, reason = "mirrors underlying API")]
     fn derive_chunks(
@@ -44,6 +53,8 @@ impl PyRepository {
 
     /// Copy the region of `sample` into `new_sample` as a smaller sequence graph and return the new
     /// `Sample`. See also `graph.subgraph()`.
+    #[pyo3(name = "_derive_subgraph")]
+    #[gen_stub(skip)]
     #[pyo3(signature = (sample, new_sample, region, backbone=None, collection=None))]
     fn derive_subgraph(
         &self,
@@ -69,90 +80,118 @@ impl PyRepository {
         self.get_block_group(&collection, &new_sample, &parsed_region.name.to_string())
     }
 
-    /// Concatenate comma-separated region strings from `sample` into one new sequence graph named
-    /// `new_region` in `new_sample`, and return it.
-    #[pyo3(signature = (sample, new_sample, regions, new_region, collection=None))]
-    fn make_stitch(
-        &self,
-        sample: String,
-        new_sample: String,
-        regions: String,
-        new_region: String,
-        collection: Option<String>,
-    ) -> PyResult<PySequenceGraph> {
-        let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        make_stitch_operation(
-            &self.context,
-            Some(collection.clone()),
-            sample,
-            new_sample.clone(),
-            regions,
-            new_region.clone(),
-        )
-        .map_err(|e| PyRuntimeError::new_err(format!("Error making stitch: {e}")))?;
-        self.get_block_group(&collection, &new_sample, &new_region)
-    }
-
-    /// Stitch multiple block groups into a single new block group.
+    /// Join `parts` end to end into a new sequence graph named `new_region` in `new_sample`.
     ///
-    /// All block groups must be in the same collection and sample.  The end
-    /// nodes of each preceding block group are connected to the start nodes of
-    /// the following one, producing a single concatenated graph.
+    /// Each part is a `SequenceGraph`, or a `Locus` such as `graph.region("chr1:100-200")`. The end
+    /// of each part is connected to the start of the next, so a graph can be assembled from
+    /// pieces of several others without first materializing a subgraph of each.
     ///
-    /// Parameters
-    /// bgs : list[BlockGroup]
-    ///     Block groups to concatenate, in order.
-    /// new_sample : str
-    ///     Sample name for the result.
-    /// new_region : str
-    ///     Name for the result block group.
-    #[pyo3(signature = (bgs, new_sample, new_region))]
+    /// A `Locus` is a linear span, but what is stitched is the subgraph of every variant route
+    /// between its first and last positions: stitching `graph.region("chr1:100-200")` keeps all
+    /// the alternatives that lie inside that region, not just the sequence that region reads
+    /// along the current path. A whole `SequenceGraph` part contributes all of its routes. The
+    /// new graph's current path reads the parts' own routes one after another. Every `SequenceGraph` part needs a current path, which
+    /// a subgraph taken between positions off the current path may lack; stitch a `Locus` of such
+    /// a graph instead.
+    ///
+    /// Parts must come from one collection, be forward-strand (reverse loci are rejected) and not
+    /// overlap, since that would make the result cyclic.
+    ///
+    /// Example::
+    ///
+    ///     construct = repo.stitch(
+    ///         [vector.region("vector:0-100"), insert, vector.region("vector:150-400")],
+    ///         new_sample="assembly",
+    ///         new_region="construct",
+    ///     )
     fn stitch(
         &self,
-        bgs: Vec<PySequenceGraph>,
+        #[gen_stub(override_type(type_repr = "typing.Sequence[SequenceGraph | Locus]", imports = ("typing")))]
+        parts: Vec<Bound<'_, PyAny>>,
         new_sample: String,
         new_region: String,
     ) -> PyResult<PySequenceGraph> {
-        if bgs.is_empty() {
-            return Err(PyRuntimeError::new_err(
-                "stitch() requires at least one block group",
-            ));
-        }
-        let first = &bgs[0];
-        for bg in &bgs[1..] {
-            if bg.collection_name != first.collection_name {
-                return Err(PyRuntimeError::new_err(format!(
-                    "All block groups must be in the same collection ('{}' vs '{}')",
-                    first.collection_name, bg.collection_name
-                )));
+        let mut collection: Option<String> = None;
+        let mut sources = Vec::with_capacity(parts.len());
+        for part in &parts {
+            let (part_collection, source) = if let Ok(graph) =
+                part.extract::<PyRef<PySequenceGraph>>()
+            {
+                (
+                    graph.collection_name.clone(),
+                    StitchSource::BlockGroup(graph.id),
+                )
+            } else if let Ok(locus) = part.extract::<PyRef<PyGraphLocus>>() {
+                let graph = locus.sequence_graph().ok_or_else(|| {
+                    PyValueError::new_err(
+                        "a locus to stitch must come from a sequence graph, such as graph.region(...)",
+                    )
+                })?;
+                let ranges = locus
+                    .graph_locus()
+                    .slices
+                    .iter()
+                    .filter(|slice| slice.start < slice.end)
+                    .map(|slice| {
+                        if slice.strand == Strand::Reverse {
+                            return Err(PyValueError::new_err(
+                                "stitch() takes forward-strand loci; reverse loci are not supported",
+                            ));
+                        }
+                        Ok(StitchRange {
+                            node_id: slice.block.node_id,
+                            start: slice.block.sequence_start + slice.start as i64,
+                            end: slice.block.sequence_start + slice.end as i64,
+                        })
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                (
+                    graph.collection_name.clone(),
+                    StitchSource::Locus {
+                        block_group_id: graph.id,
+                        ranges,
+                    },
+                )
+            } else {
+                return Err(PyTypeError::new_err(
+                    "stitch() parts must be SequenceGraph or Locus objects",
+                ));
+            };
+            match &collection {
+                Some(collection) if *collection != part_collection => {
+                    return Err(PyValueError::new_err(format!(
+                        "all parts must be in the same collection ('{collection}' vs '{part_collection}')"
+                    )));
+                }
+                _ => collection = Some(part_collection),
             }
-            if bg.sample_name != first.sample_name {
-                return Err(PyRuntimeError::new_err(format!(
-                    "All block groups must be in the same sample ('{}' vs '{}')",
-                    first.sample_name, bg.sample_name
-                )));
-            }
+            sources.push(source);
         }
-        let regions = bgs
-            .iter()
-            .map(|bg| bg.name.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        make_stitch_operation(
-            &self.context,
-            Some(first.collection_name.clone()),
-            first.sample_name.clone(),
-            new_sample.clone(),
-            regions,
-            new_region.clone(),
-        )
-        .map_err(|e| PyRuntimeError::new_err(format!("Error stitching block groups: {e}")))?;
+        let collection = collection
+            .ok_or_else(|| PyValueError::new_err("stitch() requires at least one part"))?;
 
-        let conn = self.context.graph().conn();
-        let child_id = BlockGroup::get_id(&first.collection_name, &new_sample, &new_region, None);
-        let found = BlockGroup::get_by_id(conn, &child_id, None).map_err(|e| {
-            PyRuntimeError::new_err(format!("Stitched BG created but not found: {e}"))
-        })?;
-        Ok(self.to_py_block_group(found))
+        let stitched = run_context_operation_write(
+            &self.context,
+            |context| {
+                let block_group =
+                    stitch_sources(context, &collection, &new_sample, &new_region, &sources)
+                        .map_err(|error| {
+                            PyRuntimeError::new_err(format!("Error stitching parts: {error}"))
+                        })?;
+                let summary = OperationSummary::new(
+                    OperationInfo {
+                        files: vec![],
+                        description: "stitch".to_string(),
+                    },
+                    format!(
+                        " {new_sample}: stitched {} parts into {new_region}",
+                        sources.len()
+                    ),
+                );
+                Ok((block_group, summary))
+            },
+            |error| PyRuntimeError::new_err(format!("Error stitching parts: {error}")),
+        )?;
+        Ok(self.to_py_block_group(stitched))
     }
 }

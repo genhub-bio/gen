@@ -13,16 +13,15 @@ __all__ = [
     "HashId",
     "Locus",
     "Node",
-    "NodeSlice",
     "Operation",
     "Position",
     "Remote",
     "Repository",
     "Sample",
     "SampleIterator",
+    "Sequence",
     "SequenceGraph",
     "SequenceIterator",
-    "SequencePart",
     "SuperPosition",
     "clone",
 ]
@@ -49,7 +48,7 @@ class Annotation:
         Pass it to ``SequenceGraph.delete()`` and friends to edit them.
         """
     @property
-    def id(self) -> builtins.str:
+    def id(self) -> HashId:
         r"""
         Hash ID of this annotation.
         """
@@ -57,11 +56,6 @@ class Annotation:
     def name(self) -> builtins.str:
         r"""
         Human-readable annotation name.
-        """
-    @property
-    def group(self) -> builtins.str:
-        r"""
-        Annotation group this annotation belongs to.
         """
     @property
     def track(self) -> typing.Optional[builtins.str]:
@@ -87,14 +81,6 @@ class Annotation:
                 print(ann.metadata)
                 # GenBank CDS:  {"kind": "CDS", "qualifiers": [...]}
         """
-    @property
-    def segments(self) -> builtins.list[dict]:
-        r"""
-        Genomic segments covered by this annotation.
-
-        Each segment is a dict with keys ``node_id`` (str), ``start`` (int),
-        ``end`` (int), and ``strand`` (``"+"`` or ``"-"``).
-        """
     def __new__(cls, locus: Locus, name: builtins.str) -> Annotation:
         r"""
         Create an annotation object from a search-result locus.
@@ -107,31 +93,53 @@ class Annotation:
         """
     def __len__(self) -> builtins.int:
         r"""
-        Total length of the annotation in base pairs (sum across all segments).
+        Length of the annotation in bases.
         """
+    def __hash__(self) -> builtins.int: ...
+    def __eq__(self, other: typing.Any) -> builtins.bool: ...
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class Asset:
     r"""
-    A content-addressed file reachable from a branch, such as an imported FASTA or GenBank file.
+    A file kept in the repository without being imported as sequence, such as a README, a FASTA or
+    GenBank file that was imported, or an annotation file.
 
-    Every file import is tracked as an asset for provenance, independent of whether its content is
-    stored inline in the graph. A custom GenHub-compatible server needs this inventory to answer
-    asset-transfer requests for clone, push, pull, and fetch.
+    Add one with `Repository.add_file()` and list them with `Repository.get_assets()`. The
+    content is stored once under a hashed filename inside `.gen`; `.name` is the file's original
+    name, `.path` locates the stored copy and `.save_as()` writes a copy under any name you
+    choose. Treat the stored copy as read-only.
     """
     @property
-    def id(self) -> builtins.str:
+    def id(self) -> HashId:
         r"""
         Content-addressed asset id.
         """
     @property
     def name(self) -> typing.Optional[builtins.str]:
         r"""
-        File name the asset was imported from, if known.
+        The file's original name, if known.
+        """
+    @property
+    def path(self) -> pathlib.Path:
+        r"""
+        Where the stored copy lives, as a `pathlib.Path` inside `.gen`. The filename is a hash, so
+        use `save_as()` for a copy you can name and share. Raises `FileNotFoundError` when the
+        content has not been downloaded to this repository yet.
+        """
+    def save_as(
+        self, destination: str | os.PathLike[str], *, overwrite: builtins.bool = False
+    ) -> pathlib.Path:
+        r"""
+        Write a copy of the file to `destination` and return its path.
+
+        If `destination` is a directory the copy is named after `.name` inside it. An existing
+        file is only replaced with `overwrite=True`.
         """
     def __str__(self) -> builtins.str: ...
     def __repr__(self) -> builtins.str: ...
+    def __hash__(self) -> builtins.int: ...
+    def __eq__(self, other: typing.Any) -> builtins.bool: ...
 
 @typing.final
 class Branch:
@@ -142,11 +150,6 @@ class Branch:
     def name(self) -> builtins.str:
         r"""
         Branch name.
-        """
-    @property
-    def head(self) -> builtins.str:
-        r"""
-        Hash of the operation at the branch head.
         """
     @property
     def remote(self) -> typing.Optional[builtins.str]:
@@ -163,13 +166,20 @@ class Branch:
         r"""
         Whether the branch has uncommitted working-set changes.
         """
+    @property
+    def head(self) -> HashId:
+        r"""
+        Hash of the operation at the branch head.
+        """
     def __str__(self) -> builtins.str: ...
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class HashId:
     r"""
-    Exposes a HashId to Python.
+    A content hash identifying a stored object, such as a sequence graph, annotation or operation.
+
+    Use it as a dict key or compare it with `==`. `str(hash_id)` gives the hex digest.
     """
     def __str__(self) -> builtins.str: ...
     def __repr__(self) -> builtins.str: ...
@@ -177,7 +187,7 @@ class HashId:
     def __eq__(self, other: typing.Any) -> builtins.bool: ...
     def to_bytes(self) -> bytes:
         r"""
-        Returns the HashId as a 16-byte bytes object.
+        Returns the raw bytes of the hash.
         """
 
 @typing.final
@@ -185,18 +195,12 @@ class Locus:
     r"""
     An ordered span in graph space, independent of how nodes are split for display.
 
-    Obtain via `sg.search(query)` or `repo.search(query)`.
-    Pass it, or its `.start()` or `.end()`, to `widget.go_to()`.
-    `.sequence` reads the bases it covers fresh from the database on every access.
+    Obtain via `sg.search(query)`, `sg.region(text)` or `annotation.locus`.
+    Pass it, or its `.start()` or `.end()`, to `widget.go_to()`, or to an editing method such as
+    `sg.replace(locus, sequence)`.
+    `len(locus)` is the number of bases it covers, `locus[i]` is the `Position` of base `i` and
+    `locus[a:b]` a sub-locus.
     """
-    @property
-    def slices(self) -> builtins.list[NodeSlice]:
-        r"""
-        Ordered node slices as displayed when this locus was obtained.
-
-        Each `NodeSlice` carries a node, local offsets, and a strand. Later edits
-        can split nodes without changing this locus's identity.
-        """
     @property
     def strand(self) -> builtins.str:
         r"""
@@ -206,7 +210,7 @@ class Locus:
     @property
     def sequence(self) -> builtins.str:
         r"""
-        The sequence text this locus covers, read fresh from the database on every call.
+        The sequence text this locus covers.
         """
     def start(self) -> Position:
         r"""
@@ -245,23 +249,15 @@ class Locus:
 @typing.final
 class Node:
     r"""
-    An opaque handle to a graph node, usable as a dict key in Python.
-    Used to ensure consistent hashing when used as dictionary keys in Python.
+    A stretch of stored sequence in a sequence graph, usable as a dict key.
+
+    Obtain it from `position.node` or the keys of `SequenceGraph.to_dict()`. Read its bases with
+    `.sequence`.
     """
     @property
-    def sequence_start(self) -> builtins.int:
+    def sequence(self) -> builtins.str:
         r"""
-        Inclusive start of this block in the underlying node's sequence.
-        """
-    @property
-    def sequence_end(self) -> builtins.int:
-        r"""
-        Exclusive end of this block in the underlying node's sequence.
-        """
-    @property
-    def id(self) -> HashId:
-        r"""
-        Stable ID of the underlying sequence node, independent of block boundaries.
+        The bases this node holds.
         """
     @property
     def length(self) -> builtins.int:
@@ -274,35 +270,10 @@ class Node:
     def __eq__(self, other: typing.Any) -> builtins.bool: ...
 
 @typing.final
-class NodeSlice:
-    r"""
-    A slice of a single graph block with local byte offsets and strand.
-    """
-    @property
-    def node(self) -> Node: ...
-    @property
-    def start(self) -> builtins.int: ...
-    @property
-    def end(self) -> builtins.int: ...
-    @property
-    def strand(self) -> builtins.str: ...
-    def __repr__(self) -> builtins.str: ...
-
-@typing.final
 class Operation:
     r"""
     A committed Gen operation in repository history.
     """
-    @property
-    def id(self) -> builtins.str:
-        r"""
-        Operation hash.
-        """
-    @property
-    def parent_id(self) -> typing.Optional[builtins.str]:
-        r"""
-        Hash of the previous operation, or `None` for the first.
-        """
     @property
     def committer(self) -> builtins.str:
         r"""
@@ -328,23 +299,34 @@ class Operation:
         r"""
         Whether this is the head operation of the branch.
         """
+    @property
+    def id(self) -> HashId:
+        r"""
+        Operation hash.
+        """
+    @property
+    def parent_id(self) -> typing.Optional[HashId]:
+        r"""
+        Hash of the previous operation, or `None` for the first.
+        """
     def __str__(self) -> builtins.str: ...
     def __repr__(self) -> builtins.str: ...
+    def __hash__(self) -> builtins.int: ...
+    def __eq__(self, other: typing.Any) -> builtins.bool: ...
 
 @typing.final
 class Position:
     r"""
-    A position in a sequence graph: a node slice, an offset within it, and the strand it is read on.
+    A position in a sequence graph: a node, an offset within it, and the strand it is read on.
 
     Returned by ``Locus.start()`` and ``Locus.end()``, which name the first and last position of the
     locus in reading order. Two positions are equal when they name the same point of the same node,
     even if later edits split that node so their ``node`` and ``offset`` differ. Pass a position to
-    ``GraphWidget.go_to()``, as ``after`` or ``before`` to ``SequenceGraph.insert()``, or to
+    ``widget.go_to()``, as ``after`` or ``before`` to ``SequenceGraph.insert()``, or to
     ``SuperPosition()`` to step from it.
 
     A position taken from a ``Locus`` is attached to the sequence graph that locus came from, and
-    can
-    step with ``pos + n`` and ``pos - n``: the result stays a ``Position`` while the step lands on a
+    can step with ``pos + n`` and ``pos - n``: the result stays a ``Position`` while the step lands on a
     single point, and becomes a ``SuperPosition`` once the step lands at a fork. ``pos.on(sg)``
     attaches it to another sequence graph, such as a copy of the sample. ``a | b`` combines a
     position with another position or a ``SuperPosition`` into a ``SuperPosition``.
@@ -352,7 +334,7 @@ class Position:
     @property
     def node(self) -> Node:
         r"""
-        The node slice this position is in.
+        The node this position is in.
         """
     @property
     def offset(self) -> builtins.int:
@@ -365,13 +347,13 @@ class Position:
         Strand this position is read on: ``"+"`` or ``"-"``.
         """
     @property
-    def sequence_graph(self) -> typing.Optional[SequenceGraph]:
+    def graph(self) -> typing.Optional[SequenceGraph]:
         r"""
         The sequence graph this position steps through, or ``None`` when unattached.
         """
-    def on(self, sequence_graph: SequenceGraph) -> Position:
+    def on(self, graph: SequenceGraph) -> Position:
         r"""
-        This position attached to ``sequence_graph``.
+        This position attached to ``graph``.
 
         Raises ``ValueError`` if the position is not reachable in that sequence graph.
         """
@@ -424,8 +406,10 @@ class Repository:
     r"""
     The main entry point for the gen Python module.
 
-    This class manages the database connection and provides methods for
-    querying and manipulating the database.
+    `Repository(path)` opens, or creates, the repository at `path`. Import sequences into samples
+    with the `import_*` methods, then edit and read them through the returned `Sample` and
+    `SequenceGraph` objects. The repository itself holds history (branches and operations), remotes
+    and search.
     """
     @property
     def current_branch(self) -> typing.Optional[Branch]:
@@ -438,120 +422,61 @@ class Repository:
         Path of the `.gen` directory holding this repository's databases and assets.
         """
     @property
-    def db_path(self) -> pathlib.Path:
-        r"""
-        Path of the graph database file.
-        """
-    @property
     def samples(self) -> builtins.list[Sample]:
         r"""
         All samples in the repository, each holding its sequence graphs.
+        """
+    @property
+    def remotes(self) -> builtins.list[Remote]:
+        r"""
+        Every configured remote, ordered by name.
         """
     @property
     def default_remote(self) -> typing.Optional[Remote]:
         r"""
         The repository's default remote, if one is configured.
         """
-    def export_fasta(
-        self,
-        filename: builtins.str,
-        sample: typing.Optional[builtins.str] = None,
-        collection: typing.Optional[builtins.str] = None,
-        all_sequences: builtins.bool = False,
-    ) -> None:
-        r"""
-        Export current paths as FASTA, optionally restricted by sample and collection.
-        Set `all_sequences=True` to export all graph paths with 1-based
-        ``"{sequence_graph_name}.{index}"`` record names.
-        """
-    def export_gfa(
-        self,
-        filename: builtins.str,
-        sample: typing.Optional[builtins.str] = None,
-        node_max: typing.Optional[builtins.int] = None,
-        collection: typing.Optional[builtins.str] = None,
-    ) -> None:
-        r"""
-        Write a sample's graph structure to a GFA file. `node_max` splits nodes longer than that
-        many bases.
-        """
-    def export_genbank(
-        self,
-        filename: builtins.str,
-        sample: typing.Optional[builtins.str] = None,
-        collection: typing.Optional[builtins.str] = None,
-    ) -> None:
-        r"""
-        Write a sample's sequences and annotations to a GenBank file.
-        """
-    def derive_chunks(
-        self,
-        sample: builtins.str,
-        new_sample: builtins.str,
-        region: builtins.str,
-        backbone: typing.Optional[builtins.str] = None,
-        breakpoints: typing.Optional[typing.Sequence[builtins.int]] = None,
-        chunk_size: typing.Optional[builtins.int] = None,
-        collection: typing.Optional[builtins.str] = None,
-    ) -> Sample:
-        r"""
-        Split the region of `sample` into chunks, either at `breakpoints` or every `chunk_size`
-        bases, and store them in `new_sample`. Returns the new `Sample`. See also `graph.chunks()`.
-        """
-    def derive_subgraph(
-        self,
-        sample: builtins.str,
-        new_sample: builtins.str,
-        region: builtins.str,
-        backbone: typing.Optional[builtins.str] = None,
-        collection: typing.Optional[builtins.str] = None,
-    ) -> SequenceGraph:
-        r"""
-        Copy the region of `sample` into `new_sample` as a smaller sequence graph and return the new
-        `Sample`. See also `graph.subgraph()`.
-        """
-    def make_stitch(
-        self,
-        sample: builtins.str,
-        new_sample: builtins.str,
-        regions: builtins.str,
-        new_region: builtins.str,
-        collection: typing.Optional[builtins.str] = None,
-    ) -> SequenceGraph:
-        r"""
-        Concatenate comma-separated region strings from `sample` into one new sequence graph named
-        `new_region` in `new_sample`, and return it.
-        """
     def stitch(
         self,
-        bgs: typing.Sequence[SequenceGraph],
+        parts: typing.Sequence[SequenceGraph | Locus],
         new_sample: builtins.str,
         new_region: builtins.str,
     ) -> SequenceGraph:
         r"""
-        Stitch multiple block groups into a single new block group.
+        Join `parts` end to end into a new sequence graph named `new_region` in `new_sample`.
 
-        All block groups must be in the same collection and sample.  The end
-        nodes of each preceding block group are connected to the start nodes of
-        the following one, producing a single concatenated graph.
+        Each part is a `SequenceGraph`, or a `Locus` such as `graph.region("chr1:100-200")`. The end
+        of each part is connected to the start of the next, so a graph can be assembled from
+        pieces of several others without first materializing a subgraph of each.
 
-        Parameters
-        bgs : list[BlockGroup]
-            Block groups to concatenate, in order.
-        new_sample : str
-            Sample name for the result.
-        new_region : str
-            Name for the result block group.
+        A `Locus` is a linear span, but what is stitched is the subgraph of every variant route
+        between its first and last positions: stitching `graph.region("chr1:100-200")` keeps all
+        the alternatives that lie inside that region, not just the sequence that region reads
+        along the current path. A whole `SequenceGraph` part contributes all of its routes. The
+        new graph's current path reads the parts' own routes one after another. Every `SequenceGraph` part needs a current path, which
+        a subgraph taken between positions off the current path may lack; stitch a `Locus` of such
+        a graph instead.
+
+        Parts must come from one collection, be forward-strand (reverse loci are rejected) and not
+        overlap, since that would make the result cyclic.
+
+        Example::
+
+            construct = repo.stitch(
+                [vector.region("vector:0-100"), insert, vector.region("vector:150-400")],
+                new_sample="assembly",
+                new_region="construct",
+            )
         """
     def get_branches(self) -> builtins.list[Branch]:
         r"""
         Returns every branch, ordered by name.
         """
     def create_branch(
-        self, name: builtins.str, start: typing.Optional[builtins.str] = None
+        self, name: builtins.str, start: str | HashId | Operation | None = None
     ) -> Branch:
         r"""
-        Creates a branch at HEAD, or at `start` when supplied.
+        Creates a branch at HEAD, or at `start` (an operation or its hash) when supplied.
         """
     def delete_branch(self, branch: str | Branch) -> None:
         r"""
@@ -583,15 +508,28 @@ class Repository:
         r"""
         Returns the assets reachable from the current branch or a named branch.
         """
+    def add_file(
+        self,
+        filename: str | os.PathLike[str],
+        message: typing.Optional[builtins.str] = None,
+    ) -> Asset:
+        r"""
+        Keep a file in the repository without importing it as sequence, for example a README or a
+        protocol, and return its `Asset`.
+
+        The content is stored once, inside `.gen`, and recorded as its own operation (with
+        `message` when given). Adding the same file again fails. Use `asset.path` to locate the
+        stored copy or `asset.save_as(name)` to write a copy under a name you choose.
+        """
     def merge(self, branch: str | Branch) -> Operation:
         r"""
         Merges a branch into the current branch and returns the new HEAD operation.
         """
-    def apply(self, operation: str | Operation) -> Operation:
+    def apply(self, operation: str | HashId | Operation) -> Operation:
         r"""
         Applies one operation to the current branch and returns the new HEAD operation.
         """
-    def reset(self, operation: str | Operation) -> Operation:
+    def reset(self, operation: str | HashId | Operation) -> Operation:
         r"""
         Hard-resets the current branch to an operation and returns the resulting HEAD.
         """
@@ -602,12 +540,14 @@ class Repository:
         index: typing.Optional[builtins.str] = None,
         name: typing.Optional[builtins.str] = None,
         message: typing.Optional[builtins.str] = None,
-    ) -> builtins.str:
+    ) -> HashId:
         r"""
-        Record an annotation file as a repository asset and return its commit hash.
+        Record an annotation file in the repository and return the `HashId` of the operation that
+        recorded it.
 
         The format is inferred from the filename unless provided. A neighboring tabix index is
-        discovered unless an index path is provided. Views match file references to block groups.
+        discovered unless an index path is provided. The file's features then appear in
+        `graph.annotations` and in plots of every sequence graph they land on.
         """
     def import_fasta(
         self,
@@ -686,13 +626,13 @@ class Repository:
     def import_library(
         self,
         library_name: builtins.str,
-        parts_list: typing.Sequence[typing.Sequence[SequencePart]],
+        parts_list: typing.Sequence[typing.Sequence[Sequence]],
         sample: typing.Optional[builtins.str] = None,
         collection: typing.Optional[builtins.str] = None,
     ) -> SequenceGraph:
         r"""
         Build a combinatorial library from `parts_list`, a list of columns each holding alternative
-        `SequencePart` objects, and return the resulting `SequenceGraph`. Every path through the
+        named `Sequence` objects, and return the resulting `SequenceGraph`. Every path through the
         graph is one assembled design; read them with `graph.all_sequences()`.
         """
     def import_library_files(
@@ -720,40 +660,20 @@ class Repository:
         directory. `committer` and `email` become the identity recorded on operations made through
         this object.
         """
-    def get_sequence_graph_by_id(self, id: HashId) -> SequenceGraph:
+    def get_sequence_graph(self, id: HashId | str) -> SequenceGraph:
         r"""
-        Return the sequence graph with this `HashId` (see `SequenceGraph.id`). Use it to rebuild a
-        graph handle in another Repository object, for example in a worker thread.
+        Return the sequence graph with this `HashId` (see `SequenceGraph.id`), or its hex string. Use
+        it to rebuild a graph handle in another Repository object, for example in a worker thread.
         """
-    def get_sequence_graphs(self) -> builtins.list[SequenceGraph]:
-        r"""
-        Return every sequence graph in the repository, across all samples and collections. Group
-        them by sample with `repo.samples` instead.
-        """
-    def get_sequence_graphs_by_collection(
-        self, collection_name: builtins.str
+    def get_sequence_graphs(
+        self,
+        name: typing.Optional[builtins.str] = None,
+        sample: str | Sample | None = None,
+        collection: typing.Optional[builtins.str] = None,
     ) -> builtins.list[SequenceGraph]:
         r"""
-        Return the sequence graphs belonging to one collection.
-        """
-    def plot(
-        self,
-        sequence_graph: SequenceGraph,
-        rows: typing.Optional[builtins.int] = None,
-        cols: typing.Optional[builtins.int] = None,
-        detail: typing.Optional[builtins.str] = None,
-        colors: typing.Optional[typing.Any] = None,
-        show_history: builtins.bool = False,
-    ) -> typing.Any:
-        r"""
-        show_history : bool, optional
-        Keep retired edit-site and pruned edges in the graph, dimmed,
-        instead of removing them along with the nodes only they reach.
-        Defaults to ``False``.
-        """
-    def get_remotes(self) -> builtins.list[Remote]:
-        r"""
-        Returns every configured remote, ordered by name.
+        Return the sequence graphs in the repository, across all samples and collections. Pass
+        `name`, `sample` (a name or a `Sample`) and `collection` to keep only the matching ones.
         """
     def add_remote(self, name: builtins.str, url: builtins.str) -> Remote:
         r"""
@@ -793,17 +713,12 @@ class Repository:
         Fetches a branch into its remote-tracking ref without changing the checkout.
         """
     def build_index(
-        self,
-        sequence_kind: builtins.str = "dna",
-        k: builtins.int = 16,
-        bgs: typing.Optional[typing.Sequence[SequenceGraph]] = None,
+        self, sequence_kind: builtins.str = "dna", k: builtins.int = 16
     ) -> None:
         r"""
-        Build a junction-aware k-mer seed index for a sequence graph and save it
-        to `.gen/search_index/{block_group_id}.bin`.
-
-        If `sgs` is None or empty, indexes all sequence graphs.
-        Subsequent calls to `search()` will load this index automatically.
+        Build a junction-aware k-mer seed index for every sequence graph in the repository and save
+        it to `.gen/search_index/{sequence_graph_id}.bin`. Later calls to `search()` load it
+        automatically; `SequenceGraph.build_index()` indexes just one graph.
         """
     def search(
         self,
@@ -812,19 +727,15 @@ class Repository:
         sequence_kind: builtins.str = "dna",
     ) -> builtins.list[tuple[SequenceGraph, builtins.list[Locus]]]:
         r"""
-        Search for exact occurrences of `query`.
+        Search for occurrences of `query`.
 
-        Returns a list of `(SequenceGraph, list[Locus])` tuples — one entry per
-          - graph that contains at least one match
-          - `matches` is a list of `GraphLocus` objects. Each locus exposes:
-              - `.start()` / `.end()` → `Position` — pass
-                directly to `widget.go_to()`
-              - `.slices` → `list[NodeSlice]`
+        Returns a list of `(SequenceGraph, list[Locus])` tuples, one for each sequence graph that
+        contains at least one match. Each `Locus` can be passed to `widget.go_to()` or to an editing
+        method such as `graph.replace()`.
 
-        If `sgs` is None or empty, searches all sequence graphs.
-        If a seed index was previously built with `build_index()`, it is loaded
-        automatically to accelerate the current-graph search. Falls back to a
-        full scan when no index is found.
+        If `bgs` is None or empty, searches all sequence graphs. If a seed index was previously
+        built with `build_index()`, it is loaded automatically to speed the search up. Falls back to
+        a full scan when no index is found. `sequence_kind` is as in `SequenceGraph.search()`.
         """
     def clear_index(
         self, bgs: typing.Optional[typing.Sequence[SequenceGraph]] = None
@@ -832,8 +743,8 @@ class Repository:
         r"""
         Clear the search index cache.
 
-        If `sgs` is None or empty, clears all indices in `.gen/search_index/`.
-        Otherwise, clears only the specified sequence graph indices.
+        If `bgs` is None or empty, clears all indices in `.gen/search_index/`. Otherwise, clears
+        only the indices of the given sequence graphs.
         """
     def update_with_fasta(
         self,
@@ -897,31 +808,17 @@ class Repository:
         Update `sample` with the sequences and features of a GenBank file. `create_missing=True`
         allows graphs not yet in the sample. Returns the updated `Sample`.
         """
-    def update_with_sequence(
-        self,
-        sequence: builtins.str,
-        sample: builtins.str,
-        new_sample: builtins.str,
-        region_name: builtins.str,
-        no_reference_path_update: builtins.bool = False,
-        collection: typing.Optional[builtins.str] = None,
-    ) -> Sample:
-        r"""
-        Replace the region `region_name` of `sample` with a literal sequence string, storing the
-        result as `new_sample`. Returns the new `Sample`. For editing a copied sample in place,
-        `graph.replace()` is usually simpler.
-        """
     def update_with_library(
         self,
         sample: typing.Optional[builtins.str],
         new_sample_name: builtins.str,
         path_name: builtins.str,
-        parts_list: typing.Sequence[typing.Sequence[SequencePart]],
+        parts_list: typing.Sequence[typing.Sequence[Sequence]],
         collection: typing.Optional[builtins.str] = None,
     ) -> Sample:
         r"""
         Replace the region `path_name` of `sample` with a combinatorial library built from
-        `parts_list` (columns of `SequencePart` alternatives), storing the result as
+        `parts_list` (columns of named `Sequence` alternatives), storing the result as
         `new_sample_name`. Returns the new `Sample`.
         """
     def update_with_library_files(
@@ -941,19 +838,18 @@ class Repository:
 @typing.final
 class Sample:
     r"""
-    The sequence graphs produced by a single import/update/derive call, all
-    within one sample.
+    The sequence graphs of one sample, such as the records of an imported FASTA file.
 
     Acts like a read-only list of ``SequenceGraph``: index it, iterate it, or
     call ``len()`` on it. Indexing out of range raises ``IndexError``.
     """
     @property
-    def collection_name(self) -> builtins.str:
+    def collection(self) -> builtins.str:
         r"""
         Collection this sample belongs to.
         """
     @property
-    def sample_name(self) -> builtins.str:
+    def name(self) -> builtins.str:
         r"""
         Name of the sample.
         """
@@ -993,10 +889,6 @@ class Sample:
             instead of removing them along with the nodes only they reach.
             Defaults to ``False``.
         """
-    def _ipython_display_(self, slf: Sample) -> None:
-        r"""
-        IPython display hook — called when a cell ends with a Sample.
-        """
     def __repr__(self) -> builtins.str: ...
     def copy(
         self,
@@ -1022,6 +914,46 @@ class SampleIterator:
     def __next__(self) -> typing.Optional[SequenceGraph]: ...
 
 @typing.final
+class Sequence:
+    r"""
+    A DNA, RNA or protein sequence, with an optional name.
+
+    `SequenceGraph.all_sequences()` yields these, and combinatorial libraries are built from named
+    ones. `str(sequence)` is just the bases, and it compares, hashes, slices and measures like that
+    string.
+    """
+    @property
+    def name(self) -> typing.Optional[builtins.str]:
+        r"""
+        Name of this sequence, or `None` when it has none.
+        """
+    @property
+    def sequence(self) -> builtins.str:
+        r"""
+        The bases of this sequence as a string.
+        """
+    def __new__(
+        cls, name: typing.Optional[builtins.str], sequence: builtins.str
+    ) -> Sequence:
+        r"""
+        A named sequence, such as one option for a column of a combinatorial library.
+        """
+    def __str__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str: ...
+    def __len__(self) -> builtins.int: ...
+    def __hash__(self) -> builtins.int: ...
+    def __richcmp__(self, other: typing.Any, operator: int) -> builtins.bool:
+        r"""
+        Compares by bases with another `Sequence` or a `str`, so sequences sort and match like the
+        strings they read as; the name is not compared.
+        """
+    def __contains__(self, needle: builtins.str) -> builtins.bool: ...
+    def __getitem__(self, key: typing.Any) -> typing.Any:
+        r"""
+        Index a single base as a string, or slice a sub-`Sequence` with a step of 1.
+        """
+
+@typing.final
 class SequenceGraph:
     r"""
     A sequence graph returned by a ``Repository``.
@@ -1033,22 +965,17 @@ class SequenceGraph:
     open a fresh ``Repository`` in that thread, and look it up by id::
 
         sg_id = sg.id
-        path  = str(repo.db_path)
+        path  = str(repo.gen_dir)
 
         def worker():
             r = gen.Repository(path)
-            sg = r.get_sequence_graph_by_id(sg_id)
+            sg = r.get_sequence_graph(sg_id)
             ...
     """
     @property
-    def collection_name(self) -> builtins.str:
+    def collection(self) -> builtins.str:
         r"""
         Collection this sequence graph belongs to.
-        """
-    @property
-    def sample_name(self) -> builtins.str:
-        r"""
-        Name of the sample that owns this graph.
         """
     @property
     def name(self) -> builtins.str:
@@ -1057,7 +984,15 @@ class SequenceGraph:
         (`"name:start-end"`).
         """
     @property
-    def id(self) -> HashId: ...
+    def id(self) -> HashId:
+        r"""
+        Hash ID of this sequence graph.
+        """
+    @property
+    def sample(self) -> Sample:
+        r"""
+        The sample that owns this graph.
+        """
     @property
     def annotations(self) -> builtins.list[Annotation]:
         r"""
@@ -1065,7 +1000,7 @@ class SequenceGraph:
 
         Annotations imported from files (``Repository.import_annotations()``) are read in full
         and listed after the database ones, so they can be searched by name alike. Their
-        ``group`` is the file's display name.
+        ``track`` is the file's display name.
 
         Returns
         list[Annotation]
@@ -1125,8 +1060,7 @@ class SequenceGraph:
 
         Returns a list of `Locus` objects. Each locus exposes:
           - `.start()` / `.end()` → `Position` (first and last position)
-          - `.slices` → `list[NodeSlice]`
-          - `.sequence` → `str` (the bases it covers, read fresh from the database)
+          - `.sequence` → `str` (the bases it covers)
 
         Parameters
         query : str
@@ -1136,23 +1070,28 @@ class SequenceGraph:
             ``"exact"`` performs case-sensitive raw-byte matching with no IUPAC
             expansion and no reverse complement.
         """
+    def locus(self, start: builtins.int, end: builtins.int) -> Locus:
+        r"""
+        The `Locus` covering path coordinates `start` to `end` of this sequence graph: 0-based,
+        half-open, counted along the graph's current path. `graph.locus(100, 110)` is the same
+        as `graph.region("<name>:100-110")` without building the string.
+
+        Pass it to editing methods, `Locus.on()`, `repo.stitch()` or a widget's `go_to()`. Raises
+        `ValueError` if the span is empty, outside the path, or maps to more than one route.
+        """
     def region(self, region: builtins.str) -> Locus:
         r"""
         Resolve a region string (e.g. ``"chr1:100-110"``) to a ``Locus`` in this sequence graph.
 
         Unlike passing a region string to ``replace()``, ``delete()``, or ``insert()``, this
-        performs no edit — it only looks up the coordinates, for inspection (``.sequence``,
-        ``.slices``) or as an argument to a widget's ``go_to()``. Raises ``ValueError`` if the
-        region cannot be resolved in this sequence graph.
+        performs no edit — it only looks up the coordinates, for inspection (``.sequence``) or as
+        an argument to a widget's ``go_to()``. Raises ``ValueError`` if the region cannot be
+        resolved in this sequence graph.
         """
     def all_sequences(self) -> SequenceIterator:
         r"""
-        Lazily yields one string per path through the pruned graph.
-        Distinct paths may yield identical strings.
-        """
-    def _ipython_display_(self, slf: SequenceGraph) -> None:
-        r"""
-        IPython display hook — called when a cell ends with a SequenceGraph.
+        Lazily yields one `Sequence` per path through the graph; `str(sequence)` is its bases.
+        Distinct paths may yield identical sequences.
         """
     def build_index(
         self, sequence_kind: builtins.str = "dna", k: builtins.int = 16
@@ -1183,22 +1122,10 @@ class SequenceGraph:
         Raises ``RuntimeError`` if this sequence graph was not created via a
         ``Repository``.
         """
-    def get_node_sequence(self, node: Node) -> builtins.str:
-        r"""
-        Return the sequence for a graph node.
-
-        Parameters
-        node : Node
-            A ``Node`` obtained from ``to_dict()["nodes"]``, ``search()`` results,
-            or any other API that returns graph nodes.
-
-        Raises ``RuntimeError`` if this sequence graph was not created via a
-        ``Repository``.
-        """
     def to_dict(self) -> typing.Any:
         r"""
-        Return the graph as a dict with `nodes` and `edges` (edge keys are `(source, target)` node
-        pairs mapped to lists of edge-weight dicts).
+        Return the graph as a dict with `nodes` (a list of `Node`) and `edges` (edge keys are
+        `(source, target)` node pairs mapped to lists of edge-weight dicts).
         """
     def to_rustworkx(self) -> typing.Any:
         r"""
@@ -1251,9 +1178,9 @@ class SequenceGraph:
         Persist an annotation over a locus in this sequence graph.
 
         Parameters
-        target : Locus
-            Graph-space span to annotate. The locus must cover at least one base
-            and belong to this sequence graph.
+        target : str, Locus or Annotation
+            Graph-space span to annotate: a region string, a ``Locus`` or an existing
+            ``Annotation``. It must cover at least one base and belong to this sequence graph.
         name : str
             Human-readable annotation name.
         track : str, optional
@@ -1306,29 +1233,39 @@ class SequenceGraph:
     def subgraph(
         self,
         new_sample: builtins.str,
-        start: builtins.int,
-        end: builtins.int,
-        backbone: typing.Optional[builtins.str] = None,
+        start: Locus | Position | int,
+        end: Position | int | None = None,
     ) -> SequenceGraph:
         r"""
-        Derive a coordinate-bounded subgraph from this sequence graph.
+        Derive a subgraph of this sequence graph into a new sample, holding every variant route
+        between two points.
+
+        The span can be given three ways:
+
+        - a `Locus`: `graph.subgraph("mcs", graph.region("pUC19:390-460"))`. Only its first and last
+          positions are used, so a locus from another graph works as long as both are still in
+          this one;
+        - two `Position`s, the first and last base to include: `graph.subgraph("mcs", first, last)`;
+        - two integers, path coordinates along the current path (0-based, end exclusive):
+          `graph.subgraph("mcs", 390, 460)`.
+
+        Raises `ValueError` if a position is not in this graph, the span is empty or reversed, or
+        the end cannot be reached from the start. The new graph gets a current path when this
+        graph's current path runs from start to end.
 
         Parameters
         new_sample : str
             Sample name for the derived sequence graph.
-        start : int
-            Start coordinate along the path (inclusive).
-        end : int
-            End coordinate along the path (exclusive).
-        backbone : str, optional
-            Named path to use as the coordinate backbone.
+        start : Locus, Position or int
+            The locus, or the first position (or path coordinate) of the span.
+        end : Position or int, optional
+            The last position (or exclusive path coordinate); omit when `start` is a `Locus`.
         """
     def chunks(
         self,
         new_sample: builtins.str,
         breakpoints: typing.Optional[typing.Sequence[builtins.int]] = None,
         chunk_size: typing.Optional[builtins.int] = None,
-        backbone: typing.Optional[builtins.str] = None,
     ) -> builtins.list[SequenceGraph]:
         r"""
         Split this sequence graph into coordinate-bounded subgraphs.
@@ -1336,12 +1273,13 @@ class SequenceGraph:
         Parameters
         new_sample : str
             Sample name for the derived sequence graphs.
-        breakpoints : str, optional
-            Comma-separated coordinate values at which to split.
+        breakpoints : list[int], optional
+            Coordinates at which to split.
         chunk_size : int, optional
             Split into equal-length pieces of this many bases.
-        backbone : str, optional
-            Named path to use as the coordinate backbone.
+
+        Returns the chunks in order along the graph, so ``repo.stitch(chunks, ...)`` joins them back
+        in the order they were cut.
         """
     def replace(
         self,
@@ -1450,24 +1388,7 @@ class SequenceGraph:
 @typing.final
 class SequenceIterator:
     def __iter__(self) -> SequenceIterator: ...
-    def __next__(self) -> typing.Optional[builtins.str]: ...
-
-@typing.final
-class SequencePart:
-    @property
-    def name(self) -> builtins.str:
-        r"""
-        Name of this part.
-        """
-    @property
-    def sequence(self) -> builtins.str:
-        r"""
-        Sequence of this part.
-        """
-    def __new__(cls, name: builtins.str, sequence: builtins.str) -> SequencePart:
-        r"""
-        A named sequence option for one column of a combinatorial library.
-        """
+    def __next__(self) -> typing.Optional[Sequence]: ...
 
 @typing.final
 class SuperPosition:
@@ -1477,15 +1398,15 @@ class SuperPosition:
     Build one from positions with ``SuperPosition(pos, ...)`` or ``a | b``. Where the graph holds
     several variants a superposition can cover a position on each of them, and ``a | b`` combines
     the positions of two superpositions, or of a superposition and a position. ``sp + n`` steps a
-    single position along its strand, splitting
-    it across every route leaving a fork, and ``sp - n`` steps back the same way. A superposition
-    that already covers several positions does not step, so a walk splits only on its last step.
+    single position along its strand, splitting it across every route leaving a fork, and
+    ``sp - n`` steps back the same way. A superposition that already covers several positions does
+    not step, so a walk splits only on its last step.
 
     Stepping needs a sequence graph. A superposition of positions from one locus, or from loci of
     one sequence graph, is attached to it already; ``sp.on(sg)`` attaches it to another sequence
     graph that shares its nodes, and is invalid there only if one of its positions is not reachable.
-    Pass a superposition as ``after`` or ``before`` to
-    ``SequenceGraph.insert()`` to insert at every position it covers.
+    Pass a superposition as ``after`` or ``before`` to ``SequenceGraph.insert()`` to insert at
+    every position it covers.
     """
     @property
     def positions(self) -> builtins.list[Position]:
@@ -1493,7 +1414,7 @@ class SuperPosition:
         Every ``Position`` this superposition covers.
         """
     @property
-    def sequence_graph(self) -> typing.Optional[SequenceGraph]:
+    def graph(self) -> typing.Optional[SequenceGraph]:
         r"""
         The sequence graph this superposition steps through, or ``None`` when unattached.
         """
@@ -1501,9 +1422,9 @@ class SuperPosition:
         r"""
         Combine positions into one superposition (same as `position_a | position_b`).
         """
-    def on(self, sequence_graph: SequenceGraph) -> SuperPosition:
+    def on(self, graph: SequenceGraph) -> SuperPosition:
         r"""
-        This superposition attached to ``sequence_graph``.
+        This superposition attached to ``graph``.
 
         Raises ``ValueError`` if any of its positions is not reachable in that sequence graph.
         """

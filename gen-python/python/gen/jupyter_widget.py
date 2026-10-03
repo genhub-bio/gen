@@ -42,7 +42,7 @@ _FREEZE_TEXT_HINT = (
     "# terminal cell from the Rust layout engine; UPPERCASE marks a highlighted\n"
     "# annotation region, lowercase is unhighlighted sequence/graph structure.\n"
     "# To interact with this graph instead of reading the ASCII, rerun the notebook's\n"
-    "# own cell (e.g. `repo.plot(sg)` or `sample.plot()`) in a live Jupyter kernel; the\n"
+    "# own cell (e.g. `sg.plot()` or `sample.plot()`) in a live Jupyter kernel; the\n"
     "# returned GraphWidget supports .zoom_in()/.zoom_out(), .scroll_left()/.scroll_right()/\n"
     "# .scroll_up()/.scroll_down(), and .next_page()/.prev_page() for multi-page samples.\n"
 )
@@ -51,8 +51,8 @@ _FREEZE_TEXT_HINT = (
 class GraphWidget(anywidget.AnyWidget):
     """Jupyter widget that displays a Gen graph using the native Rust renderer.
 
-    A widget obtained from a single ``SequenceGraph`` (via ``repo.plot(sg)`` or
-    ``sg.plot()``) shows just that graph. A widget obtained from a ``Sample``
+    A widget obtained from a single ``SequenceGraph`` (via ``sg.plot()``) shows
+    just that graph. A widget obtained from a ``Sample``
     (via ``sample.plot()``) pages through every sequence graph it contains,
     showing a header row with the sequence graph name plus a floating
     ``<index/count>`` pager indicator next to the zoom buttons.
@@ -63,7 +63,7 @@ class GraphWidget(anywidget.AnyWidget):
 
         repo   = gen.Repository()
         sg     = repo.get_sequence_graphs()[0]
-        widget = repo.plot(sg)   # or sg.plot()
+        widget = sg.plot()
 
         # Configure before displaying: each display below clones the
         # controller's *current* state, so commands compose into whatever
@@ -108,7 +108,7 @@ class GraphWidget(anywidget.AnyWidget):
         ----------
         controller:
             A ``gen.PyGraphController`` instance.  Normally obtained via
-            ``repo.plot(sg)``, ``sg.plot()``, or ``sample.plot()``.
+            ``sg.plot()``, ``sg.plot()``, or ``sample.plot()``.
         colors : callable | dict | list, optional
             Controls annotation colours loaded from the repository.
 
@@ -190,7 +190,7 @@ class GraphWidget(anywidget.AnyWidget):
 
         color_fn = self._build_color_fn(colors)
         annotations = self._controller.annotations
-        color_map = {ann.id: color_fn(ann) for ann in annotations}
+        color_map = {str(ann.id): color_fn(ann) for ann in annotations}
         self._controller.load_annotation_groups_with_colors(color_map)
 
     @staticmethod
