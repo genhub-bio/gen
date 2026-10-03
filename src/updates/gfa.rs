@@ -526,7 +526,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -549,13 +548,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "applied diff");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }
@@ -576,7 +570,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -599,13 +592,8 @@ mod tests {
         let block_groups = block_groups_for_sample(conn, &collection, "applied diff");
         assert_eq!(block_groups.len(), 1);
         assert_eq!(
-            BlockGroup::get_all_sequences(
-                conn,
-                crate::test_helpers::test_workspace(),
-                &block_groups[0].id,
-                false
-            )
-            .unwrap(),
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_groups[0].id, false)
+                .unwrap(),
             HashSet::from_iter(expected_sequences),
         );
     }

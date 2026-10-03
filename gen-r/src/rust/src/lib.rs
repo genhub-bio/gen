@@ -1139,8 +1139,8 @@ impl Repository {
         &self,
         filename: String,
         sample: String,
-        shallow: bool,
         collection: Nullable<String>,
+        indexes: Vec<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.config().conn(),
@@ -1153,8 +1153,7 @@ impl Repository {
             &filename,
             &collection_name,
             &sample,
-            shallow,
-            &[],
+            &indexes,
         ) {
             Ok(operation_summary) => {
                 end_transactions(&self.context, &operation_summary).map_err(Error::Other)?;
@@ -1175,8 +1174,8 @@ impl Repository {
         &self,
         filename: String,
         reference: String,
-        shallow: bool,
         collection: Nullable<String>,
+        indexes: Vec<String>,
     ) -> std::result::Result<Robj, Error> {
         let collection_name = resolve_collection_name(
             self.context.config().conn(),
@@ -1201,8 +1200,7 @@ impl Repository {
             &filename,
             &collection_name,
             &reference,
-            shallow,
-            &[],
+            &indexes,
         ) {
             Ok(operation_summary) => {
                 end_transactions(&self.context, &operation_summary).map_err(Error::Other)?;

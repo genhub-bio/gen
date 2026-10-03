@@ -183,6 +183,11 @@ pub struct OperationInfo {
 pub struct OperationSummary {
     pub operation_info: OperationInfo,
     pub summary: String,
+    /// Exact asset references prepared while an operation consumed its source streams.
+    ///
+    /// When present, commit tracks these references directly instead of preparing the original
+    /// descriptors again. This is used by imports that transform a source while streaming it.
+    pub prepared_asset_refs: Option<Vec<AssetRef>>,
 }
 
 impl OperationSummary {
@@ -190,7 +195,14 @@ impl OperationSummary {
         Self {
             operation_info,
             summary: summary.into(),
+            prepared_asset_refs: None,
         }
+    }
+
+    /// Uses the already-prepared asset references when this operation is committed.
+    pub fn with_prepared_asset_refs(mut self, asset_refs: Vec<AssetRef>) -> Self {
+        self.prepared_asset_refs = Some(asset_refs);
+        self
     }
 }
 
@@ -214,17 +226,20 @@ pub fn commit_operation_summary(
     let created_on = chrono::Utc::now()
         .timestamp_nanos_opt()
         .expect("should create operation asset timestamp");
-    let prepared_assets = operation_info
-        .files
-        .iter()
-        .map(|operation_file| operation_file.prepare_asset_ref(workspace, created_on))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| match err {
-            FileAdditionError::ConfigError(config_error) => {
-                OperationError::ConfigError(config_error)
-            }
-            other => OperationError::SQLError(other.to_string()),
-        })?;
+    let prepared_assets = match &operation_summary.prepared_asset_refs {
+        Some(asset_refs) => asset_refs.clone(),
+        None => operation_info
+            .files
+            .iter()
+            .map(|operation_file| operation_file.prepare_asset_ref(workspace, created_on))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| match err {
+                FileAdditionError::ConfigError(config_error) => {
+                    OperationError::ConfigError(config_error)
+                }
+                other => OperationError::SQLError(other.to_string()),
+            })?,
+    };
     let operation_kind = OperationKind::Other(operation_info.description.clone());
     track_asset_refs(
         graph_conn,
@@ -437,52 +452,83 @@ impl FileAddition {
     ) -> Result<FileAddition, FileAdditionError> {
         let asset_uri = <dyn AssetUri>::new(workspace, file_path);
         let is_local = LocalAssetUri::is_local_path_or_file_uri(file_path);
-        let (checksum, materialized_checksum, stored_asset_uri) =
-            if is_local && !LocalAssetUri::is_index_path(file_path) {
-                let source_reader = asset_uri.reader(workspace)?;
-                let (compression_type, replayed_reader) = CompressionType::sniff(source_reader)
-                    .map_err(FileAdditionError::FileReadError)?;
-                let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
-                    workspace,
-                    file_type,
-                    replayed_reader,
-                    compression_type,
-                    checksum_override,
-                )
-                .map_err(|error| match error {
-                    FileAdditionError::ChecksumError(message) => {
-                        FileAdditionError::ChecksumError(format!("{message}: {file_path}"))
-                    }
-                    error => error,
-                })?;
-                let repo_root = workspace.repo_root()?;
-                let asset_path = workspace.asset_dir()?.join(format!(
-                    "{archive_checksum}.{}.bgz",
-                    FileTypes::suffix(file_type)
-                ));
-                let relative_path = asset_path
-                    .strip_prefix(&repo_root)
-                    .map_err(|_| FileAdditionError::PathOutsideRepo {
-                        path: asset_path.clone(),
-                        repo_root,
-                    })?
-                    .to_string_lossy();
-                let stored_asset_uri = LocalAssetUri::asset_uri(&relative_path);
-                let materialized_checksum =
-                    (compression_type == CompressionType::Plain).then_some(source_checksum);
-                (
-                    Some(archive_checksum),
-                    materialized_checksum,
-                    stored_asset_uri,
-                )
-            } else {
-                let checksum = asset_uri.prepare_asset(workspace, checksum_override)?;
-                let stored_asset_uri = match checksum.as_ref() {
-                    Some(checksum) => asset_uri.stored_asset_uri(workspace, checksum)?,
-                    None => asset_uri.uri().to_string(),
-                };
-                (checksum, None, stored_asset_uri)
-            };
+        if is_local && !LocalAssetUri::is_index_path(file_path) {
+            let source_reader = asset_uri.reader(workspace)?;
+            let (compression_type, replayed_reader) =
+                CompressionType::sniff(source_reader).map_err(FileAdditionError::FileReadError)?;
+            return Self::prepare_from_reader(
+                workspace,
+                file_path,
+                file_type,
+                replayed_reader,
+                compression_type,
+                checksum_override,
+            );
+        }
+
+        let checksum = asset_uri.prepare_asset(workspace, checksum_override)?;
+        let stored_asset_uri = match checksum.as_ref() {
+            Some(checksum) => asset_uri.stored_asset_uri(workspace, checksum)?,
+            None => asset_uri.uri().to_string(),
+        };
+
+        Ok(FileAddition {
+            id: LocalAssetUri::generate_file_addition_id(checksum.as_ref(), &stored_asset_uri),
+            asset_uri: stored_asset_uri,
+            file_type,
+            checksum,
+            materialized_checksum: None,
+        })
+    }
+
+    /// Stores an asset from a source stream that has already been classified.
+    ///
+    /// Streaming importers can inspect a bounded prefix once, then send the replayed reader through
+    /// the same content-addressed archive path used by ordinary local preparation.
+    pub fn prepare_from_reader(
+        workspace: &Workspace,
+        source_uri: &str,
+        file_type: FileTypes,
+        reader: impl io::Read + 'static,
+        compression_type: CompressionType,
+        source_checksum_override: Option<Sha256Hash>,
+    ) -> Result<FileAddition, FileAdditionError> {
+        if LocalAssetUri::is_index_path(source_uri) {
+            return Err(FileAdditionError::FileReadError(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("index sources cannot be retained as BGZF assets: {source_uri}"),
+            )));
+        }
+
+        let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
+            workspace,
+            file_type,
+            reader,
+            compression_type,
+            source_checksum_override,
+        )
+        .map_err(|error| match error {
+            FileAdditionError::ChecksumError(message) => {
+                FileAdditionError::ChecksumError(format!("{message}: {source_uri}"))
+            }
+            error => error,
+        })?;
+        let repo_root = workspace.repo_root()?;
+        let asset_path = workspace.asset_dir()?.join(format!(
+            "{archive_checksum}.{}.bgz",
+            FileTypes::suffix(file_type)
+        ));
+        let relative_path = asset_path
+            .strip_prefix(&repo_root)
+            .map_err(|_| FileAdditionError::PathOutsideRepo {
+                path: asset_path.clone(),
+                repo_root,
+            })?
+            .to_string_lossy();
+        let stored_asset_uri = LocalAssetUri::asset_uri(&relative_path);
+        let checksum = Some(archive_checksum);
+        let materialized_checksum =
+            (compression_type == CompressionType::Plain).then_some(source_checksum);
 
         Ok(FileAddition {
             id: LocalAssetUri::generate_file_addition_id(checksum.as_ref(), &stored_asset_uri),

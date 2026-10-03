@@ -221,7 +221,7 @@ pub(super) fn search_request_fixture() -> RegionSearchFixture {
         .to_str()
         .expect("should encode FASTA fixture path")
         .to_string();
-    import_fasta(&context, &fasta_path, "test", "simple", false, &[])
+    import_fasta(&context, &fasta_path, "test", "simple", &[])
         .expect("should import search fixture FASTA");
     add_annotation(&context, "test", "model-gene", None, "simple", "m123:5-20")
         .expect("should create model annotation");

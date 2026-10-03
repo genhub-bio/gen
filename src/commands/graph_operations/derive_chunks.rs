@@ -172,7 +172,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();

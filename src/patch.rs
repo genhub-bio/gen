@@ -1049,7 +1049,6 @@ mod tests {
             &fasta_path.to_string_lossy().to_string(),
             "default",
             "foo",
-            false,
             &[],
         )
         .expect("should import fasta fixture");

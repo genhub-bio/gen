@@ -82,7 +82,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -137,7 +136,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
