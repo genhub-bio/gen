@@ -257,19 +257,19 @@ impl PyRepository {
 
     /// Checks out a branch by name or Branch object and returns its updated metadata.
     ///
-    /// Set `create=True` to create a new branch at HEAD before checking it out.
-    /// Creating an existing branch is an error.
-    #[pyo3(signature = (branch, *, create=false))]
-    fn checkout(
-        &self,
-        #[gen_stub(override_type(type_repr = "str | Branch", imports = ()))] branch: &Bound<
-            '_,
-            PyAny,
-        >,
-        create: bool,
-    ) -> PyResult<PyBranch> {
+    /// Set `create=True` to create a new branch at HEAD before checking it out. Creating an
+    /// existing branch is an error unless `exist_ok=True`, which switches to it instead; use that
+    /// in notebook cells that may be run more than once.
+    #[pyo3(signature = (branch, *, create=false, exist_ok=false))]
+    fn checkout(&self, #[gen_stub(override_type(type_repr = "str | Branch", imports = ()))] branch: &Bound<'_, PyAny>, create: bool, exist_ok: bool) -> PyResult<PyBranch> {
         let name = branch_name(branch)?;
-        if create {
+        let already_exists = self.find_branch(&name).is_ok();
+        if create && already_exists && !exist_ok {
+            return Err(PyRuntimeError::new_err(format!(
+                "branch '{name}' already exists; use checkout('{name}') to switch to it, or pass exist_ok=True"
+            )));
+        }
+        if create && !already_exists {
             let history_store = DoltHistoryStore::new(self.context.graph().conn());
             r#gen::history::ensure_clean_working_set(&history_store, "checkout")
                 .map_err(history_err_to_pyerr)?;
@@ -428,7 +428,7 @@ mod tests {
             assert!(!feature.is_current, "new branch should not be current");
             let feature_object = Py::new(python, feature).expect("should create Python branch");
             let checked_out = repository
-                .checkout(feature_object.bind(python).as_any(), false)
+                .checkout(feature_object.bind(python).as_any(), false, false)
                 .expect("should checkout Branch object");
             assert!(
                 checked_out.is_current,
@@ -452,7 +452,7 @@ mod tests {
                 .into_pyobject(python)
                 .expect("should create Python branch name");
             repository
-                .checkout(main.as_any(), false)
+                .checkout(main.as_any(), false, false)
                 .expect("should checkout branch name");
             assert!(
                 Collection::all(repository.context.graph().conn())

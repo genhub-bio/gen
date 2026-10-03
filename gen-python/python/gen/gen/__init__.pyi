@@ -558,13 +558,18 @@ class Repository:
         Deletes a branch.
         """
     def checkout(
-        self, branch: str | Branch, *, create: builtins.bool = False
+        self,
+        branch: str | Branch,
+        *,
+        create: builtins.bool = False,
+        exist_ok: builtins.bool = False,
     ) -> Branch:
         r"""
         Checks out a branch by name or Branch object and returns its updated metadata.
 
-        Set `create=True` to create a new branch at HEAD before checking it out.
-        Creating an existing branch is an error.
+        Set `create=True` to create a new branch at HEAD before checking it out. Creating an
+        existing branch is an error unless `exist_ok=True`, which switches to it instead; use that
+        in notebook cells that may be run more than once.
         """
     def get_operations(
         self,
@@ -632,6 +637,8 @@ class Repository:
         sample: str | Sample | None = None,
         circular: builtins.bool = False,
         collection: typing.Optional[builtins.str] = None,
+        *,
+        exist_ok: builtins.bool = False,
     ) -> SequenceGraph:
         r"""
         Add one in-memory sequence to a sample as a new sequence graph, without a FASTA file, and
@@ -650,6 +657,8 @@ class Repository:
         name: typing.Optional[builtins.str] = None,
         circular: builtins.bool = False,
         collection: typing.Optional[builtins.str] = None,
+        *,
+        exist_ok: builtins.bool = False,
     ) -> SequenceGraph:
         r"""
         Like `import_sequence`, but adds to a reference sample.
@@ -990,12 +999,18 @@ class Sample:
         """
     def __repr__(self) -> builtins.str: ...
     def copy(
-        self, new_name: builtins.str, message: typing.Optional[builtins.str] = None
+        self,
+        new_name: builtins.str,
+        message: typing.Optional[builtins.str] = None,
+        *,
+        exist_ok: builtins.bool = False,
     ) -> Sample:
         r"""
         Copy this sample into a new sample with the same sequence graphs.
 
-        The destination name must not already exist. The returned sample is
+        The destination name must not already exist, unless `exist_ok=True`, which returns the
+        existing sample as it is now (including any edits) instead of copying again; use that in
+        notebook cells that may be run more than once. The returned sample is
         ready for explicit in-place edits on its sequence graphs. The copy is
         recorded as its own operation, using ``message`` as the operation's
         commit message when given, or a generated description otherwise.
