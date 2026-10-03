@@ -51,6 +51,15 @@ graph.search("GAATTC")                      # list[Locus]; sequence_kind="exact"
 graph.export_fasta("out.fa", all_sequences=True)   # whole sample; also export_genbank/gfa
 ```
 
+**Pieces of a graph** (loci, subgraphs, stitching, files)
+```python
+locus = graph.locus(100, 200)                       # path coordinates; same as graph.region("name:100-200")
+sub = graph.subgraph("piece", locus)                # keeps every variant between its ends (also two Positions)
+joined = repo.stitch([sub, other_graph.region("o:0-50")], "assembly", "construct")  # graphs or loci
+asset = repo.add_file("README.md")                  # keep a file without importing it as sequence
+asset.path;  asset.save_as("copy.md")               # stored copy has a hashed name; save_as renames it
+```
+
 **Annotate**
 ```python
 graph.annotations;  graph.add_annotation(locus, "motif", track="motifs")

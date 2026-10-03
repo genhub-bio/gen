@@ -453,9 +453,10 @@ class Repository:
         between its first and last positions: stitching `graph.region("chr1:100-200")` keeps all
         the alternatives that lie inside that region, not just the sequence that region reads
         along the current path. A whole `SequenceGraph` part contributes all of its routes. The
-        new graph's current path reads the parts' own routes one after another. Every `SequenceGraph` part needs a current path, which
-        a subgraph taken between positions off the current path may lack; stitch a `Locus` of such
-        a graph instead.
+        new graph's current path reads the parts' own routes one after another.
+
+        Every `SequenceGraph` part needs a current path, which a subgraph taken between positions
+        off the current path may lack; stitch a `Locus` of such a graph instead.
 
         Parts must come from one collection, be forward-strand (reverse loci are rejected) and not
         overlap, since that would make the result cyclic.
@@ -1076,7 +1077,7 @@ class SequenceGraph:
         half-open, counted along the graph's current path. `graph.locus(100, 110)` is the same
         as `graph.region("<name>:100-110")` without building the string.
 
-        Pass it to editing methods, `Locus.on()`, `repo.stitch()` or a widget's `go_to()`. Raises
+        Pass it to editing methods, `graph.subgraph()`, `repo.stitch()` or a widget's `go_to()`. Raises
         `ValueError` if the span is empty, outside the path, or maps to more than one route.
         """
     def region(self, region: builtins.str) -> Locus:
@@ -1249,8 +1250,9 @@ class SequenceGraph:
         - two integers, path coordinates along the current path (0-based, end exclusive):
           `graph.subgraph("mcs", 390, 460)`.
 
-        Raises `ValueError` if a position is not in this graph, the span is empty or reversed, or
-        the end cannot be reached from the start. The new graph gets a current path when this
+        A `Locus` may read on either strand; two `Position`s must be forward-strand. Raises
+        `ValueError` if a position is not in this graph, the span is empty or reversed, or the end
+        cannot be reached from the start. The new graph gets a current path when this
         graph's current path runs from start to end.
 
         Parameters
