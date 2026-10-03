@@ -24,7 +24,7 @@ signatures and docstrings). Longer recipes: [references/gen-python-workflows.md]
 import gen
 repo = gen.Repository("workspace")                 # open or create
 repo = gen.clone(url, "workspace")                 # clone; the path must not hold data yet
-repo.checkout("branch", create=True); repo.get_branches(); repo.get_operations(limit=5)
+repo.checkout("branch", create=True)  # exist_ok=True to reuse; also get_branches(); repo.get_operations(limit=5)
 repo.pull(); repo.push()                           # remotes: add_remote(name, url), fetch()
 ```
 
@@ -83,6 +83,8 @@ after graph edits.
   is the audit trail.
 - `graph.region()` and `sample.copy()` do not mutate. Inspect the return type before chaining:
   VCF updates return `list[Sample]`, most other updates return one `Sample`.
+- Cells that mutate fail when re-run ("already exists"). In notebooks pass `exist_ok=True` to
+  `import_sequence`, `sample.copy` and `checkout(..., create=True)` to reuse the earlier result.
 - Don't switch to the CLI after a `TypeError`; check the signature in the `.pyi`.
 - Use the CLI only for patches and operation diffs, which have no Python binding.
 - Gen exposes sequence context; primer thermodynamics, specificity and functional predictions

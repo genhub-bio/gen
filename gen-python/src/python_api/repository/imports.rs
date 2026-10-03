@@ -31,6 +31,7 @@ use pyo3_stub_gen::derive::gen_stub_pymethods;
 use super::{PyRepository, run_context_operation_write};
 use crate::python_api::{
     block_group::PySequenceGraph, sample::PySample, sequence_part::PySequencePart,
+    utils::block_group_err_to_pyerr,
 };
 
 /// Biopython `SeqRecord`s are recognised by shape (`id` and `seq`) so gen never imports Biopython.
@@ -146,18 +147,47 @@ fn circularize(conn: &GraphConnection, block_group_id: &HashId) -> PyResult<()> 
 
 impl PyRepository {
     /// Importing a name already present in the sample would silently keep the old graph, so
-    /// callers get an error instead.
-    fn reject_existing_graph(&self, collection: &str, sample: &str, name: &str) -> PyResult<()> {
+    /// callers get an error instead. With `exist_ok`, a graph holding exactly the requested
+    /// sequence is returned as is, which makes repeated notebook cells harmless; a graph holding
+    /// anything else is still an error.
+    fn existing_graph(
+        &self,
+        entry: &(String, String),
+        collection: &str,
+        sample: &str,
+        exist_ok: bool,
+    ) -> PyResult<Option<PySequenceGraph>> {
+        let (name, text) = entry;
         let exists =
             Sample::get_block_groups(self.context.graph().conn(), collection, sample, None)
                 .iter()
-                .any(|block_group| block_group.name == name);
-        if exists {
+                .any(|block_group| block_group.name == *name);
+        if !exists {
+            return Ok(None);
+        }
+        let graph = self.get_block_group(collection, sample, name)?;
+        if exist_ok {
+            let mut sequences = BlockGroup::sequences_iter(
+                self.context.graph().conn(),
+                self.context.workspace(),
+                &graph.id,
+                None,
+            )
+            .map_err(block_group_err_to_pyerr)?;
+            let holds_requested_sequence =
+                sequences.next().as_ref() == Some(text) && sequences.next().is_none();
+            if holds_requested_sequence {
+                return Ok(Some(graph));
+            }
             return Err(PyRuntimeError::new_err(format!(
-                "sequence graph '{name}' already exists in sample '{sample}'"
+                "sequence graph '{name}' already exists in sample '{sample}' with a different sequence; \
+                 edit it with graph.replace(), or choose another name"
             )));
         }
-        Ok(())
+        Err(PyRuntimeError::new_err(format!(
+            "sequence graph '{name}' already exists in sample '{sample}'; fetch it from repo.samples, \
+             choose another name, or pass exist_ok=True to reuse it when the sequence is identical"
+        )))
     }
 
     fn import_sequence_entry(
@@ -166,8 +196,11 @@ impl PyRepository {
         collection: &str,
         sample: &str,
         circular: bool,
+        exist_ok: bool,
     ) -> PyResult<PySequenceGraph> {
-        self.reject_existing_graph(collection, sample, &entry.0)?;
+        if let Some(graph) = self.existing_graph(entry, collection, sample, exist_ok)? {
+            return Ok(graph);
+        }
         run_context_operation_write(
             &self.context,
             |ctx| {
@@ -325,7 +358,7 @@ impl PyRepository {
     /// defaults to the default sample, "reference"; call it repeatedly with the same `sample` to
     /// build up a sample from several sequences. With `circular=True` the sequence is stored as a
     /// circular graph. Each call is its own operation, so use `import_fasta` for large files.
-    #[pyo3(signature = (sequence, name=None, sample=None, circular=false, collection=None))]
+    #[pyo3(signature = (sequence, name=None, sample=None, circular=false, collection=None, *, exist_ok=false))]
     pub fn import_sequence(
         &self,
         sequence: &Bound<'_, PyAny>,
@@ -335,6 +368,7 @@ impl PyRepository {
         >,
         circular: bool,
         collection: Option<String>,
+        exist_ok: bool,
     ) -> PyResult<PySequenceGraph> {
         let entry = parse_sequence_entry(sequence, name)?;
         let (sample, sample_collection) = match sample {
@@ -344,11 +378,11 @@ impl PyRepository {
         let collection = collection
             .or(sample_collection)
             .unwrap_or_else(|| self.get_default_collection());
-        self.import_sequence_entry(&entry, &collection, &sample, circular)
+        self.import_sequence_entry(&entry, &collection, &sample, circular, exist_ok)
     }
 
     /// Like `import_sequence`, but adds to a reference sample.
-    #[pyo3(signature = (sequence, reference, name=None, circular=false, collection=None))]
+    #[pyo3(signature = (sequence, reference, name=None, circular=false, collection=None, *, exist_ok=false))]
     pub fn import_reference_sequence(
         &self,
         sequence: &Bound<'_, PyAny>,
@@ -359,13 +393,16 @@ impl PyRepository {
         name: Option<String>,
         circular: bool,
         collection: Option<String>,
+        exist_ok: bool,
     ) -> PyResult<PySequenceGraph> {
         let entry = parse_sequence_entry(sequence, name)?;
         let (reference, reference_collection) = sample_reference(reference)?;
         let collection = collection
             .or(reference_collection)
             .unwrap_or_else(|| self.get_default_collection());
-        self.reject_existing_graph(&collection, &reference, &entry.0)?;
+        if let Some(graph) = self.existing_graph(&entry, &collection, &reference, exist_ok)? {
+            return Ok(graph);
+        }
         run_context_operation_write(
             &self.context,
             |ctx| {
@@ -636,6 +673,7 @@ mod tests {
                         None,
                         circular,
                         None,
+                        false,
                     )
                     .unwrap();
                 let conn = repository.context.graph().conn();
