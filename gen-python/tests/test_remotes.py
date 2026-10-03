@@ -233,7 +233,7 @@ def fake_gcs_server():
                 "run",
                 "--rm",
                 "--detach",
-                "--pull=never",
+                "--pull=missing",
                 "--publish",
                 "127.0.0.1::4443",
                 "fsouza/fake-gcs-server:1.56.1",
