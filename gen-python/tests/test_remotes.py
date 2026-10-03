@@ -1,6 +1,7 @@
 """Exercise the installed extension's remote API without a live GenHub account."""
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -9,7 +10,11 @@ import subprocess
 import tempfile
 from queue import Empty, Queue
 from threading import Thread
+from time import monotonic, sleep
 import unittest
+import urllib.parse
+import urllib.request
+import uuid
 from urllib.request import url2pathname
 from unittest.mock import patch
 
@@ -46,12 +51,15 @@ def genhub_server(respond):
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            content_length = int(self.headers.get("Content-Length", 0))
+            raw_body = self.rfile.read(content_length)
+            body = json.loads(raw_body) if raw_body else None
             requests.append((self.path, dict(self.headers), body))
             status, response = respond(self.path, self.headers, body)
-            payload = json.dumps(response).encode()
+            payload = json.dumps(response).encode() if response is not None else b""
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            if response is not None:
+                self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -214,6 +222,78 @@ def direct_gcs_database(local_database):
             if process.stdin is not None:
                 process.stdin.close()
             stderr_file.close()
+
+@contextmanager
+def fake_gcs_server():
+    """Runs the pinned GCS emulator used by the direct-push integration test."""
+    try:
+        container_id = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--detach",
+                "--pull=never",
+                "--publish",
+                "127.0.0.1::4443",
+                "fsouza/fake-gcs-server:1.56.1",
+                "-scheme",
+                "http",
+                "-port",
+                "4443",
+                "-backend",
+                "memory",
+                "-public-host",
+                "127.0.0.1",
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout.strip()
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "direct-GCS remote tests require Docker and the "
+            "fsouza/fake-gcs-server:1.56.1 image"
+        ) from error
+    except subprocess.CalledProcessError as error:
+        details = error.stderr.strip()
+        message = (
+            "direct-GCS remote tests require Docker and the locally available "
+            "fsouza/fake-gcs-server:1.56.1 image"
+        )
+        if details:
+            message = f"{message}: {details}"
+        raise RuntimeError(message) from error
+    try:
+        published_port = (
+            subprocess.run(
+                ["docker", "port", container_id, "4443/tcp"],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+            .stdout.strip()
+            .rsplit(":", 1)[-1]
+        )
+        origin = f"http://127.0.0.1:{published_port}"
+        ready_by = monotonic() + 15
+        while True:
+            try:
+                with urllib.request.urlopen(f"{origin}/storage/v1/b", timeout=1):
+                    break
+            except OSError:
+                if monotonic() >= ready_by:
+                    raise
+                sleep(0.05)
+        yield origin
+    finally:
+        subprocess.run(
+            ["docker", "stop", container_id],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=15,
+        )
 
 
 class RemoteTests(unittest.TestCase):
@@ -394,12 +474,15 @@ class RemoteTests(unittest.TestCase):
                             for path, _, _ in requests
                         )
                     )
+                    api_key_requests = [
+                        body
+                        for _, headers, body in requests
+                        if headers.get("x-api-key") == "test-key"
+                    ]
                     self.assertEqual(
-                        sum(
-                            headers.get("x-api-key") == "test-key"
-                            for _, headers, _ in requests
-                        ),
-                        1,
+                        [body["operation"] for body in api_key_requests],
+                        ["push"],
+                        "direct push should carry the API key; denied reads should stay anonymous",
                     )
 
     # TODO: Re-enable when pulling an explicit non-current branch updates that local branch.
@@ -500,7 +583,7 @@ class RemoteTests(unittest.TestCase):
             server_origin["url"] = url.split("/repos/", 1)[0]
             served_assets.update(known_assets)
             with patch.dict(os.environ, {"GENHUB_API_KEY": "accepted-test-key"}):
-                local = gen.clone(url, path=str(self.root / "clone"))
+                local = gen.clone(url, path=str(self.root / "legacy-clone"))
                 self.assertEqual(
                     archived_asset_bytes_by_id(local),
                     known_assets,
@@ -508,7 +591,7 @@ class RemoteTests(unittest.TestCase):
                 )
                 local.fetch()
                 local.pull()
-                self.import_sequence(local, "local_change")
+                self.import_sequence(local, "legacy_local_change")
                 local_assets = archived_asset_bytes_by_id(local)
                 local_only_asset_ids = local_assets.keys() - known_assets.keys()
                 self.assertTrue(
@@ -523,6 +606,7 @@ class RemoteTests(unittest.TestCase):
                     local_only_asset_ids.isdisjoint(served_assets.keys()),
                     "rejected legacy push must not upload local-only assets",
                 )
+
             authenticated = [
                 (path, body)
                 for path, headers, body in requests
@@ -533,24 +617,201 @@ class RemoteTests(unittest.TestCase):
                 for path, body in authenticated
                 if path.endswith("/remote-capability")
             ]
-            self.assertEqual(
-                [body["operation"] for body in capabilities],
-                ["clone", "pull", "pull", "push"],
-            )
-            self.assertTrue(capabilities[3]["force"])
+            self.assertIn("push", [body["operation"] for body in capabilities])
             self.assertGreaterEqual(
                 sum(path.endswith("/asset-transfers") for path, _ in authenticated),
                 1,
             )
-            self.assertEqual(
-                sum(
-                    path.endswith("/asset-transfers/complete")
-                    for path, _ in authenticated
-                ),
-                0,
+            self.assertFalse(
+                any(path.endswith("/asset-transfers/complete") for path, _ in authenticated)
             )
             self.assertEqual(
                 local.default_remote.url, url.replace("/repos/", "/api/repos/")
+            )
+
+    @unittest.skipIf(
+        os.name == "nt", "direct-GCS remote workflows are currently tested on Unix"
+    )
+    def test_direct_gcs_remote_push_uploads_graph_and_completes_asset_transfer(self):
+        upstream_path = self.root / "upstream"
+        upstream = gen.Repository(str(upstream_path))
+        self.import_sequence(upstream, "base")
+        graph_url = (upstream_path / ".gen" / "default.db").as_uri()
+        known_assets = archived_asset_bytes_by_id(upstream)
+        server_origin = {}
+        bucket = f"gen-python-{uuid.uuid4().hex}"
+        graph_prefix = f"repositories/{uuid.uuid4().hex}/.gen/graph_db/"
+        transfer_id = str(uuid.uuid4())
+
+        def respond(path, headers, body):
+            if path.startswith("/api/publish?") or path.startswith("/api/abort?"):
+                return 204, None
+            if headers.get("x-api-key") != "accepted-test-key":
+                return 401, {"message": "private repository"}
+            if path.endswith("/remote-capability"):
+                now = datetime.now(timezone.utc)
+                response = {
+                    "remote_url": None if body["operation"] == "push" else graph_url,
+                    "expires_at": (now + timedelta(minutes=30)).isoformat(),
+                    "default_branch": "main",
+                    "transfer_id": transfer_id,
+                }
+                if body["operation"] == "push":
+                    session_id = headers.get("idempotency-token")
+                    if session_id is None:
+                        return 400, {"message": "push capability requires a session id"}
+                    response["direct_push"] = {
+                        "database_uri": database_uri,
+                        "token_expires_at": (now + timedelta(hours=1)).isoformat(),
+                        "session_id": session_id,
+                        "session_scope": {
+                            "principal": "repository:python-direct-gcs-test",
+                            "target_database": "default.db",
+                            "operations": json.dumps(
+                                [
+                                    "write",
+                                    "push",
+                                    body.get("branch") or "main",
+                                    bool(body["force"]),
+                                ],
+                                separators=(",", ":"),
+                            ),
+                        },
+                        "publish_url": (
+                            f"{server_origin['url']}/api/publish?capability={transfer_id}"
+                        ),
+                        "abort_url": (
+                            f"{server_origin['url']}/api/abort?capability={transfer_id}"
+                        ),
+                    }
+                return 200, response
+            if path.endswith("/asset-transfers"):
+                return 200, {
+                    "assets": [
+                        {
+                            "id": asset_id,
+                            "url": f"{server_origin['url']}/assets/{asset_id}",
+                        }
+                        for asset_id in known_assets
+                    ]
+                }
+            return 200, {"assets": []}
+
+        with fake_gcs_server() as gcs_endpoint:
+            bucket_request = urllib.request.Request(
+                f"{gcs_endpoint}/storage/v1/b?project=test-project",
+                data=json.dumps({"name": bucket}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(bucket_request, timeout=10) as response:
+                self.assertEqual(response.status, 200)
+            database_query = urllib.parse.urlencode(
+                {
+                    "database": "default.db",
+                    "project": "test-project",
+                    "vfs": "blockcachevfs",
+                    "endpoint": gcs_endpoint,
+                    "access_token": "fake-gcs-token",
+                }
+            )
+            database_uri = f"gcs://{bucket}/{graph_prefix}?{database_query}"
+
+            with genhub_server(respond) as (url, requests, served_assets):
+                server_origin["url"] = url.split("/repos/", 1)[0]
+                served_assets.update(known_assets)
+                with patch.dict(os.environ, {"GENHUB_API_KEY": "accepted-test-key"}):
+                    local = gen.clone(url, path=str(self.root / "direct-gcs-clone"))
+                    local.fetch()
+                    local.pull()
+                    self.import_sequence(local, "local_change")
+                    local_assets = archived_asset_bytes_by_id(local)
+                    local_only_asset_ids = local_assets.keys() - known_assets.keys()
+                    self.assertTrue(local_only_asset_ids)
+                    known_assets.update(
+                        {asset_id: local_assets[asset_id] for asset_id in local_only_asset_ids}
+                    )
+                    source_branch = local.current_branch.name
+                    source_commit = local.current_branch.head
+                    local.push(force=True)
+                    self.assertEqual(local.current_branch.name, source_branch)
+                    self.assertEqual(local.current_branch.head, source_commit)
+                    for asset_id in local_only_asset_ids:
+                        self.assertEqual(
+                            served_assets.get(asset_id),
+                            local_assets[asset_id],
+                            "push should upload each local-only asset's exact archived bytes",
+                        )
+
+                authenticated = [
+                    (path, body)
+                    for path, headers, body in requests
+                    if headers.get("x-api-key") == "accepted-test-key"
+                ]
+                capabilities = [
+                    body
+                    for path, body in authenticated
+                    if path.endswith("/remote-capability")
+                ]
+                push_capabilities = [
+                    body for body in capabilities if body["operation"] == "push"
+                ]
+                self.assertTrue(push_capabilities)
+                self.assertTrue(all(body["force"] for body in push_capabilities))
+                completions = [
+                    body
+                    for path, body in authenticated
+                    if path.endswith("/asset-transfers/complete")
+                ]
+                self.assertEqual(len(completions), 1)
+                self.assertEqual(completions[0]["transfer_id"], transfer_id)
+                self.assertEqual(completions[0]["branch"], "main")
+                self.assertTrue(
+                    local_only_asset_ids
+                    & {asset["id"] for asset in completions[0]["assets"]}
+                )
+                self.assertTrue(
+                    any(
+                        path.endswith("/asset-transfers")
+                        for path, _body in authenticated
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        path.endswith("/asset-transfers/complete")
+                        and body is not None
+                        for path, body in authenticated
+                    )
+                )
+                self.assertEqual(
+                    local.default_remote.url, url.replace("/repos/", "/api/repos/")
+                )
+
+                publications = [
+                    (path, headers)
+                    for path, headers, _body in requests
+                    if path.startswith("/api/publish?")
+                ]
+                self.assertEqual(len(publications), 1)
+                self.assertNotIn("x-api-key", publications[0][1])
+
+            object_list_url = (
+                f"{gcs_endpoint}/storage/v1/b/{bucket}/o?"
+                f"{urllib.parse.urlencode({'prefix': graph_prefix})}"
+            )
+            with urllib.request.urlopen(object_list_url, timeout=10) as response:
+                graph_objects = json.load(response).get("items", [])
+            self.assertTrue(graph_objects, "direct push should store graph objects in GCS")
+            self.assertTrue(
+                all(object_["name"].startswith(graph_prefix) for object_ in graph_objects),
+                "direct push should keep graph objects under its isolated repository prefix",
+            )
+            self.assertTrue(
+                any(
+                    object_["name"].endswith("manifest.bcv")
+                    for object_ in graph_objects
+                ),
+                "direct push should publish the graph manifest to GCS",
             )
 
 

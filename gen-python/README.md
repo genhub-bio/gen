@@ -374,6 +374,8 @@ make jupyter  # also builds the JS widget bundle and installs the `jupyter` extr
 - `api-test` — rebuilds the extension into the project-root `.venv` and runs
   `unittest discover` over `tests/`, exercising the installed extension's public
   API (including remote clone/push/pull/fetch against mock HTTP and file remotes).
+  The direct-GCS push case starts `fsouza/fake-gcs-server:1.56.1` through Docker; have
+  Docker running and pull that image first (`docker pull fsouza/fake-gcs-server:1.56.1`).
 - `notebook-test` — rebuilds the extension into the project-root `.venv` and runs
   `pytest --nbmake` over `examples/`, executing every example notebook end to end.
 - `test` — runs all of the above.

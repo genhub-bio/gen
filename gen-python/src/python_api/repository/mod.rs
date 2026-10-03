@@ -78,11 +78,13 @@ pub fn clone_repository(
     Ok(repository)
 }
 
+#[cfg(not(target_os = "emscripten"))]
 const INITIALIZATION_OPERATION_COUNT: usize = 2;
 
 /// Removes a destination's `.gen` directory when it is the only entry and holds no graph data or
 /// operations, so agents that opened `Repository(path)` before cloning do not hit a spurious
 /// "not an empty directory" error. Anything with content is left for the clone to reject.
+#[cfg(not(target_os = "emscripten"))]
 fn discard_untouched_workspace(workspace: &Workspace) -> PyResult<()> {
     let destination = workspace.base_dir();
     let Ok(mut entries) = fs::read_dir(destination) else {
