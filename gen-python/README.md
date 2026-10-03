@@ -27,6 +27,23 @@ graphs = repo.get_sequence_graphs()          # -> list[SequenceGraph]
 sample.plot()  # or sg.plot()
 ```
 
+Local FASTA imports are stored in an indexed BGZF asset, and sequence reads
+use that local archive. A remote BGZF FASTA with usable `.fai` and `.gzi`
+indexes supplied through `indexes=[...]` remains a remote reference, so
+sequence reads use its URL. Other remote FASTA inputs are downloaded,
+compressed, indexed, and stored locally.
+
+```python
+sample = repo.import_fasta(
+    "https://example.org/reference.fa.gz",
+    sample="reference",
+    indexes=[
+        "https://example.org/reference.fa.gz.fai",
+        "https://example.org/reference.fa.gz.gzi",
+    ],
+)
+```
+
 Clone and version-control repositories with the same object-oriented workflow:
 
 ```python

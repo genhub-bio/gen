@@ -28,8 +28,8 @@ use crate::{
 };
 
 mod compression;
-pub use compression::should_archive_as_bgzf;
-pub(crate) use compression::{InputEncoding, classify_input, stage_bgzf_asset_copy};
+pub(crate) use compression::stage_bgzf_asset_copy;
+pub use compression::{InputEncoding, classify_input, should_archive_as_bgzf};
 
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -333,7 +333,8 @@ impl AssetRef {
         HashId(calculate_hash(&identity))
     }
 
-    pub(crate) fn from_file_addition(
+    /// Creates an asset reference from a prepared file addition and its provenance metadata.
+    pub fn from_file_addition(
         file_addition: &FileAddition,
         role: AssetRole,
         logical_path: Option<&str>,
@@ -1356,7 +1357,8 @@ impl LocalAssetUri {
             .unwrap_or_else(|| Self::resolve_source_path(workspace, &self.asset_uri))
     }
 
-    pub(crate) fn resolve_input_source_path(
+    /// Resolves a local input path using the repository as the base for relative paths.
+    pub fn resolve_input_source_path(
         workspace: &Workspace,
         file_path_or_uri: &str,
     ) -> Result<PathBuf, FileAdditionError> {

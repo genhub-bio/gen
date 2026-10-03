@@ -1,15 +1,18 @@
 use std::{
-    collections::HashMap,
-    io::{BufRead, BufReader, Read},
+    collections::{HashMap, HashSet},
+    fs::{self, File},
+    io::{BufRead, Cursor, Read, Write},
     path::Path as FsPath,
     str,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use flate2::read::MultiGzDecoder;
 use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
 use gen_models::{
-    assets::{AssetRef, AssetRole, AssetUri, ChecksummedReader},
+    assets::{
+        AssetRef, AssetRole, AssetUri, ChecksummedWriter, InputEncoding, LocalAssetUri,
+        classify_input,
+    },
     block_group::{BlockGroup, NewBlockGroup},
     block_group_edge::{BlockGroupEdge, BlockGroupEdgeData},
     collection::Collection,
@@ -18,12 +21,16 @@ use gen_models::{
     errors::{CollectionError, SampleError},
     file_types::FileTypes,
     node::Node,
-    operations::{OperationFile, OperationInfo, OperationSummary},
+    operations::{FileAddition, OperationFile, OperationInfo, OperationSummary},
     path::Path,
     sample::Sample,
     sequence::Sequence,
 };
-use noodles::{bgzf, fasta};
+use noodles::{
+    bgzf::{self, gzi},
+    fasta::{self, fai},
+};
+use tempfile::Builder as TempFileBuilder;
 
 use crate::{
     fasta::FastaError,
@@ -38,70 +45,221 @@ pub fn import_fasta(
     fasta: &String,
     collection_name: &str,
     sample: &str,
-    shallow: bool,
     indexes: &[String],
 ) -> Result<OperationSummary, FastaError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
-    let mut operation_files =
-        vec![OperationFile::new(fasta.to_string()).set_file_type(FileTypes::Fasta)];
-    let mut sequence_asset_ref_id = None;
-    let mut checksum_handle = None;
-    let mut fasta_input_uri = fasta.to_string();
-    let input: Box<dyn Read> = if shallow {
-        let created_on = i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("should create sequence asset timestamp")
-                .as_nanos(),
-        )
-        .expect("should fit sequence asset timestamp in i64");
-        let sequence_asset_ref =
-            operation_files[0].prepare_asset_ref(context.workspace(), created_on)?;
-        if let Some(source_checksum) = sequence_asset_ref.materialized_checksum {
-            operation_files[0].checksum_override = Some(source_checksum);
-        }
-        fasta_input_uri.clone_from(&sequence_asset_ref.uri);
-        AssetRef::create(conn, &sequence_asset_ref)
-            .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
-        sequence_asset_ref_id = Some(sequence_asset_ref.id);
+    let created_on = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("should create sequence asset timestamp")
+            .as_nanos(),
+    )
+    .expect("should fit sequence asset timestamp in i64");
+    let workspace = context.workspace();
+    let is_local = LocalAssetUri::is_local_path_or_file_uri(fasta);
+    let source_uri = <dyn AssetUri>::new(workspace, fasta);
+    let (input_encoding, replayed_reader) =
+        classify_input(source_uri.reader(workspace)?).map_err(std::io::Error::other)?;
 
-        let mut index_locations = indexes.to_vec();
-        for index_extension in ["fai", "gzi"] {
-            let index_location = format!("{fasta}.{index_extension}");
-            if !index_locations.contains(&index_location) && FsPath::new(&index_location).is_file()
+    let mut index_locations = indexes.to_vec();
+    if is_local {
+        for extension in ["fai", "gzi"] {
+            let index_location = format!("{fasta}.{extension}");
+            if !index_locations.contains(&index_location)
+                && LocalAssetUri::resolve_input_source_path(workspace, &index_location)?.is_file()
             {
                 index_locations.push(index_location);
             }
         }
-        for index_location in index_locations {
-            let index_operation_file = OperationFile::new(index_location)
-                .set_file_type(FileTypes::None)
-                .set_role(AssetRole::SequenceIndex)
-                .set_upstream_asset_ref_id(&sequence_asset_ref.id);
-            let index_asset_ref =
-                index_operation_file.prepare_asset_ref(context.workspace(), created_on)?;
-            AssetRef::create(conn, &index_asset_ref)
-                .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
-            operation_files.push(index_operation_file);
+    }
+    let mut selected_fai = None;
+    let mut selected_gzi = None;
+    let mut extra_indexes = Vec::new();
+    if !is_local && input_encoding == InputEncoding::Bgzf {
+        for index_location in &index_locations {
+            match index_extension(index_location).as_deref() {
+                Some("fai") if selected_fai.is_none() => {
+                    if let Some(bytes) = read_index_bytes(workspace, index_location)?
+                        && parse_fai_index(&bytes).is_some()
+                    {
+                        selected_fai = Some((index_location.clone(), bytes, true));
+                    }
+                }
+                Some("gzi") if selected_gzi.is_none() => {
+                    if let Some(bytes) = read_index_bytes(workspace, index_location)?
+                        && parse_gzi_index(&bytes).is_some()
+                    {
+                        selected_gzi = Some((index_location.clone(), bytes, true));
+                    }
+                }
+                Some("fai" | "gzi") => {}
+                _ => extra_indexes.push(index_location.clone()),
+            }
         }
-        Box::new(sequence_asset_ref.reader(context.workspace())?)
+    }
+    let indexed_remote_parent = !is_local
+        && input_encoding == InputEncoding::Bgzf
+        && selected_fai.is_some()
+        && selected_gzi.is_some();
+    if !is_local && !indexed_remote_parent {
+        selected_fai = None;
+        selected_gzi = None;
+        extra_indexes.clear();
+    }
+    let parent_operation_file =
+        OperationFile::new(fasta.to_string()).set_file_type(FileTypes::Fasta);
+    let sequence_asset = if indexed_remote_parent {
+        parent_operation_file.prepare_asset_ref(workspace, created_on)?
     } else {
-        let asset_uri = <dyn AssetUri>::new(context.workspace(), fasta);
-        let file = ChecksummedReader::new(asset_uri.reader(context.workspace())?);
-        checksum_handle = Some(file.checksum_handle());
-        Box::new(file)
+        let file_addition = FileAddition::prepare_from_reader(
+            workspace,
+            fasta,
+            FileTypes::Fasta,
+            replayed_reader,
+            input_encoding,
+            None,
+        )?;
+        let logical_path = if is_local {
+            Some(OperationFile::storage_file_path(
+                workspace,
+                fasta,
+                file_addition.checksum.as_ref(),
+                FileTypes::Fasta,
+            )?)
+        } else {
+            None
+        };
+        AssetRef::from_file_addition(
+            &file_addition,
+            AssetRole::Input,
+            logical_path.as_deref(),
+            Some(&parent_operation_file.filename),
+            None,
+            created_on,
+        )
     };
 
-    let fasta_extension = <dyn AssetUri>::from_uri(&fasta_input_uri)
-        .suffix()
-        .and_then(|suffix| suffix.rsplit('.').next().map(str::to_string));
-    let reader_stream: Box<dyn BufRead> = match fasta_extension.as_deref() {
-        Some("gz") => Box::new(BufReader::new(MultiGzDecoder::new(input))),
-        Some("bgz") => Box::new(bgzf::io::Reader::new(input)),
-        _ => Box::new(BufReader::new(input)),
+    let sequence_path = if indexed_remote_parent {
+        None
+    } else {
+        Some(sequence_asset.versioned_store_path(workspace)?)
     };
-    let mut reader = fasta::io::reader::Builder.build_from_reader(reader_stream)?;
+    if is_local {
+        for index_location in &index_locations {
+            match index_extension(index_location).as_deref() {
+                Some("fai") if selected_fai.is_none() => {
+                    if let Some(bytes) = read_index_bytes(workspace, index_location)?
+                        && parse_fai_index(&bytes).is_some()
+                    {
+                        selected_fai = Some((index_location.clone(), bytes, true));
+                    }
+                }
+                Some("gzi") if selected_gzi.is_none() && input_encoding == InputEncoding::Bgzf => {
+                    if let Some(bytes) = read_index_bytes(workspace, index_location)?
+                        && parse_gzi_index(&bytes).is_some()
+                    {
+                        selected_gzi = Some((index_location.clone(), bytes, true));
+                    }
+                }
+                Some("fai" | "gzi") => {}
+                _ => extra_indexes.push(index_location.clone()),
+            }
+        }
+    }
+
+    let (fai_location, fai_bytes, fai_reused) = match selected_fai {
+        Some((location, bytes, reused)) => (location, bytes, reused),
+        None => {
+            let sequence_path = sequence_path.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "remote FASTA index was not available",
+                )
+            })?;
+            let (_, bytes) = build_fai_index(sequence_path)?;
+            let index_location = sibling_index_location(fasta, "fai");
+            (index_location, bytes, false)
+        }
+    };
+    let fasta_index = parse_fai_index(&fai_bytes).ok_or_else(|| {
+        FastaError::IOError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "FASTA index could not be parsed",
+        ))
+    })?;
+
+    let (gzi_location, gzi_bytes, gzi_reused) = match selected_gzi {
+        Some((location, bytes, reused)) if input_encoding == InputEncoding::Bgzf => {
+            (location, bytes, reused)
+        }
+        _ => {
+            let sequence_path = sequence_path.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "remote BGZF index was not available",
+                )
+            })?;
+            let bytes = build_gzi_index(sequence_path)?;
+            (sibling_index_location(fasta, "gzi"), bytes, false)
+        }
+    };
+
+    let mut prepared_asset_refs = vec![sequence_asset.clone()];
+    AssetRef::create(conn, &sequence_asset)
+        .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
+    let mut operation_files = vec![parent_operation_file];
+    for (index_location, bytes, extension, reused) in [
+        (fai_location.clone(), fai_bytes, "fai", fai_reused),
+        (gzi_location.clone(), gzi_bytes, "gzi", gzi_reused),
+    ] {
+        let index_asset_ref = if indexed_remote_parent {
+            index_operation_file(&index_location, &sequence_asset.id)
+                .prepare_asset_ref(workspace, created_on)?
+        } else if reused
+            && LocalAssetUri::is_local_path_or_file_uri(&index_location)
+            && LocalAssetUri::resolve_input_source_path(workspace, &index_location)?.is_file()
+        {
+            let operation_file = index_operation_file(&index_location, &sequence_asset.id);
+            operation_file.prepare_asset_ref(workspace, created_on)?
+        } else {
+            prepare_stored_index_asset_ref(
+                workspace,
+                &bytes,
+                extension,
+                &index_location,
+                &sequence_asset,
+                created_on,
+            )?
+        };
+        AssetRef::create(conn, &index_asset_ref)
+            .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
+        prepared_asset_refs.push(index_asset_ref.clone());
+        operation_files.push(index_operation_file(&index_location, &sequence_asset.id));
+    }
+    for index_location in extra_indexes {
+        let operation_file = index_operation_file(&index_location, &sequence_asset.id);
+        let index_asset_ref =
+            if indexed_remote_parent || LocalAssetUri::is_local_path_or_file_uri(&index_location) {
+                operation_file.prepare_asset_ref(workspace, created_on)?
+            } else if let Some(bytes) = read_index_bytes(workspace, &index_location)? {
+                let extension = index_extension(&index_location).unwrap_or_default();
+                prepare_stored_index_asset_ref(
+                    workspace,
+                    &bytes,
+                    &extension,
+                    &index_location,
+                    &sequence_asset,
+                    created_on,
+                )?
+            } else {
+                continue;
+            };
+        AssetRef::create(conn, &index_asset_ref)
+            .map_err(gen_models::errors::FileAdditionError::DatabaseError)?;
+        prepared_asset_refs.push(index_asset_ref.clone());
+        operation_files.push(operation_file);
+    }
 
     let collection = match Collection::create(conn, collection_name) {
         Ok(collection) => collection,
@@ -127,26 +285,18 @@ pub fn import_fasta(
     let _ = progress_bar.println("Parsing Fasta");
     let bar = progress_bar.add(get_progress_bar(None));
     bar.set_message("Entries Processed.");
-    for result in reader.records() {
-        let record = result.expect("Error during fasta record parsing");
-        let sequence = str::from_utf8(record.sequence().as_ref())
-            .unwrap()
+    for record in fasta_index.as_ref() {
+        let name = str::from_utf8(record.name())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
             .to_string();
-        let name = String::from_utf8(record.name().to_vec()).unwrap();
-        let sequence_length = record.sequence().len() as i64;
-        let seq = if shallow {
-            Sequence::new()
-                .sequence_type("DNA")
-                .name(&name)
-                .asset_ref_id(sequence_asset_ref_id.as_ref())
-                .length(sequence_length)
-                .save(conn)?
-        } else {
-            Sequence::new()
-                .sequence_type("DNA")
-                .sequence(&sequence)
-                .save(conn)?
-        };
+        let sequence_length = i64::try_from(record.length())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let seq = Sequence::new()
+            .sequence_type("DNA")
+            .name(&name)
+            .asset_ref_id(Some(&sequence_asset.id))
+            .length(sequence_length)
+            .save(conn)?;
         let node_id = Node::create(
             conn,
             &seq.hash,
@@ -215,18 +365,6 @@ pub fn import_fasta(
         summary_str.push_str(&format!(" {path_name}: {change_count} changes.\n"));
     }
 
-    if let Some(checksum_handle) = checksum_handle {
-        let checksum_override = checksum_handle.checksum().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "FASTA reader did not reach EOF before checksum was requested",
-            )
-        })?;
-        operation_files[0] = operation_files[0]
-            .clone()
-            .set_checksum_override(checksum_override);
-    }
-
     let bar = add_saving_operation_bar(&progress_bar);
     let operation_summary = OperationSummary::new(
         OperationInfo {
@@ -234,9 +372,176 @@ pub fn import_fasta(
             description: "fasta_addition".to_string(),
         },
         summary_str,
-    );
+    )
+    .with_prepared_asset_refs(prepared_asset_refs);
     bar.finish();
     Ok(operation_summary)
+}
+
+fn index_operation_file(path: &str, upstream_asset_ref_id: &HashId) -> OperationFile {
+    OperationFile::new(path.to_string())
+        .set_file_type(FileTypes::None)
+        .set_role(AssetRole::SequenceIndex)
+        .set_upstream_asset_ref_id(upstream_asset_ref_id)
+}
+
+fn sibling_index_location(fasta: &str, extension: &str) -> String {
+    let source_path = fasta.split(['?', '#']).next().unwrap_or(fasta);
+    format!("{source_path}.{extension}")
+}
+
+fn index_extension(path_or_uri: &str) -> Option<String> {
+    <dyn AssetUri>::from_uri(path_or_uri)
+        .suffix()
+        .and_then(|suffix| suffix.rsplit('.').next().map(str::to_ascii_lowercase))
+}
+
+fn read_index_bytes(
+    workspace: &gen_core::Workspace,
+    path_or_uri: &str,
+) -> Result<Option<Vec<u8>>, FastaError> {
+    if LocalAssetUri::is_local_path_or_file_uri(path_or_uri) {
+        let path = LocalAssetUri::resolve_input_source_path(workspace, path_or_uri)?;
+        if !path.is_file() {
+            return Ok(None);
+        }
+        return Ok(Some(fs::read(path)?));
+    }
+
+    let mut reader = match <dyn AssetUri>::new(workspace, path_or_uri).reader(workspace) {
+        Ok(reader) => reader,
+        Err(_) => return Ok(None),
+    };
+    let mut bytes = Vec::new();
+    if reader.read_to_end(&mut bytes).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn parse_fai_index(bytes: &[u8]) -> Option<fai::Index> {
+    let index = fai::io::Reader::new(Cursor::new(bytes)).read_index().ok()?;
+    let mut names = HashSet::new();
+    let records = index.as_ref();
+    let is_usable = !records.is_empty()
+        && records.iter().all(|record| {
+            record.length() > 0
+                && record.line_bases() > 0
+                && record.line_width() >= record.line_bases()
+                && str::from_utf8(record.name()).is_ok_and(|name| names.insert(name.to_string()))
+        });
+    is_usable.then_some(index)
+}
+
+fn parse_gzi_index(bytes: &[u8]) -> Option<gzi::Index> {
+    let index = gzi::io::Reader::new(Cursor::new(bytes)).read_index().ok()?;
+    let mut previous = (0, 0);
+    for &(compressed_offset, uncompressed_offset) in index.as_ref() {
+        if compressed_offset <= previous.0 || uncompressed_offset <= previous.1 {
+            return None;
+        }
+        previous = (compressed_offset, uncompressed_offset);
+    }
+    Some(index)
+}
+
+fn build_fai_index(path: &FsPath) -> Result<(fai::Index, Vec<u8>), FastaError> {
+    let file = File::open(path)?;
+    let mut indexer = fasta::io::Indexer::new(bgzf::io::Reader::new(file));
+    let mut records = Vec::new();
+    while let Some(record) = indexer.index_record().map_err(std::io::Error::from)? {
+        records.push(record);
+    }
+    if records.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "FASTA contains no indexed records",
+        )
+        .into());
+    }
+    let index = fai::Index::from(records);
+    let mut bytes = Vec::new();
+    fai::io::Writer::new(&mut bytes).write_index(&index)?;
+    Ok((index, bytes))
+}
+
+fn build_gzi_index(path: &FsPath) -> Result<Vec<u8>, FastaError> {
+    let file = File::open(path)?;
+    let mut reader = bgzf::io::Reader::new(file);
+    let mut records = Vec::new();
+    let mut uncompressed_offset = 0_u64;
+    loop {
+        let block_length = {
+            let block = reader.fill_buf()?;
+            if block.is_empty() {
+                break;
+            }
+            block.len()
+        };
+        let compressed_offset = reader.virtual_position().compressed();
+        if uncompressed_offset > 0 {
+            records.push((compressed_offset, uncompressed_offset));
+        }
+        reader.consume(block_length);
+        uncompressed_offset = uncompressed_offset
+            .checked_add(u64::try_from(block_length).map_err(std::io::Error::other)?)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "BGZF uncompressed offset overflows",
+                )
+            })?;
+    }
+
+    let index = gzi::Index::from(records);
+    let mut bytes = Vec::new();
+    gzi::io::Writer::new(&mut bytes).write_index(&index)?;
+    Ok(bytes)
+}
+
+fn prepare_stored_index_asset_ref(
+    workspace: &gen_core::Workspace,
+    bytes: &[u8],
+    extension: &str,
+    source_path_or_uri: &str,
+    sequence_asset: &AssetRef,
+    created_on: i64,
+) -> Result<AssetRef, FastaError> {
+    let asset_directory = workspace
+        .asset_dir()
+        .map_err(gen_models::errors::FileAdditionError::ConfigError)?;
+    fs::create_dir_all(&asset_directory)?;
+    let suffix = format!(".{extension}");
+    let mut temporary_file = TempFileBuilder::new()
+        .suffix(&suffix)
+        .tempfile_in(&asset_directory)?;
+    let checksum = {
+        let mut writer = ChecksummedWriter::new(temporary_file.as_file_mut());
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        writer.checksum()
+    };
+    temporary_file.flush()?;
+    let retained_path = asset_directory.join(format!("{checksum}.{extension}"));
+    match temporary_file.persist_noclobber(&retained_path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.error.into()),
+    }
+    let file_addition = FileAddition::prepare(
+        workspace,
+        &retained_path.to_string_lossy(),
+        FileTypes::None,
+        Some(checksum),
+    )?;
+    Ok(AssetRef::from_file_addition(
+        &file_addition,
+        AssetRole::SequenceIndex,
+        None,
+        Some(&OperationFile::new(source_path_or_uri.to_string()).filename),
+        Some(&sequence_asset.id),
+        created_on,
+    ))
 }
 
 #[cfg(test)]
@@ -266,7 +571,11 @@ mod tests {
         sample::Sample,
         sequence::Sequence,
     };
-    use noodles::bgzf::gzi;
+    use noodles::{
+        bgzf::{self, gzi},
+        core::Region,
+        fasta::{self, fai},
+    };
 
     use super::import_fasta;
     use crate::test_helpers::{setup_gen, setup_gen_on_disk};
@@ -397,14 +706,18 @@ mod tests {
                 .expect("should lock remote FASTA request log")
                 .clone()
         }
-    }
 
-    impl Drop for TestHttpServer {
-        fn drop(&mut self) {
+        fn stop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
             if let Some(handle) = self.handle.take() {
                 handle.join().expect("should stop remote FASTA test server");
             }
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            self.stop();
         }
     }
 
@@ -423,7 +736,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -436,25 +748,47 @@ mod tests {
             OperationKind::Other("fasta_addition".to_string())
         );
         let asset_refs = AssetRef::all(conn).expect("should load asset references");
-        assert_eq!(asset_refs.len(), 1);
-        assert!(asset_refs[0].uri.ends_with(".fa.bgz"));
-        let archived_path = asset_refs[0]
+        assert_eq!(
+            asset_refs.len(),
+            3,
+            "FASTA and both indexes should be retained"
+        );
+        let sequence_asset = asset_refs
+            .iter()
+            .find(|asset_ref| asset_ref.role == AssetRole::Input)
+            .expect("should retain the sequence asset");
+        assert!(sequence_asset.uri.ends_with(".fa.bgz"));
+        let archived_path = sequence_asset
             .versioned_store_path(context.workspace())
             .expect("should resolve retained FASTA archive");
         assert_eq!(
-            asset_refs[0].checksum,
+            sequence_asset.checksum,
             Some(calculate_file_checksum(archived_path).unwrap())
         );
-        assert_eq!(asset_refs[0].materialized_checksum, Some(source_checksum));
+        assert_eq!(sequence_asset.materialized_checksum, Some(source_checksum));
         assert!(
-            asset_refs[0]
+            sequence_asset
                 .logical_path
                 .as_deref()
                 .is_some_and(|path| path == ".gen/outside_root/simple.fa")
         );
-        assert_eq!(asset_refs[0].name.as_deref(), Some("simple.fa"));
+        assert_eq!(sequence_asset.name.as_deref(), Some("simple.fa"));
 
         let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
+        let sequence = Sequence::query_by_blockgroup(conn, context.workspace(), &block_group_id)
+            .into_iter()
+            .find(|sequence| sequence.asset_ref_id == Some(sequence_asset.id))
+            .expect("should store the sequence as an external asset");
+        assert!(sequence.external_sequence);
+        assert_eq!(sequence.length, 34);
+        let stored_sequence = conn
+            .query_row(
+                "SELECT sequence FROM sequences WHERE hash = ?1",
+                [sequence.hash],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("should read the sequence row payload");
+        assert!(stored_sequence.is_empty(), "FASTA bases stay out of SQLite");
         assert_eq!(
             BlockGroup::get_all_sequences(conn, context.workspace(), &block_group_id, false)
                 .unwrap(),
@@ -482,7 +816,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -506,7 +839,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -532,7 +864,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -557,7 +888,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             "new-sample",
-            false,
             &[],
         )
         .unwrap();
@@ -604,7 +934,7 @@ mod tests {
             &fasta_path,
         )
         .unwrap();
-        fs::write(&index_path, "m123\t37\t6\t37\t38\n").unwrap();
+        fs::write(&index_path, "m123\t34\t6\t34\t35\n").unwrap();
         gzi::fs::write(&gzip_index_path, &gzi::Index::default()).unwrap();
 
         let operation_summary = import_fasta(
@@ -612,7 +942,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             "test",
             Sample::DEFAULT_NAME,
-            true,
             &[],
         )
         .unwrap();
@@ -725,7 +1054,6 @@ mod tests {
                 &fasta_path_string,
                 "test",
                 Sample::DEFAULT_NAME,
-                true,
                 &[],
             )
             .expect("should import a FASTA through the retained BGZF asset");
@@ -772,33 +1100,27 @@ mod tests {
         )
         .expect("should read BGZF FASTA fixture");
         let server = TestHttpServer::new(HashMap::from([
-            ("/reference.fa.bgz".to_string(), fasta_contents),
+            ("/reference.fa.gz".to_string(), fasta_contents),
             (
-                "/reference.fa.bgz.fai".to_string(),
-                b"m123\t37\t6\t37\t38\n".to_vec(),
+                "/indexes/reference.fai".to_string(),
+                b"m123\t34\t6\t34\t35\n".to_vec(),
             ),
             (
-                "/reference.fa.bgz.gzi".to_string(),
+                "/indexes/reference.gzi".to_string(),
                 0_u64.to_le_bytes().to_vec(),
             ),
         ]));
         let context = setup_gen_on_disk();
         let conn = context.graph().conn();
-        let fasta = server.url("/reference.fa.bgz");
+        let fasta = server.url("/reference.fa.gz");
         let indexes = [
-            server.url("/reference.fa.bgz.fai"),
-            server.url("/reference.fa.bgz.gzi"),
+            server.url("/indexes/reference.fai?token=fai"),
+            server.url("/indexes/reference.gzi?token=gzi"),
         ];
 
-        let operation_summary = import_fasta(
-            &context,
-            &fasta,
-            "test",
-            Sample::DEFAULT_NAME,
-            true,
-            &indexes,
-        )
-        .expect("should import a shallow remote BGZF with remote indexes");
+        let operation_summary =
+            import_fasta(&context, &fasta, "test", Sample::DEFAULT_NAME, &indexes)
+                .expect("should import a shallow remote BGZF with remote indexes");
         commit_operation_summary(&context, &operation_summary)
             .expect("should commit remote shallow FASTA assets");
 
@@ -816,6 +1138,14 @@ mod tests {
             index_assets.len(),
             2,
             "remote BGZF sequence should retain both index AssetRefs"
+        );
+        assert_eq!(
+            index_assets
+                .iter()
+                .map(|asset_ref| asset_ref.uri.clone())
+                .collect::<HashSet<_>>(),
+            HashSet::from(indexes.clone()),
+            "explicit remote index URIs, including query strings, should be retained"
         );
         assert!(
             index_assets.iter().all(|asset_ref| {
@@ -850,24 +1180,209 @@ mod tests {
         let requests = server.requests();
         assert!(
             requests.iter().any(|request| {
-                request.starts_with("GET /reference.fa.bgz.fai ")
-                    || request.starts_with("HEAD /reference.fa.bgz.fai ")
+                (request.starts_with("GET /indexes/reference.fai ")
+                    || request.starts_with("HEAD /indexes/reference.fai "))
+                    && request.contains("authorization: Bearer fai")
             }),
-            "indexed lookup should request the remote FASTA index"
+            "indexed lookup should request the remote FASTA index; requests: {requests:?}"
         );
         assert!(
             requests.iter().any(|request| {
-                request.starts_with("GET /reference.fa.bgz.gzi ")
-                    || request.starts_with("HEAD /reference.fa.bgz.gzi ")
+                (request.starts_with("GET /indexes/reference.gzi ")
+                    || request.starts_with("HEAD /indexes/reference.gzi "))
+                    && request.contains("authorization: Bearer gzi")
             }),
             "indexed lookup should request the remote gzip index"
         );
         assert!(
             requests.iter().any(|request| {
-                request.starts_with("GET /reference.fa.bgz ")
+                request.starts_with("GET /reference.fa.gz ")
                     && request.to_ascii_lowercase().contains("\r\nrange: bytes=")
             }),
             "indexed remote lookup should use a byte-range request"
+        );
+    }
+
+    #[test]
+    fn test_remote_fasta_without_both_usable_indexes_is_archived_locally() {
+        let fixture_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let test_cases = [
+            (
+                "/plain.fa",
+                fs::read(fixture_directory.join("simple.fa"))
+                    .expect("should read plain FASTA fixture"),
+                Vec::new(),
+                true,
+            ),
+            (
+                "/ordinary.fa.gz",
+                fs::read(fixture_directory.join("fastas/gzipped.fa.gz"))
+                    .expect("should read gzip FASTA fixture"),
+                Vec::new(),
+                false,
+            ),
+            (
+                "/bgzf.fa.gz",
+                fs::read(fixture_directory.join("fastas/bgzipped.fa.bgz"))
+                    .expect("should read BGZF FASTA fixture"),
+                Vec::new(),
+                false,
+            ),
+            (
+                "/partial.fa.bgz",
+                fs::read(fixture_directory.join("fastas/bgzipped.fa.bgz"))
+                    .expect("should read BGZF FASTA fixture"),
+                vec![("/partial.fa.bgz.fai", b"m123\t34\t6\t34\t35\n".to_vec())],
+                false,
+            ),
+        ];
+
+        for (fasta_path, fasta_contents, partial_indexes, has_materialized_checksum) in test_cases {
+            let mut files = HashMap::from([(fasta_path.to_string(), fasta_contents)]);
+            files.extend(
+                partial_indexes
+                    .iter()
+                    .map(|(path, bytes)| (path.to_string(), bytes.clone())),
+            );
+            let mut server = TestHttpServer::new(files);
+            let context = setup_gen_on_disk();
+            let conn = context.graph().conn();
+            let fasta = server.url(fasta_path);
+            let indexes = partial_indexes
+                .iter()
+                .map(|(path, _)| server.url(path))
+                .collect::<Vec<_>>();
+
+            let summary = import_fasta(&context, &fasta, "test", Sample::DEFAULT_NAME, &indexes)
+                .expect("should download and index the remote FASTA locally");
+            commit_operation_summary(&context, &summary)
+                .expect("should commit the local FASTA archive and indexes");
+
+            let source_gets = server
+                .requests()
+                .iter()
+                .filter(|request| request.starts_with(&format!("GET {fasta_path} ")))
+                .count();
+            assert_eq!(source_gets, 1, "source bytes should be fetched once");
+            server.stop();
+
+            let sequence_asset = AssetRef::all(conn)
+                .expect("should load asset references")
+                .into_iter()
+                .find(|asset_ref| asset_ref.role == AssetRole::Input)
+                .expect("should retain the sequence asset");
+            assert!(
+                sequence_asset.uri.starts_with("file://.gen/assets/"),
+                "fallback sequence should use the retained local archive"
+            );
+            assert!(sequence_asset.uri.ends_with(".fa.bgz"));
+            assert_eq!(
+                sequence_asset.materialized_checksum.is_some(),
+                has_materialized_checksum
+            );
+            let index_assets = AssetRef::get_derived_assets(conn, &sequence_asset.id, None);
+            assert_eq!(index_assets.len(), 2, "fallback should retain FAI and GZI");
+            assert!(index_assets.iter().all(|asset_ref| {
+                asset_ref.role == AssetRole::SequenceIndex
+                    && asset_ref.upstream_asset_ref_id == Some(sequence_asset.id)
+                    && asset_ref.uri.starts_with("file://.gen/assets/")
+            }));
+
+            let block_group_id = BlockGroup::get_id("test", Sample::DEFAULT_NAME, "m123", None);
+            let sequence =
+                Sequence::query_by_blockgroup(conn, context.workspace(), &block_group_id)
+                    .into_iter()
+                    .find(|sequence| sequence.asset_ref_id == Some(sequence_asset.id))
+                    .expect("should retain an external sequence row");
+            assert_eq!(
+                sequence
+                    .get_sequence(0, 34)
+                    .expect("should read local archive after server stop"),
+                "ATCGATCGATCGATCGATCGGGAACACACAGAGA"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generated_gzi_supports_indexed_reads_beyond_first_bgzf_block() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let fasta_path = context
+            .workspace()
+            .repo_root()
+            .expect("should resolve the repository root")
+            .join("multi-block.fa");
+        let expected_sequence = (0..200_000)
+            .map(|index| b"ACGT"[index % 4])
+            .collect::<Vec<_>>();
+        let mut fasta_contents = b">large\n".to_vec();
+        fasta_contents.extend_from_slice(&expected_sequence);
+        fasta_contents.push(b'\n');
+        fs::write(&fasta_path, fasta_contents).expect("should write the multi-block FASTA");
+
+        let summary = import_fasta(
+            &context,
+            &fasta_path.to_string_lossy().to_string(),
+            "test",
+            Sample::DEFAULT_NAME,
+            &[],
+        )
+        .expect("should import and index the multi-block FASTA");
+        commit_operation_summary(&context, &summary).expect("should commit the FASTA assets");
+
+        let sequence_asset = AssetRef::all(conn)
+            .expect("should load asset references")
+            .into_iter()
+            .find(|asset_ref| asset_ref.role == AssetRole::Input)
+            .expect("should retain the sequence asset");
+        let index_assets = AssetRef::get_derived_assets(conn, &sequence_asset.id, None);
+        let fai_asset = index_assets
+            .iter()
+            .find(|asset_ref| asset_ref.uri.ends_with(".fai"))
+            .expect("should retain the FAI index");
+        let gzi_asset = index_assets
+            .iter()
+            .find(|asset_ref| asset_ref.uri.ends_with(".gzi"))
+            .expect("should retain the GZI index");
+        let fai_index = fai::io::Reader::new(
+            fai_asset
+                .reader(context.workspace())
+                .expect("should open the retained FAI index"),
+        )
+        .read_index()
+        .expect("should parse the retained FAI index");
+        let gzi_index = gzi::io::Reader::new(
+            gzi_asset
+                .reader(context.workspace())
+                .expect("should open the retained GZI index"),
+        )
+        .read_index()
+        .expect("should parse the retained GZI index");
+        assert!(
+            !gzi_index.as_ref().is_empty(),
+            "multi-block BGZF should need nonzero GZI offsets"
+        );
+        let bgzf_reader = bgzf::io::indexed_reader::Builder::default()
+            .set_index(gzi_index)
+            .build_from_reader(
+                sequence_asset
+                    .reader(context.workspace())
+                    .expect("should open the retained BGZF sequence"),
+            )
+            .expect("should build a GZI-indexed BGZF reader");
+        let mut reader = fasta::io::indexed_reader::Builder::default()
+            .set_index(fai_index)
+            .build_from_reader(bgzf_reader)
+            .expect("should build a FAI-indexed FASTA reader");
+        let region = "large:130001-130200"
+            .parse::<Region>()
+            .expect("should parse the FASTA region");
+        let record = reader
+            .query(&region)
+            .expect("should seek to a FASTA region beyond the first BGZF block");
+        assert_eq!(
+            record.sequence().as_ref(),
+            &expected_sequence[130_000..130_200]
         );
     }
 
@@ -885,7 +1400,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();
@@ -903,7 +1417,6 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
             &[],
         )
         .unwrap();

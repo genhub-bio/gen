@@ -1173,15 +1173,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        import_fasta(
-            &context,
-            &fasta_path,
-            collection,
-            Sample::DEFAULT_NAME,
-            false,
-            &[],
-        )
-        .unwrap();
+        import_fasta(&context, &fasta_path, collection, Sample::DEFAULT_NAME, &[]).unwrap();
         update_with_vcf(
             &context,
             &vcf_path,
@@ -1193,14 +1185,8 @@ mod tests {
         )
         .unwrap();
 
-        let gen_graph = Sample::get_graph(
-            conn,
-            crate::test_helpers::test_workspace(),
-            collection,
-            "SAMPLE1",
-            None,
-        )
-        .unwrap();
+        let gen_graph =
+            Sample::get_graph(conn, context.workspace(), collection, "SAMPLE1", None).unwrap();
         let mut controller = create_gen_graph_controller(gen_graph);
 
         let mut terminal = create_test_terminal(120, 30);
@@ -1236,19 +1222,11 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        import_fasta(
-            &context,
-            &fasta_path,
-            collection,
-            Sample::DEFAULT_NAME,
-            false,
-            &[],
-        )
-        .unwrap();
+        import_fasta(&context, &fasta_path, collection, Sample::DEFAULT_NAME, &[]).unwrap();
 
         let gen_graph = Sample::get_graph(
             conn,
-            crate::test_helpers::test_workspace(),
+            context.workspace(),
             collection,
             Sample::DEFAULT_NAME,
             None,

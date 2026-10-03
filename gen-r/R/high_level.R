@@ -698,8 +698,8 @@ Repository <- function(path = NULL) {
   repo$auto_load_annotation_groups <- function(sg_id) inner$auto_load_annotation_groups(sg_id)
   repo$get_node_sequence          <- function(node_id, sequence_start, sequence_end) inner$get_node_sequence(node_id, as.integer(sequence_start), as.integer(sequence_end))
 
-  repo$import_fasta           <- function(filename, sample = "sample", shallow = FALSE, collection = NULL) inner$import_fasta(filename, sample, isTRUE(shallow), collection)
-  repo$import_reference_fasta <- function(filename, reference, shallow = FALSE, collection = NULL) inner$import_reference_fasta(filename, reference, isTRUE(shallow), collection)
+  repo$import_fasta           <- function(filename, sample = "sample", collection = NULL, indexes = character()) inner$import_fasta(filename, sample, collection, indexes)
+  repo$import_reference_fasta <- function(filename, reference, collection = NULL, indexes = character()) inner$import_reference_fasta(filename, reference, collection, indexes)
   repo$import_gfa             <- function(filename, sample = "sample", collection = NULL) inner$import_gfa(filename, sample, collection)
   repo$import_genbank         <- function(filename, sample = "sample", collection = NULL) inner$import_genbank(filename, sample, collection)
   repo$import_library_files   <- function(library_name, parts, library, sample = "sample", collection = NULL) inner$import_library_files(library_name, parts, library, sample, collection)
