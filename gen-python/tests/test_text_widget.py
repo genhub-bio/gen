@@ -1,8 +1,11 @@
 """Test the plain-text graph viewer when Jupyter extras are unavailable."""
 
 import json
+import sys
 import tempfile
+from types import ModuleType
 import unittest
+from unittest.mock import Mock, patch
 
 import gen
 from gen import text_widget
@@ -112,3 +115,35 @@ _GRAPH_WIDGET_API = {
     "tracks",
     "hide_all_tracks",
 }
+
+
+class PyodideKernelTests(unittest.TestCase):
+    def test_pyodide_kernel_with_comm_support_is_interactive(self):
+        shell = type("Interpreter", (), {"send_comm": lambda self, *args: None})()
+        ipython = ModuleType("IPython")
+        ipython.get_ipython = Mock(return_value=shell)
+        with (
+            patch.dict(sys.modules, {"IPython": ipython}),
+            patch.object(text_widget.sys, "platform", "emscripten"),
+        ):
+            self.assertTrue(text_widget._in_jupyter_kernel())
+
+    def test_comm_support_outside_pyodide_does_not_claim_a_jupyter_display(self):
+        shell = type("Interpreter", (), {"send_comm": lambda self, *args: None})()
+        ipython = ModuleType("IPython")
+        ipython.get_ipython = Mock(return_value=shell)
+        with (
+            patch.dict(sys.modules, {"IPython": ipython}),
+            patch.object(text_widget.sys, "platform", "linux"),
+        ):
+            self.assertFalse(text_widget._in_jupyter_kernel())
+
+    def test_zmq_jupyter_kernel_remains_interactive(self):
+        shell = type("ZMQInteractiveShell", (), {})()
+        ipython = ModuleType("IPython")
+        ipython.get_ipython = Mock(return_value=shell)
+        with (
+            patch.dict(sys.modules, {"IPython": ipython}),
+            patch.object(text_widget.sys, "platform", "linux"),
+        ):
+            self.assertTrue(text_widget._in_jupyter_kernel())

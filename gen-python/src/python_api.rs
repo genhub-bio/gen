@@ -17,6 +17,8 @@ pub(crate) mod subgraph;
 pub mod translation;
 pub mod utils;
 
+#[cfg(not(target_os = "emscripten"))]
+use crate::python_api::repository::{clone_repository, remote::PyRemote};
 use crate::python_api::{
     annotation::PyAnnotation,
     block_group::PySequenceGraph,
@@ -26,9 +28,8 @@ use crate::python_api::{
     jupyter_widget::PyGraphController,
     position::{PyPosition, PySuperPosition},
     repository::{
-        PyRepository, clone_repository,
+        PyRepository,
         history::{PyAsset, PyBranch, PyOperation},
-        remote::PyRemote,
     },
     sample::{PySample, PySampleIter},
     sequence::PySequence,
@@ -43,6 +44,7 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBranch>()?;
     m.add_class::<PyOperation>()?;
     m.add_class::<PyAsset>()?;
+    #[cfg(not(target_os = "emscripten"))]
     m.add_class::<PyRemote>()?;
     m.add_class::<PySequenceGraph>()?;
     m.add_class::<PyAnnotation>()?;
@@ -55,6 +57,7 @@ pub fn r#gen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraphController>()?;
     m.add_class::<PySample>()?;
     m.add_class::<PySampleIter>()?;
+    #[cfg(not(target_os = "emscripten"))]
     m.add_function(wrap_pyfunction!(clone_repository, m)?)?;
 
     Ok(())

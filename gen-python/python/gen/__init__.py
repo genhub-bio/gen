@@ -1,5 +1,6 @@
 """Python bindings to the Gen version control system."""
 
+import sys
 from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
 from importlib.metadata import version as _version
 
@@ -21,14 +22,17 @@ from .gen import (
     Node,
     Operation,
     Position,
-    Remote,
     Repository,
     Sample,
     Sequence,
     SequenceGraph,
     SuperPosition,
-    clone,
 )
+
+if sys.platform != "emscripten":
+    from .gen import Remote as Remote, clone as clone
+
+from .browser import NotebookSession, NotebookSessionError
 
 # Only a live Jupyter kernel can display the browser canvas. Route terminals,
 # scripts, and AI REPLs to the text widget even when the optional dependencies
@@ -52,18 +56,21 @@ __all__ = [
     "Branch",
     "HashId",
     "Locus",
+    "NotebookSession",
+    "NotebookSessionError",
     "Node",
     "Operation",
     "Position",
-    "Remote",
     "Repository",
     "Sample",
     "Sequence",
     "SequenceGraph",
     "SuperPosition",
-    "clone",
     "freeze_all_widgets",
 ]
+
+if sys.platform != "emscripten":
+    __all__.extend(["Remote", "clone"])
 
 
 def __dir__() -> list[str]:
