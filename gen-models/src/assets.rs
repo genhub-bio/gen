@@ -1,14 +1,17 @@
+#[cfg(not(target_os = "emscripten"))]
+use std::sync::LazyLock;
 use std::{
     collections::HashMap,
     fs,
     io::{self, BufReader, Read, Write},
     path::{Component, Path, PathBuf},
     string::ToString,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, Mutex},
 };
 
 use gen_core::{DoltHashId, HashId, Sha256Hash, Workspace, calculate_hash};
 use indexmap::IndexMap;
+#[cfg(not(target_os = "emscripten"))]
 use opendal::{blocking, services};
 use rusqlite::{
     ToSql, named_params, params,
@@ -16,7 +19,9 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
-use url::{Position, Url};
+#[cfg(not(target_os = "emscripten"))]
+use url::Position;
+use url::Url;
 
 use crate::{
     Direction, ModelSelect,
@@ -31,12 +36,23 @@ mod compression;
 pub use compression::CompressionType;
 pub(crate) use compression::stage_bgzf_asset_copy;
 
+#[cfg(not(target_os = "emscripten"))]
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("failed to build OpenDAL runtime")
 });
+
+#[cfg(not(target_os = "emscripten"))]
+pub type AssetReader = blocking::StdReader;
+#[cfg(target_os = "emscripten")]
+pub type AssetReader = fs::File;
+
+#[cfg(not(target_os = "emscripten"))]
+type AssetWriter = opendal::blocking::StdWriter;
+#[cfg(target_os = "emscripten")]
+type AssetWriter = fs::File;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum OperationKind {
@@ -97,13 +113,20 @@ impl FromSql for OperationKind {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn with_opendal_runtime<T>(f: impl FnOnce() -> T) -> T {
     let _guard = OPENDAL_RUNTIME.enter();
     f()
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn opendal_file_addition_error(err: opendal::Error) -> FileAdditionError {
     FileAdditionError::FileReadError(io::Error::other(err))
+}
+
+#[cfg(target_os = "emscripten")]
+fn opendal_file_addition_error(err: io::Error) -> FileAdditionError {
+    FileAdditionError::FileReadError(err)
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -308,7 +331,7 @@ impl AssetRef {
     pub fn reader(
         &self,
         workspace: &Workspace,
-    ) -> Result<BufReader<blocking::StdReader>, FileAdditionError> {
+    ) -> Result<BufReader<AssetReader>, FileAdditionError> {
         let reader = if LocalAssetUri::is_local_path_or_file_uri(&self.uri) {
             let asset_path = self.versioned_store_path(workspace)?;
             OpenDalLocation::from_absolute_path(&asset_path)
@@ -847,10 +870,17 @@ impl OperationAsset {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 #[doc(hidden)]
 pub struct OpenDalLocation {
     operator: blocking::Operator,
     path: String,
+}
+
+#[cfg(target_os = "emscripten")]
+#[doc(hidden)]
+pub struct OpenDalLocation {
+    path: PathBuf,
 }
 
 struct ChecksumState {
@@ -965,6 +995,7 @@ impl Read for ChecksummedReader {
 }
 
 impl OpenDalLocation {
+    #[cfg(not(target_os = "emscripten"))]
     fn new_fs(root: &Path, path: &Path) -> Result<Self, opendal::Error> {
         let (root, path) = if cfg!(windows) && path.is_absolute() {
             let root = path.parent().ok_or_else(|| {
@@ -997,6 +1028,7 @@ impl OpenDalLocation {
         Ok(Self { operator, path })
     }
 
+    #[cfg(not(target_os = "emscripten"))]
     fn from_workspace_path(workspace: &Workspace, path: &Path) -> Result<Self, opendal::Error> {
         let repo_root = workspace.repo_root().map_err(|err| {
             opendal::Error::new(opendal::ErrorKind::Unexpected, "repo_root failed").set_source(err)
@@ -1009,6 +1041,18 @@ impl OpenDalLocation {
         }
     }
 
+    #[cfg(target_os = "emscripten")]
+    fn from_workspace_path(workspace: &Workspace, path: &Path) -> Result<Self, io::Error> {
+        let repo_root = workspace.repo_root().map_err(io::Error::other)?;
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            repo_root.join(path)
+        };
+        Self::from_absolute_path(&path)
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
     fn from_absolute_path(path: &Path) -> Result<Self, opendal::Error> {
         if !path.is_absolute() {
             return Err(opendal::Error::new(
@@ -1020,6 +1064,20 @@ impl OpenDalLocation {
         Self::new_fs(Path::new("/"), path)
     }
 
+    #[cfg(target_os = "emscripten")]
+    fn from_absolute_path(path: &Path) -> Result<Self, io::Error> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local path must be absolute",
+            ));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
     fn from_remote_uri(asset_uri: &str) -> Result<blocking::StdReader, FileAdditionError> {
         let url = Url::parse(asset_uri)
             .map_err(|err| FileAdditionError::FileReadError(io::Error::other(err)))?;
@@ -1062,7 +1120,16 @@ impl OpenDalLocation {
         }
     }
 
-    fn reader(self) -> Result<blocking::StdReader, FileAdditionError> {
+    #[cfg(target_os = "emscripten")]
+    fn from_remote_uri(_asset_uri: &str) -> Result<AssetReader, FileAdditionError> {
+        Err(FileAdditionError::FileReadError(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "remote asset reads are unavailable in browser repositories",
+        )))
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    fn reader(self) -> Result<AssetReader, FileAdditionError> {
         // Validate access before returning a lazy reader so remote credential fallback can run.
         // The known length also bounds range requests and seeks to the object.
         let content_length = self
@@ -1076,12 +1143,17 @@ impl OpenDalLocation {
             .into_std_read(0..content_length)
             .map_err(opendal_file_addition_error)
     }
+
+    #[cfg(target_os = "emscripten")]
+    fn reader(self) -> Result<AssetReader, FileAdditionError> {
+        fs::File::open(self.path).map_err(FileAdditionError::FileReadError)
+    }
 }
 
 pub trait AssetUri {
     fn uri(&self) -> &str;
 
-    fn reader(&self, workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError>;
+    fn reader(&self, workspace: &Workspace) -> Result<AssetReader, FileAdditionError>;
 
     /// Performs the storage work required before recording an asset and returns a verified
     /// checksum when one is available.
@@ -1245,8 +1317,8 @@ pub struct LocalAssetUri {
     asset_uri: String,
     source_path: Option<PathBuf>,
     workspace_root: Option<PathBuf>,
-    read_file: Option<blocking::StdReader>,
-    write_file: Option<opendal::blocking::StdWriter>,
+    read_file: Option<AssetReader>,
+    write_file: Option<AssetWriter>,
 }
 
 impl AssetUri for LocalAssetUri {
@@ -1254,7 +1326,7 @@ impl AssetUri for LocalAssetUri {
         &self.asset_uri
     }
 
-    fn reader(&self, workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError> {
+    fn reader(&self, workspace: &Workspace) -> Result<AssetReader, FileAdditionError> {
         let source_file_path = self.resolved_source_file_path(workspace)?;
         OpenDalLocation::from_workspace_path(workspace, &source_file_path)
             .map_err(opendal_file_addition_error)?
@@ -1442,9 +1514,12 @@ impl LocalAssetUri {
     }
 
     pub fn close_write(&mut self) -> io::Result<()> {
+        #[cfg(not(target_os = "emscripten"))]
         if let Some(mut file) = self.write_file.take() {
             file.close()?;
         }
+        #[cfg(target_os = "emscripten")]
+        drop(self.write_file.take());
         Ok(())
     }
 
@@ -1624,11 +1699,7 @@ impl LocalAssetUri {
         }
 
         let asset_path = asset_dir.join(self.asset_filename(&checksum));
-        match staged_file.persist_noclobber(&asset_path) {
-            Ok(_) => {}
-            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(FileAdditionError::FileReadError(error.error)),
-        }
+        persist_staged_asset(staged_file, &asset_path).map_err(FileAdditionError::FileReadError)?;
         Ok(checksum)
     }
 
@@ -1709,6 +1780,30 @@ impl LocalAssetUri {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
+fn persist_staged_asset(staged_file: NamedTempFile, asset_path: &Path) -> io::Result<()> {
+    match staged_file.persist_noclobber(asset_path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.error),
+    }
+}
+
+#[cfg(target_os = "emscripten")]
+fn persist_staged_asset(staged_file: NamedTempFile, asset_path: &Path) -> io::Result<()> {
+    // Pyodide MEMFS does not support tempfile's hard-link-based persist_noclobber fallback.
+    // Since the browser repository runs single-threaded, an existence check followed by rename
+    // retains the content-addressed no-overwrite behavior.
+    match fs::symlink_metadata(asset_path) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let temporary_path = staged_file.into_temp_path();
+    fs::rename(&temporary_path, asset_path)
+}
+
 impl Read for LocalAssetUri {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.read_file.is_none() {
@@ -1728,15 +1823,25 @@ impl Write for LocalAssetUri {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.write_file.is_none() {
             let io_path = self.io_path();
-            let location =
-                OpenDalLocation::from_absolute_path(&io_path).map_err(io::Error::other)?;
-            self.write_file = Some(
-                location
-                    .operator
-                    .writer(&location.path)
-                    .map_err(io::Error::other)?
-                    .into_std_write(),
-            );
+            #[cfg(not(target_os = "emscripten"))]
+            {
+                let location =
+                    OpenDalLocation::from_absolute_path(&io_path).map_err(io::Error::other)?;
+                self.write_file = Some(
+                    location
+                        .operator
+                        .writer(&location.path)
+                        .map_err(io::Error::other)?
+                        .into_std_write(),
+                );
+            }
+            #[cfg(target_os = "emscripten")]
+            {
+                if let Some(parent) = io_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                self.write_file = Some(fs::File::create(io_path)?);
+            }
         }
         self.write_file.as_mut().unwrap().write(buf)
     }
@@ -1765,7 +1870,7 @@ impl AssetUri for RemoteAssetUri {
         &self.asset_uri
     }
 
-    fn reader(&self, _workspace: &Workspace) -> Result<blocking::StdReader, FileAdditionError> {
+    fn reader(&self, _workspace: &Workspace) -> Result<AssetReader, FileAdditionError> {
         OpenDalLocation::from_remote_uri(&self.asset_uri)
     }
 

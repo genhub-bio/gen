@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import Self
 
 from .ascii_render import frame_text
@@ -15,7 +16,13 @@ def _in_jupyter_kernel() -> bool:
     except ImportError:
         return False
     ipython = get_ipython()
-    return ipython is not None and ipython.__class__.__name__ == "ZMQInteractiveShell"
+    if ipython is None:
+        return False
+    if ipython.__class__.__name__ == "ZMQInteractiveShell":
+        return True
+    return sys.platform == "emscripten" and callable(
+        getattr(ipython, "send_comm", None)
+    )
 
 
 # Shown to a notebook user who has a live kernel but installed gen without the
