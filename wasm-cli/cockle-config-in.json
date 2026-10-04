@@ -1,0 +1,27 @@
+{
+  "packages": {
+    "cockle_fs": {
+      "version": "0.3.0=h8b79025_1"
+    },
+    "coreutils": {
+      "version": "9.10=h072c4ef_2"
+    },
+    "grep": {
+      "version": "3.12=h8b79025_0"
+    },
+    "less": {
+      "version": "693=hf259948_0"
+    },
+    "sed": {
+      "version": "4.9=h072c4ef_0"
+    },
+    "gen": {
+      "local_directory": "gen-wasm",
+      "modules": {
+        "gen": {
+          "commands": "gen"
+        }
+      }
+    }
+  }
+}
