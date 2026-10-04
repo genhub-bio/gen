@@ -62,3 +62,11 @@ wasm-cli/cockle_wasm_env/
 # Agent stuff
 .codex
 **/.kiro/specs/*
+
+# Pyodide wheel and JupyterLite build output
+jupyterlite/.xbuildenv/
+jupyterlite/wheels/
+jupyterlite/_output/
+jupyterlite/.cache/
+jupyterlite/.jupyterlite.doit.db*
+.venv-pyodide/
