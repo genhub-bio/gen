@@ -14,6 +14,7 @@ use crate::{
     block_group_edge::AugmentedEdgeData,
     db::GraphConnection,
     edge::EdgeData,
+    edit_planning::EdgeLookup,
     errors::PathError,
     locus::GraphLocus,
     path::Path,
@@ -702,7 +703,7 @@ impl ResolvedGenRegion {
 
     #[cfg_attr(
         feature = "profiling",
-        tracing::instrument(skip(self, conn, change, tree))
+        tracing::instrument(skip(self, conn, change, tree, ports))
     )]
     pub fn plan_edges(
         &self,
@@ -710,6 +711,7 @@ impl ResolvedGenRegion {
         workspace: &Workspace,
         change: &BlockGroupChange,
         tree: Option<&IntervalTree<i64, NodeIntervalBlock>>,
+        ports: &mut EdgeLookup,
     ) -> Result<Vec<AugmentedEdgeData>, BlockGroupError> {
         match self.kind {
             ResolvedRegionKind::Path | ResolvedRegionKind::BlockGroup => {
@@ -721,7 +723,7 @@ impl ResolvedGenRegion {
                         &local_tree
                     }
                 };
-                return BlockGroup::set_up_new_edges(change, tree);
+                return BlockGroup::set_up_new_edges(conn, change, tree, ports);
             }
             ResolvedRegionKind::Annotation | ResolvedRegionKind::Accession => {}
         };

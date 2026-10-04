@@ -129,10 +129,20 @@ impl From<&Edge> for EdgeData {
     }
 }
 
-#[derive(Eq, Hash, PartialEq)]
+/// A point on a node where blocks start or end and edges attach.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BlockKey {
     pub node_id: HashId,
     pub coordinate: i64,
+}
+
+impl BlockKey {
+    pub fn new(node_id: HashId, coordinate: i64) -> Self {
+        BlockKey {
+            node_id,
+            coordinate,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

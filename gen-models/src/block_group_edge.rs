@@ -111,7 +111,7 @@ pub struct AugmentedEdge {
     pub created_on: i64,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct AugmentedEdgeData {
     pub edge_data: EdgeData,
     pub chromosome_index: i64,
