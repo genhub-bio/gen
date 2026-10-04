@@ -1321,6 +1321,53 @@ mod tests {
         },
     };
 
+    #[test]
+    fn test_touching_deletions_add_each_deletion_and_their_combination() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        for (start, end, bases) in [(8, 12, ""), (12, 16, "")] {
+            let (node_id, length) = if bases.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(bases)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                )
+                .unwrap();
+                (node_id, sequence.length)
+            };
+            let block = PathBlock {
+                node_id,
+                block_sequence: bases.to_string(),
+                sequence_start: 0,
+                sequence_end: length,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            };
+            let region =
+                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let change = BlockGroupChange {
+                region,
+                path_accession: None,
+                block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        }
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 4);
+    }
+
     mod region_resolver {
         use super::*;
 

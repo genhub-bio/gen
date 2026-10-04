@@ -435,13 +435,11 @@ impl Edge {
         Ok(intervals)
     }
 
-    /// Records a coordinate jump whose endpoints belong to the same backing node.
+    /// Records the endpoints of a non-zero jump within one backing node.
     ///
-    /// `blocks_from_edges` calls this for both its initial edges and any edges fetched while
-    /// completing partially described nodes. The source is an outgoing jump coordinate and the
-    /// target is an incoming jump coordinate. Keeping those sets separate lets block generation
-    /// identify coordinates where one jump arrives and another leaves; those coordinates need
-    /// junctions.
+    /// `blocks_from_edges` uses the source as an outgoing jump coordinate and the target as an
+    /// incoming jump coordinate. Keeping these sets separate identifies where adjacent jumps or
+    /// another edge meet the jump.
     fn record_same_node_jump_coordinates(
         edge: &Edge,
         outgoing_coordinates_by_node_id: &mut HashMap<HashId, HashSet<i64>>,
@@ -505,9 +503,8 @@ impl Edge {
         let mut node_ids = IndexSet::new();
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
-        // A same-node coordinate jump connects two positions without consuming the intervening
-        // sequence. Track where jumps leave and arrive so their intersections can become
-        // junctions.
+        // Same-node coordinate jumps consume no intervening sequence. Their endpoints need a
+        // junction when another edge meets the same coordinate.
         let mut outgoing_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
             HashMap::new();
         let mut incoming_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
@@ -620,24 +617,25 @@ impl Edge {
             let empty_ends = HashSet::new();
             let starts = starts_by_node_id.get(node_id).unwrap_or(&empty_starts);
             let ends = ends_by_node_id.get(node_id).unwrap_or(&empty_ends);
-            // Adjacent same-node jumps share a coordinate: one jump arrives at k and the next
-            // leaves from k. Add k as a junction so the graph connects both jumps:
-            //
-            //     [real sequence] -> (k,k) -> [real sequence]
-            //                           0 bases
-            //
-            // Only coordinates in both sets become junctions. A lone jump has no shared coordinate
-            // and connects real sequence blocks directly.
+            let empty_jumps = HashSet::new();
             let outgoing_jump_coordinates = outgoing_jump_coordinates_by_node_id
                 .get(node_id)
-                .unwrap_or(&empty_starts);
+                .unwrap_or(&empty_jumps);
             let incoming_jump_coordinates = incoming_jump_coordinates_by_node_id
                 .get(node_id)
-                .unwrap_or(&empty_ends);
-            let junction_coordinates = outgoing_jump_coordinates
+                .unwrap_or(&empty_jumps);
+            // Two adjacent deletions add edges A:8->T:2 and T:2->T:6, both with chromosome index
+            // -1. A zero-width junction at T:2 lets the built graph follow both edges:
+            //
+            //     Original: [A:0..10] -- A:10->T:0 --> [T:0..10]
+            //     Deleted:  [A:0..8] -- -1 A:8->T:2 --> (T:2) -- -1 T:2->T:6 --> [T:6..10]
+            //                                                   zero-width junction
+            let mut junction_coordinates = outgoing_jump_coordinates
                 .intersection(incoming_jump_coordinates)
                 .copied()
                 .collect::<HashSet<_>>();
+            junction_coordinates.extend(outgoing_jump_coordinates.intersection(starts).copied());
+            junction_coordinates.extend(incoming_jump_coordinates.intersection(ends).copied());
             let block_intervals = Edge::get_block_intervals(starts, ends, &junction_coordinates)?;
 
             for (start, end) in block_intervals {
