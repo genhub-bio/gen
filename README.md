@@ -162,3 +162,4 @@ cargo build --release
 ```
 
 For Python and R bindings, see [gen-python/README.md](gen-python/README.md) and [gen-r/README.md](gen-r/README.md).
+For browser-based Python, see the [Pyodide wheel and JupyterLite setup](jupyterlite/README.md).

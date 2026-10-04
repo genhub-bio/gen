@@ -12,14 +12,14 @@ repos:
       - id: rustfmt
         name: rustfmt
         description: Check if all files follow the rustfmt style
-        entry: cargo +nightly fmt --all -- 
+        entry: cargo +nightly-2026-06-26 fmt --all --
         language: system
         types: [file, rust]
         pass_filenames: true
       - id: rust-clippy
         name: Rust clippy
         description: Run cargo clippy on files included in the commit. clippy should be installed before-hand.
-        entry: cargo +nightly clippy --all-targets --all-features -- -D clippy::all
+        entry: cargo +nightly-2026-06-26 clippy --all-targets --all-features -- -D clippy::all
         pass_filenames: false
         types: [file, rust]
         language: system
