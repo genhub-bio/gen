@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use gen_core::{Workspace, is_end_node, is_start_node};
+use gen_core::{HashId, Workspace, is_end_node, is_start_node};
 use gen_graph::{GenGraph, GraphNode, GraphNodeSlice};
 use gen_models::{
     block_group::BlockGroup, db::GraphConnection, locus::GraphLocus, node::Node,
@@ -328,6 +328,19 @@ fn create_gen_graph_controller_with_lowlights(
     controller.set_detail_level(VisualDetail::Truncated);
     controller.hide_cursor();
     controller
+}
+
+/// Node IDs present in the current viewport (excluding terminal start/end nodes).
+pub fn extract_viewport_node_ids(
+    controller: &GraphController<GenGraph, GenGraphNodeSizer>,
+) -> HashSet<HashId> {
+    let graph = controller.graph();
+    controller
+        .get_viewport_graph()
+        .data_nodes()
+        .map(|(_, idx, _)| <&GenGraph as NodeIndexable>::from_index(&graph, idx.index()).node_id)
+        .filter(|&id| !is_start_node(id) && !is_end_node(id))
+        .collect()
 }
 
 /// Navigate to an exact byte offset within a node, snapping the camera left.

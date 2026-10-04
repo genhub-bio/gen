@@ -22,6 +22,8 @@ ftree = "1.2.0"
 rand = { version = "0.10.1", features = ["std"] }
 tachyonfx = "0.23.0"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [features]
 default = ["crossterm"]

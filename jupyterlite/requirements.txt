@@ -1,0 +1,8 @@
+pyodide-build==0.39.1
+maturin==1.13.0
+jupyterlite-core==0.7.3
+jupyterlite-pyodide-kernel==0.7.1
+jupyterlab==4.5.6
+anywidget==0.9.21
+ipywidgets==8.1.8
+jupyterlab_widgets==3.0.16

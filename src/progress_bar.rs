@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "emscripten"))]
 use std::time::Duration;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -52,6 +53,8 @@ pub fn get_progress_bar(length: impl Into<Option<u64>>) -> ProgressBar {
             ),
         )
     };
+    // no thread spawning in wasm
+    #[cfg(not(target_os = "emscripten"))]
     bar.enable_steady_tick(Duration::from_millis(250));
     bar
 }
@@ -63,6 +66,8 @@ pub fn get_time_elapsed_bar() -> ProgressBar {
         )
         .unwrap(),
     );
+    // no thread spawning in wasm
+    #[cfg(not(target_os = "emscripten"))]
     bar.enable_steady_tick(Duration::from_millis(250));
     bar
 }
@@ -71,6 +76,8 @@ pub fn get_message_bar() -> ProgressBar {
     // This is a bar solely meant for giving messages to the user since the use of print causes
     // issues with indicatif
     let bar = ProgressBar::no_length().with_style(ProgressStyle::with_template("{msg}").unwrap());
+    // no thread spawning in wasm
+    #[cfg(not(target_os = "emscripten"))]
     bar.enable_steady_tick(Duration::from_millis(250));
     bar
 }

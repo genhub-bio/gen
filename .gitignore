@@ -51,9 +51,22 @@ gen-python/python/gen/static/jupyter_widget.js.map
 # Cap'n proto generated files
 **/generated/*capnp.rs
 
+# wasm-cli build output
+wasm-cli/dist/
+wasm-cli/gen-wasm/
+wasm-cli/cockle_wasm_env/
+
 # precommit stuff
 .cache
 
 # Agent stuff
 .codex
 **/.kiro/specs/*
+
+# Pyodide wheel and JupyterLite build output
+jupyterlite/.xbuildenv/
+jupyterlite/wheels/
+jupyterlite/_output/
+jupyterlite/.cache/
+jupyterlite/.jupyterlite.doit.db*
+.venv-pyodide/

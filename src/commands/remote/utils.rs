@@ -10,6 +10,8 @@ use base64::{
 };
 use directories::ProjectDirs;
 use getrandom;
+use thiserror::Error;
+use url::Url;
 
 use crate::commands::remote::server::AuthTokens;
 
@@ -18,6 +20,23 @@ pub fn generate_state() -> Result<String, getrandom::Error> {
     getrandom::fill(&mut buf)?;
 
     Ok(URL_SAFE.encode(buf))
+}
+
+/// A `redirect_to`/remote URL that is not a well-formed `http`/`https` URL with a host.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("Invalid GenHub repository URL: {0}")]
+pub struct InvalidRemoteUrl(pub String);
+
+/// Extracts the scheme+host+port origin from a remote repository URL. Pure string/URL parsing
+/// with no network dependency, so it is available on every target, unlike
+/// `commands::remote::client` (native-only, depends on `reqwest` for push/pull HTTP calls).
+/// `client::normalized_origin` delegates here to avoid duplicating this logic.
+pub fn normalized_origin(remote_url: &str) -> Result<String, InvalidRemoteUrl> {
+    let parsed = Url::parse(remote_url).map_err(|_| InvalidRemoteUrl(remote_url.to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(InvalidRemoteUrl(remote_url.to_string()));
+    }
+    Ok(parsed.origin().ascii_serialization())
 }
 
 fn get_token_path(identity: &str) -> PathBuf {
@@ -86,6 +105,36 @@ mod tests {
             let s1 = generate_state().unwrap();
             let s2 = generate_state().unwrap();
             assert_ne!(s1, s2, "Two consecutive states should not be equal");
+        }
+    }
+
+    mod normalized_origin_tests {
+        use super::*;
+
+        #[test]
+        fn test_normalized_origin_preserves_non_default_port() {
+            assert_eq!(
+                normalized_origin("http://localhost:5800/api/repos/alice/example").unwrap(),
+                "http://localhost:5800"
+            );
+        }
+
+        #[test]
+        fn test_normalized_origin_omits_default_port() {
+            assert_eq!(
+                normalized_origin("https://GenHub.Bio:443/api/repos/alice/example").unwrap(),
+                "https://genhub.bio"
+            );
+        }
+
+        #[test]
+        fn test_normalized_origin_rejects_non_http_scheme() {
+            assert!(normalized_origin("ftp://genhub.bio/repo").is_err());
+        }
+
+        #[test]
+        fn test_normalized_origin_rejects_malformed_url() {
+            assert!(normalized_origin("not-a-url").is_err());
         }
     }
 }
