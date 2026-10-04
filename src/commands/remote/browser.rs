@@ -105,7 +105,7 @@ pub fn build_login_url(
 
 /// The result the host page's JS bridge reports back over stdin, one message per login attempt.
 ///
-/// Only decoded by `receive_login_result` (`target_os = "emscripten"`) outside of tests, so a
+/// Only decoded by `login_origin` (`target_os = "emscripten"`) outside of tests, so a
 /// native, non-test build sees no caller and would otherwise warn this whole parse chain as dead
 /// code.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -117,21 +117,13 @@ enum BridgeOutcome {
         jwt: String,
         refresh_token: String,
     },
-    Cancelled,
     Timeout,
-    BridgeError {
-        message: String,
-    },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BrowserLoginError {
-    #[error("Login was cancelled.")]
-    Cancelled,
     #[error("Timed out waiting for the browser login callback.")]
     Timeout,
-    #[error("Browser login bridge error: {0}")]
-    Bridge(String),
     #[error("State mismatch: the browser callback did not match the pending login attempt.")]
     StateMismatch,
     #[error("Malformed login result from the browser bridge: {0}")]
@@ -167,9 +159,7 @@ fn parse_bridge_message(json: &str, expected_state: &str) -> Result<AuthTokens, 
             }
             Ok(AuthTokens { jwt, refresh_token })
         }
-        BridgeOutcome::Cancelled => Err(BrowserLoginError::Cancelled),
         BridgeOutcome::Timeout => Err(BrowserLoginError::Timeout),
-        BridgeOutcome::BridgeError { message } => Err(BrowserLoginError::Bridge(message)),
     }
 }
 
@@ -225,8 +215,6 @@ pub fn login_origin(origin: &str) -> Result<AuthTokens, Box<dyn Error>> {
     println!("Logging in to remote: {origin}");
     let begin_payload = serde_json::json!({
         "login_url": login_url,
-        "callback_url": callback_url,
-        "expected_state": state,
         "expected_origin": terminal_origin,
     });
     println!("{BEGIN_SENTINEL}{begin_payload}{MESSAGE_TERMINATOR}");
@@ -394,31 +382,11 @@ mod tests {
         }
 
         #[test]
-        fn test_parse_bridge_message_maps_cancelled() {
-            let json = r#"{"status":"cancelled"}"#;
-            assert_eq!(
-                parse_bridge_message(json, "expected-state"),
-                Err(BrowserLoginError::Cancelled)
-            );
-        }
-
-        #[test]
         fn test_parse_bridge_message_maps_timeout() {
             let json = r#"{"status":"timeout"}"#;
             assert_eq!(
                 parse_bridge_message(json, "expected-state"),
                 Err(BrowserLoginError::Timeout)
-            );
-        }
-
-        #[test]
-        fn test_parse_bridge_message_maps_bridge_error() {
-            let json = r#"{"status":"bridge_error","message":"popup closed unexpectedly"}"#;
-            assert_eq!(
-                parse_bridge_message(json, "expected-state"),
-                Err(BrowserLoginError::Bridge(
-                    "popup closed unexpectedly".to_string()
-                ))
             );
         }
     }

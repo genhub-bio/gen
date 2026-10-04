@@ -17,14 +17,13 @@ interface BroadcastResponse {
   requestId?: string;
 }
 
-// @ts-expect-error TS2769
 self.addEventListener('install', onInstall);
 // @ts-expect-error TS2769
 self.addEventListener('activate', onActivate);
 // @ts-expect-error TS2769
 self.addEventListener('fetch', onFetch);
 
-function onInstall(event: ExtendableEvent): void {
+function onInstall(): void {
   // @ts-expect-error TS2339
   void self.skipWaiting();
 }

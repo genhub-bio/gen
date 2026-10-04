@@ -117,7 +117,7 @@ async function runDemo(): Promise<void> {
   // navigate it -- see `@xterm/addon-web-links`'s default handler, reproduced here since the
   // addon only lets a custom handler *replace* the default, not wrap it).
   term.loadAddon(
-    new WebLinksAddon((event, uri) => {
+    new WebLinksAddon((_event, uri) => {
       if (loginBridge.isPendingLoginUrl(uri)) {
         loginBridge.openLoginWindow();
         return;

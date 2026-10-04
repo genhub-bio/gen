@@ -35,8 +35,6 @@ pub enum BrowserHttpError {
     EmbeddedNullByte { field: &'static str },
     #[error("HTTP method {0:?} is not valid for this transport")]
     InvalidMethod(String),
-    #[error("browser request failed to start (invalid URL or attributes)")]
-    FetchStartFailed,
     #[error("response body is too large to address on this platform")]
     ResponseTooLarge,
     #[error("browser HTTP buffer allocation failed")]

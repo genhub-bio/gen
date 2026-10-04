@@ -14,8 +14,6 @@
 /** Parsed contents of a `\0GEN_LOGIN_BEGIN\0{...}\0`-framed stdout message. */
 export interface BeginLoginMessage {
   login_url: string;
-  callback_url: string;
-  expected_state: string;
   expected_origin: string;
 }
 
@@ -47,8 +45,6 @@ export function extractBeginMessage(text: string): BeginLoginMessage | null {
     const parsed = JSON.parse(rest.slice(0, end));
     if (
       typeof parsed?.login_url === 'string' &&
-      typeof parsed?.callback_url === 'string' &&
-      typeof parsed?.expected_state === 'string' &&
       typeof parsed?.expected_origin === 'string'
     ) {
       return parsed as BeginLoginMessage;
@@ -88,14 +84,13 @@ export function splitOnBeginMessage(
   return { before, begin, after };
 }
 
-type BridgeStatus = 'success' | 'cancelled' | 'timeout' | 'bridge_error';
+type BridgeStatus = 'success' | 'timeout';
 
 interface BridgeResult {
   status: BridgeStatus;
   state?: string;
   jwt?: string;
   refresh_token?: string;
-  message?: string;
 }
 
 function encodeResult(result: BridgeResult): string {
@@ -103,7 +98,6 @@ function encodeResult(result: BridgeResult): string {
 }
 
 interface Attempt {
-  state: string;
   expectedOrigin: string;
   windows: Set<Window>;
   settled: boolean;
@@ -115,8 +109,8 @@ interface Attempt {
 
 /**
  * Drives one Cockle terminal's browser login attempts: opens the popup (or exposes the fallback
- * link), validates and delivers the callback result, and cleans up on completion, timeout, or
- * cancellation. One instance per terminal; a new `begin()` call always invalidates whatever
+ * link), validates and delivers the callback result, and cleans up on completion or timeout.
+ * One instance per terminal; a new `begin()` call always invalidates whatever
  * attempt came before it, so a stale popup from an earlier `gen remote login` can never complete
  * a newer one.
  */
@@ -151,7 +145,6 @@ export class BrowserLoginBridge {
     this.invalidateActiveAttempt();
 
     const attempt: Attempt = {
-      state: begin.expected_state,
       expectedOrigin: begin.expected_origin,
       windows: new Set(),
       settled: false,
@@ -168,19 +161,6 @@ export class BrowserLoginBridge {
     } else {
       this.onFallbackNeeded(begin.login_url);
     }
-  }
-
-  /** Cancels the active attempt (e.g. Ctrl-C). Never touches previously saved credentials. */
-  cancel(): void {
-    if (this.attempt) {
-      this.finish(this.attempt, { status: 'cancelled' });
-    }
-  }
-
-  /** Removes all listeners/timers and forgets the active attempt without delivering a result. */
-  dispose(): void {
-    window.removeEventListener('message', this.handleMessage);
-    this.invalidateActiveAttempt();
   }
 
   private pendingLoginUrl: string | null = null;
@@ -224,9 +204,8 @@ export class BrowserLoginBridge {
       return;
     }
 
-    // Acknowledge so the callback page can stop retrying and close itself. JS-side state
-    // matching here is defense in depth only -- Rust is the sole authority on whether `state`
-    // actually matches the nonce it generated (see `parse_bridge_message` in browser.rs).
+    // Acknowledge so the callback page can stop retrying and close itself. Rust validates
+    // the returned state against its nonce (see `parse_bridge_message` in browser.rs).
     source?.postMessage({ type: ACK_MESSAGE_TYPE, state }, attempt.expectedOrigin);
 
     this.finish(attempt, { status: 'success', state, jwt, refresh_token: refreshToken });
