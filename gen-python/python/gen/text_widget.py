@@ -14,7 +14,13 @@ def _in_jupyter_kernel() -> bool:
     except ImportError:
         return False
     ipython = get_ipython()
-    return ipython is not None and ipython.__class__.__name__ == "ZMQInteractiveShell"
+    if ipython is None:
+        return False
+    shell_class = ipython.__class__
+    return shell_class.__name__ == "ZMQInteractiveShell" or (
+        shell_class.__module__ == "pyodide_kernel.interpreter"
+        and shell_class.__name__ == "Interpreter"
+    )
 
 
 # Shown to a notebook user who has a live kernel but installed gen without the

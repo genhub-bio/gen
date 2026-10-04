@@ -4,6 +4,7 @@ This local site runs the existing Gen Python API in a standard Pyodide worker.
 Publishing is outside this setup. The wheel comes from this checkout and is
 bundled in the site's relative piplite index; it needs no external wheel host.
 The standard Pyodide runtime and its kernel packages load from the pinned CDN.
+A local loader installs a DriveFS sync adapter before the kernel mounts `/drive`.
 
 ## Build and launch
 
@@ -55,19 +56,41 @@ not route HTTP through Python or enable browser database threading.
 
 ## Files and persistence
 
-Keep live Gen repositories in `/tmp`, which is the kernel's MEMFS. The notebook
-creates, imports, reads, edits and automatically commits a small sequence there,
-then inspects Dolt history. MEMFS and installed packages disappear when the
-kernel restarts. The notebook closes the repository, archives all its files,
-and writes `gen-demo.zip` to `/drive` for download from the file browser.
+Keep live Gen repositories in `/drive`, the kernel's JupyterLite Contents API
+filesystem. `pyodide-drive.js` wraps the standard Pyodide loader and installs
+synchronous `fsync` on DriveFS before mounting it. SQLite sync therefore publishes
+buffered writes while the connection is open. Open handles within one kernel
+share file buffers, so plotting connections also see current writes. This allows
+Dolt's branch-head checks to reopen the current database bytes. Unlike the standalone Cockle integration,
+this kernel mounts DriveFS directly and needs no PROXYFS forwarding. The adapter
+also normalizes directory creation requests for JupyterLite 0.7, so private
+directories (such as Python's `mkdtemp` folders) persist as directories.
 
-JupyterLite's Contents API drive stores user files in IndexedDB for the site
-origin. Those survive reloads, but clearing browser storage removes them, and
-changing origin uses a different store. Do not treat that browser storage as a
-backup. Download archives to retain them independently. `/drive` buffers files
-and does not provide the SQLite sync behavior installed specifically in the
-standalone Cockle integration, so use it for closed archives rather than live
-Python repository databases.
+The notebook creates a uniquely named repository on `/drive`, imports and edits a
+small sequence, inspects Dolt history, and plots the original and edited sequence
+graphs with Gen's interactive canvas viewer. The site includes the anywidget and
+ipywidgets extensions; the notebook installs matching widget package versions
+with `gen[jupyter]` for plotting. Its path is saved in
+`/drive/gen-demo-path.txt`. After a restart, reinstall the bundled wheel and reopen
+that repository:
+
+```python
+import piplite
+await piplite.install(['anywidget==0.9.21', 'ipywidgets==8.1.8'])
+await piplite.install('gen[jupyter]==0.3.1')
+import gen
+from pathlib import Path
+root = Path(Path('/drive/gen-demo-path.txt').read_text())
+repository = gen.Repository(str(root))
+```
+
+JupyterLite's drive stores user files in IndexedDB for the site origin. Repositories
+survive kernel restarts and page reloads, but clearing browser storage removes
+them, and changing origin uses a different store. Installed packages and `/tmp`
+(MEMFS) disappear when the kernel restarts. Use one kernel at a time for a given
+repository; this adapter does not add cross-worker SQLite locking. Close Gen
+objects before archiving. The notebook writes `gen-demo.zip` to the file browser;
+download it to retain a backup independently of browser storage.
 
 ## Validation
 
@@ -84,6 +107,7 @@ python jupyterlite/tests/test_worker.py --runtime /path/to/pyodide
 python wasm-cli/tests/test_drive_import.py
 # Stop serve.py before this test, which owns port 4502.
 python jupyterlite/tests/test_site.py
+node --test jupyterlite/tests/test_drive_sync.cjs
 ```
 
 The worker regression validates the real extension's import, local SQLite,
@@ -95,5 +119,7 @@ Dolt database through Rust capability negotiation and DoltLite's HTTP bridge,
 verifies replicated data, and checks a failing Dolt endpoint. The native fixture
 process owns temporary database files; the test proxy supplies browser CORS.
 `test_site.py` separately runs the bundled notebook in the actual JupyterLite UI
-and verifies its outputs and exported ZIP. No production writes or credentials
-are used.
+and verifies its outputs and exported ZIP, then reopens and edits the same
+`/drive` repository after a page reload and verifies it again after a kernel
+restart. The loader tests check sync publication, shared buffers, directory
+creation and error propagation. No production writes or credentials are used.

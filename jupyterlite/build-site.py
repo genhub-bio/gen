@@ -1,6 +1,7 @@
 """Bundle the actual Gen wheel and a demonstration notebook into JupyterLite."""
 
 import json
+import shutil
 from pathlib import Path
 import subprocess
 
@@ -32,18 +33,19 @@ This site bundles `{wheel.name}` in its site-relative piplite index. Install it
 using the kernel's supported wheel mechanism. Gen runs in the kernel worker.
 """),
     code(
-        "import piplite\nawait piplite.install('gen==0.3.1')\nimport gen  # noqa: E402\nprint(gen.__version__)\n"
+        "import piplite\nawait piplite.install(['anywidget==0.9.21', 'ipywidgets==8.1.8'])\nawait piplite.install('gen[jupyter]==0.3.1')\nimport gen  # noqa: E402\nprint(gen.__version__)\n"
     ),
     markdown("""## Create a repository and read a sequence
 
-Use `/tmp` (the kernel's MEMFS) for live databases. JupyterLite's `/drive` uses
-buffered Contents API files, which are unsuitable for live SQLite connections.
-This repository lasts for this kernel session. Export it before restarting.
+The site's filesystem adapter synchronizes live databases on `/drive`.
+Repositories survive kernel restarts and page reloads at this site origin.
+Download an archive to keep a backup outside browser storage.
 """),
     code("""from pathlib import Path
 from tempfile import mkdtemp
 
-root = Path(mkdtemp(prefix='gen-demo-', dir='/tmp'))
+root = Path(mkdtemp(prefix='gen-demo-', dir='/drive'))
+Path('/drive/gen-demo-path.txt').write_text(str(root))
 repository = gen.Repository(str(root))
 fasta = root / 'small.fa'
 fasta.write_text('>tiny\\nACGTACGT\\n')
@@ -54,13 +56,26 @@ print((root / 'before.fa').read_text())
     markdown("""## Edit and inspect committed history
 
 Import and update methods commit their operation automatically. The region uses
-zero-based half-open coordinates; replace the eight bases with a new sequence.
+zero-based half-open coordinates; replace bases 4–6 (`AC`) with `TT`.
 """),
-    code("""repository.update_with_sequence('ACGTTTGT', 'initial', 'edited', 'tiny:0-8')
+    code("""repository.update_with_sequence('TT', 'initial', 'edited', 'tiny:4-6')
 repository.export_fasta(str(root / 'after.fa'), sample='edited')
 print((root / 'after.fa').read_text())
 for operation in repository.get_operations():
     print(operation.id, operation.message)
+"""),
+    markdown("""## Explore the sequence graph
+
+Compare the original sequence with the edited sample. Each plot shows the graph
+at base-level detail; use the zoom buttons and drag to explore it. The edited
+sample keeps the original path alongside the replacement sequence.
+"""),
+    code("""from IPython.display import display
+
+for sequence_graph in sorted(repository.get_sequence_graphs(), key=lambda graph: graph.sample_name != 'initial'):
+    print(f'{sequence_graph.sample_name}: tiny sequence graph')
+    display(sequence_graph.plot(rows=10, cols=70, detail='full', show_history=True))
+del sequence_graph
 """),
     markdown("""## Browser HTTP example
 
@@ -128,3 +143,6 @@ subprocess.run(
     cwd=ROOT,
     check=True,
 )
+
+# The kernel imports this loader before mounting its Contents API drive.
+shutil.copyfile(ROOT / "pyodide-drive.js", ROOT / "_output" / "pyodide-drive.js")
