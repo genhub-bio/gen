@@ -5,7 +5,7 @@ use ftree::FenwickTree;
 use gen_sugiyama::VERTEX_SPACING_DEFAULT;
 use petgraph::{
     Direction, Undirected,
-    algo::toposort,
+    algo::{greedy_feedback_arc_set, toposort},
     graph::{EdgeIndex, NodeIndex},
     stable_graph::{StableDiGraph, StableGraph},
     visit::{
@@ -1202,19 +1202,43 @@ where
         return Ok(Vec::new());
     }
 
-    // Perform topological sort
     let sorted_nodes = match toposort(&graph, None) {
         Ok(nodes) => nodes,
         Err(_) => {
-            return Err("Could not compute ranks for graph layout. Is there a cycle?".to_string());
+            let nodes = (&graph).node_identifiers().collect::<Vec<_>>();
+            let mut ranking_graph =
+                StableDiGraph::<G::NodeId, ()>::with_capacity(nodes.len(), nodes.len());
+            let node_indices = nodes
+                .iter()
+                .map(|&node| (node, ranking_graph.add_node(node)))
+                .collect::<HashMap<_, _>>();
+
+            for &node in &nodes {
+                for target in (&graph).neighbors_directed(node, Direction::Outgoing) {
+                    ranking_graph.add_edge(node_indices[&node], node_indices[&target], ());
+                }
+            }
+
+            let edges_to_remove = greedy_feedback_arc_set(&ranking_graph)
+                .map(|edge| edge.id())
+                .collect::<Vec<_>>();
+            for edge in edges_to_remove {
+                ranking_graph.remove_edge(edge);
+            }
+
+            toposort(&ranking_graph, None)
+                .map_err(|_| {
+                    "Could not compute ranks for graph layout. Is there a cycle?".to_string()
+                })?
+                .into_iter()
+                .map(|node| ranking_graph[node])
+                .collect()
         }
     };
 
-    // Initialize rank for all nodes to 0
+    // Skipping unranked predecessors preserves DAG ranks and ignores cycle edges that point later in
+    // the order.
     let mut node_ranks: HashMap<G::NodeId, usize> = HashMap::new();
-    for node in (&graph).node_identifiers() {
-        node_ranks.insert(node, 0);
-    }
 
     // Process nodes in topological order
     for node in sorted_nodes {
@@ -1225,7 +1249,7 @@ where
 
         let rank = match max_pred_rank {
             Some(pred_rank) => pred_rank + 1,
-            None => 0, // No predecessors means this is a root node
+            None => 0, // No earlier predecessor means this starts the rank sequence
         };
 
         node_ranks.insert(node, rank);
@@ -1315,6 +1339,23 @@ mod tests {
         assert_eq!(ranks[0].1, 0); // First node in topo order should have rank 0
         let max_rank = ranks.iter().map(|(_, rank)| *rank).max().unwrap();
         assert_eq!(max_rank, 3);
+    }
+
+    #[test]
+    fn test_calculate_node_ranks_cycle_without_mutating_graph() {
+        let graph = make_test_graph(vec![(0, 1), (1, 2), (2, 0)]);
+
+        let ranks = compute_all_ranks(&graph).unwrap();
+
+        assert_eq!(ranks.len(), 3);
+        assert_eq!(graph.edge_count(), 3);
+        assert!(graph.contains_edge(TestNode(0), TestNode(1)));
+        assert!(graph.contains_edge(TestNode(1), TestNode(2)));
+        assert!(graph.contains_edge(TestNode(2), TestNode(0)));
+        let mut ranked_nodes = ranks.iter().map(|(node, _)| *node).collect::<Vec<_>>();
+        ranked_nodes.sort();
+        assert_eq!(ranked_nodes, vec![TestNode(0), TestNode(1), TestNode(2)]);
+        assert_eq!(ranks.iter().map(|(_, rank)| *rank).max(), Some(2));
     }
 
     #[test]

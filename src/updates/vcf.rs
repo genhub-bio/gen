@@ -1680,9 +1680,9 @@ mod tests {
         assert!(SampleLineage::get_parents(conn, "child", None).is_empty());
     }
 
-    /// Adjacent deletions from one VCF spell the sequence with both deleted regions removed.
+    /// Separated deletions from one VCF spell the sequence with both deleted regions removed.
     #[test]
-    fn test_adjacent_deletions_in_one_vcf_add_each_deletion_and_their_combination() {
+    fn test_separated_deletions_in_one_vcf_add_each_deletion_and_their_combination() {
         let context = setup_gen();
         let collection = "test".to_string();
         let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
@@ -1698,7 +1698,7 @@ mod tests {
         update_with_vcf(
             &context,
             &fixtures
-                .join("simple_adjacent_deletions.vcf")
+                .join("simple_separated_deletions.vcf")
                 .to_str()
                 .unwrap()
                 .to_string(),
@@ -1711,13 +1711,13 @@ mod tests {
         .unwrap();
 
         let conn = context.graph().conn();
-        let block_group = get_sample_bg(conn, &collection, "adjacent");
+        let block_group = get_sample_bg(conn, &collection, "separated");
         let sequences =
             BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
                 .unwrap();
         assert_eq!(
             sequences,
-            HashSet::from(["ATCGATCGATCGATCGGGAACACACAGAGA".to_string()])
+            HashSet::from(["ATCGATCGAGCGATCGGGAACACACAGAGA".to_string()])
         );
     }
 }

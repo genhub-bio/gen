@@ -11,6 +11,7 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
+use petgraph::{algo::kosaraju_scc, graphmap::DiGraphMap};
 use rusqlite::{ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -459,6 +460,44 @@ impl Edge {
         }
     }
 
+    fn shared_position_coordinates(edges: &[AugmentedEdge]) -> HashSet<BlockKey> {
+        let mut outgoing_coordinates = HashSet::new();
+        // Same-coordinate markers already encode continuity.
+        // Distinct edges identify coordinates that need a shared site.
+        for augmented_edge in edges {
+            let edge = &augmented_edge.edge;
+            if !edge.is_same_coordinate_edge()
+                && !is_terminal(edge.source_node_id)
+                && !is_terminal(edge.target_node_id)
+            {
+                outgoing_coordinates.insert(BlockKey {
+                    node_id: edge.source_node_id,
+                    coordinate: edge.source_coordinate,
+                });
+            }
+        }
+
+        let mut incoming_coordinates = HashSet::new();
+        for augmented_edge in edges {
+            let edge = &augmented_edge.edge;
+            if !is_terminal(edge.target_node_id)
+                && !is_terminal(edge.source_node_id)
+                && !edge.is_same_coordinate_edge()
+                && outgoing_coordinates.contains(&BlockKey {
+                    node_id: edge.target_node_id,
+                    coordinate: edge.target_coordinate,
+                })
+            {
+                incoming_coordinates.insert(BlockKey {
+                    node_id: edge.target_node_id,
+                    coordinate: edge.target_coordinate,
+                });
+            }
+        }
+
+        incoming_coordinates
+    }
+
     /// Computes the backing-node slices from the stored block group edges.
     ///
     /// Graph construction, sequence enumeration, GFA export, and diff reconstruction use this as
@@ -509,6 +548,7 @@ impl Edge {
             HashMap::new();
         let mut incoming_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
             HashMap::new();
+        let mut routing_edges = edges.to_vec();
         for edge in edges.iter().map(|edge| &edge.edge) {
             Self::record_same_node_jump_coordinates(
                 edge,
@@ -558,15 +598,15 @@ impl Edge {
             queried_node_ids.extend(incomplete_node_ids.iter().copied());
             let mut next_incomplete_node_ids = HashSet::new();
 
-            for edge in Edge::edges_for_block_group_nodes(
+            let neighboring_edges = Edge::edges_for_block_group_nodes(
                 conn,
                 block_group_id,
                 &incomplete_node_ids,
                 history_ref,
-            )?
-            .iter()
-            .map(|augmented_edge| &augmented_edge.edge)
-            {
+            )?;
+            for augmented_edge in neighboring_edges {
+                routing_edges.push(augmented_edge.clone());
+                let edge = &augmented_edge.edge;
                 Self::record_same_node_jump_coordinates(
                     edge,
                     &mut outgoing_jump_coordinates_by_node_id,
@@ -602,6 +642,14 @@ impl Edge {
         }
 
         let node_ids = node_ids.iter().copied().collect::<Vec<HashId>>();
+        let shared_position_coordinates = Self::shared_position_coordinates(&routing_edges);
+        let mut shared_position_coordinates_by_node_id = HashMap::<HashId, HashSet<i64>>::new();
+        for position in shared_position_coordinates {
+            shared_position_coordinates_by_node_id
+                .entry(position.node_id)
+                .or_default()
+                .insert(position.coordinate);
+        }
         let sequences_by_node_id =
             Node::get_sequences_by_node_ids(conn, workspace, &node_ids, history_ref);
 
@@ -636,6 +684,13 @@ impl Edge {
                 .collect::<HashSet<_>>();
             junction_coordinates.extend(outgoing_jump_coordinates.intersection(starts).copied());
             junction_coordinates.extend(incoming_jump_coordinates.intersection(ends).copied());
+            junction_coordinates.extend(
+                shared_position_coordinates_by_node_id
+                    .get(node_id)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
             let block_intervals = Edge::get_block_intervals(starts, ends, &junction_coordinates)?;
 
             for (start, end) in block_intervals {
@@ -759,19 +814,36 @@ impl Edge {
     ///
     /// `build_graph` calls this after coordinate lookup may have returned both a sequence block and
     /// a junction. Same-coordinate edges connect the surrounding sequence through that junction;
-    /// all other edges connect to the junction and let the next input edge continue from it. These
-    /// returned connections are a graph projection and are not additional database edges.
+    /// shared positions and same-node jumps keep the sequence projections needed when markers are
+    /// filtered or pruned. These returned connections are graph projections, not database edges.
     fn block_connections<'a>(
         &self,
         source_blocks: &[&'a GroupBlock],
         target_blocks: &[&'a GroupBlock],
+        source_is_shared_position: bool,
+        target_is_shared_position: bool,
     ) -> Vec<(&'a GroupBlock, &'a GroupBlock)> {
         if self.is_same_coordinate_edge() {
             return Self::same_coordinate_block_connections(source_blocks, target_blocks);
         }
 
-        let source_blocks = Self::select_junction_or_sequence_blocks(source_blocks);
-        let target_blocks = Self::select_junction_or_sequence_blocks(target_blocks);
+        let same_node_jump = self.source_node_id == self.target_node_id;
+        let source_blocks = if source_is_shared_position || same_node_jump {
+            source_blocks.to_vec()
+        } else {
+            Self::select_junction_or_sequence_blocks(source_blocks)
+        };
+        let target_blocks = if target_is_shared_position {
+            target_blocks
+                .iter()
+                .copied()
+                .filter(|block| block.start == block.end)
+                .collect()
+        } else if same_node_jump {
+            target_blocks.to_vec()
+        } else {
+            Self::select_junction_or_sequence_blocks(target_blocks)
+        };
         source_blocks
             .into_iter()
             .cartesian_product(target_blocks)
@@ -807,6 +879,7 @@ impl Edge {
         edges: &[AugmentedEdge],
         blocks: &[GroupBlock],
     ) -> (GenGraph, HashMap<(i64, i64), Edge>) {
+        let shared_position_coordinates = Self::shared_position_coordinates(edges);
         let graph_node_for_block = |block: &GroupBlock| GraphNode {
             node_id: block.node_id,
             sequence_start: block.start,
@@ -842,10 +915,19 @@ impl Edge {
 
         let mut graph = GenGraph::new();
         let mut edges_by_node_pair = HashMap::new();
+        let mut position_exit_projections = Vec::new();
+        let graph_edge_for = |augmented_edge: &AugmentedEdge| GraphEdge {
+            edge_id: augmented_edge.edge.id,
+            source_strand: augmented_edge.edge.source_strand,
+            target_strand: augmented_edge.edge.target_strand,
+            chromosome_index: augmented_edge.chromosome_index,
+            phased: augmented_edge.phased,
+            created_on: augmented_edge.created_on,
+        };
         for block in blocks {
             graph.add_node(graph_node_for_block(block));
         }
-        for augmented_edge in edges {
+        for (edge_index, augmented_edge) in edges.iter().enumerate() {
             let edge = &augmented_edge.edge;
             let source_key = BlockKey {
                 node_id: edge.source_node_id,
@@ -864,19 +946,18 @@ impl Edge {
                 // A coordinate may match both a sequence block and a junction. When connecting
                 // to junctions, multiple edges may be needed to fully represent the graph.
                 // `block_connections` orchestrates this.
-                for (source_block, target_block) in
-                    edge.block_connections(source_blocks, target_blocks)
-                {
+                let source_is_shared_position = shared_position_coordinates.contains(&source_key);
+                let target_is_shared_position = shared_position_coordinates.contains(&target_key);
+                let connections = edge.block_connections(
+                    source_blocks,
+                    target_blocks,
+                    source_is_shared_position,
+                    target_is_shared_position,
+                );
+                for (source_block, target_block) in &connections {
                     let source_node = graph_node_for_block(source_block);
                     let target_node = graph_node_for_block(target_block);
-                    let graph_edge = GraphEdge {
-                        edge_id: edge.id,
-                        source_strand: edge.source_strand,
-                        target_strand: edge.target_strand,
-                        chromosome_index: augmented_edge.chromosome_index,
-                        phased: augmented_edge.phased,
-                        created_on: augmented_edge.created_on,
-                    };
+                    let graph_edge = graph_edge_for(augmented_edge);
                     if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
                         existing_edges.push(graph_edge);
                     } else {
@@ -884,7 +965,82 @@ impl Edge {
                     }
                     edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
                 }
+
+                if target_is_shared_position && !edge.is_same_coordinate_edge() {
+                    let target_sequences = target_blocks
+                        .iter()
+                        .copied()
+                        .filter(|block| block.start != block.end)
+                        .collect::<Vec<_>>();
+                    for (source_block, position_block) in connections
+                        .iter()
+                        .filter(|(_, target_block)| target_block.start == target_block.end)
+                    {
+                        for target_sequence in &target_sequences {
+                            position_exit_projections.push((
+                                *source_block,
+                                *position_block,
+                                *target_sequence,
+                                edge_index,
+                            ));
+                        }
+                    }
+                }
             }
+        }
+
+        let mut cycle_graph = DiGraphMap::<GraphNode, ()>::new();
+        for node in graph.nodes() {
+            cycle_graph.add_node(node);
+        }
+        for (source, target, _) in graph.all_edges() {
+            cycle_graph.add_edge(source, target, ());
+        }
+
+        // Filtered preserve markers can hide continuity between contiguous slices of one stored
+        // sequence. Restore that continuity only while deciding whether an edge returns through
+        // a position; the returned graph still contains only stored-edge projections.
+        for source_block in blocks.iter().filter(|block| block.start != block.end) {
+            let next_block_key = BlockKey {
+                node_id: source_block.node_id,
+                coordinate: source_block.end,
+            };
+            if let Some(target_blocks) = blocks_by_start.get(&next_block_key) {
+                for target_block in target_blocks
+                    .iter()
+                    .filter(|block| block.start != block.end)
+                {
+                    cycle_graph.add_edge(
+                        graph_node_for_block(source_block),
+                        graph_node_for_block(target_block),
+                        (),
+                    );
+                }
+            }
+        }
+
+        let component_by_node = kosaraju_scc(&cycle_graph)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(component, nodes)| nodes.into_iter().map(move |node| (node, component)))
+            .collect::<HashMap<_, _>>();
+        for (source_block, position_block, target_block, edge_index) in position_exit_projections {
+            let source_node = graph_node_for_block(source_block);
+            let position_node = graph_node_for_block(position_block);
+            let target_node = graph_node_for_block(target_block);
+            if component_by_node.get(&source_node) != component_by_node.get(&position_node) {
+                continue;
+            }
+
+            let augmented_edge = &edges[edge_index];
+            let edge = &augmented_edge.edge;
+            let graph_edge = graph_edge_for(augmented_edge);
+            if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
+                existing_edges.push(graph_edge);
+            } else {
+                graph.add_edge(source_node, target_node, vec![graph_edge]);
+            }
+            edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
         }
 
         (graph, edges_by_node_pair)

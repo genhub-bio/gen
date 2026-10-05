@@ -39,8 +39,8 @@ use r#gen::{
             parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
         },
         gen_graph_widget::{
-            GenGraphNodeRenderer, GenGraphNodeSizer, draw_annotation_labels, highlight_locus,
-            locus_midpoint, reapply_overlays,
+            GenGraphNodeRenderer, GenGraphNodeSizer, create_gen_graph_controller,
+            draw_annotation_labels, highlight_locus, locus_midpoint, reapply_overlays,
         },
         graph_overlay::{AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource},
     },
@@ -2122,8 +2122,7 @@ impl Repository {
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg_id, None)
             .map_err(|e| Error::Other(e.to_string()))?;
-        let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new(graph, node_sizer);
+        let mut controller = create_gen_graph_controller(graph);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
         controller.hide_cursor();
 
@@ -2215,8 +2214,7 @@ impl Repository {
         let bg_id = hash_id_from_string(&sequence_graph_id).map_err(Error::Other)?;
         let graph = BlockGroup::get_graph(conn, self.context.workspace(), &bg_id, None)
             .map_err(|e| Error::Other(e.to_string()))?;
-        let node_sizer = GenGraphNodeSizer;
-        let mut controller = GraphController::new(graph, node_sizer);
+        let mut controller = create_gen_graph_controller(graph);
         controller.set_detail_level(visual_detail(&detail).map_err(Error::Other)?);
         controller.hide_cursor();
         apply_graph_ops(&mut controller, &ops).map_err(Error::Other)?;

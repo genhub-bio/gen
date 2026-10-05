@@ -30,14 +30,14 @@ setup_repository <- function() {
 }
 
 expect_binding_result <- function(result) {
+  expect_false(inherits(result, "try-error"), info = paste(result, collapse = "\n"))
   expect_true(
     is.character(result) ||
       is.list(result) ||
       is.logical(result) ||
       is.null(result) ||
       inherits(result, "gen_sample") ||
-      inherits(result, "SequenceGraph") ||
-      inherits(result, "try-error")
+      inherits(result, "SequenceGraph")
   )
 }
 
@@ -46,6 +46,16 @@ simple_parts_list <- function() {
     c(`part-a` = "AAAA", `part-b` = "TAAT", `part-c` = "CAAC"),
     c(`part-d` = "ATGA", `part-e` = "TGTT", `part-f` = "TGCT")
   )
+}
+
+first_sequence_node <- function(graph_dict) {
+  sequence_node_indexes <- which(vapply(
+    graph_dict$nodes,
+    function(node) node$sequence_end > node$sequence_start,
+    logical(1)
+  ))
+  expect_gt(length(sequence_node_indexes), 0)
+  graph_dict$nodes[[sequence_node_indexes[[1]]]]
 }
 
 test_that("Repository initializes workspace and returns correct paths", {
@@ -249,7 +259,7 @@ test_that("repository inspection and graph controller work", {
   expect_true(length(graph_dict$nodes) >= 1)
   expect_true(length(graph_dict$edges) >= 1)
 
-  node <- graph_dict$nodes[[1]]
+  node <- first_sequence_node(graph_dict)
   expect_true(nzchar(get_node_sequence(repo, node)))
 
   controller <- GenPlot(groups[[1]]$db_path(), groups[[1]]$id(), rows = 12, cols = 40)
@@ -286,10 +296,54 @@ test_that("raw SQL execute/query and sequence graph object API work", {
   graph_dict <- sg$to_dict()
   expect_true(length(graph_dict$nodes) >= 1)
 
-  node <- graph_dict$nodes[[1]]
+  node <- first_sequence_node(graph_dict)
   expect_true(nzchar(repo$get_node_sequence(node$node_id, node$sequence_start, node$sequence_end)))
 
   frame_json <- repo$render_frame(sg$id(), "normal", 40L, 12L, "", "[]")
   expect_match(frame_json, "\"cells\"")
   expect_type(repo$handle_click(sg$id(), "normal", "", 1L, 1L), "logical")
+})
+
+test_that("variant routing positions remain usable by the R graph widget", {
+  repo <- setup_repository()
+  repo$import_fasta(fixture_path("simple.fa"), sample = "sample-a")
+  repo$update_with_vcf(
+    fixture_path("simple.vcf"),
+    reference = "sample-a"
+  )
+
+  variant_graphs <- Filter(
+    function(graph) graph$sample_name() == "unknown",
+    repo$get_sequence_graphs()
+  )
+  expect_length(variant_graphs, 1)
+  graph <- variant_graphs[[1]]
+  graph_dict <- graph$to_dict()
+  expect_true(any(vapply(
+    graph_dict$nodes,
+    function(node) {
+      node$sequence_start > 0 && node$sequence_start == node$sequence_end
+    },
+    logical(1)
+  )))
+  expect_true(any(vapply(
+    graph_dict$edges,
+    function(edge) {
+      (edge$source$sequence_start > 0 &&
+        edge$source$sequence_start == edge$source$sequence_end) ||
+        (edge$target$sequence_start > 0 &&
+          edge$target$sequence_start == edge$target$sequence_end)
+    },
+    logical(1)
+  )))
+
+  frame <- jsonlite::fromJSON(
+    repo$render_frame(graph$id(), "full", 100L, 48L, "", "[]"),
+    simplifyVector = FALSE
+  )
+  expect_true(any(vapply(
+    frame$cells,
+    function(cell) identical(cell$fg, "#585b70"),
+    logical(1)
+  )))
 })

@@ -245,7 +245,10 @@ fn get_path_nodes(graph: &GenGraph, path_blocks: &[PathBlock]) -> Vec<GraphNode>
                     }
                 }
                 if !invalid {
-                    return node_path;
+                    return node_path
+                        .into_iter()
+                        .filter(|node| node.sequence_start != node.sequence_end)
+                        .collect();
                 }
             }
         }
@@ -315,6 +318,10 @@ pub fn export_genbank(
             // we evaluate all edges from our node, and if the connection point is not the expected
             // next node of the path, it's a bubble and a change we incorporate.
             for (_source_node, target_node, _edges) in graph.edges(*current_node) {
+                // Position projections route edits but do not carry sequence to export twice.
+                if target_node.length() == 0 {
+                    continue;
+                }
                 if let Some(next_node) = node_it.peek()
                     && &&target_node != next_node
                 {
