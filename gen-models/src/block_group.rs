@@ -4637,4 +4637,307 @@ mod tests {
             );
         }
     }
+
+    fn insert_test_edit(
+        conn: &GraphConnection,
+        block_group_id: HashId,
+        path: &Path,
+        start: i64,
+        end: i64,
+        bases: &str,
+        preserve_edge: bool,
+    ) {
+        let (node_id, length) = if bases.is_empty() {
+            (HashId::convert_str(""), 0)
+        } else {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(bases)
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(
+                conn,
+                &sequence.hash,
+                &HashId::convert_str(&format!("test-edit-{start}-{end}-{bases}")),
+            )
+            .unwrap();
+            (node_id, sequence.length)
+        };
+        let block = PathBlock {
+            node_id,
+            block_sequence: bases.to_string(),
+            sequence_start: 0,
+            sequence_end: length,
+            path_start: start,
+            path_end: end,
+            strand: Strand::Forward,
+        };
+        let region = ResolvedGenRegion::from_path(conn, block_group_id, path, start, end).unwrap();
+        let change = BlockGroupChange {
+            region,
+            path_accession: None,
+            block,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge,
+        };
+        BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+    }
+
+    /// A deletion touching an insertion or substitution has four spelled combinations.
+    #[test]
+    fn test_deletion_and_touching_edit_add_each_edit_and_their_combination() {
+        let suffix = format!("{}{}", "C".repeat(10), "G".repeat(10));
+        for (start, end, bases, combined) in [
+            (
+                12,
+                12,
+                "GG",
+                format!("{}GG{}{}", "A".repeat(8), "T".repeat(8), suffix),
+            ),
+            (
+                12,
+                13,
+                "A",
+                format!("{}A{}{}", "A".repeat(8), "T".repeat(7), suffix),
+            ),
+        ] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            insert_test_edit(conn, block_group_id, &path, 8, 12, "", true);
+            insert_test_edit(conn, block_group_id, &path, start, end, bases, true);
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(sequences.len(), 4, "{bases}");
+            assert!(sequences.contains(&combined), "{bases}");
+        }
+    }
+
+    /// A deletion is applied to each existing route that arrives at the edited node.
+    #[test]
+    fn test_deletion_adds_an_edge_from_every_route_arriving_at_the_node() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let mut alternatives = Vec::new();
+        for (label, bases) in [
+            ("first-alternative", "GGGG"),
+            ("second-alternative", "CCCC"),
+        ] {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(bases)
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str(label)).unwrap();
+            let into = Edge::create(
+                conn,
+                a_node_id,
+                10,
+                Strand::Forward,
+                node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let out = Edge::create(
+                conn,
+                node_id,
+                4,
+                Strand::Forward,
+                t_node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[into.id, out.id].map(|edge_id| BlockGroupEdgeData {
+                    block_group_id,
+                    edge_id,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                }),
+            );
+            alternatives.push(bases);
+        }
+        insert_test_edit(conn, block_group_id, &path, 10, 12, "", true);
+
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        let a = "A".repeat(10);
+        let t = "T".repeat(10);
+        let t_after_deletion = "T".repeat(8);
+        let c = "C".repeat(10);
+        let g = "G".repeat(10);
+        let expected = alternatives
+            .into_iter()
+            .flat_map(|alternative| {
+                [
+                    format!("{a}{alternative}{t}{c}{g}"),
+                    format!("{a}{alternative}{t_after_deletion}{c}{g}"),
+                ]
+            })
+            .chain([
+                format!("{a}{t}{c}{g}"),
+                format!("{a}{t_after_deletion}{c}{g}"),
+            ])
+            .collect::<HashSet<_>>();
+        assert_eq!(sequences, expected);
+    }
+
+    /// A second insertion at one point goes in front of the first in the combined route.
+    #[test]
+    fn test_second_insertion_at_one_point_goes_in_front_of_the_first() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        insert_test_edit(conn, block_group_id, &path, 10, 10, "GG", true);
+        insert_test_edit(conn, block_group_id, &path, 10, 10, "CC", true);
+
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        let a = "A".repeat(10);
+        let t = "T".repeat(10);
+        let c = "C".repeat(10);
+        let g = "G".repeat(10);
+        assert_eq!(
+            sequences,
+            HashSet::from([
+                format!("{a}{t}{c}{g}"),
+                format!("{a}GG{t}{c}{g}"),
+                format!("{a}CC{t}{c}{g}"),
+                format!("{a}CCGG{t}{c}{g}"),
+            ])
+        );
+    }
+
+    /// A homozygous edit replaces the original allele and leaves one spelled sequence.
+    #[test]
+    fn test_homozygous_edit_retires_the_replaced_edge() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        insert_test_edit(conn, block_group_id, &path, 10, 12, "NNNN", false);
+
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(
+            sequences,
+            HashSet::from([format!(
+                "{}NNNN{}{}{}",
+                "A".repeat(10),
+                "T".repeat(8),
+                "C".repeat(10),
+                "G".repeat(10)
+            )])
+        );
+    }
+
+    /// A heterozygous edit beside a homozygous edit keeps the homozygous allele in either order.
+    #[test]
+    fn test_heterozygous_edit_next_to_homozygous_edit_does_not_fan_out_the_parent_allele() {
+        let homozygous = (10, 15, "NNNN", false);
+        let heterozygous = (15, 17, "GG", true);
+        for edits in [[homozygous, heterozygous], [heterozygous, homozygous]] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            for (start, end, bases, preserve_edge) in edits {
+                insert_test_edit(
+                    conn,
+                    block_group_id,
+                    &path,
+                    start,
+                    end,
+                    bases,
+                    preserve_edge,
+                );
+            }
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(sequences.len(), 2, "{edits:?}");
+            assert_eq!(
+                sequences,
+                HashSet::from([
+                    "AAAAAAAAAANNNNTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                    "AAAAAAAAAANNNNGGTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                ]),
+                "{edits:?}"
+            );
+        }
+    }
+
+    /// Deletions at the contig ends leave paths connected to the marker nodes.
+    #[test]
+    fn test_deletion_at_a_contig_end_attaches_to_the_marker_node() {
+        let reference = format!(
+            "{}{}{}{}",
+            "A".repeat(10),
+            "T".repeat(10),
+            "C".repeat(10),
+            "G".repeat(10)
+        );
+        let expected_deleted = [
+            format!(
+                "{}{}{}{}",
+                "A".repeat(8),
+                "T".repeat(10),
+                "C".repeat(10),
+                "G".repeat(10)
+            ),
+            format!(
+                "{}{}{}{}",
+                "A".repeat(10),
+                "T".repeat(10),
+                "C".repeat(10),
+                "G".repeat(8)
+            ),
+        ];
+        for ((start, end), deleted) in [(0, 2), (38, 40)].into_iter().zip(expected_deleted) {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            insert_test_edit(conn, block_group_id, &path, start, end, "", true);
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(
+                sequences,
+                HashSet::from([reference.clone(), deleted]),
+                "{start}-{end}"
+            );
+        }
+    }
+
+    /// Insertions at either contig end sit beside the corresponding marker node.
+    #[test]
+    fn test_insertion_at_a_contig_end_sits_next_to_the_marker_node() {
+        let reference = format!(
+            "{}{}{}{}",
+            "A".repeat(10),
+            "T".repeat(10),
+            "C".repeat(10),
+            "G".repeat(10)
+        );
+        for (position, inserted) in [
+            (0, format!("GG{reference}")),
+            (40, format!("{reference}GG")),
+        ] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            insert_test_edit(conn, block_group_id, &path, position, position, "GG", true);
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(
+                sequences,
+                HashSet::from([reference.clone(), inserted]),
+                "{position}"
+            );
+        }
+    }
 }
