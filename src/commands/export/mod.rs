@@ -6,6 +6,7 @@ use crate::commands::cli_context::CliContext;
 mod fasta;
 mod genbank;
 mod gfa;
+mod sample_metadata;
 
 #[derive(Debug, Args, Clone)]
 pub struct Command {
@@ -24,6 +25,8 @@ pub enum Commands {
     Genbank(genbank::Command),
     /// Export gfa
     Gfa(gfa::Command),
+    /// Export sample metadata as TSV
+    SampleMetadata(sample_metadata::Command),
 }
 
 #[cfg_attr(
@@ -35,5 +38,6 @@ pub fn execute(ctx: &CliContext, command: Command) -> anyhow::Result<()> {
         Commands::Fasta(cmd) => crate::commands::export::fasta::execute(ctx, cmd),
         Commands::Genbank(cmd) => crate::commands::export::genbank::execute(ctx, cmd),
         Commands::Gfa(cmd) => crate::commands::export::gfa::execute(ctx, cmd),
+        Commands::SampleMetadata(cmd) => sample_metadata::execute(ctx, cmd),
     }
 }

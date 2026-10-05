@@ -21,6 +21,31 @@ gen import fasta reference.fa --sample reference -m "Import reference genome"
 gen update vcf variants.vcf --sample sample1 --message "Apply sample variants"
 ```
 
+VCF updates also store fields from `##SAMPLE=<ID=sample1,Score=90.68>` header records
+as sample metadata. The ID identifies the sample; other field names become metadata keys.
+Values are inferred as signed 64-bit integers, then finite floating-point numbers, or text.
+A later update replaces an existing value for the same sample and key. Only samples
+updated by the operation receive metadata; a fixed sample receives fields only from a
+matching header ID.
+
+# Sample metadata export
+
+Export all sample metadata as TSV, or select a single sample:
+
+```sh
+gen export sample-metadata metadata.tsv
+gen export sample-metadata metadata.tsv --sample sample1
+gen export --ref HEAD sample-metadata metadata.tsv
+```
+
+The columns are `sample_name`, `key`, `value_type`, and `value`, with one row per
+sample/key pair, sorted by sample name and key. `value_type` is `text`, `integer`,
+or `real`, preserving the distinction between text and numeric values. Tabs,
+newlines, and quotes in fields use CSV-style quoting with a tab delimiter.
+An empty selection produces only the header; an unknown sample is an error.
+Sample metadata belongs to samples across collections, so this command does not
+require a collection option. `--ref` reads a commit or branch without checkout.
+
 # Branches
 
 Creating a new branch can be accomplished via `gen branch --create branch_name`.

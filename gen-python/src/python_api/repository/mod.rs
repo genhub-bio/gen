@@ -27,6 +27,7 @@ pub mod graph_ops;
 pub mod history;
 pub mod imports;
 pub mod remote;
+pub mod sample_metadata;
 pub mod search;
 pub mod updates;
 

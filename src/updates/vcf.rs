@@ -16,19 +16,23 @@ use gen_models::{
     reference_alias::ReferenceAlias,
     region::{Region, ResolvedGenRegion, ResolvedRegionKind, resolve_path},
     sample::Sample,
+    sample_metadata::{MetadataValue, SampleMetadata, SampleMetadataError},
     sequence::Sequence,
 };
 use intervaltree::IntervalTree;
 use noodles::{
     vcf,
-    vcf::variant::{
-        Record,
-        record::{
-            AlternateBases,
-            info::field::Value as InfoValue,
-            samples::{
-                Sample as NoodlesSample,
-                series::{Value, value::genotype::Phasing},
+    vcf::{
+        header::record::value::Collection as HeaderCollection,
+        variant::{
+            Record,
+            record::{
+                AlternateBases,
+                info::field::Value as InfoValue,
+                samples::{
+                    Sample as NoodlesSample,
+                    series::{Value, value::genotype::Phasing},
+                },
             },
         },
     },
@@ -311,6 +315,8 @@ pub enum VcfError {
     OperationError(#[from] OperationError),
     #[error("Sample Error: {0}")]
     SampleError(#[from] SampleError),
+    #[error("Sample metadata error: {0}")]
+    SampleMetadata(#[from] SampleMetadataError),
     #[error("Invalid Record: {0}")]
     InvalidRecord(String),
     #[error("Node creation error: {0}")]
@@ -321,6 +327,42 @@ pub enum VcfError {
     SequenceError(#[from] SequenceError),
     #[error("Path error: {0}")]
     PathError(#[from] PathError),
+}
+
+/// Read SAMPLE header fields once so metadata can be saved independently of variant counts.
+fn parse_sample_metadata(
+    header: &vcf::Header,
+) -> Result<HashMap<String, Vec<(String, MetadataValue)>>, VcfError> {
+    let mut metadata = HashMap::new();
+    let Some(records) = header.other_records().get("SAMPLE") else {
+        return Ok(metadata);
+    };
+    let HeaderCollection::Structured(samples) = records else {
+        return Err(VcfError::InvalidRecord(
+            "SAMPLE metadata must be a structured header record with an ID".to_string(),
+        ));
+    };
+    for (sample_name, fields) in samples {
+        let mut values = Vec::new();
+        for (key, value) in fields.other_fields() {
+            // SAMPLE fields have no declared type; preserve numeric values when possible.
+            let value = if let Ok(integer) = value.parse::<i64>() {
+                MetadataValue::Integer(integer)
+            } else if let Ok(real) = value.parse::<f64>() {
+                if !real.is_finite() {
+                    return Err(VcfError::InvalidRecord(format!(
+                        "non-finite SAMPLE metadata for sample {sample_name}, key {key}"
+                    )));
+                }
+                MetadataValue::Real(real)
+            } else {
+                MetadataValue::Text(value.clone())
+            };
+            values.push((key.to_string(), value));
+        }
+        metadata.insert(sample_name.clone(), values);
+    }
+    Ok(metadata)
 }
 
 fn resolve_parent_samples(
@@ -361,7 +403,10 @@ pub fn update_with_vcf(
     let mut reader = vcf::io::reader::Builder::default()
         .build_from_path(vcf_path)
         .expect("Unable to parse");
-    let header = reader.read_header().unwrap();
+    let header = reader
+        .read_header()
+        .map_err(|error| VcfError::InvalidRecord(format!("invalid VCF header: {error}")))?;
+    let sample_metadata = parse_sample_metadata(&header)?;
     let sample_names = header.sample_names();
     let mut genotype = vec![];
     if !fixed_genotype.is_empty() {
@@ -717,6 +762,15 @@ pub fn update_with_vcf(
             &mut path_cache,
         )?;
     }
+    // Save metadata once per updated sample, including samples with reference-only genotypes.
+    // A fixed sample receives only metadata whose header ID matches its name.
+    for sample_name in &created_samples {
+        if let Some(values) = sample_metadata.get(*sample_name) {
+            for (key, value) in values {
+                SampleMetadata::upsert(conn, sample_name, key, value)?;
+            }
+        }
+    }
     let mut summary_str = "".to_string();
     for (sample_name, sample_changes) in summary.iter() {
         summary_str.push_str(&format!("Sample {sample_name}\n"));
@@ -747,14 +801,145 @@ mod tests {
     use std::{collections::HashSet, path::PathBuf};
 
     use gen_models::{
-        accession::Accession, node::Node, sample::Sample, sample_lineage::SampleLineage,
+        accession::Accession,
+        node::Node,
+        sample::Sample,
+        sample_lineage::SampleLineage,
+        sample_metadata::{MetadataValue, SampleMetadata},
     };
+    use noodles::vcf;
 
     use super::*;
     use crate::{
         imports::fasta::import_fasta,
         test_helpers::{get_sample_bg, setup_gen},
     };
+    #[test]
+    fn test_update_vcf_stores_sample_metadata_scores() {
+        let context = setup_gen();
+        let fixture_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_path = fixture_directory
+            .join("simple.fa")
+            .to_str()
+            .expect("should have UTF-8 path")
+            .to_string();
+        let vcf_path = fixture_directory
+            .join("simple-metadata.vcf")
+            .to_str()
+            .expect("should have UTF-8 path")
+            .to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            "test",
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .expect("should import reference");
+        let conn = context.graph().conn();
+        for _ in 0..2 {
+            update_with_vcf(
+                &context,
+                &vcf_path,
+                "test",
+                String::new(),
+                None,
+                vec![Sample::DEFAULT_NAME.to_string()],
+                false,
+            )
+            .expect("should update variants and metadata");
+            for (sample_name, score) in [("sample_001", 90.68), ("sample_002", 27.79)] {
+                let metadata = SampleMetadata::select(conn)
+                    .sample_name(sample_name)
+                    .load()
+                    .expect("should load sample metadata");
+                assert_eq!(metadata.len(), 1);
+                assert_eq!(metadata[0].key, "Score");
+                assert_eq!(metadata[0].value, MetadataValue::Real(score));
+            }
+        }
+        assert!(
+            SampleMetadata::select(conn)
+                .sample_name(Sample::DEFAULT_NAME)
+                .load()
+                .expect("should load reference metadata")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_update_vcf_metadata_matches_fixed_sample_id() {
+        let context = setup_gen();
+        let fixture_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let fasta_path = fixture_directory
+            .join("simple.fa")
+            .to_str()
+            .expect("should have UTF-8 path")
+            .to_string();
+        let vcf_path = fixture_directory
+            .join("simple-metadata.vcf")
+            .to_str()
+            .expect("should have UTF-8 path")
+            .to_string();
+        import_fasta(
+            &context,
+            &fasta_path,
+            "test",
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .expect("should import reference");
+        for sample_name in ["sample_001", "custom"] {
+            update_with_vcf(
+                &context,
+                &vcf_path,
+                "test",
+                "0".to_string(),
+                Some(sample_name),
+                vec![Sample::DEFAULT_NAME.to_string()],
+                false,
+            )
+            .expect("should update fixed sample");
+        }
+        let metadata = SampleMetadata::select(context.graph().conn())
+            .load()
+            .expect("should load metadata");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].sample_name, "sample_001");
+        assert_eq!(metadata[0].value, MetadataValue::Real(90.68));
+    }
+
+    #[test]
+    fn test_parse_vcf_sample_metadata_types() {
+        let input = b"##fileformat=VCFv4.2\n##SAMPLE=<ID=sample,Score=90.68,Count=42,Label=\"a,b\",Scientific=1e-3>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+        let mut reader = vcf::io::Reader::new(&input[..]);
+        let header = reader.read_header().expect("should parse header");
+        let metadata = parse_sample_metadata(&header).expect("should parse metadata");
+        assert_eq!(
+            metadata["sample"],
+            vec![
+                ("Score".to_string(), MetadataValue::Real(90.68)),
+                ("Count".to_string(), MetadataValue::Integer(42)),
+                ("Label".to_string(), MetadataValue::Text("a,b".to_string())),
+                ("Scientific".to_string(), MetadataValue::Real(0.001)),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_vcf_sample_metadata_rejects_non_finite_values() {
+        for value in ["NaN", "inf", "-inf", "1e999"] {
+            let input = format!(
+                "##fileformat=VCFv4.2\n##SAMPLE=<ID=sample,Score={value}>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            );
+            let mut reader = vcf::io::Reader::new(input.as_bytes());
+            let header = reader.read_header().expect("should parse header");
+            assert!(parse_sample_metadata(&header).is_err());
+        }
+    }
+
     #[test]
     fn test_update_fasta_with_vcf() -> Result<(), VcfError> {
         let context = setup_gen();

@@ -31,6 +31,7 @@ pub mod reference_alias;
 pub mod region;
 pub mod sample;
 pub mod sample_lineage;
+pub mod sample_metadata;
 #[doc(hidden)]
 pub mod select;
 pub mod sequence;
