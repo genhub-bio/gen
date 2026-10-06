@@ -10,21 +10,6 @@ use tempfile::NamedTempFile;
 use super::{ChecksummedReader, ChecksummedWriter, FileTypes};
 use crate::errors::FileAdditionError;
 
-/// Returns whether a file type is retained as BGZF for efficient indexed access.
-pub fn should_archive_as_bgzf(file_type: FileTypes) -> bool {
-    matches!(
-        file_type,
-        FileTypes::Fasta
-            | FileTypes::VCF
-            | FileTypes::GFA
-            | FileTypes::GAF
-            | FileTypes::Gff3
-            | FileTypes::Bed
-            | FileTypes::GenBank
-            | FileTypes::CSV
-    )
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputEncoding {
     Plain,

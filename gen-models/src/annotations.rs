@@ -808,12 +808,8 @@ pub fn add_annotation_file(
     };
     let file_addition =
         FileAddition::prepare(workspace, path, file_type, checksum_overrides.annotation)?;
-    let annotation_logical_path = OperationFile::storage_file_path(
-        workspace,
-        path,
-        file_addition.checksum.as_ref(),
-        file_type,
-    )?;
+    let annotation_logical_path =
+        OperationFile::storage_file_path(workspace, path, file_addition.checksum.as_ref())?;
     let prepared_index =
         if let Some(index_path) = annotation_index_file_path(workspace, path, index) {
             let index_file_type = FileTypes::infer_from_path(&index_path);
@@ -827,7 +823,6 @@ pub fn add_annotation_file(
                 workspace,
                 &index_path,
                 file_addition.checksum.as_ref(),
-                index_file_type,
             )?;
             let name = Path::new(&index_path)
                 .file_name()

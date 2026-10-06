@@ -28,7 +28,6 @@ use crate::{
 };
 
 mod compression;
-pub use compression::should_archive_as_bgzf;
 pub(crate) use compression::{InputEncoding, classify_input, stage_bgzf_asset_copy};
 
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {

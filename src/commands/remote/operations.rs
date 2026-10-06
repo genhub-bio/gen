@@ -77,11 +77,9 @@ use gen_core::{
 use gen_models::{
     assets::{
         AssetRef, AssetView, ChecksummedWriter, LocalAssetUri, materialization_destination_path,
-        should_archive_as_bgzf,
     },
     db::{ConfigConnection, GraphConnection},
     errors::{QueryError, RemoteError as ModelRemoteError},
-    file_types::FileTypes,
     history::dolt::{
         active_branch, add_remote, branch_hash, checkout, clone_remote, fetch, hash_of, pull, push,
         push_force, remote_rows, set_remote_url,
@@ -485,7 +483,6 @@ fn destination_matches_previous_asset(
         }
         // Ordinary-gzip sources retain their path while the archive is normalized to BGZF.
         if asset.materialized_checksum.is_some()
-            || !should_archive_as_bgzf(FileTypes::from_storage_tag(&asset.file_type))
             || !asset.logical_path.as_deref().is_some_and(|logical_path| {
                 Path::new(logical_path)
                     .extension()
