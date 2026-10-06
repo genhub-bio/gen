@@ -288,8 +288,11 @@ mod tests {
         assert_ne!(text.hash, integer.hash);
         assert_ne!(integer.hash, real.hash);
         let other = SampleMetadata::create(&conn, "ab", "c", &MetadataValue::Real(1.0))
-            .expect("should create metadata with different boundaries");
-        assert_ne!(real.hash, other.hash);
+            .expect("should create metadata for sample 'ab' with key 'c'");
+        assert_ne!(
+            real.hash, other.hash,
+            "sample/key pairs ('a', 'bc') and ('ab', 'c') should hash differently even though both concatenate to 'abc'"
+        );
         let zero = SampleMetadata::create(&conn, "a", "zero", &MetadataValue::Real(-0.0))
             .expect("should create zero");
         SampleMetadata::select(&conn)
