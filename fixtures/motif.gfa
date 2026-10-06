@@ -1,0 +1,15 @@
+H	VN:Z:1.2
+S	A	AB
+S	B	CD
+S	C	EF
+S	D	GH
+S	E	IJ
+S	F	KL
+L	A	+	B	+	*
+L	A	+	C	+	*
+L	B	+	D	+	*
+L	B	+	E	+	*
+L	C	+	E	+	*
+L	D	+	F	+	*
+L	E	+	F	+	*
+P	route	A+,B+,E+,F+	*
