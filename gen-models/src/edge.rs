@@ -11,7 +11,7 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
-use petgraph::{algo::kosaraju_scc, graphmap::DiGraphMap};
+use petgraph::algo::kosaraju_scc;
 use rusqlite::{ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -989,17 +989,14 @@ impl Edge {
             }
         }
 
-        let mut cycle_graph = DiGraphMap::<GraphNode, ()>::new();
-        for node in graph.nodes() {
-            cycle_graph.add_node(node);
-        }
-        for (source, target, _) in graph.all_edges() {
-            cycle_graph.add_edge(source, target, ());
+        if position_exit_projections.is_empty() {
+            return (graph, edges_by_node_pair);
         }
 
-        // Filtered preserve markers can hide continuity between contiguous slices of one stored
-        // sequence. Restore that continuity only while deciding whether an edge returns through
-        // a position; the returned graph still contains only stored-edge projections.
+        // Filtered preserve markers can hide continuity between contiguous slices. Restore it
+        // only while checking whether an edge returns through a position; reverse removal
+        // preserves the graph's original edge and neighbor ordering.
+        let mut continuity_edges = Vec::new();
         for source_block in blocks.iter().filter(|block| block.start != block.end) {
             let next_block_key = BlockKey {
                 node_id: source_block.node_id,
@@ -1010,20 +1007,25 @@ impl Edge {
                     .iter()
                     .filter(|block| block.start != block.end)
                 {
-                    cycle_graph.add_edge(
-                        graph_node_for_block(source_block),
-                        graph_node_for_block(target_block),
-                        (),
-                    );
+                    let source_node = graph_node_for_block(source_block);
+                    let target_node = graph_node_for_block(target_block);
+                    if !graph.contains_edge(source_node, target_node) {
+                        graph.add_edge(source_node, target_node, Vec::new());
+                        continuity_edges.push((source_node, target_node));
+                    }
                 }
             }
         }
 
-        let component_by_node = kosaraju_scc(&cycle_graph)
+        let component_by_node = kosaraju_scc(&graph)
             .into_iter()
             .enumerate()
             .flat_map(|(component, nodes)| nodes.into_iter().map(move |node| (node, component)))
             .collect::<HashMap<_, _>>();
+        for (source_node, target_node) in continuity_edges.into_iter().rev() {
+            graph.remove_edge(source_node, target_node);
+        }
+
         for (source_block, position_block, target_block, edge_index) in position_exit_projections {
             let source_node = graph_node_for_block(source_block);
             let position_node = graph_node_for_block(position_block);
