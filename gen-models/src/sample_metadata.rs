@@ -14,14 +14,16 @@ pub enum MetadataValue {
     /// A signed 64-bit integer.
     Integer(i64),
     /// A finite double-precision value.
-    Real(f64),
+    Float(f64),
+    /// A boolean value.
+    Boolean(bool),
 }
 
 /// One metadata value associated with a sample and key.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ModelSelect)]
 #[model_select(
     table = "sample_metadata",
-    select = "hash, sample_name, key, value_text, value_integer, value_real",
+    select = "hash, sample_name, key, value_text, value_integer, value_float, value_boolean",
     from_row = SampleMetadata::from_row
 )]
 pub struct SampleMetadata {
@@ -44,8 +46,8 @@ pub enum SampleMetadataError {
     #[error(transparent)]
     Database(#[from] rusqlite::Error),
     /// Non-finite values cannot be persisted reliably in SQLite.
-    #[error("sample metadata real values must be finite")]
-    NonFiniteReal,
+    #[error("sample metadata float values must be finite")]
+    NonFiniteFloat,
 }
 
 impl SampleMetadata {
@@ -77,16 +79,17 @@ impl SampleMetadata {
         replace: bool,
     ) -> Result<Self, SampleMetadataError> {
         let value = match value {
-            MetadataValue::Real(real) if !real.is_finite() => {
-                return Err(SampleMetadataError::NonFiniteReal);
+            MetadataValue::Float(float) if !float.is_finite() => {
+                return Err(SampleMetadataError::NonFiniteFloat);
             }
-            MetadataValue::Real(real) if *real == 0.0 => MetadataValue::Real(0.0),
+            MetadataValue::Float(float) if *float == 0.0 => MetadataValue::Float(0.0),
             value => value.clone(),
         };
-        let (text, integer, real) = match &value {
-            MetadataValue::Text(text) => (Some(text.as_str()), None, None),
-            MetadataValue::Integer(integer) => (None, Some(*integer), None),
-            MetadataValue::Real(real) => (None, None, Some(*real)),
+        let (text, integer, float, boolean) = match &value {
+            MetadataValue::Text(text) => (Some(text.as_str()), None, None, None),
+            MetadataValue::Integer(integer) => (None, Some(*integer), None, None),
+            MetadataValue::Float(float) => (None, None, Some(*float), None),
+            MetadataValue::Boolean(boolean) => (None, None, None, Some(*boolean)),
         };
 
         // Length prefixes and a type tag keep field boundaries and numeric types distinct.
@@ -104,25 +107,33 @@ impl SampleMetadata {
                 hasher.update([1]);
                 hasher.update(integer.to_be_bytes());
             }
-            MetadataValue::Real(real) => {
+            MetadataValue::Float(float) => {
                 hasher.update([2]);
-                hasher.update(real.to_bits().to_be_bytes());
+                hasher.update(float.to_bits().to_be_bytes());
+            }
+            MetadataValue::Boolean(boolean) => {
+                hasher.update([3]);
+                hasher.update([u8::from(*boolean)]);
             }
         }
         let hash = Sha256Hash(hasher.finalize().into());
         let mut sql = String::from(
             "INSERT INTO sample_metadata
-             (hash, sample_name, key, value_text, value_integer, value_real)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (hash, sample_name, key, value_text, value_integer, value_float, value_boolean)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         );
         if replace {
             sql.push_str(
                 " ON CONFLICT(sample_name, key) DO UPDATE SET
                   hash = excluded.hash, value_text = excluded.value_text,
-                  value_integer = excluded.value_integer, value_real = excluded.value_real",
+                  value_integer = excluded.value_integer, value_float = excluded.value_float,
+                  value_boolean = excluded.value_boolean",
             );
         }
-        conn.execute(&sql, params![hash, sample_name, key, text, integer, real])?;
+        conn.execute(
+            &sql,
+            params![hash, sample_name, key, text, integer, float, boolean],
+        )?;
         Ok(Self {
             hash,
             sample_name: sample_name.to_string(),
@@ -136,11 +147,13 @@ impl SampleMetadata {
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<i64>>(4)?,
             row.get::<_, Option<f64>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
         );
         let value = match values {
-            (Some(text), None, None) => MetadataValue::Text(text),
-            (None, Some(integer), None) => MetadataValue::Integer(integer),
-            (None, None, Some(real)) if real.is_finite() => MetadataValue::Real(real),
+            (Some(text), None, None, None) => MetadataValue::Text(text),
+            (None, Some(integer), None, None) => MetadataValue::Integer(integer),
+            (None, None, Some(float), None) if float.is_finite() => MetadataValue::Float(float),
+            (None, None, None, Some(boolean @ (0 | 1))) => MetadataValue::Boolean(boolean == 1),
             _ => return Err(rusqlite::Error::InvalidQuery),
         };
         Ok(Self {
@@ -180,8 +193,9 @@ mod tests {
             &MetadataValue::Text("pending".to_string()),
         )
         .expect("should insert metadata");
-        let updated = SampleMetadata::upsert(&conn, "sample", "Score", &MetadataValue::Real(90.68))
-            .expect("should update metadata");
+        let updated =
+            SampleMetadata::upsert(&conn, "sample", "Score", &MetadataValue::Float(90.68))
+                .expect("should update metadata");
         assert_ne!(original.hash, updated.hash);
         assert_eq!(
             SampleMetadata::select(&conn)
@@ -190,9 +204,44 @@ mod tests {
             vec![updated.clone()],
         );
         let repeated =
-            SampleMetadata::upsert(&conn, "sample", "Score", &MetadataValue::Real(90.68))
+            SampleMetadata::upsert(&conn, "sample", "Score", &MetadataValue::Float(90.68))
                 .expect("should repeat update");
         assert_eq!(updated, repeated);
+    }
+
+    #[test]
+    fn test_sample_metadata_boolean_hash_and_type_changes() {
+        let conn = get_connection(None).expect("should open database");
+        Sample::create(
+            &conn,
+            NewSample {
+                name: "sample",
+                ..Default::default()
+            },
+        )
+        .expect("should create sample");
+        let mut hashes = Vec::new();
+        for value in [
+            MetadataValue::Integer(1),
+            MetadataValue::Boolean(true),
+            MetadataValue::Boolean(false),
+            MetadataValue::Text("false".to_string()),
+            MetadataValue::Float(0.0),
+        ] {
+            let metadata = SampleMetadata::upsert(&conn, "sample", "flag", &value)
+                .expect("should replace metadata type");
+            assert!(
+                !hashes.contains(&metadata.hash),
+                "typed values should have distinct hashes"
+            );
+            hashes.push(metadata.hash);
+            assert_eq!(
+                SampleMetadata::select(&conn)
+                    .load()
+                    .expect("should load metadata"),
+                vec![metadata]
+            );
+        }
     }
 
     #[test]
@@ -209,7 +258,9 @@ mod tests {
         for (key, value) in [
             ("text", MetadataValue::Text("1".to_string())),
             ("integer", MetadataValue::Integer(i64::MAX)),
-            ("real", MetadataValue::Real(1.25)),
+            ("float", MetadataValue::Float(1.25)),
+            ("true", MetadataValue::Boolean(true)),
+            ("false", MetadataValue::Boolean(false)),
         ] {
             let metadata = SampleMetadata::create(&conn, "sample", key, &value)
                 .expect("should create metadata");
@@ -226,10 +277,10 @@ mod tests {
         assert!(
             SampleMetadata::create(&conn, "missing", "key", &MetadataValue::Integer(1)).is_err()
         );
-        for real in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for float in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(matches!(
-                SampleMetadata::create(&conn, "sample", "invalid", &MetadataValue::Real(real)),
-                Err(SampleMetadataError::NonFiniteReal)
+                SampleMetadata::create(&conn, "sample", "invalid", &MetadataValue::Float(float)),
+                Err(SampleMetadataError::NonFiniteFloat)
             ));
         }
     }
@@ -246,14 +297,19 @@ mod tests {
         )
         .expect("should create sample");
         for values in [
-            "NULL, NULL, NULL",
-            "'text', 1, NULL",
-            "NULL, 'invalid', NULL",
-            "NULL, 1.5, NULL",
-            "NULL, NULL, 'invalid'",
+            "NULL, NULL, NULL, NULL",
+            "NULL, NULL, NULL, 2",
+            "NULL, NULL, NULL, -1",
+            "NULL, NULL, NULL, 0.5",
+            "NULL, NULL, NULL, 'invalid'",
+            "NULL, 1, NULL, 1",
+            "'text', 1, NULL, NULL",
+            "NULL, 'invalid', NULL, NULL",
+            "NULL, 1.5, NULL, NULL",
+            "NULL, NULL, 'invalid', NULL",
         ] {
             let sql = format!(
-                "INSERT INTO sample_metadata (hash, sample_name, key, value_text, value_integer, value_real)
+                "INSERT INTO sample_metadata (hash, sample_name, key, value_text, value_integer, value_float, value_boolean)
                  VALUES (?1, 'sample', 'key', {values})"
             );
             assert!(conn.execute(&sql, params![vec![0u8; 32]]).is_err());
@@ -283,22 +339,22 @@ mod tests {
         SampleMetadata::select(&conn)
             .delete_by_ids([integer.hash])
             .expect("should delete metadata");
-        let real = SampleMetadata::create(&conn, "a", "bc", &MetadataValue::Real(1.0))
-            .expect("should create real");
+        let float = SampleMetadata::create(&conn, "a", "bc", &MetadataValue::Float(1.0))
+            .expect("should create float");
         assert_ne!(text.hash, integer.hash);
-        assert_ne!(integer.hash, real.hash);
-        let other = SampleMetadata::create(&conn, "ab", "c", &MetadataValue::Real(1.0))
+        assert_ne!(integer.hash, float.hash);
+        let other = SampleMetadata::create(&conn, "ab", "c", &MetadataValue::Float(1.0))
             .expect("should create metadata for sample 'ab' with key 'c'");
         assert_ne!(
-            real.hash, other.hash,
+            float.hash, other.hash,
             "sample/key pairs ('a', 'bc') and ('ab', 'c') should hash differently even though both concatenate to 'abc'"
         );
-        let zero = SampleMetadata::create(&conn, "a", "zero", &MetadataValue::Real(-0.0))
+        let zero = SampleMetadata::create(&conn, "a", "zero", &MetadataValue::Float(-0.0))
             .expect("should create zero");
         SampleMetadata::select(&conn)
             .delete_by_ids([zero.hash])
             .expect("should delete zero");
-        let positive_zero = SampleMetadata::create(&conn, "a", "zero", &MetadataValue::Real(0.0))
+        let positive_zero = SampleMetadata::create(&conn, "a", "zero", &MetadataValue::Float(0.0))
             .expect("should recreate zero");
         assert_eq!(zero.hash, positive_zero.hash);
     }

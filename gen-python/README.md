@@ -46,8 +46,8 @@ repo.add_sample_metadata(sample, {"group": "control", "replicate": 1, "score": 0
 metadata = repo.get_sample_metadata(sample.sample_name)  # -> dict
 ```
 
-Keys must be strings. Values support strings, signed 64-bit integers, and finite
-floats; booleans and nested values are rejected. Adding metadata updates existing
+Keys must be strings. Values support strings, signed 64-bit integers, finite
+floats, and booleans; nested values are rejected. Adding metadata updates existing
 keys and preserves other keys, with the changes recorded in repository history.
 Samples without metadata return `{}`; unknown sample IDs raise `ValueError`.
 

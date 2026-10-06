@@ -11,7 +11,7 @@ use gen_models::{
 /// Export typed sample metadata as TSV, ordered by sample name and key.
 ///
 /// The header is `sample_name`, `key`, `value_type`, and `value`. Value types
-/// are `text`, `integer`, and `real`. Fields containing tabs, newlines, or
+/// are `text`, `integer`, `float`, and `boolean`. Fields containing tabs, newlines, or
 /// quotes use CSV-style quoting with a tab delimiter.
 pub fn export_sample_metadata(
     connection: &GraphConnection,
@@ -46,7 +46,8 @@ pub fn export_sample_metadata(
         let (value_type, value) = match entry.value {
             MetadataValue::Text(text) => ("text", text),
             MetadataValue::Integer(integer) => ("integer", integer.to_string()),
-            MetadataValue::Real(real) => ("real", real.to_string()),
+            MetadataValue::Float(float) => ("float", float.to_string()),
+            MetadataValue::Boolean(boolean) => ("boolean", boolean.to_string()),
         };
         writer.write_record([entry.sample_name.as_str(), &entry.key, value_type, &value])?;
     }
@@ -89,14 +90,16 @@ mod tests {
             ("sample", "text", MetadataValue::Text(special.to_string())),
             ("sample", "integer", MetadataValue::Integer(i64::MAX)),
             ("sample", "minimum", MetadataValue::Integer(i64::MIN)),
-            ("sample", "real", MetadataValue::Real(1.25)),
+            ("sample", "float", MetadataValue::Float(1.25)),
+            ("sample", "boolean_false", MetadataValue::Boolean(false)),
+            ("sample", "boolean_true", MetadataValue::Boolean(true)),
             (
                 "sample",
                 "numeric_text",
                 MetadataValue::Text("1".to_string()),
             ),
             ("sample", "empty_text", MetadataValue::Text(String::new())),
-            ("other", "key\t\"\n", MetadataValue::Real(1.0)),
+            ("other", "key\t\"\n", MetadataValue::Float(1.0)),
         ] {
             SampleMetadata::create(connection, sample_name, key, &value)
                 .expect("should create metadata");
@@ -130,12 +133,14 @@ mod tests {
         assert_eq!(
             records,
             vec![
-                vec!["other", "key\t\"\n", "real", "1"],
+                vec!["other", "key\t\"\n", "float", "1"],
+                vec!["sample", "boolean_false", "boolean", "false"],
+                vec!["sample", "boolean_true", "boolean", "true"],
                 vec!["sample", "empty_text", "text", ""],
+                vec!["sample", "float", "float", "1.25"],
                 vec!["sample", "integer", "integer", "9223372036854775807"],
                 vec!["sample", "minimum", "integer", "-9223372036854775808"],
                 vec!["sample", "numeric_text", "text", "1"],
-                vec!["sample", "real", "real", "1.25"],
                 vec!["sample", "text", "text", special],
             ]
         );
@@ -184,7 +189,7 @@ mod tests {
         SampleMetadata::create(connection, "sample", "score", &MetadataValue::Integer(1))
             .expect("should create metadata");
         let original = commit_all(connection, "original metadata").expect("should commit metadata");
-        SampleMetadata::upsert(connection, "sample", "score", &MetadataValue::Real(2.5))
+        SampleMetadata::upsert(connection, "sample", "score", &MetadataValue::Float(2.5))
             .expect("should update metadata");
         commit_all(connection, "updated metadata").expect("should commit updated metadata");
         export_sample_metadata(
@@ -205,7 +210,7 @@ mod tests {
             .expect("should export current metadata");
         assert_eq!(
             fs::read_to_string(&output).expect("should read current export"),
-            "sample_name\tkey\tvalue_type\tvalue\nsample\tscore\treal\t2.5\n"
+            "sample_name\tkey\tvalue_type\tvalue\nsample\tscore\tfloat\t2.5\n"
         );
     }
 }

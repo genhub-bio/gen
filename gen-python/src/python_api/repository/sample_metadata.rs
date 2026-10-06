@@ -23,19 +23,21 @@ fn sample_name(sample: &Bound<'_, PyAny>) -> PyResult<String> {
 fn metadata_value(value: &Bound<'_, PyAny>) -> PyResult<MetadataValue> {
     if value.is_instance_of::<PyString>() {
         Ok(MetadataValue::Text(value.extract()?))
-    } else if value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyBool>() {
+    } else if value.is_instance_of::<PyBool>() {
+        Ok(MetadataValue::Boolean(value.extract()?))
+    } else if value.is_instance_of::<PyInt>() {
         Ok(MetadataValue::Integer(value.extract()?))
     } else if value.is_instance_of::<PyFloat>() {
-        let real: f64 = value.extract()?;
-        if !real.is_finite() {
+        let float: f64 = value.extract()?;
+        if !float.is_finite() {
             return Err(PyValueError::new_err(
                 "sample metadata floats must be finite",
             ));
         }
-        Ok(MetadataValue::Real(real))
+        Ok(MetadataValue::Float(float))
     } else {
         Err(PyTypeError::new_err(
-            "sample metadata values must be strings, signed 64-bit integers, or finite floats",
+            "sample metadata values must be strings, signed 64-bit integers, finite floats, or booleans",
         ))
     }
 }
@@ -65,7 +67,7 @@ impl PyRepository {
     /// Add metadata to a Sample or its string ID (sample_name).
     ///
     /// Keys must be strings; values must be strings, signed 64-bit integers,
-    /// or finite floats. Existing keys are updated and other keys are preserved.
+    /// finite floats, or booleans. Existing keys are updated and other keys are preserved.
     /// The entire dictionary is validated before any values are written.
     fn add_sample_metadata(
         &self,
@@ -112,7 +114,7 @@ impl PyRepository {
 
     /// Return a metadata dictionary for a Sample or its string ID (sample_name).
     ///
-    /// Values retain their string, integer, or float types. A sample without
+    /// Values retain their string, integer, float, or boolean types. A sample without
     /// metadata returns an empty dictionary; an unknown sample raises ValueError.
     fn get_sample_metadata<'py>(&self, sample: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
         let metadata = PyDict::new(sample.py());
@@ -120,7 +122,8 @@ impl PyRepository {
             match entry.value {
                 MetadataValue::Text(value) => metadata.set_item(entry.key, value)?,
                 MetadataValue::Integer(value) => metadata.set_item(entry.key, value)?,
-                MetadataValue::Real(value) => metadata.set_item(entry.key, value)?,
+                MetadataValue::Float(value) => metadata.set_item(entry.key, value)?,
+                MetadataValue::Boolean(value) => metadata.set_item(entry.key, value)?,
             }
         }
         Ok(metadata)
@@ -159,13 +162,15 @@ mod tests {
             .expect("should create Python sample");
             py_run!(python, repository sample, r#"
 assert repository.get_sample_metadata(sample) == {}
-values = {"label": "case", "count": 9223372036854775807, "score": 1.25}
+values = {"label": "case", "count": 9223372036854775807, "score": 1.25, "enabled": True, "disabled": False}
 repository.add_sample_metadata(sample, values)
 assert repository.get_sample_metadata("sample") == values
 assert repository.get_sample_metadata("other") == {}
 result = repository.get_sample_metadata(sample)
 assert type(result["count"]) is int
 assert type(result["score"]) is float
+assert type(result["enabled"]) is bool
+assert type(result["disabled"]) is bool
 result["label"] = "local change"
 assert repository.get_sample_metadata(sample) == values
 repository.add_sample_metadata("sample", {"count": "updated", "minimum": -9223372036854775808})
@@ -179,7 +184,7 @@ repository.add_sample_metadata(sample, {"label": "branch"})
 assert repository.get_sample_metadata(sample)["label"] == "branch"
 repository.checkout("main")
 assert repository.get_sample_metadata(sample) == values
-for invalid in [None, True, [], {}, float("nan"), float("inf"), float("-inf"), 2**63, -2**63 - 1]:
+for invalid in [None, [], {}, float("nan"), float("inf"), float("-inf"), 2**63, -2**63 - 1]:
     try:
         repository.add_sample_metadata(sample, {"first": "must not persist", "invalid": invalid})
     except (TypeError, ValueError, OverflowError):

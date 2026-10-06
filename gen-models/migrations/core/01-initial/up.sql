@@ -13,10 +13,11 @@ CREATE TABLE sample_metadata (
   key TEXT NOT NULL,
   value_text TEXT,
   value_integer INTEGER,
-  value_real REAL,
+  value_float REAL,
+  value_boolean INTEGER CHECK (value_boolean IN (0, 1)),
   FOREIGN KEY(sample_name) REFERENCES samples(name),
   UNIQUE(sample_name, key),
-  CHECK ((value_text IS NOT NULL) + (value_integer IS NOT NULL) + (value_real IS NOT NULL) = 1)
+  CHECK ((value_text IS NOT NULL) + (value_integer IS NOT NULL) + (value_float IS NOT NULL) + (value_boolean IS NOT NULL) = 1)
 ) STRICT;
 
 CREATE TABLE sequences (

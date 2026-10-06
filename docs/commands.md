@@ -40,8 +40,8 @@ gen export --ref HEAD sample-metadata metadata.tsv
 
 The columns are `sample_name`, `key`, `value_type`, and `value`, with one row per
 sample/key pair, sorted by sample name and key. `value_type` is `text`, `integer`,
-or `real`, preserving the distinction between text and numeric values. Tabs,
-newlines, and quotes in fields use CSV-style quoting with a tab delimiter.
+`float`, or `boolean`, preserving the value types. Booleans export as `true` or
+`false`. Tabs, newlines, and quotes in fields use CSV-style quoting with a tab delimiter.
 An empty selection produces only the header; an unknown sample is an error.
 Sample metadata belongs to samples across collections, so this command does not
 require a collection option. `--ref` reads a commit or branch without checkout.

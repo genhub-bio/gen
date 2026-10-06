@@ -345,16 +345,18 @@ fn parse_sample_metadata(
     for (sample_name, fields) in samples {
         let mut values = Vec::new();
         for (key, value) in fields.other_fields() {
-            // SAMPLE fields have no declared type; preserve numeric values when possible.
-            let value = if let Ok(integer) = value.parse::<i64>() {
+            // SAMPLE fields have no declared type; preserve boolean and numeric values when possible.
+            let value = if let Ok(boolean) = value.parse::<bool>() {
+                MetadataValue::Boolean(boolean)
+            } else if let Ok(integer) = value.parse::<i64>() {
                 MetadataValue::Integer(integer)
-            } else if let Ok(real) = value.parse::<f64>() {
-                if !real.is_finite() {
+            } else if let Ok(float) = value.parse::<f64>() {
+                if !float.is_finite() {
                     return Err(VcfError::InvalidRecord(format!(
                         "non-finite SAMPLE metadata for sample {sample_name}, key {key}"
                     )));
                 }
-                MetadataValue::Real(real)
+                MetadataValue::Float(float)
             } else {
                 MetadataValue::Text(value.clone())
             };
@@ -856,7 +858,7 @@ mod tests {
                     .expect("should load sample metadata");
                 assert_eq!(metadata.len(), 1);
                 assert_eq!(metadata[0].key, "Score");
-                assert_eq!(metadata[0].value, MetadataValue::Real(score));
+                assert_eq!(metadata[0].value, MetadataValue::Float(score));
             }
         }
         assert!(
@@ -908,22 +910,24 @@ mod tests {
             .expect("should load metadata");
         assert_eq!(metadata.len(), 1);
         assert_eq!(metadata[0].sample_name, "sample_001");
-        assert_eq!(metadata[0].value, MetadataValue::Real(90.68));
+        assert_eq!(metadata[0].value, MetadataValue::Float(90.68));
     }
 
     #[test]
     fn test_parse_vcf_sample_metadata_types() {
-        let input = b"##fileformat=VCFv4.2\n##SAMPLE=<ID=sample,Score=90.68,Count=42,Label=\"a,b\",Scientific=1e-3>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+        let input = b"##fileformat=VCFv4.2\n##SAMPLE=<ID=sample,Score=90.68,Count=42,Label=\"a,b\",Scientific=1e-3,Enabled=true,Disabled=false>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
         let mut reader = vcf::io::Reader::new(&input[..]);
         let header = reader.read_header().expect("should parse header");
         let metadata = parse_sample_metadata(&header).expect("should parse metadata");
         assert_eq!(
             metadata["sample"],
             vec![
-                ("Score".to_string(), MetadataValue::Real(90.68)),
+                ("Score".to_string(), MetadataValue::Float(90.68)),
                 ("Count".to_string(), MetadataValue::Integer(42)),
                 ("Label".to_string(), MetadataValue::Text("a,b".to_string())),
-                ("Scientific".to_string(), MetadataValue::Real(0.001)),
+                ("Scientific".to_string(), MetadataValue::Float(0.001)),
+                ("Enabled".to_string(), MetadataValue::Boolean(true)),
+                ("Disabled".to_string(), MetadataValue::Boolean(false)),
             ]
         );
     }

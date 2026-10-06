@@ -53,7 +53,7 @@ fn test_export_sample_metadata_cli() {
     );
     assert_eq!(
         fs::read_to_string(directory.path().join("metadata.tsv")).expect("should read TSV"),
-        "sample_name\tkey\tvalue_type\tvalue\nsample_001\tScore\treal\t90.68\nsample_002\tScore\treal\t27.79\n"
+        "sample_name\tkey\tvalue_type\tvalue\nsample_001\tScore\tfloat\t90.68\nsample_002\tScore\tfloat\t27.79\n"
     );
     run_gen(
         directory.path(),
@@ -70,6 +70,6 @@ fn test_export_sample_metadata_cli() {
     assert_eq!(
         fs::read_to_string(directory.path().join("filtered.tsv"))
             .expect("should read filtered TSV"),
-        "sample_name\tkey\tvalue_type\tvalue\nsample_002\tScore\treal\t27.79\n"
+        "sample_name\tkey\tvalue_type\tvalue\nsample_002\tScore\tfloat\t27.79\n"
     );
 }
