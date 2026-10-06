@@ -1,14 +1,16 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use r#gen::{
-    imports::fasta::import_fasta, test_helpers::setup_gen, updates::vcf::update_with_vcf,
+    imports::fasta::import_fasta,
+    test_helpers::setup_gen,
+    updates::{sequence::update_with_sequence, vcf::update_with_vcf},
     views::diff_graph::build_diff_graph_component,
 };
 use gen_diff::{
     graph::DiffChangeKind,
     sample::{SampleDiff, build_sample_diff},
 };
-use gen_models::{db::DbContext, node::Node};
+use gen_models::{db::DbContext, node::Node, sample::Sample};
 use ratatui::style::Color;
 
 fn simple_vcf_sample_diff(query_name: &str, base_name: &str) -> (DbContext, SampleDiff) {
@@ -197,5 +199,131 @@ fn test_reversing_query_and_base_marks_unknown_insertion_added() {
     assert!(
         changed_sequences(&context, &diff, DiffChangeKind::Removed).is_empty(),
         "unknown should not remove sequence relative to foo"
+    );
+}
+
+/// Imports the simple reference, applies `(parent, child, region, sequence)`
+/// sequence updates in order, then diffs `query_name` against `base_name`.
+fn sequence_update_sample_diff(
+    updates: &[(&str, &str, &str, &str)],
+    query_name: &str,
+    base_name: &str,
+) -> (DbContext, SampleDiff) {
+    let context = setup_gen();
+    let collection_name = "test";
+    let fasta_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+    import_fasta(
+        &context,
+        &fasta_path
+            .to_str()
+            .expect("should encode FASTA fixture path")
+            .to_string(),
+        collection_name,
+        Sample::DEFAULT_NAME,
+        false,
+        &[],
+    )
+    .expect("should import simple FASTA fixture");
+    for (parent, child, region, sequence) in updates {
+        update_with_sequence(
+            &context,
+            collection_name,
+            parent,
+            child,
+            region,
+            sequence,
+            false,
+        )
+        .expect("should apply sequence update");
+    }
+    let diff = build_sample_diff(
+        context.graph().conn(),
+        collection_name,
+        "m123",
+        query_name,
+        base_name,
+        None,
+    )
+    .expect("should build sample diff");
+    (context, diff)
+}
+
+/// Counts non-neutral edges of one change kind, ignoring continuation edges.
+fn changed_edge_count(diff: &SampleDiff, change_kind: DiffChangeKind) -> usize {
+    diff.graph
+        .all_edges()
+        .flat_map(|(_, _, edges)| edges.iter())
+        .filter(|edge| edge.change.kind == change_kind)
+        .count()
+}
+
+/// Summarizes a diff as (added sequences, removed sequences, added edges, removed edges).
+fn change_summary(
+    context: &DbContext,
+    diff: &SampleDiff,
+) -> (HashSet<String>, HashSet<String>, usize, usize) {
+    (
+        changed_sequences(context, diff, DiffChangeKind::Added),
+        changed_sequences(context, diff, DiffChangeKind::Removed),
+        changed_edge_count(diff, DiffChangeKind::Added),
+        changed_edge_count(diff, DiffChangeKind::Removed),
+    )
+}
+
+fn sequences(values: &[&str]) -> HashSet<String> {
+    values.iter().map(|value| value.to_string()).collect()
+}
+
+#[test]
+fn test_snp_adds_one_node_and_two_edges_without_split_bookkeeping() {
+    let updates = [(Sample::DEFAULT_NAME, "snp", "m123:10-11", "G")];
+
+    let (context, diff) = sequence_update_sample_diff(&updates, "snp", Sample::DEFAULT_NAME);
+    assert_eq!(
+        change_summary(&context, &diff),
+        (sequences(&["G"]), sequences(&[]), 2, 0)
+    );
+
+    let (context, diff) = sequence_update_sample_diff(&updates, Sample::DEFAULT_NAME, "snp");
+    assert_eq!(
+        change_summary(&context, &diff),
+        (sequences(&[]), sequences(&["G"]), 0, 2)
+    );
+}
+
+#[test]
+fn test_deletion_is_a_single_edge_without_node_changes() {
+    let updates = [(Sample::DEFAULT_NAME, "del", "m123:10-14", "")];
+
+    let (context, diff) = sequence_update_sample_diff(&updates, "del", Sample::DEFAULT_NAME);
+    assert_eq!(
+        change_summary(&context, &diff),
+        (sequences(&[]), sequences(&[]), 1, 0)
+    );
+
+    let (context, diff) = sequence_update_sample_diff(&updates, Sample::DEFAULT_NAME, "del");
+    assert_eq!(
+        change_summary(&context, &diff),
+        (sequences(&[]), sequences(&[]), 0, 1)
+    );
+}
+
+#[test]
+fn test_edit_on_edit_marks_the_whole_extra_subgraph() {
+    let updates = [
+        (Sample::DEFAULT_NAME, "child", "m123:2-5", "AAAAAAAA"),
+        ("child", "grandchild", "m123:4-6", "TTTTTTTT"),
+    ];
+
+    let (context, diff) = sequence_update_sample_diff(&updates, Sample::DEFAULT_NAME, "grandchild");
+    assert_eq!(
+        change_summary(&context, &diff),
+        (sequences(&[]), sequences(&["AA", "AAAA", "TTTTTTTT"]), 0, 4)
+    );
+
+    let (context, diff) = sequence_update_sample_diff(&updates, "child", "grandchild");
+    assert_eq!(
+        change_summary(&context, &diff),
+        (sequences(&[]), sequences(&["TTTTTTTT"]), 0, 2)
     );
 }
