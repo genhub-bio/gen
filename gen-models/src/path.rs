@@ -283,9 +283,11 @@ impl Path {
                     second_edge.source_node_id
                 )));
             }
-            if first_edge.target_coordinate >= second_edge.source_coordinate {
+            // Equal coordinates are a path through a zero-width routing block, which consumes no
+            // bases; only leaving a node before the coordinate it was entered at is invalid.
+            if first_edge.target_coordinate > second_edge.source_coordinate {
                 return Err(PathError::Invalid(format!(
-                    "source coordinate {} for edge {} is not after target coordinate {} for edge {}",
+                    "source coordinate {} for edge {} is before target coordinate {} for edge {}",
                     second_edge.source_coordinate,
                     second_edge.id_hash(),
                     first_edge.target_coordinate,
@@ -4250,6 +4252,87 @@ mod tests {
             path3.sequence(conn, test_workspace(), None).unwrap(),
             "ATCGCCCCCCCCGAAAAAAAA"
         );
+    }
+
+    #[test]
+    fn test_path_through_a_zero_width_stretch_of_a_node() {
+        let conn = &get_connection(None).unwrap();
+        Collection::create(conn, "test collection").unwrap();
+        let block_group = create_test_block_group(conn);
+        let sequence1 = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("ATCGATCG")
+            .save(conn)
+            .unwrap();
+        let node1_id = Node::create(conn, &sequence1.hash, &HashId::convert_str("1")).unwrap();
+        let sequence2 = Sequence::new()
+            .sequence_type("DNA")
+            .sequence("AAAACCCC")
+            .save(conn)
+            .unwrap();
+        let node2_id = Node::create(conn, &sequence2.hash, &HashId::convert_str("2")).unwrap();
+        let create_edge = |source_node_id, source_coordinate, target_node_id, target_coordinate| {
+            Edge::create(
+                conn,
+                source_node_id,
+                source_coordinate,
+                Strand::Forward,
+                target_node_id,
+                target_coordinate,
+                Strand::Forward,
+            )
+            .unwrap()
+        };
+        let edges = [
+            create_edge(PATH_START_NODE_ID, 0, node1_id, 0),
+            create_edge(node1_id, 4, node2_id, 2),
+            // Entering node 2 at coordinate 2 and leaving at once reads no bases of it.
+            create_edge(node2_id, 2, node2_id, 6),
+            create_edge(node2_id, 8, PATH_END_NODE_ID, 0),
+        ];
+        let edge_ids = edges.iter().map(|edge| edge.id).collect::<Vec<_>>();
+        BlockGroupEdge::bulk_create(
+            conn,
+            &edge_ids
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let path = Path::create(conn, "chr1", &block_group.id, &edge_ids).unwrap();
+
+        assert_eq!(
+            path.sequence(conn, test_workspace(), None).unwrap(),
+            "ATCGCC"
+        );
+        assert_eq!(path.length(conn, None).unwrap(), 6);
+
+        let leaves_before_entering = [
+            edges[0].id,
+            create_edge(node1_id, 4, node2_id, 6).id,
+            create_edge(node2_id, 2, PATH_END_NODE_ID, 0).id,
+        ];
+        BlockGroupEdge::bulk_create(
+            conn,
+            &leaves_before_entering
+                .iter()
+                .map(|edge_id| BlockGroupEdgeData {
+                    block_group_id: block_group.id,
+                    edge_id: *edge_id,
+                    chromosome_index: 0,
+                    phased: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        assert!(matches!(
+            Path::create(conn, "backwards", &block_group.id, &leaves_before_entering),
+            Err(PathError::Invalid(_))
+        ));
     }
 
     #[test]
