@@ -436,6 +436,23 @@ fn position_hash(hash: isize, position: &Position) -> isize {
         .wrapping_add(isize::from(position.is_reverse()))
 }
 
+/// The positions an insert method is given, from a ``Position`` or a ``SuperPosition``.
+pub(crate) fn positions_of(value: &Bound<'_, PyAny>) -> PyResult<Vec<Position>> {
+    if let Ok(position) = value.extract::<PyRef<PyPosition>>() {
+        Ok(vec![position.position])
+    } else if let Ok(superposition) = value.extract::<PyRef<PySuperPosition>>() {
+        Ok(superposition
+            .positions
+            .iter()
+            .map(|position| position.position)
+            .collect())
+    } else {
+        Err(PyTypeError::new_err(
+            "expected a Position or a SuperPosition",
+        ))
+    }
+}
+
 fn canonical_positions(mut positions: Vec<PyPosition>) -> Vec<PyPosition> {
     positions.sort_unstable_by_key(|position| position.position);
     positions.dedup_by_key(|position| position.position);
