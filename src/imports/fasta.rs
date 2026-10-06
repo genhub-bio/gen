@@ -47,6 +47,9 @@ pub fn import_fasta(
 ) -> Result<OperationSummary, FastaError> {
     let conn = context.graph().conn();
     let progress_bar = get_handler();
+
+    // We have a created_on field passed through to file creation for indices, etc. We pregenerate
+    // the creation date so indices can be shown as being made at the same time.
     let created_on = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -67,21 +70,20 @@ pub fn import_fasta(
         .into());
     }
 
-    let supplied_fai = fai
-        .map(|location| -> Result<_, FastaError> {
-            let bytes = read_supplied_index_bytes(workspace, location, "FAI")?;
-            let index =
-                parse_fai_index(&bytes).ok_or_else(|| invalid_index_error("FAI", location))?;
-            Ok((location.to_string(), bytes, index))
-        })
-        .transpose()?;
-    let supplied_gzi = gzi
-        .map(|location| -> Result<_, FastaError> {
-            let bytes = read_supplied_index_bytes(workspace, location, "GZI")?;
-            parse_gzi_index(&bytes).ok_or_else(|| invalid_index_error("GZI", location))?;
-            Ok((location.to_string(), bytes))
-        })
-        .transpose()?;
+    let supplied_fai = if let Some(location) = fai {
+        let bytes = read_supplied_index_bytes(workspace, location, "FAI")?;
+        let index = parse_fai_index(&bytes).ok_or_else(|| invalid_index_error("FAI", location))?;
+        Some((location.to_string(), bytes, index))
+    } else {
+        None
+    };
+    let supplied_gzi = if let Some(location) = gzi {
+        let bytes = read_supplied_index_bytes(workspace, location, "GZI")?;
+        parse_gzi_index(&bytes).ok_or_else(|| invalid_index_error("GZI", location))?;
+        Some((location.to_string(), bytes))
+    } else {
+        None
+    };
     let indexed_remote_parent = !is_local
         && compression_type == CompressionType::Bgzf
         && supplied_fai.is_some()
@@ -124,6 +126,7 @@ pub fn import_fasta(
         Some(sequence_asset.versioned_store_path(workspace)?)
     };
 
+    // If there is no index present for the fasta, generate it
     let (fai_location, fai_bytes, fasta_index) = match supplied_fai {
         Some((location, bytes, index)) => (location, bytes, index),
         None => {
@@ -139,6 +142,7 @@ pub fn import_fasta(
         }
     };
 
+    // if there is no index present for the bgz compressed fasta, generatre it
     let (gzi_location, gzi_bytes) = match supplied_gzi {
         Some((location, bytes)) => (location, bytes),
         None => {
@@ -161,7 +165,12 @@ pub fn import_fasta(
         (fai_location, fai_bytes, FileTypes::FastaIndex),
         (gzi_location, gzi_bytes, FileTypes::BgzfIndex),
     ] {
-        let operation_file = index_operation_file(&index_location, &sequence_asset.id, file_type);
+        let operation_file = OperationFile::new(index_location.clone())
+            .set_file_type(file_type)
+            .set_role(AssetRole::SequenceIndex)
+            .set_upstream_asset_ref_id(&sequence_asset.id);
+
+        // These are the asset refs for the indices we generated or passed in
         let index_asset_ref = if indexed_remote_parent
             && !LocalAssetUri::is_local_path_or_file_uri(&index_location)
         {
@@ -297,17 +306,6 @@ pub fn import_fasta(
     .with_prepared_asset_refs(prepared_asset_refs);
     bar.finish();
     Ok(operation_summary)
-}
-
-fn index_operation_file(
-    path: &str,
-    upstream_asset_ref_id: &HashId,
-    file_type: FileTypes,
-) -> OperationFile {
-    OperationFile::new(path.to_string())
-        .set_file_type(file_type)
-        .set_role(AssetRole::SequenceIndex)
-        .set_upstream_asset_ref_id(upstream_asset_ref_id)
 }
 
 fn sibling_index_location(fasta: &str, extension: &str) -> String {
