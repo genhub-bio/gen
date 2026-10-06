@@ -10,36 +10,48 @@ use tempfile::NamedTempFile;
 use super::{ChecksummedReader, ChecksummedWriter, FileTypes};
 use crate::errors::FileAdditionError;
 
+/// A compression encoding inferred from an asset path or detected from its bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum InputEncoding {
+pub enum CompressionType {
+    /// The bytes are uncompressed or their path does not identify a compressed format.
     Plain,
+    /// The bytes use ordinary gzip compression.
     Gzip,
+    /// The bytes use BGZF compression, including BAM files.
     Bgzf,
 }
 
-pub(crate) type ReplayedReader<R> = Chain<Cursor<Vec<u8>>, R>;
+type ReplayedReader<R> = Chain<Cursor<Vec<u8>>, R>;
+
+impl CompressionType {
+    /// Classifies input compression from header bytes and returns a reader that replays inspected bytes.
+    ///
+    /// Replaying lets callers hash or decode the complete stream without losing bytes read during
+    /// classification. [`super::AssetUri::compression_type`] infers from the URI suffix only.
+    pub fn sniff<R: Read>(reader: R) -> io::Result<(Self, impl Read)> {
+        classify_input(reader)
+    }
+}
 
 // Read enough header bytes to distinguish BGZF from ordinary gzip, then replay them into storage.
-pub(crate) fn classify_input<R: Read>(
-    mut reader: R,
-) -> io::Result<(InputEncoding, ReplayedReader<R>)> {
+fn classify_input<R: Read>(mut reader: R) -> io::Result<(CompressionType, ReplayedReader<R>)> {
     let mut prefix = Vec::with_capacity(12);
     let encoding = if !fill_prefix(&mut reader, &mut prefix, 2)? || prefix[..2] != [0x1f, 0x8b] {
-        InputEncoding::Plain
+        CompressionType::Plain
     } else if !fill_prefix(&mut reader, &mut prefix, 10)?
         || prefix[2] != 8
         || prefix[3] & 0x04 == 0
         || !fill_prefix(&mut reader, &mut prefix, 12)?
     {
-        InputEncoding::Gzip
+        CompressionType::Gzip
     } else {
         let extra_length = usize::from(u16::from_le_bytes([prefix[10], prefix[11]]));
         if !fill_prefix(&mut reader, &mut prefix, 12 + extra_length)? {
-            InputEncoding::Gzip
+            CompressionType::Gzip
         } else if has_bgzf_subfield(&prefix[12..]) {
-            InputEncoding::Bgzf
+            CompressionType::Bgzf
         } else {
-            InputEncoding::Gzip
+            CompressionType::Gzip
         }
     };
 
@@ -51,7 +63,7 @@ pub(crate) fn stage_bgzf_asset_copy(
     source_uri: &str,
     file_type: FileTypes,
     reader: impl Read + 'static,
-    input_encoding: InputEncoding,
+    compression_type: CompressionType,
     source_checksum_override: Option<Sha256Hash>,
 ) -> Result<(Sha256Hash, Sha256Hash), FileAdditionError> {
     let asset_dir = workspace.asset_dir()?;
@@ -63,8 +75,8 @@ pub(crate) fn stage_bgzf_asset_copy(
         NamedTempFile::new_in(&asset_dir).map_err(FileAdditionError::FileReadError)?;
     let archive_checksum = {
         let checksummed_writer = ChecksummedWriter::new(staged_file.as_file_mut());
-        match input_encoding {
-            InputEncoding::Gzip => {
+        match compression_type {
+            CompressionType::Gzip => {
                 let mut bgzf_writer = bgzf::io::Writer::new(checksummed_writer);
                 io::copy(
                     &mut flate2::read::MultiGzDecoder::new(source_reader),
@@ -79,7 +91,7 @@ pub(crate) fn stage_bgzf_asset_copy(
                     .map_err(FileAdditionError::FileReadError)?;
                 checksummed_writer.checksum()
             }
-            InputEncoding::Bgzf => {
+            CompressionType::Bgzf => {
                 let mut checksummed_writer = checksummed_writer;
                 let mut source_reader = source_reader;
                 io::copy(&mut source_reader, &mut checksummed_writer)
@@ -89,7 +101,7 @@ pub(crate) fn stage_bgzf_asset_copy(
                     .map_err(FileAdditionError::FileReadError)?;
                 checksummed_writer.checksum()
             }
-            InputEncoding::Plain => {
+            CompressionType::Plain => {
                 let mut bgzf_writer = bgzf::io::Writer::new(checksummed_writer);
                 let mut source_reader = source_reader;
                 io::copy(&mut source_reader, &mut bgzf_writer)
@@ -171,7 +183,7 @@ mod tests {
 
     use noodles::bgzf;
 
-    use super::{InputEncoding, classify_input};
+    use super::CompressionType;
 
     struct ShortReadReader<R> {
         reader: R,
@@ -199,9 +211,9 @@ mod tests {
             .expect("should write BGZF bytes");
         let bgzf_contents = bgzf_writer.finish().expect("should finish BGZF bytes");
         let cases = [
-            (b"plain bytes".to_vec(), InputEncoding::Plain),
-            (gzip_contents, InputEncoding::Gzip),
-            (bgzf_contents, InputEncoding::Bgzf),
+            (b"plain bytes".to_vec(), CompressionType::Plain),
+            (gzip_contents, CompressionType::Gzip),
+            (bgzf_contents, CompressionType::Bgzf),
         ];
 
         for (contents, expected_encoding) in cases {
@@ -210,7 +222,7 @@ mod tests {
                 maximum_read: 1,
             };
             let (encoding, mut replayed_reader) =
-                classify_input(reader).expect("should classify source bytes");
+                CompressionType::sniff(reader).expect("should classify source bytes");
             let mut replayed_contents = Vec::new();
             replayed_reader
                 .read_to_end(&mut replayed_contents)
@@ -242,13 +254,13 @@ mod tests {
             maximum_read: 7,
         };
         let (encoding, mut replayed_reader) =
-            classify_input(reader).expect("should parse the complete gzip extra field");
+            CompressionType::sniff(reader).expect("should parse the complete gzip extra field");
         let mut replayed_contents = Vec::new();
         replayed_reader
             .read_to_end(&mut replayed_contents)
             .expect("should replay all source bytes");
 
-        assert_eq!(encoding, InputEncoding::Bgzf);
+        assert_eq!(encoding, CompressionType::Bgzf);
         assert_eq!(replayed_contents, contents);
     }
 }

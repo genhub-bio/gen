@@ -28,7 +28,8 @@ use crate::{
 };
 
 mod compression;
-pub(crate) use compression::{InputEncoding, classify_input, stage_bgzf_asset_copy};
+pub use compression::CompressionType;
+pub(crate) use compression::stage_bgzf_asset_copy;
 
 static OPENDAL_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -247,6 +248,22 @@ pub struct OperationAsset {
 }
 
 impl AssetRef {
+    /// Infers the compression of bytes materialized at this asset's logical path.
+    ///
+    /// A materialized checksum marks transformed workspace bytes as plain; missing or empty paths
+    /// also default to plain. This reads only metadata and does not verify the asset bytes.
+    pub fn materialized_compression_type(&self) -> CompressionType {
+        if self.materialized_checksum.is_some() {
+            return CompressionType::Plain;
+        }
+
+        self.logical_path
+            .as_deref()
+            .filter(|logical_path| !logical_path.is_empty())
+            .map(|logical_path| <dyn AssetUri>::from_uri(logical_path).compression_type())
+            .unwrap_or(CompressionType::Plain)
+    }
+
     /// Return the versioned store path for an asset.
     ///
     /// Logical paths describe the materialized workspace view and can point at a newer version.
@@ -1048,6 +1065,28 @@ pub trait AssetUri {
             })
     }
 
+    /// Infers compression from the URI suffix without opening or verifying the asset.
+    ///
+    /// Use [`CompressionType::sniff`] when bytes are available to classify the actual encoding.
+    fn compression_type(&self) -> CompressionType {
+        let Some(suffix) = self.suffix() else {
+            return CompressionType::Plain;
+        };
+        let suffix = suffix.split(['?', '#']).next().unwrap_or_default();
+        let extension = suffix.rsplit('.').next().unwrap_or(suffix);
+
+        if extension.eq_ignore_ascii_case("gz") {
+            CompressionType::Gzip
+        } else if ["bgz", "bgzf", "bam"]
+            .iter()
+            .any(|compressed_extension| extension.eq_ignore_ascii_case(compressed_extension))
+        {
+            CompressionType::Bgzf
+        } else {
+            CompressionType::Plain
+        }
+    }
+
     fn generate_file_addition_id(checksum: Option<&Sha256Hash>, asset_uri: &str) -> HashId
     where
         Self: Sized,
@@ -1235,7 +1274,7 @@ impl LocalAssetUri {
             .is_some_and(|extension| {
                 matches!(
                     extension.to_ascii_lowercase().as_str(),
-                    "fai" | "gzi" | "tbi" | "csi"
+                    "fai" | "gzi" | "tbi" | "csi" | "bai"
                 )
             })
     }
@@ -1717,6 +1756,76 @@ mod tests {
         operations::{FileAddition, calculate_file_checksum, calculate_reader_checksum},
         test_helpers::setup_gen,
     };
+
+    #[test]
+    fn test_asset_uri_compression_type_infers_known_suffixes() {
+        for (uri, expected) in [
+            ("reference.GZ", CompressionType::Gzip),
+            ("reference.fa.Gz?download=1#fragment", CompressionType::Gzip),
+            (
+                "file://reference.vcf.Gz?download=1#fragment",
+                CompressionType::Gzip,
+            ),
+            (
+                "https://example.test/reference.vcf.BGZ?download=1#fragment",
+                CompressionType::Bgzf,
+            ),
+            (
+                "https://example.test/reference.BgZf?token=1",
+                CompressionType::Bgzf,
+            ),
+            ("s3://bucket/sample.BaM#fragment", CompressionType::Bgzf),
+            (
+                "https://example.test/reference.vcf?download=1",
+                CompressionType::Plain,
+            ),
+        ] {
+            assert_eq!(
+                <dyn AssetUri>::from_uri(uri).compression_type(),
+                expected,
+                "unexpected compression inference for {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_materialized_asset_compression_type_respects_workspace_bytes() {
+        let asset = |logical_path: Option<&str>, materialized_checksum| AssetRef {
+            id: HashId::convert_str("compression-type-test"),
+            uri: "file://.gen/assets/archive.bgz".to_string(),
+            file_type: FileTypes::None.as_str().to_string(),
+            checksum: Some(Sha256Hash::convert_str("archive-checksum")),
+            materialized_checksum,
+            size: None,
+            role: AssetRole::Input,
+            logical_path: logical_path.map(str::to_string),
+            name: None,
+            created_on: 1,
+            upstream_asset_ref_id: None,
+        };
+
+        assert_eq!(
+            asset(Some("reads.bam"), None).materialized_compression_type(),
+            CompressionType::Bgzf
+        );
+        assert_eq!(
+            asset(
+                Some("ordinary.fa.gz"),
+                Some(Sha256Hash::convert_str("materialized-checksum"))
+            )
+            .materialized_compression_type(),
+            CompressionType::Plain,
+            "materialized workspace bytes are plain even when their logical path ends in .gz"
+        );
+        assert_eq!(
+            asset(None, None).materialized_compression_type(),
+            CompressionType::Plain
+        );
+        assert_eq!(
+            asset(Some(""), None).materialized_compression_type(),
+            CompressionType::Plain
+        );
+    }
 
     fn test_asset_id_hash(
         checksum: Option<Sha256Hash>,
