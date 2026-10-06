@@ -19,6 +19,7 @@ use gen_models::{
     annotations::Annotation,
     block_group::BlockGroup,
     db::DbContext,
+    locus::GraphLocus,
     node::Node,
     operations::{OperationInfo, OperationSummary, commit_operation_summary},
     sample::Sample,
@@ -260,7 +261,24 @@ impl PySequenceGraph {
             None => matcher.find_all(query_bytes),
         };
 
-        Ok(matches
+        // A hit that crosses a zero-width routing block lists an empty slice for it, and routes
+        // that differ only in the routing blocks they cross find the same hit again. Neither
+        // changes what the hit reads, so each hit is reported once, without empty slices. An
+        // insertion inside a node loops its routing block back onto the node, and a hit that
+        // wraps around that loop reads a block twice, which no route of the graph does.
+        let mut hits: Vec<GraphLocus> = vec![];
+        for mut locus in matches {
+            locus.slices.retain(|slice| slice.end > slice.start);
+            let revisits = locus.slices.iter().enumerate().any(|(index, slice)| {
+                locus.slices[..index]
+                    .iter()
+                    .any(|earlier| earlier.block == slice.block)
+            });
+            if !revisits && !hits.contains(&locus) {
+                hits.push(locus);
+            }
+        }
+        Ok(hits
             .into_iter()
             .map(crate::python_api::graph_search::PyGraphLocus::from_locus)
             .collect())
@@ -814,12 +832,22 @@ impl PySequenceGraph {
         .map_err(|e| PyRuntimeError::new_err(format!("Error deriving chunks: {e}")))?;
         let conn = ctx.graph().conn();
         let prefix = format!("{}.", self.name);
-        Ok(
-            Sample::get_block_groups(conn, &self.collection_name, &new_sample, None)
-                .into_iter()
-                .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
-                .map(|bg| self.to_py_block_group(bg))
-                .collect(),
-        )
+        let mut chunks = Sample::get_block_groups(conn, &self.collection_name, &new_sample, None)
+            .into_iter()
+            .filter(|bg| bg.name == self.name || bg.name.starts_with(&prefix))
+            .collect::<Vec<_>>();
+        // Chunks are numbered along the graph, so list them in that order rather than by name,
+        // which puts `.10` before `.2`. Stitching the list then rebuilds the original order.
+        chunks.sort_by_key(|bg| {
+            let number = bg
+                .name
+                .strip_prefix(&prefix)
+                .and_then(|suffix| suffix.parse::<u64>().ok());
+            (number, bg.name.clone())
+        });
+        Ok(chunks
+            .into_iter()
+            .map(|bg| self.to_py_block_group(bg))
+            .collect())
     }
 }
