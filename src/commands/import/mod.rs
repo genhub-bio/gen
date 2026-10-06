@@ -7,6 +7,7 @@ mod fasta;
 mod genbank;
 mod gfa;
 mod library;
+mod metadata;
 
 #[derive(Debug, Args, Clone)]
 pub struct Command {
@@ -23,6 +24,9 @@ pub enum Commands {
     Genbank(genbank::Command),
     /// Import gfa
     Gfa(gfa::Command),
+    /// Import sample metadata from TSV
+    #[command(alias = "sample-metadata")]
+    Metadata(metadata::Command),
     /// Import library
     Library(library::Command),
 }
@@ -33,6 +37,7 @@ pub enum Commands {
 )]
 pub fn execute(ctx: &CliContext, command: Command) -> anyhow::Result<()> {
     match command.command {
+        Commands::Metadata(command) => metadata::execute(ctx, command),
         Commands::Fasta(cmd) => crate::commands::import::fasta::execute(ctx, cmd),
         Commands::Genbank(cmd) => crate::commands::import::genbank::execute(ctx, cmd),
         Commands::Gfa(cmd) => crate::commands::import::gfa::execute(ctx, cmd),

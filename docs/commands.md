@@ -29,6 +29,20 @@ A later update replaces an existing value for the same sample and key. Only samp
 updated by the operation receive metadata; a fixed sample receives fields only from a
 matching header ID.
 
+# Sample metadata import
+
+```sh
+gen import metadata metadata.tsv
+gen import metadata metadata.tsv --message "Update sample metadata"
+```
+
+Import TSV files with the same `sample_name`, `key`, `value_type`, and `value`
+columns and quoting as metadata exports. Supported types are `text`, `integer`,
+`float`, and `boolean`; booleans use `true` or `false`. Samples must already exist.
+Matching sample/key values are replaced; other metadata is preserved. Duplicate
+sample/key rows use the last value. Invalid rows reject the entire import.
+Changes are recorded in repository history. `import sample-metadata` is an alias.
+
 # Sample metadata export
 
 Export all sample metadata as TSV, or select a single sample:

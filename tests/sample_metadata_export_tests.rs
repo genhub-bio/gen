@@ -122,3 +122,91 @@ fn test_export_sample_metadata_cli_unmatched_keys() {
         "sample_name\tkey\tvalue_type\tvalue\n"
     );
 }
+
+#[test]
+fn test_import_sample_metadata_cli_round_trip_and_validation() {
+    let directory = tempdir().expect("should create repository directory");
+    run_gen(directory.path(), &["init"]);
+    let fasta = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.fa");
+    run_gen(
+        directory.path(),
+        &[
+            "import",
+            "fasta",
+            fasta.to_str().expect("should encode FASTA path"),
+            "--collection",
+            "test",
+            "--sample",
+            "sample",
+        ],
+    );
+    let input = "sample_name\tkey\tvalue_type\tvalue\nsample\tboolean\tboolean\tfalse\nsample\tfloat\tfloat\t1.25\nsample\tinteger\tinteger\t42\nsample\ttext\ttext\t\"tabs\tand\nquotes\"\"\"\n";
+    fs::write(directory.path().join("input.tsv"), input).expect("should write metadata TSV");
+    run_gen(directory.path(), &["import", "metadata", "input.tsv"]);
+    run_gen(
+        directory.path(),
+        &["export", "sample-metadata", "output.tsv"],
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("output.tsv")).expect("should read export"),
+        input
+    );
+    run_gen(directory.path(), &["branch", "--create", "metadata-import"]);
+    run_gen(
+        directory.path(),
+        &["checkout", "--branch", "metadata-import"],
+    );
+    fs::write(directory.path().join("update.tsv"),
+        "sample_name\tkey\tvalue_type\tvalue\nsample\tboolean\tinteger\t1\nsample\tboolean\tboolean\ttrue\n")
+        .expect("should write update TSV");
+    run_gen(
+        directory.path(),
+        &["import", "sample-metadata", "update.tsv"],
+    );
+    let updated = input.replace("boolean\tfalse", "boolean\ttrue");
+    run_gen(
+        directory.path(),
+        &["export", "sample-metadata", "output.tsv"],
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("output.tsv"))
+            .expect("should read updated export"),
+        updated
+    );
+    for invalid in [
+        "wrong\theader\n",
+        "sample_name\tkey\tvalue_type\tvalue\nsample\tnew\ttext\tvalid\nsample\tbad\tfloat\tNaN\n",
+        "sample_name\tkey\tvalue_type\tvalue\nsample\tbad\tinteger\t9223372036854775808\n",
+        "sample_name\tkey\tvalue_type\tvalue\nsample\tbad\tboolean\t2\n",
+        "sample_name\tkey\tvalue_type\tvalue\nsample\tbad\tunknown\tvalue\n",
+        "sample_name\tkey\tvalue_type\tvalue\nmissing\tbad\ttext\tvalue\n",
+        "sample_name\tkey\tvalue_type\tvalue\nsample\tbad\ttext\n",
+    ] {
+        fs::write(directory.path().join("invalid.tsv"), invalid).expect("should write invalid TSV");
+        let result = Command::new(env!("CARGO_BIN_EXE_gen"))
+            .current_dir(directory.path())
+            .args(["import", "metadata", "invalid.tsv"])
+            .output()
+            .expect("should run invalid import");
+        assert!(!result.status.success(), "invalid TSV should be rejected");
+        run_gen(
+            directory.path(),
+            &["export", "sample-metadata", "output.tsv"],
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("output.tsv"))
+                .expect("should read preserved export"),
+            updated
+        );
+    }
+    run_gen(directory.path(), &["checkout", "--branch", "main"]);
+    run_gen(
+        directory.path(),
+        &["export", "sample-metadata", "output.tsv"],
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("output.tsv"))
+            .expect("should read original export"),
+        input
+    );
+}
