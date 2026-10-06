@@ -82,7 +82,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let tmp_dir = tempfile::tempdir().unwrap().keep();
@@ -136,7 +137,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_fasta(

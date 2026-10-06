@@ -771,7 +771,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _operation = update_with_vcf(
@@ -833,7 +834,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _operation = update_with_vcf(
@@ -901,7 +903,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _operation = update_with_vcf(
@@ -959,7 +962,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1001,7 +1005,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let res = update_with_vcf(
@@ -1036,7 +1041,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _operation = update_with_vcf(
@@ -1081,7 +1087,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         update_with_vcf(
@@ -1124,7 +1131,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1170,7 +1178,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1218,7 +1227,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1275,7 +1285,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1314,7 +1325,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1363,7 +1375,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1428,7 +1441,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1521,7 +1535,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "reference",
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1579,7 +1594,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "parent-a",
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1588,7 +1604,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "parent-b",
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1635,7 +1652,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "reference",
-            &[],
+            None,
+            None,
         )
         .unwrap();
 

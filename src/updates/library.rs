@@ -527,7 +527,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -589,7 +590,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -653,7 +655,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "simple",
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
@@ -709,7 +712,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "simple",
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
@@ -760,7 +764,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -819,7 +824,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -873,7 +879,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 
@@ -932,7 +939,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
 

@@ -435,6 +435,7 @@ mod python_tests {
                     Some("test".to_string()),
                     None,
                     None,
+                    None,
                 )
                 .unwrap();
             let source_root = source.borrow(py).context.workspace().repo_root().unwrap();
@@ -474,12 +475,58 @@ mod python_tests {
                     Some("test".to_string()),
                     None,
                     None,
+                    None,
                 )
                 .unwrap();
 
             let block_groups = py_repo.borrow(py).get_sequence_graphs().unwrap();
             assert_eq!(block_groups.len(), 1);
             assert_eq!(block_groups[0].name, "chr1");
+        });
+    }
+
+    #[test]
+    fn test_import_fasta_accepts_explicit_fai_and_gzi_keywords() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_repo = make_repo(py);
+            let dir = tempdir().unwrap();
+            let fasta = write_fasta(&dir, "test.fa", "chr1", "ACGTACGT");
+            let fasta = fasta.to_str().unwrap().replace('\\', "\\\\");
+            let fai = dir
+                .path()
+                .join("missing.fai")
+                .to_str()
+                .unwrap()
+                .replace('\\', "\\\\");
+            let gzi = dir
+                .path()
+                .join("missing.gzi")
+                .to_str()
+                .unwrap()
+                .replace('\\', "\\\\");
+
+            py_run!(
+                py,
+                py_repo,
+                &format!(
+                    r#"
+                    try:
+                        py_repo.import_fasta("{fasta}", sample="fai", fai="{fai}")
+                    except RuntimeError as error:
+                        assert "could not read supplied FAI index" in str(error), str(error)
+                    else:
+                        raise AssertionError("explicit FAI path should be read")
+
+                    try:
+                        py_repo.import_fasta("{fasta}", sample="gzi", gzi="{gzi}")
+                    except RuntimeError as error:
+                        assert "GZI index can only be used" in str(error), str(error)
+                    else:
+                        raise AssertionError("explicit GZI path should be validated")
+                    "#
+                )
+            );
         });
     }
 
@@ -494,17 +541,19 @@ mod python_tests {
 
             py_repo
                 .borrow(py)
-                .import_fasta(path.clone(), Some("test".to_string()), None, None)
+                .import_fasta(path.clone(), Some("test".to_string()), None, None, None)
                 .unwrap();
 
-            let err =
-                match py_repo
-                    .borrow(py)
-                    .import_fasta(path, Some("test".to_string()), None, None)
-                {
-                    Err(e) => e.to_string(),
-                    Ok(_) => panic!("expected duplicate import to fail"),
-                };
+            let err = match py_repo.borrow(py).import_fasta(
+                path,
+                Some("test".to_string()),
+                None,
+                None,
+                None,
+            ) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected duplicate import to fail"),
+            };
             assert!(
                 err.contains("already exist"),
                 "Expected 'already exist' in error: {err}"
@@ -525,6 +574,7 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
+                    None,
                     None,
                     None,
                 )
@@ -553,6 +603,7 @@ mod python_tests {
                     Some("test".to_string()),
                     None,
                     None,
+                    None,
                 )
                 .unwrap();
 
@@ -574,6 +625,7 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
+                    None,
                     None,
                     None,
                 )
@@ -613,6 +665,7 @@ mod python_tests {
                     Some("test".to_string()),
                     None,
                     None,
+                    None,
                 )
                 .unwrap();
 
@@ -635,6 +688,7 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
+                    None,
                     None,
                     None,
                 )
@@ -674,6 +728,7 @@ mod python_tests {
                 .import_fasta(
                     fasta.to_str().unwrap().to_string(),
                     Some("test".to_string()),
+                    None,
                     None,
                     None,
                 )

@@ -1173,7 +1173,15 @@ mod tests {
             .unwrap()
             .to_string();
 
-        import_fasta(&context, &fasta_path, collection, Sample::DEFAULT_NAME, &[]).unwrap();
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
         update_with_vcf(
             &context,
             &vcf_path,
@@ -1222,7 +1230,15 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        import_fasta(&context, &fasta_path, collection, Sample::DEFAULT_NAME, &[]).unwrap();
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
 
         let gen_graph = Sample::get_graph(
             conn,

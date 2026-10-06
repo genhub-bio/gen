@@ -19,6 +19,7 @@ use crate::{
     ModelSelect, ModelSelectError,
     assets::{AssetRef, AssetUri, LocalAssetUri},
     db::{GraphConnection, max_rows_per_batch},
+    file_types::FileTypes,
     gen_models_capnp::sequence,
     select::ModelSelectRow,
 };
@@ -363,7 +364,7 @@ fn fasta_gzi_index(workspace: &Workspace, asset_ref: &AssetRef) -> Option<gzi::I
 fn asset_extension(asset_ref: &AssetRef) -> Option<String> {
     <dyn AssetUri>::from_uri(&asset_ref.uri)
         .suffix()
-        .and_then(|suffix| suffix.rsplit('.').next().map(str::to_string))
+        .and_then(|suffix| suffix.rsplit('.').next().map(str::to_ascii_lowercase))
 }
 
 fn validate_sequence_bounds(
@@ -460,10 +461,22 @@ pub fn cached_sequence(
     let mut sequence: Option<String> = None;
     let fasta_index_asset = index_assets
         .iter()
-        .find(|asset_ref| asset_extension(asset_ref).as_deref() == Some("fai"));
+        .find(|asset_ref| asset_ref.file_type == FileTypes::FastaIndex.as_str())
+        .or_else(|| {
+            index_assets.iter().find(|asset_ref| {
+                asset_ref.file_type == FileTypes::None.as_str()
+                    && asset_extension(asset_ref).as_deref() == Some("fai")
+            })
+        });
     let gzip_index_asset = index_assets
         .iter()
-        .find(|asset_ref| asset_extension(asset_ref).as_deref() == Some("gzi"));
+        .find(|asset_ref| asset_ref.file_type == FileTypes::BgzfIndex.as_str())
+        .or_else(|| {
+            index_assets.iter().find(|asset_ref| {
+                asset_ref.file_type == FileTypes::None.as_str()
+                    && asset_extension(asset_ref).as_deref() == Some("gzi")
+            })
+        });
     let sequence_extension = asset_extension(sequence_asset);
     let compressed = matches!(sequence_extension.as_deref(), Some("gz" | "bgz"));
     if let Some(index) = fasta_index_asset.and_then(|asset_ref| fasta_index(workspace, asset_ref)) {

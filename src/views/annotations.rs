@@ -1209,7 +1209,8 @@ mod tests {
             &fasta_path,
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(
@@ -1578,9 +1579,15 @@ mod tests {
             .to_str()
             .expect("should encode FASTA path")
             .to_string();
-        let operation_summary =
-            import_fasta(&context, &fasta_path, "test", Sample::DEFAULT_NAME, &[])
-                .expect("should import FASTA");
+        let operation_summary = import_fasta(
+            &context,
+            &fasta_path,
+            "test",
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .expect("should import FASTA");
         commit_operation_summary(&context, &operation_summary).expect("should commit FASTA");
 
         let annotation_directory = tempdir().expect("should create annotation directory");

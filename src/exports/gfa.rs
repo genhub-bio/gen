@@ -575,7 +575,15 @@ mod tests {
             .expect("should have a UTF-8 library path")
             .to_string();
 
-        import_fasta(&context, &fasta_path, collection, Sample::DEFAULT_NAME, &[]).unwrap();
+        import_fasta(
+            &context,
+            &fasta_path,
+            collection,
+            Sample::DEFAULT_NAME,
+            None,
+            None,
+        )
+        .unwrap();
         add_annotation(
             &context,
             collection,

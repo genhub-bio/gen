@@ -55,9 +55,9 @@ remove the cache. Local repository files and `.gen/assets` are not affected.
 # FASTA import
 
 Use `gen import fasta <path-or-uri>` to import a FASTA. BGZF-compressed inputs
-with `.fai` and `.gzi` indexes are the most efficient for both local files and
-remote URLs. Supply indexes using repeatable `--index <path-or-uri>` options,
-such as `--index reference.fa.gz.fai` and `--index reference.fa.gz.gzi`.
+with FAI and GZI indexes are the most efficient for both local files and remote
+URLs. Pass the index locations explicitly with `--fai <path-or-uri>` and
+`--gzi <path-or-uri>`.
 
 # View diff
 

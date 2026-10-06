@@ -330,7 +330,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             "simple",
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(&context, &collection, "foobar", None, "simple", "m123:5-20").unwrap();
@@ -394,7 +395,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let operation_summary = update_with_sequence(
@@ -448,7 +450,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -507,7 +510,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -562,7 +566,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -623,7 +628,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -678,7 +684,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -733,7 +740,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -787,7 +795,8 @@ mod tests {
             &fasta_path.to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         let _ = update_with_sequence(
@@ -839,7 +848,8 @@ mod tests {
             &fasta_path,
             &collection,
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         add_annotation(

@@ -119,7 +119,8 @@ mod tests {
             &fasta_path.to_string_lossy().to_string(),
             "test",
             Sample::DEFAULT_NAME,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         crate::commands::graph_operations::derive_chunks::derive_chunks_operation(

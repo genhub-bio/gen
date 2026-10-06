@@ -23,35 +23,34 @@ use crate::python_api::{
 
 #[pymethods]
 impl PyRepository {
-    #[pyo3(signature = (filename, sample=None, collection=None, indexes=None))]
+    #[pyo3(signature = (filename, sample=None, collection=None, fai=None, gzi=None))]
     pub fn import_fasta(
         &self,
         filename: String,
         sample: Option<String>,
         collection: Option<String>,
-        indexes: Option<Vec<String>>,
+        fai: Option<String>,
+        gzi: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
-        let indexes = indexes.unwrap_or_default();
         run_operation_write(
             self,
             |ctx| {
-                let operation_summary =
-                    import_fasta(ctx, &filename, &collection, &sample, &indexes).map_err(|e| {
-                        match e {
-                            FastaError::OperationError(OperationError::NoChanges) => {
-                                PyRuntimeError::new_err(format!(
-                                    "'{}': contents already exist",
-                                    filename
-                                ))
-                            }
-                            _ => PyRuntimeError::new_err(format!(
-                                "Failed to import '{}': {e}",
-                                filename
-                            )),
-                        }
-                    })?;
+                let operation_summary = import_fasta(
+                    ctx,
+                    &filename,
+                    &collection,
+                    &sample,
+                    fai.as_deref(),
+                    gzi.as_deref(),
+                )
+                .map_err(|e| match e {
+                    FastaError::OperationError(OperationError::NoChanges) => {
+                        PyRuntimeError::new_err(format!("'{}': contents already exist", filename))
+                    }
+                    _ => PyRuntimeError::new_err(format!("Failed to import '{}': {e}", filename)),
+                })?;
                 Ok((
                     self.block_groups_in_sample(&collection, &sample),
                     operation_summary,
@@ -66,16 +65,16 @@ impl PyRepository {
         )
     }
 
-    #[pyo3(signature = (filename, reference, collection=None, indexes=None))]
+    #[pyo3(signature = (filename, reference, collection=None, fai=None, gzi=None))]
     pub fn import_reference_fasta(
         &self,
         filename: String,
         reference: String,
         collection: Option<String>,
-        indexes: Option<Vec<String>>,
+        fai: Option<String>,
+        gzi: Option<String>,
     ) -> PyResult<PySample> {
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
-        let indexes = indexes.unwrap_or_default();
         run_operation_write(
             self,
             |ctx| {
@@ -94,7 +93,8 @@ impl PyRepository {
                     &filename,
                     &collection,
                     &reference,
-                    &indexes,
+                    fai.as_deref(),
+                    gzi.as_deref(),
                 )
                 .map_err(|e| match e {
                     FastaError::OperationError(OperationError::NoChanges) => {
