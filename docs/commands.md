@@ -48,7 +48,7 @@ sample/key pair, sorted by sample name and key. `value_type` is `text`, `integer
 be combined with `--sample`. Omit it to export all keys. Unknown keys are ignored.
 An empty selection produces only the header; an unknown sample is an error.
 Sample metadata belongs to samples across collections, so this command does not
-require a collection option. `--ref` reads a commit or branch without checkout.
+require a collection option. `--ref` uses the data at a given commit or branch.
 
 # Branches
 
