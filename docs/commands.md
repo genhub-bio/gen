@@ -21,9 +21,10 @@ gen import fasta reference.fa --sample reference -m "Import reference genome"
 gen update vcf variants.vcf --sample sample1 --message "Apply sample variants"
 ```
 
-VCF updates also store fields from `##SAMPLE=<ID=sample1,Score=90.68>` header records
+With `--read-metadata`, VCF updates store fields from `##SAMPLE=<ID=sample1,Score=90.68>` header records
 as sample metadata. The ID identifies the sample; other field names become metadata keys.
-Values are inferred as signed 64-bit integers, then finite floating-point numbers, or text.
+Metadata reading is off by default. Values are inferred as booleans (`true` or
+`false`), signed 64-bit integers, finite floating-point numbers, or text.
 A later update replaces an existing value for the same sample and key. Only samples
 updated by the operation receive metadata; a fixed sample receives fields only from a
 matching header ID.
@@ -35,6 +36,7 @@ Export all sample metadata as TSV, or select a single sample:
 ```sh
 gen export sample-metadata metadata.tsv
 gen export sample-metadata metadata.tsv --sample sample1
+gen export sample-metadata metadata.tsv --keys Score,Count
 gen export --ref HEAD sample-metadata metadata.tsv
 ```
 
@@ -42,6 +44,8 @@ The columns are `sample_name`, `key`, `value_type`, and `value`, with one row pe
 sample/key pair, sorted by sample name and key. `value_type` is `text`, `integer`,
 `float`, or `boolean`, preserving the value types. Booleans export as `true` or
 `false`. Tabs, newlines, and quotes in fields use CSV-style quoting with a tab delimiter.
+`--keys` selects exact, case-sensitive keys from a comma-separated list and can
+be combined with `--sample`. Omit it to export all keys. Unknown keys are ignored.
 An empty selection produces only the header; an unknown sample is an error.
 Sample metadata belongs to samples across collections, so this command does not
 require a collection option. `--ref` reads a commit or branch without checkout.

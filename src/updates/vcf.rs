@@ -385,10 +385,16 @@ fn resolve_parent_samples(
         .clone()
 }
 
-#[cfg_attr(
-    feature = "profiling",
-    tracing::instrument(skip(context, vcf_path, parent_samples))
-)]
+/// Options controlling VCF updates.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VcfUpdateOptions {
+    /// Apply edits using the sample's current coordinates.
+    pub in_place: bool,
+    /// Read SAMPLE header fields as typed sample metadata.
+    pub read_metadata: bool,
+}
+
+/// Update sequences from VCF without reading sample metadata.
 pub fn update_with_vcf(
     context: &DbContext,
     vcf_path: &String,
@@ -398,6 +404,35 @@ pub fn update_with_vcf(
     parent_samples: Vec<String>,
     in_place: bool,
 ) -> Result<(OperationSummary, Vec<String>), VcfError> {
+    update_with_vcf_options(
+        context,
+        vcf_path,
+        collection_name,
+        fixed_genotype,
+        fixed_sample,
+        parent_samples,
+        VcfUpdateOptions {
+            in_place,
+            ..Default::default()
+        },
+    )
+}
+
+/// Update sequences from VCF with optional sample metadata reading.
+#[cfg_attr(
+    feature = "profiling",
+    tracing::instrument(skip(context, vcf_path, parent_samples))
+)]
+pub fn update_with_vcf_options(
+    context: &DbContext,
+    vcf_path: &String,
+    collection_name: &str,
+    fixed_genotype: String,
+    fixed_sample: Option<&str>,
+    parent_samples: Vec<String>,
+    options: VcfUpdateOptions,
+) -> Result<(OperationSummary, Vec<String>), VcfError> {
+    let in_place = options.in_place;
     let conn = context.graph().conn();
     let progress_bar = get_handler();
     let cnv_re = Regex::new(r"(?x)<CN(?P<count>\d+)>").unwrap();
@@ -408,7 +443,11 @@ pub fn update_with_vcf(
     let header = reader
         .read_header()
         .map_err(|error| VcfError::InvalidRecord(format!("invalid VCF header: {error}")))?;
-    let sample_metadata = parse_sample_metadata(&header)?;
+    let sample_metadata = if options.read_metadata {
+        parse_sample_metadata(&header)?
+    } else {
+        HashMap::new()
+    };
     let sample_names = header.sample_names();
     let mut genotype = vec![];
     if !fixed_genotype.is_empty() {
@@ -841,14 +880,17 @@ mod tests {
         .expect("should import reference");
         let conn = context.graph().conn();
         for _ in 0..2 {
-            update_with_vcf(
+            update_with_vcf_options(
                 &context,
                 &vcf_path,
                 "test",
                 String::new(),
                 None,
                 vec![Sample::DEFAULT_NAME.to_string()],
-                false,
+                VcfUpdateOptions {
+                    read_metadata: true,
+                    ..Default::default()
+                },
             )
             .expect("should update variants and metadata");
             for (sample_name, score) in [("sample_001", 90.68), ("sample_002", 27.79)] {
@@ -894,14 +936,17 @@ mod tests {
         )
         .expect("should import reference");
         for sample_name in ["sample_001", "custom"] {
-            update_with_vcf(
+            update_with_vcf_options(
                 &context,
                 &vcf_path,
                 "test",
                 "0".to_string(),
                 Some(sample_name),
                 vec![Sample::DEFAULT_NAME.to_string()],
-                false,
+                VcfUpdateOptions {
+                    read_metadata: true,
+                    ..Default::default()
+                },
             )
             .expect("should update fixed sample");
         }
