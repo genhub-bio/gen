@@ -294,6 +294,8 @@ pub struct CollectionExplorerState {
     pub collection_change_requested: Option<String>,
     /// Active annotation files
     pub active_annotation_files: HashSet<HashId>,
+    /// Files already offered in this viewer session, including those turned off by the user.
+    seen_annotation_files: HashSet<HashId>,
     /// Active annotation groups
     pub active_annotation_groups: HashSet<String>,
     /// Pending annotation file toggle request
@@ -319,6 +321,7 @@ impl CollectionExplorerState {
             focus_change_requested: None,
             collection_change_requested: None,
             active_annotation_files: HashSet::new(),
+            seen_annotation_files: HashSet::new(),
             active_annotation_groups: HashSet::new(),
             annotation_file_toggle_requested: None,
             annotation_group_toggle_requested: None,
@@ -366,15 +369,26 @@ impl CollectionExplorerState {
         self.active_annotation_files.contains(id)
     }
 
-    /// Retain only annotation files that exist in the provided list
-    pub fn retain_annotation_files(
+    /// Activate newly discovered files while preserving the user's toggles for existing files.
+    pub fn sync_annotation_files(
         &mut self,
         entries: &[crate::views::annotation_files::AnnotationFileEntry],
-    ) {
+    ) -> Vec<HashId> {
         let valid_ids: HashSet<HashId> =
             entries.iter().map(|entry| entry.file_addition.id).collect();
         self.active_annotation_files
             .retain(|id| valid_ids.contains(id));
+        self.seen_annotation_files
+            .retain(|id| valid_ids.contains(id));
+        let mut newly_active = Vec::new();
+        for entry in entries {
+            let id = entry.file_addition.id;
+            if self.seen_annotation_files.insert(id) {
+                self.active_annotation_files.insert(id);
+                newly_active.push(id);
+            }
+        }
+        newly_active
     }
 
     /// Toggle an annotation group on/off
@@ -456,6 +470,7 @@ impl CollectionExplorer {
             || self.data.sample_roots != new_data.sample_roots
             || self.data.sample_children != new_data.sample_children
             || self.data.sample_parents != new_data.sample_parents
+            || self.data.annotation_files != new_data.annotation_files
             || self.data.annotation_groups != new_data.annotation_groups;
         self.data = new_data;
         changed
@@ -1029,15 +1044,90 @@ impl StatefulWidget for &CollectionExplorer {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use crossterm::event::KeyModifiers;
+    use gen_core::HashId;
     use gen_models::{
+        annotations::{AnnotationFileChecksumOverrides, add_annotation_file},
         block_group::{BlockGroup, NewBlockGroup},
+        file_types::FileTypes,
         history::dolt::commit_all,
         sample::{NewSample, Sample},
     };
 
     use super::*;
-    use crate::test_helpers::{setup_gen, setup_gen_on_disk};
+    use crate::{
+        test_helpers::{setup_gen, setup_gen_on_disk},
+        views::annotation_files::{AnnotationAssetEntry, AnnotationFileEntry},
+    };
+
+    fn annotation_file_entry(name: &str) -> AnnotationFileEntry {
+        AnnotationFileEntry {
+            file_addition: AnnotationAssetEntry {
+                id: HashId::convert_str(name),
+                asset_uri: name.to_string(),
+                file_type: FileTypes::Gff3,
+                checksum: None,
+            },
+            index_file_addition: None,
+            name: Some(name.to_string()),
+            display_name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_annotation_files_start_active_and_preserve_viewer_toggles() {
+        let first = annotation_file_entry("first.gff");
+        let second = annotation_file_entry("second.gff");
+        let mut state = CollectionExplorerState::new();
+
+        assert_eq!(
+            state.sync_annotation_files(&[first.clone()]),
+            vec![first.file_addition.id]
+        );
+        assert!(state.is_annotation_file_active(&first.file_addition.id));
+
+        state.toggle_annotation_file(first.file_addition.id);
+        assert!(state.sync_annotation_files(&[first.clone()]).is_empty());
+        assert!(!state.is_annotation_file_active(&first.file_addition.id));
+
+        assert_eq!(
+            state.sync_annotation_files(&[first.clone(), second.clone()]),
+            vec![second.file_addition.id]
+        );
+        assert!(!state.is_annotation_file_active(&first.file_addition.id));
+        assert!(state.is_annotation_file_active(&second.file_addition.id));
+
+        state.toggle_annotation_file(first.file_addition.id);
+        assert!(state.is_annotation_file_active(&first.file_addition.id));
+        state.sync_annotation_files(&[second]);
+        assert!(!state.is_annotation_file_active(&first.file_addition.id));
+    }
+
+    #[test]
+    fn test_collection_refresh_detects_added_annotation_file() {
+        let context = setup_gen_on_disk();
+        let conn = context.graph().conn();
+        let mut explorer =
+            CollectionExplorer::new(conn, context.config().conn(), None, None, "test", None);
+        assert!(explorer.data.annotation_files.is_empty());
+
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/simple.gff");
+        add_annotation_file(
+            &context,
+            fixture_path.to_str().expect("should encode fixture path"),
+            None,
+            None,
+            Some("fixture-track"),
+            Some("add-annotation"),
+            AnnotationFileChecksumOverrides::default(),
+        )
+        .expect("should add annotation file");
+
+        assert!(explorer.refresh(conn, context.config().conn(), None, None, "test", None,));
+        assert_eq!(explorer.data.annotation_files.len(), 1);
+    }
 
     #[test]
     fn test_collection_explorer_resolves_block_groups_from_history_ref() {

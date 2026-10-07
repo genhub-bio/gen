@@ -83,6 +83,16 @@ where
     /// Get the dimensions (width, height) for a node.
     fn get_node_size(&self, node: &G::NodeId) -> (u64, u64);
 
+    /// Map a raw node-local coordinate to a displayed column.
+    fn map_column(&self, _node: &G::NodeId, raw: i64) -> i64 {
+        raw
+    }
+
+    /// Map a displayed column back to a raw node-local coordinate.
+    fn raw_column(&self, _node: &G::NodeId, column: i64) -> i64 {
+        column
+    }
+
     /// Get default dimensions for dummy/routing nodes
     fn get_dummy_size(&self) -> (u64, u64) {
         (1, 1)
@@ -135,6 +145,14 @@ where
         (**self).get_dummy_size()
     }
 
+    fn map_column(&self, node: &G::NodeId, raw: i64) -> i64 {
+        (**self).map_column(node, raw)
+    }
+
+    fn raw_column(&self, node: &G::NodeId, column: i64) -> i64 {
+        (**self).raw_column(node, column)
+    }
+
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {
         (**self).render_node(buffer, area, node_id);
     }
@@ -168,6 +186,14 @@ where
 
     fn get_dummy_size(&self) -> (u64, u64) {
         (**self).get_dummy_size()
+    }
+
+    fn map_column(&self, node: &G::NodeId, raw: i64) -> i64 {
+        (**self).map_column(node, raw)
+    }
+
+    fn raw_column(&self, node: &G::NodeId, column: i64) -> i64 {
+        (**self).raw_column(node, column)
     }
 
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &G::NodeId) {

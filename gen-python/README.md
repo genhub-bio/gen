@@ -222,6 +222,11 @@ Names that do not fit beside their bars fall back to floating labels. Annotation
 apply to bars, connectors, and labels; sequence characters keep their normal colors. Use
 `widget.zoom_in()` to reach full detail and see this display.
 
+At truncated detail, nodes reserve at least three sequence columns (or one per base
+for nodes shorter than three bases). Annotation ends stay in sequence order, and
+labels can expand the node. Nodes of one to three bases show their complete sequence;
+longer nodes show bases at distinct mapped positions and dots in expanded gaps.
+
 ## Annotation files
 
 Add a GFF3, BED, or GenBank file to repository history with

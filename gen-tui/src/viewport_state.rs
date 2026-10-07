@@ -1,4 +1,6 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::geometry::{ViewportPos, WorldPos, WorldRect};
 
@@ -186,6 +188,26 @@ impl<'a> WorldBuffer<'a> {
         }
     }
 
+    /// Draw terminal graphemes at their cell widths, including wide and combining characters.
+    pub fn set_graphemes_styled(&mut self, world_pos: WorldPos, text: &str, style: Style) {
+        let mut column = world_pos.x;
+        for grapheme in text.graphemes(true) {
+            let width = grapheme.width() as i64;
+            if let Some((buffer_x, buffer_y)) = self
+                .viewport_state
+                .world_to_terminal(WorldPos::new(column, world_pos.y))
+                && let Some(cell) = self.buffer.cell_mut((buffer_x, buffer_y))
+            {
+                cell.set_symbol(grapheme);
+                cell.set_style(style);
+            }
+            for offset in 1..width {
+                self.set_char_styled(WorldPos::new(column + offset, world_pos.y), ' ', style);
+            }
+            column += width;
+        }
+    }
+
     /// Fill a rectangular area in world coordinates with the specified character.
     pub fn fill_rect(&mut self, world_rect: WorldRect, ch: char) {
         self.fill_rect_styled(world_rect, ch, Style::default())
@@ -323,6 +345,26 @@ mod tests {
         assert_eq!(writer.get_char(WorldPos::new(7, 3)), Some('l'));
         assert_eq!(writer.get_char(WorldPos::new(8, 3)), Some('l'));
         assert_eq!(writer.get_char(WorldPos::new(9, 3)), Some('o'));
+    }
+
+    #[test]
+    fn test_world_buffer_graphemes_keep_terminal_columns() {
+        let mut state = ViewportState::new();
+        state.viewport_bounds = Rect::new(0, 0, 20, 10);
+        let mut buffer = Buffer::empty(state.viewport_bounds);
+        let mut writer = WorldBuffer::new(&mut buffer, &state);
+        writer.set_graphemes_styled(
+            WorldPos::new(0, 0),
+            "e\u{301}漢B",
+            ratatui::style::Style::default(),
+        );
+        assert_eq!(writer.get_char(WorldPos::new(0, 0)), Some('e'));
+        assert_eq!(writer.get_char(WorldPos::new(1, 0)), Some('漢'));
+        assert_eq!(writer.get_char(WorldPos::new(2, 0)), Some(' '));
+        assert_eq!(writer.get_char(WorldPos::new(3, 0)), Some('B'));
+        drop(writer);
+        let (column, row) = state.world_to_terminal(WorldPos::new(0, 0)).unwrap();
+        assert_eq!(buffer[(column, row)].symbol(), "e\u{301}");
     }
 
     #[test]

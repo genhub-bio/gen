@@ -9,7 +9,7 @@
 //! nothing.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     error::Error,
 };
 
@@ -26,6 +26,7 @@ use gen_tui::{
     theme::current_theme,
 };
 use log::warn;
+use petgraph::Direction;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -41,10 +42,12 @@ use crate::views::{
         active_neighborhood_node_ids, load_block_group_graph, teleport_through_wormhole,
     },
     gen_graph_widget::{
-        self, AnnotationLabels, AnnotationStarts, CenteredPath, NodeAnnotationLayer, OverlayInputs,
-        SendSyncZoomLevels, build_send_sync_annotated_zoom_levels, center_zoom_levels,
+        self, AnnotationLabels, AnnotationStarts, CenteredPath, FULL_ZOOM_LEVEL,
+        MINIMAL_ZOOM_LEVEL, NodeAnnotationLayer, OverlayInputs, SendSyncZoomLevels,
+        build_send_sync_annotated_zoom_levels, center_zoom_levels,
         create_send_sync_annotated_gen_graph_engine_lazy, draw_annotation_connectors,
-        draw_annotation_labels, reapply_overlays, starting_zoom_level, update_node_annotations,
+        draw_annotation_labels, draw_compact_annotation_connectors, reapply_overlays,
+        starting_zoom_level, update_node_annotations,
     },
     graph_database::GraphDatabase,
     graph_dimming::GraphDimming,
@@ -134,10 +137,11 @@ pub struct GenGraphController {
     centered_path: CenteredPath,
     /// Whether opened block groups center on their current path.
     center_current_path: bool,
-    /// Where annotations start on each loaded node, for the `w`/`b` keys. Rebuilt with the
+    /// Where annotations start and end on each loaded node, for the `w`/`b`/`e` keys. Rebuilt with the
     /// highlights whatever the annotation display, so the stops don't depend on flags being
     /// drawn.
     annotation_starts: AnnotationStarts,
+    cursor_raw_before_truncation: Option<(GraphNode, i64)>,
     /// `None` until a block group is opened.
     block_group: Option<BlockGroup>,
     /// Fetched once per block group; a batch change only reloads their annotations for the
@@ -203,6 +207,7 @@ impl Clone for GenGraphController {
             centered_path,
             center_current_path: self.center_current_path,
             annotation_starts: self.annotation_starts.clone(),
+            cursor_raw_before_truncation: self.cursor_raw_before_truncation,
             block_group: self.block_group.clone(),
             annotation_group_entries: self.annotation_group_entries.clone(),
             annotation_groups_world: self.annotation_groups_world,
@@ -253,6 +258,7 @@ impl GenGraphController {
             centered_path,
             center_current_path: false,
             annotation_starts: AnnotationStarts::default(),
+            cursor_raw_before_truncation: None,
             block_group: None,
             annotation_group_entries: Vec::new(),
             annotation_groups_world: None,
@@ -301,9 +307,8 @@ impl GenGraphController {
         }
     }
 
-    /// Replace the graph with `block_group_id`'s, starting over from its seed at its starting
-    /// zoom level (see `starting_zoom_level`) with no overlays, paths or annotation groups
-    /// loaded.
+    /// Replace the graph with `block_group_id`'s seed at full detail, with no overlays,
+    /// paths, or annotation groups loaded.
     pub fn open_block_group(&mut self, block_group_id: &HashId) -> Result<(), Box<dyn Error>> {
         let history_ref = self.history_ref.as_deref();
         let block_group =
@@ -320,7 +325,7 @@ impl GenGraphController {
                 loaded.source,
                 self.database.sequence_source(),
                 self.node_annotations.clone(),
-                loaded.zoom_index,
+                FULL_ZOOM_LEVEL,
             );
         self.zoom_levels = center_zoom_levels(self.zoom_levels.clone(), &self.centered_path);
         self.centered_path.set(if self.center_current_path {
@@ -338,6 +343,8 @@ impl GenGraphController {
         self.annotation_groups_world = None;
         self.paths.clear();
         self.overlays.clear();
+        self.node_annotations.replace(HashMap::new());
+        self.cursor_raw_before_truncation = None;
         self.focused_annotation = None;
         self.overlays_dirty = true;
         Ok(())
@@ -392,7 +399,7 @@ impl GenGraphController {
         self.overlays_dirty = true;
     }
 
-    /// Join the pieces of annotation `id` with connectors at full detail, or stop joining any.
+    /// Join the pieces of annotation `id` with connectors at full or truncated detail.
     pub fn set_focused_annotation(&mut self, id: Option<HashId>) {
         self.focused_annotation = id;
     }
@@ -401,16 +408,57 @@ impl GenGraphController {
         self.focused_annotation
     }
 
+    fn change_zoom(&mut self, mut index: usize) {
+        index = index.min(self.zoom_levels.len() - 1);
+        if index == FULL_ZOOM_LEVEL - 1 && !self.node_annotations.has_annotations() {
+            index = FULL_ZOOM_LEVEL;
+        }
+        let old_index = self.view_state.zoom_index;
+        if index == old_index {
+            return;
+        }
+        let cursor = self.view_state.cursor.node.and_then(|node| {
+            let rect = self.view_state.frame.rect_of(node)?;
+            let column = rect.point_at_fraction(self.view_state.cursor.fractional).x - rect.min.x;
+            let renderer = &self.zoom_levels[old_index].1;
+            let raw = if old_index == FULL_ZOOM_LEVEL - 1 {
+                self.cursor_raw_before_truncation
+                    .filter(|(saved_node, saved_raw)| {
+                        *saved_node == node && renderer.map_column(&node, *saved_raw) == column
+                    })
+                    .map_or_else(|| renderer.raw_column(&node, column), |(_, raw)| raw)
+            } else {
+                renderer.raw_column(&node, column)
+            };
+            Some((node, raw))
+        });
+        gen_graph_widget::apply_zoom_level(&mut self.view_state, index, &self.zoom_levels);
+        if let Some((node, raw)) = cursor {
+            let renderer = &self.zoom_levels[index].1;
+            let column = renderer.map_column(&node, raw);
+            let width = renderer.get_node_size(&node).0.saturating_sub(1).max(1) as f64;
+            self.view_state.cursor.fractional.0 = (column as f64 / width).clamp(0.0, 1.0);
+            if index == FULL_ZOOM_LEVEL - 1 {
+                self.cursor_raw_before_truncation = Some((node, raw));
+            } else {
+                self.cursor_raw_before_truncation = None;
+            }
+        }
+        self.overlays_dirty = true;
+    }
+
     /// Step one zoom level in.
     pub fn zoom_in(&mut self) {
-        gen_graph_widget::zoom_in(&mut self.view_state, &self.zoom_levels);
-        self.overlays_dirty = true;
+        self.change_zoom(self.view_state.zoom_index + 1);
     }
 
     /// Step one zoom level out.
     pub fn zoom_out(&mut self) {
-        gen_graph_widget::zoom_out(&mut self.view_state, &self.zoom_levels);
-        self.overlays_dirty = true;
+        let mut index = self.view_state.zoom_index.saturating_sub(1);
+        if index == FULL_ZOOM_LEVEL - 1 && !self.node_annotations.has_annotations() {
+            index = MINIMAL_ZOOM_LEVEL;
+        }
+        self.change_zoom(index);
     }
 
     /// Jump straight to the first zoom level drawing nodes at `detail`.
@@ -420,8 +468,7 @@ impl GenGraphController {
             .iter()
             .position(|(level, _, _)| *level == detail)
         {
-            gen_graph_widget::apply_zoom_level(&mut self.view_state, index, &self.zoom_levels);
-            self.overlays_dirty = true;
+            self.change_zoom(index);
         }
     }
 
@@ -481,6 +528,66 @@ impl GenGraphController {
             self.view_state.queue_snap_left();
         }
         self.view_state.hide_cursor();
+        true
+    }
+
+    /// Open compact detail at the left edge of the earliest annotation in the loaded graph.
+    /// Called once by terminal viewers after their initial tracks have loaded.
+    pub fn focus_first_annotation(&mut self) -> bool {
+        let graph = self.engine.graph();
+        let Some(start) = graph.nodes().find(|node| is_start_node(node.node_id)) else {
+            return false;
+        };
+        let mut distances = HashMap::from([(start, 0usize)]);
+        let mut queue = VecDeque::from([start]);
+        while let Some(node) = queue.pop_front() {
+            let mut successors: Vec<_> = graph
+                .neighbors_directed(node, Direction::Outgoing)
+                .collect();
+            successors.sort_unstable();
+            for successor in successors {
+                if !distances.contains_key(&successor) {
+                    distances.insert(successor, distances[&node] + 1);
+                    queue.push_back(successor);
+                }
+            }
+        }
+        let first = self
+            .overlays
+            .iter()
+            .filter(|overlay| overlay.source.is_annotation())
+            .filter_map(GraphOverlay::span)
+            .flat_map(|span| &span.segments)
+            .flat_map(|segment| {
+                graph.nodes().filter_map(move |node| {
+                    let start = segment.start.max(node.sequence_start);
+                    let end = segment.end.min(node.sequence_end);
+                    (node.node_id == segment.node_id && start < end).then_some((node, start))
+                })
+            })
+            .filter_map(|(node, coordinate)| {
+                distances
+                    .get(&node)
+                    .map(|distance| (*distance, node, coordinate))
+            })
+            .min();
+        let Some((_, node, coordinate)) = first else {
+            return false;
+        };
+
+        update_node_annotations(&self.node_annotations, &self.engine, &self.overlays);
+        self.change_zoom(FULL_ZOOM_LEVEL - 1);
+        let renderer = &self.zoom_levels[self.view_state.zoom_index].1;
+        let raw = coordinate - node.sequence_start;
+        let column = renderer.map_column(&node, raw);
+        let width = renderer.get_node_size(&node).0.saturating_sub(1).max(1) as f64;
+        let was_visible = self.view_state.is_cursor_visible();
+        self.view_state
+            .go_to_node(node, ((column as f64 / width).clamp(0.0, 1.0), 0.5));
+        self.view_state.queue_snap_left();
+        if !was_visible {
+            self.view_state.hide_cursor();
+        }
         true
     }
 
@@ -612,7 +719,7 @@ impl GenGraphController {
         true
     }
 
-    /// Apply a graph key: zoom, the path toggle, annotation stops at full detail, and cursor
+    /// Apply a graph key: zoom, the path toggle, annotation stops, and cursor
     /// navigation, where a door reached by the cursor opens the batch behind it.
     pub fn handle_key(&mut self, key: KeyEvent) -> GraphKeyOutcome {
         match key.code {
@@ -631,16 +738,25 @@ impl GenGraphController {
                 self.zoom_out();
                 GraphKeyOutcome::Redraw
             }
-            // Annotation starts are only known in screen columns where the annotations are
-            // drawn under their nodes, at full detail.
-            KeyCode::Char(key_char @ ('w' | 'b')) if self.detail_level() == VisualDetail::Full => {
+            KeyCode::Char(key_char @ ('w' | 'b' | 'e'))
+                if self.detail_level() != VisualDetail::Minimal =>
+            {
                 // Reaching the edge of the loaded batch leaves the cursor where it is, like an
                 // arrow key with nothing beyond it.
                 let annotation_starts = &self.annotation_starts;
+                let renderer = &self.zoom_levels[self.view_state.zoom_index].1;
                 match self
                     .view_state
-                    .move_cursor_to_stop(key_char == 'w', |node| annotation_starts.on(&node))
-                {
+                    .move_cursor_to_stop(key_char != 'b', |node| {
+                        let raw = if key_char == 'e' {
+                            annotation_starts.ends_on(&node)
+                        } else {
+                            annotation_starts.on(&node)
+                        };
+                        raw.into_iter()
+                            .map(|column| renderer.map_column(&node, column))
+                            .collect()
+                    }) {
                     Ok(()) => GraphKeyOutcome::Redraw,
                     Err(_) => GraphKeyOutcome::Ignore,
                 }
@@ -837,18 +953,21 @@ impl GenGraphController {
                 &mut self.annotation_colors,
             );
             self.annotation_starts = AnnotationStarts::new(&self.engine, &self.overlays);
-            // Names with no room under their node fall back to floating labels.
+            // Both display styles share the endpoint layout at truncated detail.
+            let floating =
+                update_node_annotations(&self.node_annotations, &self.engine, &self.overlays);
             self.floating_overlays = match annotation_display {
-                AnnotationDisplay::FlagsUnderNodes => Some(update_node_annotations(
-                    &self.node_annotations,
-                    &self.engine,
-                    &self.overlays,
-                )),
+                AnnotationDisplay::FlagsUnderNodes => Some(floating),
                 AnnotationDisplay::FloatingLabels => None,
             };
             self.overlays_dirty = false;
             self.applied_overlay_inputs = Some(overlay_inputs);
             self.labelled_overlay_inputs = None;
+        }
+        if self.view_state.zoom_index == FULL_ZOOM_LEVEL - 1
+            && !self.node_annotations.has_annotations()
+        {
+            self.change_zoom(FULL_ZOOM_LEVEL);
         }
 
         let active_renderer = &self.zoom_levels[self.view_state.zoom_index].1;
@@ -869,11 +988,21 @@ impl GenGraphController {
                 _ => &self.overlays,
             };
             self.annotation_labels =
-                AnnotationLabels::new(self.engine.graph(), detail_level, labelled_overlays);
+                AnnotationLabels::new(self.engine.graph(), detail_level, labelled_overlays)
+                    .with_compact_layout(self.node_annotations.clone());
             self.labelled_overlay_inputs = Some(label_inputs);
         }
         if flags_drawn {
             draw_annotation_connectors(
+                buf,
+                area,
+                &self.view_state.frame,
+                &self.node_annotations,
+                self.focused_annotation,
+            );
+        }
+        if detail_level == VisualDetail::Truncated {
+            draw_compact_annotation_connectors(
                 buf,
                 area,
                 &self.view_state.frame,
@@ -914,8 +1043,7 @@ mod tests {
 
     use super::{AnnotationDisplay, GenGraphController, GraphKeyOutcome};
     use crate::views::{
-        gen_graph_widget::{FULL_ZOOM_LEVEL, MINIMAL_ZOOM_LEVEL},
-        graph_database::GraphDatabase,
+        gen_graph_widget::FULL_ZOOM_LEVEL, graph_database::GraphDatabase,
         graph_overlay::has_path_overlay,
         lazy_graph_source::tests::setup_labelled_chain_block_group,
     };
@@ -1052,7 +1180,7 @@ mod tests {
 
         assert!(controller.engine().graph().node_count() <= 2);
         assert_eq!(controller.engine().active_batch(), None);
-        assert_eq!(controller.view_state().zoom_index, MINIMAL_ZOOM_LEVEL);
+        assert_eq!(controller.view_state().zoom_index, FULL_ZOOM_LEVEL);
         assert!(controller.overlays().is_empty());
     }
 
@@ -1084,6 +1212,7 @@ mod tests {
         use gen_models::db::GraphConnection;
         use gen_tui::{
             geometry::WorldRect,
+            layout::VisualDetail,
             plotter::{LineStyle, PathStyle},
         };
         use petgraph::Direction;
@@ -1093,7 +1222,7 @@ mod tests {
         use crate::views::{
             annotation_track::{AnnotationSegment, AnnotationSpan},
             gen_graph_controller::ClickOutcome,
-            gen_graph_widget::{FULL_ZOOM_LEVEL, apply_zoom_level},
+            gen_graph_widget::{FULL_ZOOM_LEVEL, MINIMAL_ZOOM_LEVEL, apply_zoom_level},
             graph_overlay::{GraphOverlay, OverlayContent, OverlaySource, group_track_key},
         };
 
@@ -1185,6 +1314,67 @@ mod tests {
         }
 
         #[test]
+        fn test_truncated_zoom_snaps_to_endpoint_and_restores_base() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let mut terminal =
+                Terminal::new(TestBackend::new(40, 12)).expect("should create a test terminal");
+            let display = AnnotationDisplay::FlagsUnderNodes;
+            let mut controller =
+                full_detail_chain(&conn, &workspace, &block_group_id, &mut terminal, display);
+            controller.zoom_out();
+            assert_eq!(controller.view_state().zoom_index, MINIMAL_ZOOM_LEVEL);
+            controller.zoom_in();
+            assert_eq!(controller.view_state().zoom_index, FULL_ZOOM_LEVEL);
+
+            let chain = active_chain(&controller);
+            let target = chain[1];
+            annotate(&mut controller, &[target]);
+            draw(&mut controller, &mut terminal, display);
+            controller.view_state_mut().go_to_node(target, (0.5, 0.5));
+            draw(&mut controller, &mut terminal, display);
+            let (full_rect, _) = cursor_rect_and_row(&controller);
+            let raw = full_rect
+                .point_at_fraction(controller.view_state().cursor.fractional)
+                .x
+                - full_rect.min.x;
+
+            controller.zoom_out();
+            assert_eq!(controller.detail_level(), VisualDetail::Truncated);
+            draw(&mut controller, &mut terminal, display);
+            let (compact_rect, _) = cursor_rect_and_row(&controller);
+            let compact_column = compact_rect
+                .point_at_fraction(controller.view_state().cursor.fractional)
+                .x
+                - compact_rect.min.x;
+            assert_eq!(
+                compact_column,
+                controller.zoom_levels()[FULL_ZOOM_LEVEL - 1]
+                    .1
+                    .map_column(&target, raw)
+            );
+
+            controller.zoom_in();
+            draw(&mut controller, &mut terminal, display);
+            let (restored_rect, _) = cursor_rect_and_row(&controller);
+            let restored = restored_rect
+                .point_at_fraction(controller.view_state().cursor.fractional)
+                .x
+                - restored_rect.min.x;
+            assert_eq!(restored, raw);
+
+            controller.zoom_out();
+            draw(&mut controller, &mut terminal, display);
+            assert_eq!(controller.detail_level(), VisualDetail::Truncated);
+            controller.overlays_mut().clear();
+            draw(&mut controller, &mut terminal, display);
+            assert_eq!(controller.detail_level(), VisualDetail::Full);
+        }
+
+        #[test]
         fn test_cursor_stays_on_the_sequence_row_of_annotated_nodes() {
             let dir = tempfile::tempdir().unwrap();
             let db_path = dir.path().join("graph.db");
@@ -1215,14 +1405,10 @@ mod tests {
             );
             let view_state = controller.view_state();
             let cursor_x = rect.point_at_fraction(view_state.cursor.fractional).x;
-            let caret = view_state
+            let annotation_cell = view_state
                 .screen_to_terminal(cursor_x, row - 1)
-                .expect("should draw the row under the cursor on screen");
-            assert_eq!(
-                terminal.backend().buffer()[caret].symbol(),
-                "⌃",
-                "the caret should sit just under the sequence row"
-            );
+                .expect("should draw the annotation row under the cursor");
+            assert_ne!(terminal.backend().buffer()[annotation_cell].symbol(), "⌃");
 
             // The chain has nothing above or below, so up and down leave the cursor put
             // instead of moving it onto a flag lane.
@@ -1269,6 +1455,48 @@ mod tests {
             let (rect, row) = cursor_rect_and_row(controller);
             let column = rect.point_at_fraction(view_state.cursor.fractional).x;
             view_state.screen_to_terminal(column, row).is_some()
+        }
+
+        #[test]
+        fn test_first_annotation_opens_compact_at_its_left_edge() {
+            let dir = tempfile::tempdir().expect("should create a temporary directory");
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).expect("should open the graph database");
+            let workspace = Workspace::from_current_dir();
+            let mut terminal =
+                Terminal::new(TestBackend::new(20, 12)).expect("should create a test terminal");
+            let mut controller = full_detail_chain(
+                &conn,
+                &workspace,
+                &block_group_id,
+                &mut terminal,
+                AnnotationDisplay::FlagsUnderNodes,
+            );
+            let chain = active_chain(&controller);
+            let (first, later) = (chain[1], chain[5]);
+            annotate(&mut controller, &[later, first]);
+            assert!(controller.focus_first_annotation());
+            assert_eq!(controller.view_state().zoom_index, FULL_ZOOM_LEVEL - 1);
+            assert_eq!(controller.view_state().cursor.node, Some(first));
+
+            draw(
+                &mut controller,
+                &mut terminal,
+                AnnotationDisplay::FlagsUnderNodes,
+            );
+            let (rect, row) = cursor_rect_and_row(&controller);
+            let column = rect
+                .point_at_fraction(controller.view_state().cursor.fractional)
+                .x;
+            let (screen_column, _) = controller
+                .view_state()
+                .screen_to_terminal(column, row)
+                .expect("should show the first annotation");
+            assert!(
+                screen_column <= 5,
+                "should place the annotation near the left edge"
+            );
         }
 
         #[test]
@@ -1335,7 +1563,7 @@ mod tests {
         }
 
         #[test]
-        fn test_annotation_jump_off_screen_keeps_the_cursor_cell() {
+        fn test_annotation_jump_centers_the_cursor() {
             let dir = tempfile::tempdir().unwrap();
             let db_path = dir.path().join("graph.db");
             let block_group_id = chain_block_group(&db_path);
@@ -1369,8 +1597,47 @@ mod tests {
             assert_eq!(
                 cursor_cell(&controller),
                 before,
-                "the world should move under a cursor jumping off screen"
+                "every jump should center the cursor"
             );
+        }
+
+        #[test]
+        fn test_compact_annotation_jumps_and_end_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("graph.db");
+            let block_group_id = chain_block_group(&db_path);
+            let conn = get_connection(&db_path).unwrap();
+            let workspace = Workspace::from_current_dir();
+            let display = AnnotationDisplay::FlagsUnderNodes;
+            let mut terminal =
+                Terminal::new(TestBackend::new(20, 12)).expect("should create a test terminal");
+            let mut controller =
+                full_detail_chain(&conn, &workspace, &block_group_id, &mut terminal, display);
+            let chain = active_chain(&controller);
+            let (near, far) = (chain[1], chain[chain.len() - 3]);
+            annotate(&mut controller, &[near, far]);
+            draw(&mut controller, &mut terminal, display);
+            controller.zoom_out();
+            draw(&mut controller, &mut terminal, display);
+            assert_eq!(controller.detail_level(), VisualDetail::Truncated);
+            let press = |key| KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE);
+
+            for (key, target) in [
+                ('w', near),
+                ('w', far),
+                ('b', near),
+                ('e', near),
+                ('e', far),
+            ] {
+                assert_eq!(controller.handle_key(press(key)), GraphKeyOutcome::Redraw);
+                draw(&mut controller, &mut terminal, display);
+                assert_eq!(
+                    controller.view_state().cursor.node,
+                    Some(target),
+                    "jump {key}"
+                );
+                assert_eq!(cursor_cell(&controller), (10, 6));
+            }
         }
 
         /// Draw the graph into a buffer the way the notebook and R widgets do.

@@ -1,0 +1,17 @@
+---
+source: src/views/gen_graph_widget.rs
+expression: snapshot
+---
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"  ╟──AC..............TT.......T──AGT──╢                               "
+"     ═════forward════▶                                                "
+"      ◀reverse═       ═unknown═                                       "
+"                                                                      "
+"                                                                      "
+"                                                                      "
+"                                                                      "
