@@ -744,11 +744,12 @@ fn send_direct_push_request(
         }
         let content_type = response_content_type_label(response.headers());
         let protocol = http_version_label(response.version());
+        log::debug!(
+            "Direct GCS manifest publication returned HTTP {status}; response protocol {protocol}, content type {content_type}"
+        );
         return Err(RemoteClientError::Http {
             status,
-            message: format!(
-                "manifest publication request received {protocol}; response Content-Type: {content_type}"
-            ),
+            message: "direct GCS manifest publication failed".to_string(),
         });
     }
     Ok(())
@@ -2278,18 +2279,16 @@ mod tests {
                 "should identify the remote HTTP response for {body_type}: {rendered_error}"
             );
             assert!(
-                rendered_error.contains("manifest publication request received HTTP/1.1"),
-                "should identify the publication request protocol: {rendered_error}"
-            );
-            assert!(
-                rendered_error.contains(&format!("response Content-Type: {content_type}")),
-                "should classify the response content type: {rendered_error}"
+                rendered_error.contains("direct GCS manifest publication failed"),
+                "should identify the failing publication stage: {rendered_error}"
             );
             assert!(
                 !rendered_error.contains("publish-secret")
                     && !rendered_error.contains("response-body-canary")
-                    && !rendered_error.contains("private-canary"),
-                "should hide signed URLs, response bodies, and raw Content-Type values: {rendered_error}"
+                    && !rendered_error.contains("private-canary")
+                    && !rendered_error.contains("HTTP/1.1")
+                    && !rendered_error.contains(content_type),
+                "default errors should hide signed URLs, response bodies, and transport diagnostics: {rendered_error}"
             );
         }
     }
