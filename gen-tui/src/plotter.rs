@@ -17,7 +17,7 @@ use ratatui::{
 use crate::{
     geometry::{WorldPos, WorldRect},
     graph_widget::NODE_GLYPH,
-    layout::{JunctionSymbol, NodeRole},
+    layout::{JunctionSymbol, NodeRole, VerticalAnchor},
     theme::Theme,
     viewport_graph::ViewportGraph,
     viewport_state::WorldBuffer,
@@ -138,6 +138,12 @@ where
     /// Get the dimensions (width, height) for a node.
     fn get_node_size(&self, node: &G::NodeId) -> (u64, u64);
 
+    /// Row used for layout alignment and edge attachment. Top-anchored renderers draw their
+    /// sequence on the top row and grow decoration downward. Changes invalidate cached sizes.
+    fn vertical_anchor(&self, _node: &G::NodeId) -> VerticalAnchor {
+        VerticalAnchor::Center
+    }
+
     /// Map a raw node-local coordinate to a displayed column.
     fn map_column(&self, _node: &G::NodeId, raw: i64) -> i64 {
         raw
@@ -192,14 +198,14 @@ where
         WorldRect::from_coords(left, bottom, right, top)
     }
 
-    /// Whether `node` should sit at y = 0. Layout aligns centered nodes across layers while
+    /// Whether the attachment row of `node` should sit at y = 0. Layout aligns nodes across layers while
     /// preserving within-layer spacing and straight routing chains where feasible. A renderer
     /// marks e.g. the reference sequence so the main path reads as a straight line.
     fn is_centered(&self, _node: &G::NodeId) -> bool {
         false
     }
 
-    /// A counter that changes whenever `get_node_size` or `get_dummy_size` may answer
+    /// A counter that changes whenever `get_node_size`, `get_dummy_size`, or `vertical_anchor` may answer
     /// differently than before. Views reuse a window's routed geometry until it changes, so a
     /// renderer whose sizes depend on mutable state (e.g. annotation lanes under each node) must
     /// bump it on every real change; a renderer with fixed sizes keeps the default.
@@ -216,6 +222,10 @@ where
 {
     fn get_node_size(&self, node: &G::NodeId) -> (u64, u64) {
         (**self).get_node_size(node)
+    }
+
+    fn vertical_anchor(&self, node: &G::NodeId) -> VerticalAnchor {
+        (**self).vertical_anchor(node)
     }
 
     fn get_dummy_size(&self) -> (u64, u64) {
@@ -267,6 +277,10 @@ where
 {
     fn get_node_size(&self, node: &G::NodeId) -> (u64, u64) {
         (**self).get_node_size(node)
+    }
+
+    fn vertical_anchor(&self, node: &G::NodeId) -> VerticalAnchor {
+        (**self).vertical_anchor(node)
     }
 
     fn get_dummy_size(&self) -> (u64, u64) {
@@ -381,7 +395,7 @@ pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
         match &node.role {
             NodeRole::Data(domain_idx) => {
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
-                let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
+                let world_rect = node.vertical_anchor.rect(*world_pos, node.size);
                 renderer.render_node(buffer, world_rect, &node_id);
                 let content = renderer.content_rect(&node_id);
                 let content_rect = WorldRect::from_coords(
@@ -782,7 +796,10 @@ fn draw_arrows(
             let position = start + direction * (distance - traced_length);
             let inside_node = viewport_graph.nodes().any(|(center, node)| {
                 matches!(node.role, NodeRole::Data(_))
-                    && WorldRect::from_center_and_size(*center, node.size).contains(position)
+                    && node
+                        .vertical_anchor
+                        .rect(*center, node.size)
+                        .contains(position)
             });
             if !inside_node
                 && let Some((character, style)) = buffer.get_char_styled(position)

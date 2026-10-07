@@ -230,17 +230,12 @@ class TextGraphWidget:
 
             widget.show(matches[0].start())
 
-        When an annotation spans several sequence blocks, its pieces are joined
-        by dotted connectors at full detail. Only the most recently shown
-        annotation is connected; showing a locus or calling
-        ``clear_highlights()`` removes the connectors.
         """
         from gen import Annotation, Position, SuperPosition  # noqa: PLC0415
 
         if isinstance(target, Annotation):
             self._controller.go_to_annotation_obj(target, center)
             self._controller.highlight_annotation_obj(target, color)
-            self._controller.focus_annotation(target)
         elif isinstance(target, SuperPosition):
             self._controller.go_to_pos(target.positions[0], center)
         elif isinstance(target, Position):
@@ -248,7 +243,6 @@ class TextGraphWidget:
         else:
             self._controller.go_to_locus(target, center)
             self._controller.highlight_match(target, color)
-            self._controller.focus_annotation(None)
         self._render()
         return self
 

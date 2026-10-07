@@ -26,6 +26,6 @@ pub mod window_graph;
 
 pub use geometry::WorldPos;
 pub use graph_view::{GraphView, GraphViewState};
-pub use layout::{LayoutEdge, LayoutNode, NodeRole, VisualDetail};
+pub use layout::{LayoutEdge, LayoutNode, NodeRole, VerticalAnchor, VisualDetail};
 pub use plotter::{CursorColumns, LineStyle, PathStyle};
 pub use theme::{Theme, current_theme, set_theme};

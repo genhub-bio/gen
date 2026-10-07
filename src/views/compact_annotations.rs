@@ -1,4 +1,4 @@
-//! Endpoint-based annotation geometry for truncated graph detail.
+//! Shared annotation geometry with label-aware sequence compression for compact detail.
 
 use std::collections::HashMap;
 
@@ -12,8 +12,15 @@ use crate::views::gen_graph_widget::{
     ANNOTATION_BAR, ANNOTATION_FORWARD_CAP, ANNOTATION_REVERSE_CAP, AnnotationFlag,
 };
 
+#[derive(Clone, Copy)]
+pub(crate) enum AnnotationDetail {
+    Compact,
+    Full,
+}
+
+/// One arrow and its optional name, packed together in display coordinates.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CompactPiece {
+pub(crate) struct AnnotationPiece {
     pub id: HashId,
     pub piece: usize,
     pub color: Color,
@@ -26,24 +33,63 @@ pub(crate) struct CompactPiece {
     pub right_glyph: char,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct CompactNode {
-    pub events: Vec<i64>,
-    pub columns: Vec<i64>,
-    pub base_markers: Vec<i64>,
-    pub margin: i64,
-    pub width: i64,
-    pub height: usize,
-    pub pieces: Vec<CompactPiece>,
+impl AnnotationPiece {
+    pub fn new(flag: &AnnotationFlag, left: i64, right: i64, label: Option<String>) -> Self {
+        let width = label
+            .as_deref()
+            .map_or(0, |text| UnicodeWidthStr::width(text) as i64);
+        let label_left = label.is_some() && width > right - left - 1;
+        let (left_glyph, right_glyph) =
+            end_glyphs(flag.strand, flag.continues_left, flag.continues_right);
+        Self {
+            id: flag.id,
+            piece: flag.piece,
+            color: flag.color,
+            row: 0,
+            label_left,
+            left,
+            right,
+            label,
+            left_glyph,
+            right_glyph,
+        }
+    }
+
+    pub fn label_width(&self) -> i64 {
+        self.label
+            .as_deref()
+            .map_or(0, |text| UnicodeWidthStr::width(text) as i64)
+    }
 }
 
-impl CompactNode {
+/// Geometry shared by sequence painting, annotation painting, and cursor navigation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct NodeAnnotationLayout {
+    /// Retained node-local nucleotide offsets, in sequence order.
+    pub events: Vec<i64>,
+    /// Display columns corresponding to `events`, before horizontal padding.
+    pub columns: Vec<i64>,
+    pub base_markers: Vec<i64>,
+    /// Space before the sequence for labels that overhang to the left.
+    pub left_padding: i64,
+    pub width: i64,
+    /// Odd height with equal space above and below the sequence row for edge alignment.
+    pub height: usize,
+    pub pieces: Vec<AnnotationPiece>,
+}
+
+impl NodeAnnotationLayout {
     pub fn empty(length: i64) -> Self {
-        let mut events = sequence_anchors(length);
+        let mut events = if length <= 3 {
+            (0..length).collect()
+        } else {
+            vec![0, length - 1]
+        };
         events.sort_unstable();
+        let columns = compact_columns(&events);
         Self {
-            width: compact_columns(&events).last().copied().unwrap_or(0) + 1,
-            columns: compact_columns(&events),
+            width: columns.last().copied().unwrap_or(0) + 1,
+            columns,
             events,
             height: 1,
             ..Self::default()
@@ -64,7 +110,7 @@ impl CompactNode {
         } else {
             index
         };
-        self.margin + self.columns[nearest]
+        self.left_padding + self.columns[nearest]
     }
 
     pub fn raw_column(&self, column: i64) -> i64 {
@@ -73,12 +119,12 @@ impl CompactNode {
         }
         let index = self
             .columns
-            .partition_point(|value| *value < column - self.margin);
+            .partition_point(|value| *value < column - self.left_padding);
         self.events[index.min(self.events.len() - 1)]
     }
 }
 
-/// A skipped run always occupies one ellipsis cell, independent of annotation names.
+/// A skipped run occupies one period cell; retained nucleotides keep their own columns.
 fn compact_columns(events: &[i64]) -> Vec<i64> {
     let mut columns = Vec::with_capacity(events.len());
     let mut column = 0;
@@ -100,10 +146,31 @@ fn sequence_anchors(length: i64) -> Vec<i64> {
     }
 }
 
+/// Keep enough real bases at both ends to fit a requested label between the arrow caps.
+/// Short segments retain the compact fallback rather than inventing sequence columns.
+fn label_anchors(flag: &AnnotationFlag, label: &str) -> Vec<i64> {
+    let width = UnicodeWidthStr::width(label) as i64;
+    let required = width + 2;
+    let length = flag.bar_end - flag.bar_start;
+    if width == 0 || length < required {
+        return Vec::new();
+    }
+    let retained = if length > required {
+        required - 1
+    } else {
+        length
+    };
+    let left_count = (retained + 1) / 2;
+    let right_count = retained / 2;
+    (flag.bar_start..flag.bar_start + left_count)
+        .chain(flag.bar_end - right_count..flag.bar_end)
+        .collect()
+}
+
 fn end_glyphs(strand: Strand, continues_left: bool, continues_right: bool) -> (char, char) {
     match strand {
         Strand::Forward => (
-            ANNOTATION_BAR,
+            if continues_left { ANNOTATION_BAR } else { '[' },
             if continues_right {
                 ANNOTATION_BAR
             } else {
@@ -116,13 +183,16 @@ fn end_glyphs(strand: Strand, continues_left: bool, continues_right: bool) -> (c
             } else {
                 ANNOTATION_REVERSE_CAP
             },
-            ANNOTATION_BAR,
+            if continues_right { ANNOTATION_BAR } else { ']' },
         ),
-        _ => (ANNOTATION_BAR, ANNOTATION_BAR),
+        _ => (
+            if continues_left { ANNOTATION_BAR } else { '[' },
+            if continues_right { ANNOTATION_BAR } else { ']' },
+        ),
     }
 }
 
-/// Shorten at grapheme boundaries while counting terminal cells, including the ellipsis.
+/// Shorten at grapheme boundaries while counting terminal cells, including the period.
 fn short_name(name: &str, limit: usize) -> String {
     let width = UnicodeWidthStr::width(name);
     if width <= limit {
@@ -141,7 +211,7 @@ fn short_name(name: &str, limit: usize) -> String {
         result.push_str(grapheme);
         used += cells;
     }
-    result.push('…');
+    result.push('.');
     result
 }
 
@@ -149,9 +219,9 @@ pub(crate) fn label_start(left: i64, right: i64, width: i64) -> i64 {
     (left + right + 1 - width).div_euclid(2)
 }
 
-pub(crate) fn piece_label_start(piece: &CompactPiece, width: i64) -> i64 {
+pub(crate) fn piece_label_start(piece: &AnnotationPiece, width: i64) -> i64 {
     if piece.label_left {
-        piece.left - width - 1
+        piece.left - width
     } else {
         label_start(piece.left, piece.right, width)
     }
@@ -162,15 +232,13 @@ pub(crate) fn piece_label_start(piece: &CompactPiece, width: i64) -> i64 {
 pub(crate) fn build_layouts(
     flags_by_node: &HashMap<GraphNode, Vec<AnnotationFlag>>,
     name_limit: usize,
-) -> HashMap<GraphNode, CompactNode> {
-    build_layouts_for_detail(flags_by_node, name_limit, false)
+) -> HashMap<GraphNode, NodeAnnotationLayout> {
+    build_layouts_for_detail(flags_by_node, name_limit, AnnotationDetail::Compact)
 }
 
-pub(crate) fn build_layouts_for_detail(
+fn select_label_pieces(
     flags_by_node: &HashMap<GraphNode, Vec<AnnotationFlag>>,
-    name_limit: usize,
-    full: bool,
-) -> HashMap<GraphNode, CompactNode> {
+) -> HashMap<HashId, usize> {
     let mut pieces_by_annotation: HashMap<HashId, Vec<(usize, i64)>> = HashMap::new();
     for flags in flags_by_node.values() {
         for flag in flags {
@@ -180,7 +248,7 @@ pub(crate) fn build_layouts_for_detail(
                 .push((flag.piece, flag.bar_end - flag.bar_start));
         }
     }
-    let label_piece: HashMap<HashId, usize> = pieces_by_annotation
+    pieces_by_annotation
         .into_iter()
         .map(|(id, mut pieces)| {
             pieces.sort_unstable_by_key(|(piece, _)| *piece);
@@ -196,7 +264,16 @@ pub(crate) fn build_layouts_for_detail(
                 .expect("should have a label piece");
             (id, selected)
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn build_layouts_for_detail(
+    flags_by_node: &HashMap<GraphNode, Vec<AnnotationFlag>>,
+    name_limit: usize,
+    detail: AnnotationDetail,
+) -> HashMap<GraphNode, NodeAnnotationLayout> {
+    let full = matches!(detail, AnnotationDetail::Full);
+    let label_piece = select_label_pieces(flags_by_node);
     let mut nodes: Vec<_> = flags_by_node.iter().collect();
     nodes.sort_by_key(|(node, flags)| {
         (
@@ -211,6 +288,11 @@ pub(crate) fn build_layouts_for_detail(
     let mut preferred: HashMap<HashId, usize> = HashMap::new();
     let mut result = HashMap::new();
     for (node, flags) in nodes {
+        let mut labels: HashMap<_, _> = flags
+            .iter()
+            .filter(|flag| name_limit > 0 && label_piece.get(&flag.id) == Some(&flag.piece))
+            .map(|flag| ((flag.id, flag.piece), short_name(&flag.name, name_limit)))
+            .collect();
         let mut base_markers: Vec<i64> = flags
             .iter()
             .flat_map(|flag| {
@@ -225,6 +307,13 @@ pub(crate) fn build_layouts_for_detail(
         base_markers.dedup();
         // True annotation ends add ordered columns; continuation boundaries do not.
         let mut events = base_markers.clone();
+        if !full {
+            for flag in flags {
+                if let Some(label) = labels.get(&(flag.id, flag.piece)) {
+                    events.extend(label_anchors(flag, label));
+                }
+            }
+        }
         for anchor in sequence_anchors(node.length()) {
             if events.len() >= node.length().min(3) as usize {
                 break;
@@ -242,7 +331,7 @@ pub(crate) fn build_layouts_for_detail(
         };
         let mut ordered: Vec<_> = flags.iter().collect();
         ordered.sort_by_key(|flag| (flag.bar_start, flag.id, flag.piece));
-        let mut margin = 0;
+        let mut left_padding = 0;
         let mut pieces = Vec::with_capacity(flags.len());
         for flag in ordered {
             let left_event = if flag.continues_left {
@@ -263,58 +352,29 @@ pub(crate) fn build_layouts_for_detail(
                     .binary_search(&(flag.bar_end - 1))
                     .expect("should find end event")]
             };
-            let label = (label_piece.get(&flag.id) == Some(&flag.piece))
-                .then(|| short_name(&flag.name, name_limit));
-            let label_width = label
-                .as_deref()
-                .map_or(0, |text| UnicodeWidthStr::width(text) as i64);
-            let outside = label.is_some() && label_width > right_event - left_event - 1;
-            let label_left = outside;
-            if label_left {
-                margin = margin.max(label_width + 1 - left_event);
+            let label = labels.remove(&(flag.id, flag.piece));
+            let piece = AnnotationPiece::new(flag, left_event, right_event, label);
+            if piece.label_left {
+                left_padding = left_padding.max(piece.label_width() - left_event);
             }
-            let (left_glyph, right_glyph) =
-                end_glyphs(flag.strand, flag.continues_left, flag.continues_right);
-            pieces.push(CompactPiece {
-                id: flag.id,
-                piece: flag.piece,
-                color: flag.color,
-                row: 0,
-                label_left,
-                left: left_event,
-                right: right_event,
-                label,
-                left_glyph,
-                right_glyph,
-            });
+            pieces.push(piece);
         }
         let sequence_width = if full {
             node.length().max(1)
         } else {
             columns.last().copied().unwrap_or(0) + 1
         };
-        let right_overhang = pieces
-            .iter()
-            .map(|piece| {
-                piece.label.as_deref().map_or(0, |text| {
-                    let width = UnicodeWidthStr::width(text) as i64;
-                    (piece_label_start(piece, width) + width - sequence_width).max(0)
-                })
-            })
-            .max()
-            .unwrap_or(0);
-        margin = margin.max(right_overhang);
         for piece in &mut pieces {
-            piece.left += margin;
-            piece.right += margin;
+            piece.left += left_padding;
+            piece.right += left_padding;
         }
         let rows = pack_pieces(&mut pieces, &mut preferred);
         result.insert(
             *node,
-            CompactNode {
-                width: sequence_width + 2 * margin,
+            NodeAnnotationLayout {
+                width: sequence_width + left_padding,
                 height: 2 * rows + 1,
-                margin,
+                left_padding,
                 events,
                 columns,
                 base_markers,
@@ -328,15 +388,12 @@ pub(crate) fn build_layouts_for_detail(
 /// Pack an arrow and its name as one interval. Names that do not fit inside extend
 /// the interval to the left; sequence coordinates remain unchanged.
 pub(crate) fn pack_pieces(
-    pieces: &mut [CompactPiece],
+    pieces: &mut [AnnotationPiece],
     preferred: &mut HashMap<HashId, usize>,
 ) -> usize {
     let mut rows: Vec<Vec<(i64, i64)>> = Vec::new();
     for piece in pieces {
-        let width = piece
-            .label
-            .as_deref()
-            .map_or(0, |text| UnicodeWidthStr::width(text) as i64);
+        let width = piece.label_width();
         let interval = (
             piece.left.min(piece_label_start(piece, width)),
             piece.right + 1,
@@ -369,8 +426,8 @@ mod tests {
     use ratatui::style::Color;
 
     use super::{
-        CompactNode, build_layouts, build_layouts_for_detail, end_glyphs, label_start,
-        piece_label_start, short_name,
+        AnnotationDetail, NodeAnnotationLayout, build_layouts, build_layouts_for_detail,
+        end_glyphs, label_start, piece_label_start, short_name,
     };
     use crate::views::gen_graph_widget::{AnnotationFlag, LabelPlacement};
 
@@ -427,12 +484,12 @@ mod tests {
         assert!(layout.pieces[0].label.is_none());
         assert!(layout.pieces[1].label.is_some());
         assert_ne!(layout.pieces[0].row, layout.pieces[1].row);
-        assert_eq!(layout.map_column(3), layout.margin + 1);
+        assert_eq!(layout.map_column(3), layout.left_padding + 1);
         assert_eq!(layout.raw_column(layout.map_column(5)), 6);
     }
 
     #[test]
-    fn test_ellipsis_gap_allows_disjoint_units_to_share_rows() {
+    fn test_period_gap_allows_disjoint_units_to_share_rows() {
         let graph_node = node("adjacent labels");
         let flags = HashMap::from([(graph_node, vec![flag("A", 0, 2, 4), flag("B", 0, 5, 7)])]);
         let layout = &build_layouts(&flags, 10)[&graph_node];
@@ -445,7 +502,7 @@ mod tests {
         let graph_node = node("shared coordinate");
         let flags = HashMap::from([(graph_node, vec![flag("A", 0, 2, 4), flag("B", 0, 4, 7)])]);
         let layout = &build_layouts(&flags, 10)[&graph_node];
-        assert_eq!(layout.events, [2, 3, 4, 6]);
+        assert_eq!(layout.events, [2, 3, 4, 5, 6]);
         assert!(layout.pieces[0].right < layout.pieces[1].left);
         assert_eq!(layout.height, 5);
     }
@@ -464,7 +521,7 @@ mod tests {
             .unwrap();
         assert_eq!(one.right, one.left);
         assert!(one.label_left);
-        assert_eq!((one.left_glyph, one.right_glyph), ('═', '▶'));
+        assert_eq!((one.left_glyph, one.right_glyph), ('[', '>'));
         let continued = layout
             .pieces
             .iter()
@@ -635,8 +692,8 @@ mod tests {
         assert!(layouts[&middle].base_markers.is_empty());
         let labeled = &layouts[&middle].pieces[0];
         let name_start = label_start(labeled.left, labeled.right, 4);
-        assert!(labeled.label_left);
-        assert_eq!(name_start, labeled.left);
+        assert!(!labeled.label_left);
+        assert_eq!(name_start, labeled.left + 1);
         assert_eq!(layouts[&last].pieces[0].label, None);
         assert_eq!(layouts[&last].base_markers, [7]);
     }
@@ -659,18 +716,19 @@ mod tests {
     }
 
     #[test]
-    fn test_labels_add_symmetric_padding_without_stretching_sequence_columns() {
+    fn test_labels_add_only_left_padding_without_stretching_sequence_columns() {
         let graph_node = GraphNode {
             sequence_end: 4,
             ..node("short sequence")
         };
         let flags = HashMap::from([(graph_node, vec![flag("long feature name", 0, 0, 4)])]);
-        for full in [false, true] {
-            let layout = &build_layouts_for_detail(&flags, usize::MAX, full)[&graph_node];
+        for detail in [AnnotationDetail::Compact, AnnotationDetail::Full] {
+            let layout = &build_layouts_for_detail(&flags, usize::MAX, detail)[&graph_node];
             let piece = &layout.pieces[0];
             assert!(piece.label_left);
-            assert_eq!(piece.left, layout.margin);
-            assert_eq!(piece.right, layout.width - layout.margin - 1);
+            assert_eq!(piece.left, layout.left_padding);
+            assert_eq!(piece.right, layout.width - 1);
+            assert_eq!(layout.width, 4 + layout.left_padding);
             assert_eq!(layout.columns, vec![0, 2, 3]);
             for raw in &layout.events {
                 assert_eq!(layout.raw_column(layout.map_column(*raw)), *raw);
@@ -683,11 +741,55 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_label_retains_balanced_endpoint_bases_and_one_period() {
+        let graph_node = node("label-sized compression");
+        let flags = HashMap::from([(graph_node, vec![flag("feature", 0, 0, 20)])]);
+        let layout = &build_layouts(&flags, usize::MAX)[&graph_node];
+        assert_eq!(layout.events, [0, 1, 2, 3, 16, 17, 18, 19]);
+        assert_eq!(layout.columns, [0, 1, 2, 3, 5, 6, 7, 8]);
+        assert_eq!(layout.width, 9);
+        assert_eq!(layout.left_padding, 0);
+        assert!(!layout.pieces[0].label_left);
+        assert_eq!(layout.height, 3);
+        for raw in &layout.events {
+            assert_eq!(layout.raw_column(layout.map_column(*raw)), *raw);
+        }
+    }
+
+    #[test]
+    fn test_compact_label_at_sequence_capacity_shows_every_base() {
+        let graph_node = GraphNode {
+            sequence_end: 9,
+            ..node("exact label capacity")
+        };
+        let flags = HashMap::from([(graph_node, vec![flag("feature", 0, 0, 9)])]);
+        let layout = &build_layouts(&flags, usize::MAX)[&graph_node];
+        assert_eq!(layout.events, (0..9).collect::<Vec<_>>());
+        assert_eq!(layout.width, 9);
+        assert!(!layout.pieces[0].label_left);
+    }
+
+    #[test]
+    fn test_compact_compression_uses_terminal_width_and_requested_name_limit() {
+        let graph_node = node("unicode label compression");
+        let flags = HashMap::from([(graph_node, vec![flag("漢字abc", 0, 0, 20)])]);
+        let layouts = build_layouts(&flags, usize::MAX);
+        assert_eq!(layouts[&graph_node].width, 9);
+        let layouts = build_layouts(&flags, 4);
+        assert_eq!(layouts[&graph_node].pieces[0].label.as_deref(), Some("漢."));
+        assert_eq!(layouts[&graph_node].width, 5);
+        let layouts = build_layouts(&flags, 0);
+        assert_eq!(layouts[&graph_node].events, [0, 10, 19]);
+        assert!(layouts[&graph_node].pieces[0].label.is_none());
+        assert_eq!(layouts[&graph_node].left_padding, 0);
+    }
+
+    #[test]
     fn test_left_placement_uses_existing_sequence_space_without_padding() {
         let graph_node = node("existing label space");
         let flags = HashMap::from([(graph_node, vec![flag("a", 0, 0, 20), flag("x", 0, 10, 11)])]);
-        for full in [false, true] {
-            let layouts = build_layouts_for_detail(&flags, usize::MAX, full);
+        for detail in [AnnotationDetail::Compact, AnnotationDetail::Full] {
+            let layouts = build_layouts_for_detail(&flags, usize::MAX, detail);
             let layout = &layouts[&graph_node];
             let piece = layout
                 .pieces
@@ -695,8 +797,8 @@ mod tests {
                 .find(|piece| piece.label.as_deref() == Some("x"))
                 .expect("should carry x label");
             assert!(piece.label_left);
-            assert_eq!(layout.margin, 0);
-            assert_eq!(piece_label_start(piece, 1), piece.left - 2);
+            assert_eq!(layout.left_padding, 0);
+            assert_eq!(piece_label_start(piece, 1), piece.left - 1);
         }
     }
 
@@ -710,7 +812,7 @@ mod tests {
                 flag("second long feature", 0, 5, 7),
             ],
         )]);
-        let layouts = build_layouts_for_detail(&flags, usize::MAX, true);
+        let layouts = build_layouts_for_detail(&flags, usize::MAX, AnnotationDetail::Full);
         let pieces = &layouts[&graph_node].pieces;
         assert!(pieces.iter().all(|piece| piece.label_left));
         assert_ne!(pieces[0].row, pieces[1].row);
@@ -719,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_empty_node_has_single_cell() {
-        let empty = CompactNode::empty(0);
+        let empty = NodeAnnotationLayout::empty(0);
         assert_eq!((empty.width, empty.height), (1, 1));
         assert!(empty.pieces.is_empty());
         assert_eq!(empty.map_column(17), 0);
@@ -754,20 +856,28 @@ mod tests {
     }
 
     #[test]
+    fn test_unannotated_long_node_retains_only_endpoints() {
+        let layout = NodeAnnotationLayout::empty(20);
+        assert_eq!(layout.events, [0, 19]);
+        assert_eq!(layout.columns, [0, 2]);
+        assert_eq!(layout.width, 3);
+    }
+
+    #[test]
     fn test_end_glyph_table() {
-        assert_eq!(end_glyphs(Strand::Forward, false, false), ('═', '▶'));
-        assert_eq!(end_glyphs(Strand::Forward, true, false), ('═', '▶'));
-        assert_eq!(end_glyphs(Strand::Forward, false, true), ('═', '═'));
-        assert_eq!(end_glyphs(Strand::Reverse, false, false), ('◀', '═'));
-        assert_eq!(end_glyphs(Strand::Reverse, false, true), ('◀', '═'));
-        assert_eq!(end_glyphs(Strand::Reverse, true, false), ('═', '═'));
-        assert_eq!(end_glyphs(Strand::Unknown, false, false), ('═', '═'));
+        assert_eq!(end_glyphs(Strand::Forward, false, false), ('[', '>'));
+        assert_eq!(end_glyphs(Strand::Forward, true, false), ('═', '>'));
+        assert_eq!(end_glyphs(Strand::Forward, false, true), ('[', '═'));
+        assert_eq!(end_glyphs(Strand::Reverse, false, false), ('<', ']'));
+        assert_eq!(end_glyphs(Strand::Reverse, false, true), ('<', '═'));
+        assert_eq!(end_glyphs(Strand::Reverse, true, false), ('═', ']'));
+        assert_eq!(end_glyphs(Strand::Unknown, false, false), ('[', ']'));
     }
 
     #[test]
     fn test_unicode_name_limit() {
-        assert_eq!(short_name("abcdefghijk", 10), "abcdefghi…");
-        assert_eq!(short_name("e\u{301}e\u{301}e\u{301}", 2), "e\u{301}…");
-        assert_eq!(short_name("漢字abc", 4), "漢…");
+        assert_eq!(short_name("abcdefghijk", 10), "abcdefghi.");
+        assert_eq!(short_name("e\u{301}e\u{301}e\u{301}", 2), "e\u{301}.");
+        assert_eq!(short_name("漢字abc", 4), "漢.");
     }
 }

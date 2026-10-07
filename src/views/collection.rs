@@ -1083,13 +1083,17 @@ mod tests {
         let mut state = CollectionExplorerState::new();
 
         assert_eq!(
-            state.sync_annotation_files(&[first.clone()]),
+            state.sync_annotation_files(std::slice::from_ref(&first)),
             vec![first.file_addition.id]
         );
         assert!(state.is_annotation_file_active(&first.file_addition.id));
 
         state.toggle_annotation_file(first.file_addition.id);
-        assert!(state.sync_annotation_files(&[first.clone()]).is_empty());
+        assert!(
+            state
+                .sync_annotation_files(std::slice::from_ref(&first))
+                .is_empty()
+        );
         assert!(!state.is_annotation_file_active(&first.file_addition.id));
 
         assert_eq!(

@@ -1,6 +1,6 @@
 ---
 name: gen-genetic-engineering-python
-description: Use the Gen Python bindings (import gen) to edit sequences, query and visualize sequence graphs, import/export files, run combinatorial libraries, manage branches, and clone or sync repositories. Use Gen's own editing methods instead of sed, Biopython or string slicing.
+description: Use the Gen Python bindings (import gen) to edit sequences, query and visualize sequence graphs, import/export files, run combinatorial libraries, manage branches, and clone or sync repositories. Use Gen's own editing methods instead of sed, Biopython or string slicing. Compact graph views mark skipped sequence with single periods, show bracket annotation tails.
 ---
 
 # Gen (Python)
@@ -98,3 +98,7 @@ after graph edits.
 - Use the CLI only for patches and operation diffs, which have no Python binding.
 - Gen exposes sequence context; primer thermodynamics, specificity and functional predictions
   need domain tools.
+
+## Graph display
+
+Compact nodes use a single period for each skipped sequence run; unannotated long nodes show their two endpoint bases as `N.N`. Annotation tails use `[` or `]`, directed heads use `<` or `>`, and undirected annotations use brackets at both ends. Known current paths align the top sequence row, with annotations growing downward.

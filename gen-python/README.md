@@ -215,18 +215,27 @@ inserted = sequence.replace(annotation, "ACGT")
 sequence.add_annotation(inserted, "mutation")
 ```
 At full detail, the widget uses the CLI's annotation display: packed directional
-bars beneath nodes. `widget.show(annotation)` also joins the fragments of that one
-annotation with a dotted Braille curve; showing another annotation moves the curve to it,
-and `widget.clear_highlights()` removes it.
+bars beneath nodes. `widget.show(annotation)` navigates to and highlights that annotation.
 Both full and compact detail center annotation names inside their arrows when they fit
-between the endpoint glyphs, or one cell to the left otherwise. Arrows and names
-move together when packed into rows. Nodes reserve transparent horizontal and vertical padding as
-needed; labels never stretch the sequence or use floating placement. Annotation colors
-apply to bars, connectors, and labels; sequence characters keep their normal colors.
+between the endpoint glyphs, or immediately to the left otherwise. Arrows and names
+move together when packed into rows. Nodes reserve transparent horizontal padding where
+labels overhang. When the graph has a current path, nodes align on their top sequence
+row and annotations grow downward, without blank padding above. Graphs without a path
+retain symmetric vertical padding and centered edge connections. This path-aware layout
+is the default; `plot(center_reference=False)` restores the centered layout.
+Labels never stretch the sequence or use floating placement. Annotation colors
+apply to bars and labels; sequence characters keep their normal colors.
 
-Compact detail replaces skipped sequence runs with an ellipsis (`…`) while retaining
-distinct annotation endpoint columns. These ellipses do not expand with label length. Full detail shows every nucleotide. In both views, arrow endpoints align with
-the corresponding displayed bases, and horizontal padding centers the sequence.
+Compact detail retains enough nucleotides at each end of a labeled annotation segment
+to fit its name between the arrow caps, with one period (`.`) for the skipped middle.
+If the sequence is too short for the name, the label goes to the left. Other annotation
+endpoints remain visible even inside a skipped middle. Each period occupies one cell;
+it never expands with label length. Full detail shows every nucleotide. In both views,
+annotation tails use brackets (`[` or `]`), directed heads use `<` or `>`, and
+undirected annotations use brackets at both ends. Unannotated long nodes retain only
+their two endpoint bases (`N.N`). Annotation endpoints align with the corresponding
+displayed bases, and the cursor visits only displayed nucleotides, skipping periods
+and padding.
 
 ## Annotation files
 

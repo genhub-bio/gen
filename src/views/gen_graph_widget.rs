@@ -15,7 +15,7 @@ use gen_tui::{
     geometry::{WorldPos, WorldRect, floor_half},
     graph_view::GraphViewState,
     graph_widget::NODE_GLYPH,
-    layout::VisualDetail,
+    layout::{VerticalAnchor, VisualDetail},
     layout_engine::{BatchId, LayoutEngine},
     plotter::{CursorColumns, NodeRenderer, PathStyle},
     theme::current_theme,
@@ -35,8 +35,8 @@ use crate::{
             span_covered_by_later, span_label_text,
         },
         compact_annotations::{
-            CompactNode, CompactPiece, build_layouts, build_layouts_for_detail, pack_pieces,
-            piece_label_start,
+            AnnotationDetail, AnnotationPiece, NodeAnnotationLayout, build_layouts,
+            build_layouts_for_detail, pack_pieces, piece_label_start,
         },
         graph_dimming::GraphDimming,
         graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership},
@@ -262,6 +262,14 @@ impl CenteredPath {
         copy
     }
 
+    fn vertical_anchor(&self) -> VerticalAnchor {
+        if self.lock().is_some() {
+            VerticalAnchor::Top
+        } else {
+            VerticalAnchor::Center
+        }
+    }
+
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
@@ -292,6 +300,10 @@ where
 {
     fn get_node_size(&self, node: &GraphNode) -> (u64, u64) {
         self.inner.get_node_size(node)
+    }
+
+    fn vertical_anchor(&self, node: &GraphNode) -> VerticalAnchor {
+        self.inner.vertical_anchor(node)
     }
 
     fn get_dummy_size(&self) -> (u64, u64) {
@@ -505,27 +517,27 @@ impl SequenceSource for PathSequenceSource {
 }
 
 /// Fetch a node's sequence through `source`, caching the result in `cache`. Shared by
-/// [`GenGraphTruncatedRenderer`] and [`GenGraphFullRenderer`] - the only two levels that
-/// need genomic sequence data at all.
+/// the full and compact renderers. Cached strings are shared so repainting a genome-length
+/// node does not copy its sequence.
 fn fetch_cached_sequence<S: SequenceSource>(
     source: &S,
-    cache: &Mutex<HashMap<GraphNode, String>>,
+    cache: &Mutex<HashMap<GraphNode, Arc<str>>>,
     node_key: &GraphNode,
-) -> Result<String, SequenceError> {
+) -> Result<Arc<str>, SequenceError> {
     let mut cache = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(cached) = cache.get(node_key) {
-        return Ok(cached.clone());
+        return Ok(Arc::clone(cached));
     }
 
-    let sequence = source.get_node_sequence(
+    let sequence = Arc::<str>::from(source.get_node_sequence(
         node_key.node_id,
         node_key.sequence_start,
         node_key.sequence_end,
-    )?;
+    )?);
 
-    cache.insert(*node_key, sequence.clone());
+    cache.insert(*node_key, Arc::clone(&sequence));
     Ok(sequence)
 }
 
@@ -598,7 +610,7 @@ impl NodeRenderer<GenGraph> for GenGraphMinimalRenderer {
 /// the older sequence preview.
 pub struct GenGraphTruncatedRenderer<S> {
     source: S,
-    cache: Mutex<HashMap<GraphNode, String>>,
+    cache: Mutex<HashMap<GraphNode, Arc<str>>>,
     layer: Option<NodeAnnotationLayer>,
 }
 
@@ -625,11 +637,17 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
         start_end_node_size(node).unwrap_or_else(|| {
             if let Some(layer) = &self.layer {
                 let layout = layer.compact(node);
-                (layout.width as u64, layout.height as u64)
+                (layout.width as u64, layer.rendered_height(layout.height))
             } else {
                 (node.length().min(13) as u64, 1)
             }
         })
+    }
+
+    fn vertical_anchor(&self, _node: &GraphNode) -> VerticalAnchor {
+        self.layer
+            .as_ref()
+            .map_or(VerticalAnchor::Center, NodeAnnotationLayer::vertical_anchor)
     }
 
     fn size_generation(&self) -> u64 {
@@ -658,14 +676,18 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
                 layout
                     .columns
                     .iter()
-                    .map(|column| layout.margin + column)
+                    .map(|column| layout.left_padding + column)
                     .collect(),
             )
         })
     }
 
     fn cursor_row(&self, node: &GraphNode) -> Option<u64> {
-        Some(floor_half(self.get_node_size(node).1 as i64) as u64)
+        let height = self.get_node_size(node).1;
+        Some(match self.vertical_anchor(node) {
+            VerticalAnchor::Center => floor_half(height as i64) as u64,
+            VerticalAnchor::Top => height.saturating_sub(1),
+        })
     }
 
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) {
@@ -676,41 +698,32 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
         }
         let Some(layer) = &self.layer else {
             let sequence = fetch_cached_sequence(&self.source, &self.cache, node_id)
-                .unwrap_or_else(|_| "Unknown Sequence".to_string());
+                .unwrap_or_else(|_| Arc::from("Unknown Sequence"));
             let truncated = inner_truncation(&sequence, 13);
             buffer.set_string_styled(area.left_center(), &truncated, body_style);
             return;
         };
         let layout = layer.compact(node_id);
-        let node_row = sequence_row(area);
+        let node_row = layer.sequence_row(area);
+        let sequence_start = area.min.x + layout.left_padding;
+        let sequence_end = sequence_start + layout.columns.last().copied().unwrap_or(0);
         let sequence = fetch_cached_sequence(&self.source, &self.cache, node_id).ok();
-        // Match full-detail sequence styling only on the center row. Annotation lanes keep
-        // the graph background so they do not look like additional sequence rows.
-        buffer.fill_rect_styled(
-            WorldRect::from_coords(
-                area.min.x + layout.margin,
-                node_row,
-                area.max.x - layout.margin,
-                node_row,
-            ),
-            ' ',
-            Style::default().bg(theme[0x05]),
-        );
-        for column in area.min.x + layout.margin..=area.max.x - layout.margin {
-            buffer.set_char_styled(WorldPos::new(column, node_row), '…', body_style);
+        // Only sequence cells receive a background; padding leaves underlying edges visible.
+        for column in sequence_start..=sequence_end {
+            buffer.set_char_styled(WorldPos::new(column, node_row), '.', body_style);
         }
+        let mut bases = sequence.as_deref().unwrap_or_default().chars();
+        let mut next_raw = 0;
         for (raw, column) in layout.events.iter().zip(&layout.columns) {
-            let base = sequence
-                .as_ref()
-                .and_then(|sequence| sequence.chars().nth(*raw as usize))
-                .unwrap_or('.');
+            let base = bases.nth((*raw - next_raw) as usize).unwrap_or('.');
+            next_raw = raw + 1;
             buffer.set_char_styled(
-                WorldPos::new(area.min.x + layout.margin + column, node_row),
+                WorldPos::new(area.min.x + layout.left_padding + column, node_row),
                 base,
                 body_style,
             );
         }
-        render_annotation_pieces(buffer, area, &layout);
+        render_annotation_pieces(buffer, area, &layout, node_row);
     }
 
     fn is_visible(&self, node: &GraphNode) -> bool {
@@ -718,9 +731,13 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
     }
 }
 
-fn render_annotation_pieces(buffer: &mut WorldBuffer, area: WorldRect, layout: &CompactNode) {
+fn render_annotation_pieces(
+    buffer: &mut WorldBuffer,
+    area: WorldRect,
+    layout: &NodeAnnotationLayout,
+    node_row: i64,
+) {
     let theme = current_theme();
-    let node_row = sequence_row(area);
     for piece in &layout.pieces {
         let row = node_row - 1 - piece.row as i64;
         let style = Style::default().fg(piece.color).bg(theme[0x00]);
@@ -741,7 +758,7 @@ fn render_annotation_pieces(buffer: &mut WorldBuffer, area: WorldRect, layout: &
             buffer.set_char_styled(WorldPos::new(area.min.x + column, row), glyph, style);
         }
         if let Some(label) = &piece.label {
-            let width = unicode_width::UnicodeWidthStr::width(label.as_str()) as i64;
+            let width = piece.label_width();
             buffer.set_graphemes_styled(
                 WorldPos::new(area.min.x + piece_label_start(piece, width), row),
                 label,
@@ -755,7 +772,7 @@ fn render_annotation_pieces(buffer: &mut WorldBuffer, area: WorldRect, layout: &
 /// sequence (clipped only by the viewport, not truncated).
 pub struct GenGraphFullRenderer<S> {
     source: S,
-    cache: Mutex<HashMap<GraphNode, String>>,
+    cache: Mutex<HashMap<GraphNode, Arc<str>>>,
 }
 
 impl<S: SequenceSource> GenGraphFullRenderer<S> {
@@ -784,7 +801,7 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphFullRenderer<S> {
             return;
         }
         let sequence = fetch_cached_sequence(&self.source, &self.cache, node_id)
-            .unwrap_or_else(|_| "Unknown Sequence".to_string());
+            .unwrap_or_else(|_| Arc::from("Unknown Sequence"));
         buffer.set_string_styled(area.left_center(), &sequence, text_style);
     }
 
@@ -799,7 +816,7 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphFullRenderer<S> {
 pub enum LabelPlacement {
     /// Inside the bar, breaking the line but never covering the bar's first or last cell.
     Inside,
-    /// One cell to the left of the bar, starting at this node-local column.
+    /// Immediately to the left of the bar, starting at this node-local column.
     Beside(i64),
 }
 
@@ -831,49 +848,32 @@ pub struct AnnotationFlag {
     pub lane: usize,
 }
 
-impl AnnotationFlag {
-    fn label_width(&self) -> i64 {
-        if self.show_label {
-            unicode_width::UnicodeWidthStr::width(self.name.as_str()) as i64
-        } else {
-            0
-        }
-    }
-}
-
 /// Flags are drawn as a double line so they cannot be mistaken for a graph edge (single
-/// line) or a node (solid block), capped with a triangle on the feature's directional end.
+/// line) or a node (solid block), capped with `<` or `>` on the feature's directional end.
 pub(crate) const ANNOTATION_BAR: char = '═';
-pub(crate) const ANNOTATION_FORWARD_CAP: char = '▶';
-pub(crate) const ANNOTATION_REVERSE_CAP: char = '◀';
+pub(crate) const ANNOTATION_FORWARD_CAP: char = '>';
+pub(crate) const ANNOTATION_REVERSE_CAP: char = '<';
 
 /// Pack arrows and labels as rigid units. Names use the arrow interior when they fit,
-/// otherwise they sit one cell to its left. The returned height counts occupied rows.
+/// otherwise they sit immediately to its left. The returned height counts occupied rows.
 pub fn pack_annotation_flags(flags: &mut [AnnotationFlag], _node_width: i64) -> usize {
     flags.sort_by_key(|flag| (flag.bar_start, flag.id, flag.piece));
     let mut pieces: Vec<_> = flags
         .iter()
         .map(|flag| {
-            let width = flag.label_width();
-            CompactPiece {
-                id: flag.id,
-                piece: flag.piece,
-                color: flag.color,
-                row: 0,
-                left: flag.bar_start,
-                right: flag.bar_end - 1,
-                label: flag.show_label.then(|| flag.name.clone()),
-                label_left: flag.show_label && width > flag.bar_end - flag.bar_start - 2,
-                left_glyph: ANNOTATION_BAR,
-                right_glyph: ANNOTATION_BAR,
-            }
+            AnnotationPiece::new(
+                flag,
+                flag.bar_start,
+                flag.bar_end - 1,
+                flag.show_label.then(|| flag.name.clone()),
+            )
         })
         .collect();
     let rows = pack_pieces(&mut pieces, &mut HashMap::new());
     for (flag, piece) in flags.iter_mut().zip(pieces) {
         flag.lane = piece.row;
         flag.label = if piece.label_left {
-            LabelPlacement::Beside(piece_label_start(&piece, flag.label_width()))
+            LabelPlacement::Beside(piece_label_start(&piece, piece.label_width()))
         } else {
             LabelPlacement::Inside
         };
@@ -883,10 +883,10 @@ pub fn pack_annotation_flags(flags: &mut [AnnotationFlag], _node_width: i64) -> 
 
 #[derive(Clone, Debug, Default)]
 struct PackedAnnotations {
+    // Keep source names intact so changing the name limit can rebuild both layouts.
     flags: Vec<AnnotationFlag>,
-    lanes: usize,
-    compact: CompactNode,
-    full: CompactNode,
+    compact: Arc<NodeAnnotationLayout>,
+    full: Arc<NodeAnnotationLayout>,
 }
 
 /// The per-node annotation flags a [`GenGraphAnnotatedRenderer`] draws, shared between the
@@ -899,6 +899,7 @@ pub struct NodeAnnotationLayer {
     /// Bumped when full-detail lanes or compact dimensions change, so views re-route.
     size_generation: Arc<AtomicU64>,
     name_limit: Arc<AtomicUsize>,
+    centered_path: CenteredPath,
 }
 
 impl Default for NodeAnnotationLayer {
@@ -907,6 +908,7 @@ impl Default for NodeAnnotationLayer {
             packed: Arc::new(Mutex::new(HashMap::new())),
             size_generation: Arc::new(AtomicU64::new(0)),
             name_limit: Arc::new(AtomicUsize::new(usize::MAX)),
+            centered_path: CenteredPath::new(),
         }
     }
 }
@@ -914,6 +916,32 @@ impl Default for NodeAnnotationLayer {
 impl NodeAnnotationLayer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Share the viewer's path selection so annotation geometry changes with its layout mode.
+    pub fn with_centered_path(centered_path: CenteredPath) -> Self {
+        Self {
+            centered_path,
+            ..Self::default()
+        }
+    }
+
+    fn vertical_anchor(&self) -> VerticalAnchor {
+        self.centered_path.vertical_anchor()
+    }
+
+    fn rendered_height(&self, centered_height: usize) -> u64 {
+        match self.vertical_anchor() {
+            VerticalAnchor::Center => centered_height as u64,
+            VerticalAnchor::Top => centered_height.div_ceil(2) as u64,
+        }
+    }
+
+    fn sequence_row(&self, area: WorldRect) -> i64 {
+        match self.vertical_anchor() {
+            VerticalAnchor::Center => sequence_row(area),
+            VerticalAnchor::Top => area.max.y,
+        }
     }
 
     /// Set the maximum terminal cells in annotation names at both detail levels.
@@ -929,21 +957,23 @@ impl NodeAnnotationLayer {
         }
     }
 
-    fn compact(&self, node: &GraphNode) -> CompactNode {
+    fn compact(&self, node: &GraphNode) -> Arc<NodeAnnotationLayout> {
         self.lock().get(node).map_or_else(
-            || CompactNode::empty(node.length()),
-            |packed| packed.compact.clone(),
+            || Arc::new(NodeAnnotationLayout::empty(node.length())),
+            |packed| Arc::clone(&packed.compact),
         )
     }
 
-    fn full(&self, node: &GraphNode) -> CompactNode {
+    fn full(&self, node: &GraphNode) -> Arc<NodeAnnotationLayout> {
         self.lock().get(node).map_or_else(
-            || CompactNode {
-                width: node.length(),
-                height: 1,
-                ..CompactNode::default()
+            || {
+                Arc::new(NodeAnnotationLayout {
+                    width: node.length(),
+                    height: 1,
+                    ..NodeAnnotationLayout::default()
+                })
             },
-            |packed| packed.full.clone(),
+            |packed| Arc::clone(&packed.full),
         )
     }
 
@@ -955,40 +985,24 @@ impl NodeAnnotationLayer {
     /// Pack `flags` per node and make them the layer's contents.
     pub fn replace(&self, flags_by_node: HashMap<GraphNode, Vec<AnnotationFlag>>) {
         let name_limit = self.name_limit.load(Ordering::Relaxed);
-        let mut full = build_layouts_for_detail(&flags_by_node, name_limit, true);
+        let mut full = build_layouts_for_detail(&flags_by_node, name_limit, AnnotationDetail::Full);
         let mut compact = build_layouts(&flags_by_node, name_limit);
         let packed: HashMap<GraphNode, PackedAnnotations> = flags_by_node
             .into_iter()
-            .map(|(node, mut flags)| {
+            .map(|(node, flags)| {
                 let full_layout = full
                     .remove(&node)
                     .expect("should have full annotation layout");
-                for flag in &mut flags {
-                    let piece = full_layout
-                        .pieces
-                        .iter()
-                        .find(|piece| piece.id == flag.id && piece.piece == flag.piece)
-                        .expect("should have annotation piece");
-                    flag.lane = piece.row;
-                    flag.show_label = piece.label.is_some();
-                    flag.label = if piece.label_left {
-                        LabelPlacement::Beside(
-                            piece_label_start(piece, flag.label_width()) - full_layout.margin,
-                        )
-                    } else {
-                        LabelPlacement::Inside
-                    };
-                }
-                let lanes = (full_layout.height - 1) / 2;
                 (
                     node,
                     PackedAnnotations {
                         flags,
-                        lanes,
-                        full: full_layout,
-                        compact: compact
-                            .remove(&node)
-                            .unwrap_or_else(|| CompactNode::empty(node.length())),
+                        full: Arc::new(full_layout),
+                        compact: Arc::new(
+                            compact
+                                .remove(&node)
+                                .expect("should have compact annotation layout"),
+                        ),
                     },
                 )
             })
@@ -1017,31 +1031,14 @@ impl NodeAnnotationLayer {
     /// Changes when a node's full-detail lanes or compact dimensions change. See
     /// [`NodeRenderer::size_generation`].
     pub fn size_generation(&self) -> u64 {
-        self.size_generation.load(Ordering::Relaxed)
+        self.size_generation.load(Ordering::Relaxed) + self.centered_path.generation()
     }
 
     /// Rows of annotation lanes `node` needs under its sequence.
     pub fn lanes(&self, node: &GraphNode) -> usize {
-        self.lock().get(node).map_or(0, |packed| packed.lanes)
-    }
-
-    /// Every flag, grouped by annotation and ordered by piece, with the node each is on.
-    fn pieces(&self) -> Vec<Vec<(GraphNode, AnnotationFlag)>> {
-        let mut by_id: HashMap<HashId, Vec<(GraphNode, AnnotationFlag)>> = HashMap::new();
-        for (node, packed) in self.lock().iter() {
-            for flag in &packed.flags {
-                by_id
-                    .entry(flag.id)
-                    .or_default()
-                    .push((*node, flag.clone()));
-            }
-        }
-        let mut pieces: Vec<_> = by_id.into_values().collect();
-        for span in &mut pieces {
-            span.sort_by_key(|(_, flag)| flag.piece);
-        }
-        pieces.sort_by_key(|span| span[0].1.id);
-        pieces
+        self.lock()
+            .get(node)
+            .map_or(0, |packed| (packed.full.height - 1) / 2)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<GraphNode, PackedAnnotations>> {
@@ -1218,228 +1215,15 @@ fn annotation_flags_by_node<S: GraphSource<GenGraph>>(
     flags_by_node
 }
 
-/// Braille dot bit for a dot at sub-cell `(column, row)` of a 2×4 braille cell.
-const fn braille_bit(column: i64, row: i64) -> u32 {
-    match (column, row) {
-        (0, 0) => 0x01,
-        (0, 1) => 0x02,
-        (0, 2) => 0x04,
-        (0, 3) => 0x40,
-        (1, 0) => 0x08,
-        (1, 1) => 0x10,
-        (1, 2) => 0x20,
-        _ => 0x80,
-    }
+/// Use the renderer's recorded sequence row for overlays in either anchoring mode.
+fn placed_sequence_row(frame: &FrameIndex<GraphNode>, node: GraphNode, rect: WorldRect) -> i64 {
+    frame
+        .cursor_row(node)
+        .map_or_else(|| sequence_row(rect), |row| rect.min.y + row as i64)
 }
 
-/// Visit a thin, eight-connected line, including both endpoints, without supercover dots.
-fn rasterize_braille_line(from: (i64, i64), to: (i64, i64), visit: &mut impl FnMut((i64, i64))) {
-    let (mut x, mut y) = from;
-    let delta_x = (to.0 - x).abs();
-    let delta_y = -(to.1 - y).abs();
-    let step_x = (to.0 - x).signum();
-    let step_y = (to.1 - y).signum();
-    let mut error = delta_x + delta_y;
-    loop {
-        visit((x, y));
-        if (x, y) == to {
-            break;
-        }
-        let twice_error = 2 * error;
-        if twice_error >= delta_y {
-            error += delta_y;
-            x += step_x;
-        }
-        if twice_error <= delta_x {
-            error += delta_x;
-            y += step_y;
-        }
-    }
-}
-
-/// Flatten in dot space before rounding, so dense curve samples cannot widen the line.
-fn rasterize_braille_cubic(controls: &[(f64, f64); 4], visit: &mut impl FnMut((i64, i64))) {
-    let [start, first, second, end] = *controls;
-    let chord = (end.0 - start.0, end.1 - start.1);
-    let chord_length = chord.0.hypot(chord.1);
-    let distance = |point: (f64, f64)| {
-        let offset = (point.0 - start.0, point.1 - start.1);
-        if chord_length == 0.0 {
-            offset.0.hypot(offset.1)
-        } else {
-            (chord.0 * offset.1 - chord.1 * offset.0).abs() / chord_length
-        }
-    };
-    // A quarter dot keeps the polyline close to the curve on the binary Braille grid.
-    if distance(first).max(distance(second)) <= 0.25 {
-        // Resolve half-dot ties evenly so reflecting a connector preserves its rounding.
-        rasterize_braille_line(
-            (
-                start.0.round_ties_even() as i64,
-                start.1.round_ties_even() as i64,
-            ),
-            (
-                end.0.round_ties_even() as i64,
-                end.1.round_ties_even() as i64,
-            ),
-            visit,
-        );
-        return;
-    }
-
-    let midpoint =
-        |left: (f64, f64), right: (f64, f64)| ((left.0 + right.0) / 2.0, (left.1 + right.1) / 2.0);
-    let start_first = midpoint(start, first);
-    let first_second = midpoint(first, second);
-    let second_end = midpoint(second, end);
-    let left_control = midpoint(start_first, first_second);
-    let right_control = midpoint(first_second, second_end);
-    let middle = midpoint(left_control, right_control);
-    // Both halves reuse the same endpoint so rounding cannot leave a gap at the join.
-    rasterize_braille_cubic(&[start, start_first, left_control, middle], visit);
-    rasterize_braille_cubic(&[middle, right_control, second_end, end], visit);
-}
-
-/// Adaptively flatten and rasterize a thin braille cubic between two terminal cells
-/// (inclusive, beside their vertical middle), adding dots only to empty or braille cells,
-/// so edge lines and nodes in the way are left intact.
-fn draw_braille_curve(buf: &mut Buffer, from: (u16, u16), to: (u16, u16), color: Color) {
-    // Work in dot space: 2 columns × 4 rows of dots per cell.
-    // Braille has no center dot. Choose the middle row facing the curve at each
-    // bar so the joins bend inward; terminal row coordinates increase downward.
-    let start_row = 1 + i64::from(to.1 > from.1);
-    let end_row = 1 + i64::from(to.1 < from.1);
-    let (x0, y0) = (2 * from.0 as i64, 4 * from.1 as i64 + start_row);
-    let (x1, y1) = (2 * to.0 as i64 + 1, 4 * to.1 as i64 + end_row);
-    // Mid-gap controls at each endpoint's height give symmetric, horizontal joins.
-    let middle_x = (x0 + x1) as f64 / 2.0;
-    let controls = [
-        (x0 as f64, y0 as f64),
-        (middle_x, y0 as f64),
-        (middle_x, y1 as f64),
-        (x1 as f64, y1 as f64),
-    ];
-    let mut dots: HashMap<(u16, u16), u32> = HashMap::new();
-    rasterize_braille_cubic(&controls, &mut |(x, y)| {
-        let cell = ((x / 2) as u16, (y / 4) as u16);
-        *dots.entry(cell).or_default() |= braille_bit(x % 2, y % 4);
-    });
-    for (cell, bits) in dots {
-        let Some(target) = buf.cell_mut(cell) else {
-            continue;
-        };
-        let existing = target.symbol().chars().next().unwrap_or(' ');
-        let merged = match existing {
-            ' ' => bits,
-            braille if ('\u{2800}'..='\u{28FF}').contains(&braille) => {
-                bits | (braille as u32 - 0x2800)
-            }
-            _ => continue,
-        };
-        let glyph = char::from_u32(0x2800 + merged).expect("should be a valid braille glyph");
-        target.set_char(glyph);
-        target.set_fg(color);
-    }
-}
-
-/// Connect the pieces of the focused annotation, when it spans several nodes, with a dotted
-/// braille cubic curve from the end of one piece's bar to the start of the next, drawn after
-/// the graph so it can use the placed node rects in `frame`. Connectors for every annotation
-/// at once crowd the graph, so only the span `focused` names is connected, and nothing is
-/// drawn without a focus. Only pieces whose nodes were both placed by the last render are
-/// connected, and the curve only ever fills empty cells, so it never breaks an edge or a node
-/// it crosses.
-pub fn draw_annotation_connectors(
-    buf: &mut Buffer,
-    area: Rect,
-    frame: &FrameIndex<GraphNode>,
-    layer: &NodeAnnotationLayer,
-    focused: Option<HashId>,
-) {
-    draw_annotation_layout_connectors(buf, area, frame, layer, focused, true);
-}
-
-/// Draw the focused span between its compact endpoint cells on adjacent nodes.
-pub fn draw_compact_annotation_connectors(
-    buf: &mut Buffer,
-    area: Rect,
-    frame: &FrameIndex<GraphNode>,
-    layer: &NodeAnnotationLayer,
-    focused: Option<HashId>,
-) {
-    draw_annotation_layout_connectors(buf, area, frame, layer, focused, false);
-}
-
-fn draw_annotation_layout_connectors(
-    buf: &mut Buffer,
-    area: Rect,
-    frame: &FrameIndex<GraphNode>,
-    layer: &NodeAnnotationLayer,
-    focused: Option<HashId>,
-    full: bool,
-) {
-    let Some(focused) = focused else {
-        return;
-    };
-    let to_terminal = |x: i64, y: i64| -> Option<(u16, u16)> {
-        if x < 0 || y < 0 || x >= area.width as i64 || y >= area.height as i64 {
-            return None;
-        }
-        Some((area.x + x as u16, area.y + area.height - 1 - y as u16))
-    };
-    for pieces in layer
-        .pieces()
-        .into_iter()
-        .filter(|pieces| pieces[0].1.id == focused)
-    {
-        for pair in pieces.windows(2) {
-            let ((from_node, from_flag), (to_node, to_flag)) = (&pair[0], &pair[1]);
-            let (Some(from_rect), Some(to_rect)) =
-                (frame.rect_of(*from_node), frame.rect_of(*to_node))
-            else {
-                continue;
-            };
-            let from_layout = if full {
-                layer.full(from_node)
-            } else {
-                layer.compact(from_node)
-            };
-            let to_layout = if full {
-                layer.full(to_node)
-            } else {
-                layer.compact(to_node)
-            };
-            let Some(from_piece) = from_layout
-                .pieces
-                .iter()
-                .find(|piece| piece.id == focused && piece.piece == from_flag.piece)
-            else {
-                continue;
-            };
-            let Some(to_piece) = to_layout
-                .pieces
-                .iter()
-                .find(|piece| piece.id == focused && piece.piece == to_flag.piece)
-            else {
-                continue;
-            };
-            let from_x = from_rect.min.x + from_piece.right;
-            let to_x = to_rect.min.x + to_piece.left;
-            if to_x < from_x {
-                continue;
-            }
-            let (Some(from), Some(to)) = (
-                to_terminal(from_x, sequence_row(from_rect) - 1 - from_piece.row as i64),
-                to_terminal(to_x, sequence_row(to_rect) - 1 - to_piece.row as i64),
-            ) else {
-                continue;
-            };
-            draw_braille_curve(buf, from, to, from_piece.color);
-        }
-    }
-}
-
-/// The row a node's sequence sits on within `area`: the layout's center row, which is where
+/// The sequence row in a symmetric layout. Path-aware annotation layers use `area.max.y`.
+/// In symmetric mode the layout's center row is where
 /// edges attach and where `highlight_match_range` paints. Everything below it is annotation
 /// lanes. The layout centers a node on its position with `WorldRect::from_center_and_size`,
 /// which puts `floor_half(rows)` rows below the center and the rest above (the extra row of
@@ -1452,12 +1236,13 @@ fn sequence_row(area: WorldRect) -> i64 {
 }
 
 /// `NodeRenderer` for the highest GenGraph zoom levels with annotations drawn under each
-/// node as packed flags: a bar over the feature's columns, a triangle cap on its
-/// directional end, and a name inside it or one cell to its left. The layout reserves annotation rows and transparent padding so neighbors cannot
-/// overdraw labels while edges remain visible through the padding.
+/// node as packed flags: a bar over the feature's columns, a `<` or `>` cap on its
+/// directional end, and a name inside it or immediately to its left. The layout reserves
+/// annotation rows and transparent padding so neighbors cannot overdraw labels while
+/// edges remain visible through the padding.
 pub struct GenGraphAnnotatedRenderer<S> {
     source: S,
-    cache: Mutex<HashMap<GraphNode, String>>,
+    cache: Mutex<HashMap<GraphNode, Arc<str>>>,
     layer: NodeAnnotationLayer,
 }
 
@@ -1475,8 +1260,15 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
     fn get_node_size(&self, node: &GraphNode) -> (u64, u64) {
         start_end_node_size(node).unwrap_or_else(|| {
             let layout = self.layer.full(node);
-            (layout.width as u64, layout.height as u64)
+            (
+                layout.width as u64,
+                self.layer.rendered_height(layout.height),
+            )
         })
+    }
+
+    fn vertical_anchor(&self, _node: &GraphNode) -> VerticalAnchor {
+        self.layer.vertical_anchor()
     }
 
     fn size_generation(&self) -> u64 {
@@ -1484,34 +1276,41 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
     }
 
     fn map_column(&self, node: &GraphNode, raw: i64) -> i64 {
-        self.layer.full(node).margin + raw
+        self.layer.full(node).left_padding + raw
     }
 
     fn raw_column(&self, node: &GraphNode, column: i64) -> i64 {
-        (column - self.layer.full(node).margin).clamp(0, (node.length() - 1).max(0))
+        (column - self.layer.full(node).left_padding).clamp(0, (node.length() - 1).max(0))
     }
 
     fn cursor_columns(&self, node: &GraphNode) -> Option<CursorColumns> {
-        let margin = self.layer.full(node).margin;
+        let left_padding = self.layer.full(node).left_padding;
         Some(CursorColumns::Range(
-            margin,
-            margin + node.length().max(1) - 1,
+            left_padding,
+            left_padding + node.length().max(1) - 1,
         ))
     }
 
     /// The sequence row (see [`sequence_row`]); the flag lanes around it are only decoration.
     fn cursor_row(&self, node: &GraphNode) -> Option<u64> {
-        Some(floor_half(self.get_node_size(node).1 as i64) as u64)
+        let height = self.get_node_size(node).1;
+        Some(match self.vertical_anchor(node) {
+            VerticalAnchor::Center => floor_half(height as i64) as u64,
+            VerticalAnchor::Top => height.saturating_sub(1),
+        })
     }
 
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) {
+        if render_start_end_node(buffer, area, node_id) {
+            return;
+        }
         let theme = current_theme();
         let background_style = Style::default().bg(theme[0x05]);
         let text_style = Style::default().bg(theme[0x05]).fg(theme[0x00]);
 
-        let sequence_y = sequence_row(area);
+        let sequence_y = self.layer.sequence_row(area);
         let layout = self.layer.full(node_id);
-        let sequence_pos = WorldPos::new(area.min.x + layout.margin, sequence_y);
+        let sequence_pos = WorldPos::new(area.min.x + layout.left_padding, sequence_y);
         buffer.fill_rect_styled(
             WorldRect::from_coords(
                 sequence_pos.x,
@@ -1523,14 +1322,11 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
             background_style,
         );
 
-        if render_start_end_node(buffer, area, node_id) {
-            return;
-        }
         let sequence = fetch_cached_sequence(&self.source, &self.cache, node_id)
-            .unwrap_or_else(|_| "Unknown Sequence".to_string());
+            .unwrap_or_else(|_| Arc::from("Unknown Sequence"));
         buffer.set_string_styled(sequence_pos, &sequence, text_style);
 
-        render_annotation_pieces(buffer, area, &layout);
+        render_annotation_pieces(buffer, area, &layout, sequence_y);
     }
 
     fn is_visible(&self, node: &GraphNode) -> bool {
@@ -1545,21 +1341,21 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
 /// * `target_length` - Maximum length for the output string
 ///
 /// # Returns
-/// A string showing beginning...end if truncation needed, or original if short enough.
+/// A string showing beginning.end if truncation needed, or original if short enough.
 pub fn inner_truncation(s: &str, target_length: u32) -> String {
     if s.len() <= target_length as usize {
         return s.to_string();
     } else if target_length < 5 {
         return NODE_GLYPH.to_string(); // ⏺ is U+23FA
     }
-    // length - 3 because we need space for the ellipsis
-    let left_len = (target_length - 3) / 2 + ((target_length - 3) % 2);
-    let right_len = (target_length - 3) / 2;
+    // Reserve one cell for the period marking the skipped middle.
+    let left_len = (target_length - 1) / 2 + ((target_length - 1) % 2);
+    let right_len = (target_length - 1) / 2;
 
     let left = &s[..left_len as usize];
     let right = &s[(s.len() - right_len as usize)..];
 
-    format!("{}...{}", left, right)
+    format!("{}.{}", left, right)
 }
 
 /// Create a `LayoutEngine`/`ZoomLevels`/`GraphViewState` triple for a GenGraph with the
@@ -1789,7 +1585,7 @@ pub fn locus_midpoint(locus: &GraphLocus) -> Option<(GraphNodeSlice, usize)> {
 ///   with the maximum y across all blocks
 ///
 /// Column offsets are clamped with `clamp_col` so they map correctly in every
-/// detail level (e.g. truncated nodes collapse interior columns to the `...` cell).
+/// detail level (e.g. truncated nodes collapse interior columns to the `.` cell).
 ///
 /// Returns `None` if no block in the locus was placed by that render (all off-screen).
 pub fn locus_label_bounds(
@@ -1810,7 +1606,10 @@ fn locus_label_bounds_mapped(
     let block_screen_pos = |block: GraphNode, col_raw: i64| -> Option<WorldPos> {
         let rect = frame.rect_of(block)?;
         let column = map_column(block, col_raw);
-        Some(WorldPos::new(rect.min.x + column, rect.center().y))
+        Some(WorldPos::new(
+            rect.min.x + column,
+            placed_sequence_row(frame, block, rect),
+        ))
     };
 
     let last = locus.slices.len() - 1;
@@ -1835,8 +1634,9 @@ fn locus_label_bounds_mapped(
         let Some(rect) = frame.rect_of(s.block) else {
             continue;
         };
-        y_min = y_min.min(rect.center().y);
-        y_max = y_max.max(rect.center().y);
+        let row = placed_sequence_row(frame, s.block, rect);
+        y_min = y_min.min(row);
+        y_max = y_max.max(row);
     }
 
     if y_min == i64::MAX {
@@ -1851,7 +1651,7 @@ fn locus_label_bounds_mapped(
 
 /// Apply detail-level clamping to a raw column offset.
 ///
-/// In `Truncated` mode, interior columns of long nodes map to the `...` region.
+/// In `Truncated` mode, interior columns of long nodes map to the `.` cell.
 fn clamp_col(col_raw: i64, block_seq_len: i64, detail_level: VisualDetail) -> i64 {
     match detail_level {
         VisualDetail::Minimal => 0,
@@ -1864,13 +1664,12 @@ fn clamp_col(col_raw: i64, block_seq_len: i64, detail_level: VisualDetail) -> i6
 
 /// Map a sequence offset to a visual cell column inside a 13-cell truncated node.
 ///
-/// Display layout: `AAAAA...BBBBB` — first 5 bases (cells 0-4), `...` (cells 5-7),
-/// last 5 bases (cells 8-12). Interior positions that fall in the `...` region clamp
-/// to cell 6 (the centre dot).
+/// Display layout: `AAAAAA.BBBBBB` — first 6 bases (cells 0-5), a period (cell 6),
+/// and last 6 bases (cells 7-12). Skipped interior positions clamp to cell 6.
 fn clamp_truncated_col(value: i64, block_seq_len: i64) -> i64 {
-    if value < 5 {
+    if value < 6 {
         value
-    } else if block_seq_len - value <= 5 {
+    } else if block_seq_len - value <= 6 {
         13 - (block_seq_len - value)
     } else {
         6
@@ -1976,7 +1775,7 @@ fn accent_colors() -> [Color; 8] {
 /// choices) keep their pinned color verbatim and are never shifted for collision
 /// avoidance, while still occupying their cells so automatic colors steer clear of them.
 ///
-/// `overlays` is written back with the colors used by annotation bars, connectors, and
+/// `overlays` is written back with the colors used by annotation bars and
 /// labels. Annotation spans leave sequence cells and graph edges in their normal colors.
 /// Callers run this after zoom or detail changes, or every frame in the live TUI viewers
 /// because the overlay set changes with scrolling.
@@ -2247,7 +2046,7 @@ pub fn draw_annotation_labels(
                 .and_then(|layer| {
                     locus_label_bounds_mapped(&label.locus, &view_state.frame, |node, raw| {
                         if labels.detail_level == VisualDetail::Full {
-                            layer.full(&node).margin + raw
+                            layer.full(&node).left_padding + raw
                         } else {
                             layer.compact(&node).map_column(raw)
                         }
@@ -2528,14 +2327,14 @@ mod tests {
     fn test_inner_truncation_truncate_to_odd_length() {
         let s = "hello world";
         let truncated = inner_truncation(s, 7);
-        assert_eq!(truncated, "he...ld");
+        assert_eq!(truncated, "hel.rld");
     }
 
     #[test]
     fn test_inner_truncation_truncate_to_even_length() {
         let s = "hello world";
         let truncated = inner_truncation(s, 8);
-        assert_eq!(truncated, "hel...ld");
+        assert_eq!(truncated, "hell.rld");
     }
 
     #[test]
@@ -2733,22 +2532,22 @@ mod tests {
         assert_eq!(placement_of(&flags, "AmpR").label, LabelPlacement::Inside);
         assert_eq!(
             placement_of(&flags, "snug").label,
-            LabelPlacement::Beside(9),
+            LabelPlacement::Beside(10),
             "a name as wide as its bar would cover the bar's ends, so it goes left"
         );
         assert_eq!(
             placement_of(&flags, "long name here").label,
-            LabelPlacement::Beside(5),
+            LabelPlacement::Beside(6),
             "a wider name uses existing room left of its bar"
         );
         assert_eq!(
             placement_of(&flags, "promoter").label,
-            LabelPlacement::Beside(-9),
+            LabelPlacement::Beside(-8),
             "the node will reserve padding for label overhang"
         );
         assert_eq!(
             placement_of(&flags, "no room for this name").label,
-            LabelPlacement::Beside(-17),
+            LabelPlacement::Beside(-16),
             "long names use left placement with transparent padding"
         );
     }
@@ -2778,7 +2577,7 @@ mod tests {
         assert_eq!(pack_annotation_flags(&mut flags, 40), 2);
         assert_eq!(
             placement_of(&flags, "abcdef").label,
-            LabelPlacement::Beside(3)
+            LabelPlacement::Beside(4)
         );
 
         // Three mutually overlapping bars need three lanes; a fourth disjoint one reuses
@@ -2791,6 +2590,63 @@ mod tests {
         ];
         assert_eq!(pack_annotation_flags(&mut flags, 40), 3);
         assert_eq!(placement_of(&flags, "d").lane, 0);
+    }
+
+    #[test]
+    fn test_annotation_renderers_switch_to_top_row_with_known_path() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("top anchored"),
+            sequence_start: 0,
+            sequence_end: 40,
+        };
+        let path = CenteredPath::new();
+        let layer = NodeAnnotationLayer::with_centered_path(path.clone());
+        layer.replace(HashMap::from([(
+            node,
+            vec![
+                flag("a", 0, 10, Strand::Forward),
+                flag("b", 5, 15, Strand::Forward),
+            ],
+        )]));
+        let renderers: Vec<Box<dyn NodeRenderer<GenGraph>>> = vec![
+            Box::new(GenGraphAnnotatedRenderer::new(
+                RepeatingSequenceSource,
+                layer.clone(),
+            )),
+            Box::new(GenGraphTruncatedRenderer::with_layer(
+                RepeatingSequenceSource,
+                layer,
+            )),
+        ];
+        for renderer in renderers {
+            let centered_size = renderer.get_node_size(&node);
+            let generation = renderer.size_generation();
+            assert_eq!(renderer.vertical_anchor(&node), VerticalAnchor::Center);
+            path.set(Some(PathMembership::default()));
+            let size = renderer.get_node_size(&node);
+            assert_eq!(size, (centered_size.0, centered_size.1.div_ceil(2)));
+            assert_eq!(renderer.vertical_anchor(&node), VerticalAnchor::Top);
+            assert_eq!(renderer.cursor_row(&node), Some(size.1 - 1));
+            assert_ne!(renderer.size_generation(), generation);
+            let area = VerticalAnchor::Top.rect(WorldPos::new(30, 10), size);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
+            let mut viewport = ViewportState::new();
+            viewport.camera_current = WorldPos::new(40, 10);
+            viewport.viewport_bounds = buffer.area;
+            let mut world = WorldBuffer::new(&mut buffer, &viewport);
+            renderer.render_node(&mut world, area, &node);
+            let sequence_x = area.min.x + renderer.map_column(&node, 0);
+            assert_eq!(
+                world
+                    .get_char_styled(WorldPos::new(sequence_x, area.max.y))
+                    .map(|cell| cell.0),
+                Some('A')
+            );
+            assert_eq!(renderer.content_rect(&node).max.y, size.1 as i64 - 1);
+            path.set(None);
+            assert_eq!(renderer.get_node_size(&node), centered_size);
+            assert_eq!(renderer.vertical_anchor(&node), VerticalAnchor::Center);
+        }
     }
 
     #[test]
@@ -2839,10 +2695,10 @@ mod tests {
         )]));
         let renderer = GenGraphAnnotatedRenderer::new(SyntheticSequenceSource, layer.clone());
         let layout = layer.full(&node);
-        assert_eq!(renderer.get_node_size(&node), (40, 3));
+        assert_eq!(renderer.get_node_size(&node), (21, 3));
         assert!(layout.pieces[0].label_left);
         for raw in 0..node.length() {
-            assert_eq!(renderer.map_column(&node, raw), layout.margin + raw);
+            assert_eq!(renderer.map_column(&node, raw), layout.left_padding + raw);
             assert_eq!(
                 renderer.raw_column(&node, renderer.map_column(&node, raw)),
                 raw
@@ -2893,11 +2749,7 @@ mod tests {
             let existing =
                 world_buffer.get_char_styled(WorldPos::new(area.min.x, sequence_row(area)));
             renderer.render_node(&mut world_buffer, area, &node);
-            for position in [
-                WorldPos::new(area.min.x, sequence_row(area)),
-                WorldPos::new(area.max.x, sequence_row(area)),
-                area.max,
-            ] {
+            for position in [WorldPos::new(area.min.x, sequence_row(area)), area.max] {
                 assert_eq!(world_buffer.get_char_styled(position), existing);
             }
         }
@@ -2923,9 +2775,39 @@ mod tests {
         let generation = layer.size_generation();
         layer.set_name_limit(4);
         let compact = layer.compact(&node);
-        assert_eq!(compact.pieces[0].label.as_deref(), Some("abc…"));
+        assert_eq!(compact.pieces[0].label.as_deref(), Some("abc."));
         assert!(compact.width < original_width);
         assert_ne!(layer.size_generation(), generation);
+    }
+
+    #[test]
+    fn test_compact_label_expansion_exposes_only_retained_nucleotide_columns() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("expanded cursor sequence"),
+            sequence_start: 100,
+            sequence_end: 120,
+        };
+        let layer = NodeAnnotationLayer::new();
+        layer.replace(HashMap::from([(
+            node,
+            vec![flag("feature", 0, 20, Strand::Forward)],
+        )]));
+        let renderer =
+            GenGraphTruncatedRenderer::with_layer(RepeatingSequenceSource, layer.clone());
+        assert_eq!(renderer.get_node_size(&node), (9, 3));
+        let Some(CursorColumns::Positions(columns)) = renderer.cursor_columns(&node) else {
+            panic!("should expose discrete nucleotide columns");
+        };
+        assert_eq!(columns, [0, 1, 2, 3, 5, 6, 7, 8]);
+        let layout = layer.compact(&node);
+        assert!(!layout.pieces[0].label_left);
+        for raw in layout.events.iter().copied() {
+            assert_eq!(
+                renderer.raw_column(&node, renderer.map_column(&node, raw)),
+                raw
+            );
+        }
+        assert_eq!(renderer.map_column(&node, 19), 8);
     }
 
     #[test]
@@ -2960,7 +2842,9 @@ mod tests {
             .get_char_styled(WorldPos::new(area.min.x, bar_row - 1))
             .expect("should paint the annotation row");
         assert_eq!(above.1.bg, Some(Color::Reset));
-        for column in area.min.x + layout.margin..=area.max.x - layout.margin {
+        for column in area.min.x + layout.left_padding
+            ..=area.min.x + layout.left_padding + layout.columns.last().copied().unwrap_or(0)
+        {
             let bar = world_buffer
                 .get_char_styled(WorldPos::new(column, bar_row))
                 .expect("should paint the sequence row across its width");
@@ -2969,8 +2853,8 @@ mod tests {
                 .events
                 .iter()
                 .zip(&layout.columns)
-                .find(|(_, event_column)| layout.margin + **event_column == local)
-                .map_or('…', |(raw, _)| {
+                .find(|(_, event_column)| layout.left_padding + **event_column == local)
+                .map_or('.', |(raw, _)| {
                     "ACGT".chars().nth(*raw as usize % 4).unwrap()
                 });
             assert_eq!(bar.0, expected);
@@ -3175,7 +3059,7 @@ mod tests {
         ]));
         let layout = layer.compact(&middle);
         assert!(layout.base_markers.is_empty());
-        assert_eq!(layout.events, [0, 10, 19]);
+        assert_eq!(layout.events, [0, 1, 2, 18, 19]);
         let renderer = GenGraphTruncatedRenderer::with_layer(RepeatingSequenceSource, layer);
         let (width, height) = renderer.get_node_size(&middle);
         let area = WorldRect::from_coords(2, 2, 1 + width as i64, 1 + height as i64);
@@ -3186,7 +3070,9 @@ mod tests {
         let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport);
         renderer.render_node(&mut world_buffer, area, &middle);
         let row = sequence_row(area);
-        for column in area.min.x + layout.margin..=area.max.x - layout.margin {
+        for column in area.min.x + layout.left_padding
+            ..=area.min.x + layout.left_padding + layout.columns.last().copied().unwrap_or(0)
+        {
             assert_eq!(
                 world_buffer
                     .get_char_styled(WorldPos::new(column, row))
@@ -3196,8 +3082,8 @@ mod tests {
                     .events
                     .iter()
                     .zip(&layout.columns)
-                    .find(|(_, mapped)| layout.margin + **mapped == column - area.min.x)
-                    .map_or('…', |(raw, _)| "ACGT"
+                    .find(|(_, mapped)| layout.left_padding + **mapped == column - area.min.x)
+                    .map_or('.', |(raw, _)| "ACGT"
                         .chars()
                         .nth(*raw as usize % 4)
                         .unwrap()),
@@ -3465,13 +3351,11 @@ mod tests {
     }
 
     /// A linear start → a → b → c → end graph with annotations covering every flag case:
-    /// a name inside its bar, beside it, clipped inside a bar too narrow for it, a
+    /// a name inside its bar, names beside bars too narrow for them, a
     /// multi-node span whose cap only shows on its last node, and overlapping features
     /// that pack into a second lane.
     #[test]
     fn snapshot_annotated_full_detail() {
-        use gen_tui::{graph_view::GraphView, testing::create_test_terminal};
-
         let node = |name: &str, length: i64| GraphNode {
             node_id: HashId::convert_str(name),
             sequence_start: 0,
@@ -3554,13 +3438,7 @@ mod tests {
                         f.buffer_mut(),
                         &mut view_state,
                     );
-                    draw_annotation_connectors(
-                        f.buffer_mut(),
-                        area,
-                        &view_state.frame,
-                        &layer,
-                        None,
-                    );
+
                     draw_annotation_labels(f.buffer_mut(), area, &view_state, &labels);
                 })
                 .unwrap();
@@ -3579,7 +3457,7 @@ mod tests {
         let sequence_y = area.height as i64 - 1 - sequence_row(rect);
         let buffer = terminal.backend().buffer();
         let lane = &buffer[((rect.min.x + 4) as u16, sequence_y as u16 + 1)];
-        assert_eq!(lane.symbol(), "═");
+        assert_eq!(lane.symbol(), "[");
 
         insta::assert_snapshot!("annotated_full_detail", terminal.backend().to_string());
     }
@@ -3590,31 +3468,38 @@ mod tests {
         use gen_annotations::translate::gff::translate_gff;
         use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
         use gen_graph::{GenGraph, GraphEdge, GraphNode};
-        use gen_models::sample::Sample;
+        use gen_models::{block_group::BlockGroup, sample::Sample};
         use gen_tui::{
-            GraphViewState,
+            GraphViewState, VerticalAnchor,
             frame_index::Direction,
             graph_view::GraphView,
+            layout::VisualDetail,
             plotter::{LineStyle, PathStyle},
             testing::create_test_terminal,
         };
-        use ratatui::{style::Color, widgets::StatefulWidget as _};
+        use ratatui::{
+            style::{Color, Style},
+            widgets::StatefulWidget as _,
+        };
 
         use super::{RepeatingSequenceSource, span_overlay};
         use crate::{
-            imports::fasta::import_fasta,
-            test_helpers::setup_gen,
+            graphs::combinatorial_library::parse_library,
+            imports::{fasta::import_fasta, library::import_library},
+            test_helpers::setup_gen_on_disk,
             updates::vcf::update_with_vcf,
             views::{
                 annotations::parse_translated_gff,
+                gen_graph_controller::{AnnotationDisplay, GenGraphController},
                 gen_graph_widget::{
                     AnnotationLabels, AnnotationStarts, FULL_ZOOM_LEVEL, NodeAnnotationLayer,
                     SequenceSource, apply_zoom_level, create_annotated_gen_graph_engine,
-                    draw_annotation_connectors, draw_annotation_labels, draw_braille_curve,
-                    draw_compact_annotation_connectors, reapply_overlays, update_node_annotations,
+                    draw_annotation_labels, reapply_overlays, update_node_annotations,
                 },
+                graph_database::GraphDatabase,
                 graph_overlay::{
                     AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
+                    PathMembership,
                 },
             },
         };
@@ -3662,16 +3547,15 @@ mod tests {
             graph
         }
 
-        // Exercise the viewer's complete overlay pass, including the second frame that
-        // uses the placed nodes for connectors and floating labels.
+        // Exercise the viewer's complete overlay pass, including the settled frame
+        // that uses the placed nodes for floating labels.
         fn render(
             graph: GenGraph,
             overlays: Vec<GraphOverlay>,
             zoom_level: usize,
             size: (u16, u16),
-            focused: Option<HashId>,
         ) -> String {
-            render_view(graph, overlays, zoom_level, size, focused).0
+            render_view(graph, overlays, zoom_level, size).0
         }
 
         /// `render`, also returning the annotation starts and view state it rendered with.
@@ -3680,17 +3564,8 @@ mod tests {
             overlays: Vec<GraphOverlay>,
             zoom_level: usize,
             size: (u16, u16),
-            focused: Option<HashId>,
         ) -> (String, AnnotationStarts, GraphViewState<GraphNode>) {
-            render_view_with_source(
-                graph,
-                RepeatingSequenceSource,
-                overlays,
-                zoom_level,
-                size,
-                focused,
-                None,
-            )
+            render_view_with_source(graph, RepeatingSequenceSource, overlays, zoom_level, size)
         }
 
         fn render_view_with_source<S: SequenceSource + Clone>(
@@ -3699,16 +3574,11 @@ mod tests {
             mut overlays: Vec<GraphOverlay>,
             zoom_level: usize,
             size: (u16, u16),
-            focused: Option<HashId>,
-            centered: Option<GraphNode>,
         ) -> (String, AnnotationStarts, GraphViewState<GraphNode>) {
             let layer = NodeAnnotationLayer::new();
             let (mut engine, zoom_levels, mut view_state) =
                 create_annotated_gen_graph_engine(graph, source, layer.clone());
             apply_zoom_level(&mut view_state, zoom_level, &zoom_levels);
-            if let Some(node) = centered {
-                view_state.go_to_node(node, (0.5, 0.5));
-            }
             let mut colors = AnnotationColorCache::new();
             let mut terminal = create_test_terminal(size.0, size.1);
             for _ in 0..2 {
@@ -3733,23 +3603,6 @@ mod tests {
                             frame.buffer_mut(),
                             &mut view_state,
                         );
-                        if zoom_level == FULL_ZOOM_LEVEL - 1 {
-                            draw_compact_annotation_connectors(
-                                frame.buffer_mut(),
-                                area,
-                                &view_state.frame,
-                                &layer,
-                                focused,
-                            );
-                        } else {
-                            draw_annotation_connectors(
-                                frame.buffer_mut(),
-                                area,
-                                &view_state.frame,
-                                &layer,
-                                focused,
-                            );
-                        }
                         draw_annotation_labels(frame.buffer_mut(), area, &view_state, &labels);
                     })
                     .expect("should render annotations");
@@ -3758,8 +3611,8 @@ mod tests {
             (terminal.backend().to_string(), starts, view_state)
         }
 
-        // Import the real reference and variants before translating annotations onto the
-        // edited sample. This covers labels and connectors across VCF-created node slices.
+        // Snapshot through the controller used by text widgets, including current-path
+        // alignment, lazy loading, and the production annotation rendering pass.
         fn render_annotated_variant_fixture(
             folder: &str,
             fasta: &str,
@@ -3768,7 +3621,7 @@ mod tests {
             sample: &str,
             position: i64,
         ) -> String {
-            let context = setup_gen();
+            let context = setup_gen_on_disk();
             let connection = context.graph().conn();
             let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/annotation_layout")
@@ -3829,7 +3682,7 @@ mod tests {
                 !spans.is_empty(),
                 "fixture annotations should reach the graph"
             );
-            let overlays = spans
+            let overlays: Vec<_> = spans
                 .into_iter()
                 .map(|span| GraphOverlay {
                     content: OverlayContent::Span(span),
@@ -3841,16 +3694,126 @@ mod tests {
                     },
                 })
                 .collect();
-            render_view_with_source(
-                graph,
-                (connection, context.workspace()),
-                overlays,
-                FULL_ZOOM_LEVEL - 1,
-                (140, 45),
-                None,
-                Some(centered),
+            let block_groups = BlockGroup::select(connection)
+                .collection_name(folder)
+                .sample_name(sample)
+                .load()
+                .expect("should load fixture block group");
+            assert_eq!(
+                block_groups.len(),
+                1,
+                "fixture should contain one block group"
+            );
+            let database = GraphDatabase::for_connection(connection, context.workspace())
+                .expect("should open widget database");
+            let mut controller = GenGraphController::new(database, None);
+            controller
+                .open_block_group(&block_groups[0].id)
+                .expect("should open fixture in the text widget controller");
+            controller.overlays_mut().extend(overlays);
+            let mut terminal = create_test_terminal(140, 45);
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    controller.render_settled(
+                        frame.buffer_mut(),
+                        area,
+                        AnnotationDisplay::FlagsUnderNodes,
+                        Style::default(),
+                    );
+                })
+                .expect("should render initial widget frame");
+            assert!(controller.go_to_coordinate(centered.node_id, position, true));
+            controller.set_detail_level(VisualDetail::Truncated);
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    controller.render_settled(
+                        frame.buffer_mut(),
+                        area,
+                        AnnotationDisplay::FlagsUnderNodes,
+                        Style::default(),
+                    );
+                })
+                .expect("should render annotated widget frame");
+            assert_eq!(controller.detail_level(), VisualDetail::Truncated);
+            assert_eq!(
+                controller.node_annotations().vertical_anchor(),
+                VerticalAnchor::Top
+            );
+            terminal.backend().to_string()
+        }
+
+        #[test]
+        fn test_annotation_library_branches() {
+            let context = setup_gen_on_disk();
+            let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+            let parts = directory.join("parts.fa");
+            let design = directory.join("combinatorial_design.csv");
+            let parts = parts.to_str().expect("should have a UTF-8 fixture path");
+            let design = design.to_str().expect("should have a UTF-8 fixture path");
+            import_library(
+                &context,
+                "library snapshot",
+                Sample::DEFAULT_NAME,
+                "parts",
+                parse_library(parts, design).expect("should parse library fixture"),
+                Some(parts),
+                Some(design),
             )
-            .0
+            .expect("should import annotated library");
+            let connection = context.graph().conn();
+            let block_group = BlockGroup::get_by_name(
+                connection,
+                "library snapshot",
+                Sample::DEFAULT_NAME,
+                "parts",
+                None,
+            )
+            .expect("should load library block group");
+            let path = BlockGroup::get_current_path(connection, &block_group.id, None)
+                .expect("should have a library current path");
+            let membership = PathMembership::load(connection, &path.id, None);
+            let database = GraphDatabase::for_connection(connection, context.workspace())
+                .expect("should open widget database");
+            let mut controller =
+                GenGraphController::for_block_group(database, &block_group.id, None)
+                    .expect("should open library in text widget controller");
+            let mut terminal = create_test_terminal(80, 21);
+            for detail in [VisualDetail::Full, VisualDetail::Truncated] {
+                controller.set_detail_level(detail);
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        controller.render_settled(
+                            frame.buffer_mut(),
+                            area,
+                            AnnotationDisplay::FlagsUnderNodes,
+                            Style::default(),
+                        );
+                    })
+                    .expect("should render annotated library");
+            }
+            let snapshot = terminal.backend().to_string();
+            for name in ["p1", "p2", "p3", "cds1", "cds2", "cds3"] {
+                assert!(
+                    snapshot.contains(name),
+                    "should display annotation {name} on its branch"
+                );
+            }
+            assert!(
+                controller
+                    .overlays()
+                    .iter()
+                    .filter_map(GraphOverlay::span)
+                    .any(|span| {
+                        span.segments.iter().any(|segment| {
+                            !membership.covers(segment.node_id, segment.start, segment.end)
+                        })
+                    }),
+                "should annotate nodes outside the current path"
+            );
+            insta::assert_snapshot!("annotation_library_branches", snapshot);
         }
 
         #[test]
@@ -3897,7 +3860,6 @@ mod tests {
                     vec![span_overlay("gene", vec![(sequence, 0, 24, strand)])],
                     FULL_ZOOM_LEVEL,
                     (44, 7),
-                    None,
                 );
                 insta::assert_snapshot!(format!("annotation_simple_{name}"), snapshot);
             }
@@ -3916,7 +3878,6 @@ mod tests {
                 ],
                 FULL_ZOOM_LEVEL - 1,
                 (70, 13),
-                None,
             );
             assert!(snapshot.contains("forward"));
             assert!(!snapshot.contains("AAAA"));
@@ -3924,17 +3885,10 @@ mod tests {
         }
 
         #[test]
-        fn test_annotation_truncated_branching_and_connectors() {
+        fn test_annotation_truncated_branching() {
             let (graph, overlays) = branching_spans();
-            let snapshot = render(
-                graph,
-                overlays,
-                FULL_ZOOM_LEVEL - 1,
-                (110, 31),
-                Some(HashId::convert_str("coding")),
-            );
-            assert!(!braille_cells(&snapshot).is_empty());
-            insta::assert_snapshot!("annotation_truncated_branching_connectors", snapshot);
+            let snapshot = render(graph, overlays, FULL_ZOOM_LEVEL - 1, (110, 31));
+            insta::assert_snapshot!("annotation_truncated_branching", snapshot);
         }
 
         #[test]
@@ -3961,7 +3915,6 @@ mod tests {
                 ],
                 FULL_ZOOM_LEVEL,
                 (64, 15),
-                None,
             );
             assert!(snapshot.contains("a_label_too_long_for_either_side"));
             insta::assert_snapshot!("annotation_packed_labels", snapshot);
@@ -4012,53 +3965,6 @@ mod tests {
             (graph, overlays)
         }
 
-        fn braille_cells(rendered: &str) -> Vec<(usize, usize)> {
-            rendered
-                .lines()
-                .enumerate()
-                .flat_map(|(row, line)| {
-                    line.chars()
-                        .enumerate()
-                        .filter(|(_, glyph)| ('\u{2801}'..='\u{28FF}').contains(glyph))
-                        .map(move |(column, _)| (row, column))
-                })
-                .collect()
-        }
-
-        #[test]
-        fn test_annotation_connectors_only_for_focused_span() {
-            let (graph, overlays) = branching_spans();
-            let render_focused = |focused: Option<&str>| {
-                render(
-                    graph.clone(),
-                    overlays.clone(),
-                    FULL_ZOOM_LEVEL,
-                    (110, 31),
-                    focused.map(HashId::convert_str),
-                )
-            };
-            assert!(
-                braille_cells(&render_focused(None)).is_empty(),
-                "should draw no connectors without a focused annotation"
-            );
-            assert!(
-                braille_cells(&render_focused(Some("site"))).is_empty(),
-                "should draw no connectors for a focused span on a single node"
-            );
-            let coding = braille_cells(&render_focused(Some("coding")));
-            let reverse = braille_cells(&render_focused(Some("reverse")));
-            let tail = braille_cells(&render_focused(Some("tail")));
-            assert!(!coding.is_empty(), "should connect the focused span");
-            assert!(!reverse.is_empty(), "should connect the focused span");
-            assert_ne!(coding, reverse, "should connect only the focused span");
-            // `tail` joins pieces on adjacent nodes, so its connector spans the gap between them.
-            assert!(!tail.is_empty(), "should connect the focused span");
-            assert!(
-                tail.iter().all(|cell| !coding.contains(cell)),
-                "should not draw another span's connector"
-            );
-        }
-
         /// The cursor's node and its column within that node.
         fn cursor_column(view_state: &GraphViewState<GraphNode>) -> (GraphNode, i64) {
             let node = view_state.cursor.node.expect("should have a cursor node");
@@ -4076,7 +3982,7 @@ mod tests {
         fn test_annotation_start_jumps_across_a_fork() {
             let (graph, overlays) = branching_spans();
             let (_, annotation_starts, mut view_state) =
-                render_view(graph, overlays, FULL_ZOOM_LEVEL, (110, 31), None);
+                render_view(graph, overlays, FULL_ZOOM_LEVEL, (110, 31));
             let (first, upper, lower, merge) = (
                 node("first", 16),
                 node("upper", 22),
@@ -4138,7 +4044,7 @@ mod tests {
         fn test_annotation_branching_spans() {
             let (graph, overlays) = branching_spans();
             for zoom_level in [FULL_ZOOM_LEVEL, 4] {
-                let snapshot = render(graph.clone(), overlays.clone(), zoom_level, (110, 31), None);
+                let snapshot = render(graph.clone(), overlays.clone(), zoom_level, (110, 31));
                 for label in ["coding", "reverse", "nested", "site", "tail"] {
                     assert_eq!(
                         snapshot.matches(label).count(),
@@ -4151,38 +4057,6 @@ mod tests {
                     snapshot
                 );
             }
-        }
-
-        #[test]
-        fn test_annotation_connector_curves() {
-            let mut terminal = create_test_terminal(66, 16);
-            terminal
-                .draw(|frame| {
-                    let buffer = frame.buffer_mut();
-                    // Paired slopes expose the symmetry; short gaps and level bars cover
-                    // the limiting shapes. The crossing must preserve existing graph ink.
-                    for (from, to) in [
-                        ((2, 1), (26, 6)),
-                        ((36, 6), (60, 1)),
-                        ((2, 9), (26, 9)),
-                        ((36, 9), (39, 14)),
-                        ((48, 9), (48, 14)),
-                    ] {
-                        buffer[(from.0 - 1, from.1)].set_char('═');
-                        buffer[(to.0 + 1, to.1)].set_char('═');
-                        draw_braille_curve(buffer, from, to, Color::Red);
-                    }
-                    buffer[(14, 12)].set_char('│');
-                    buffer[(19, 12)].set_char('A');
-                    draw_braille_curve(buffer, (2, 12), (26, 12), Color::Blue);
-                    assert_eq!(buffer[(14, 12)].symbol(), "│");
-                    assert_eq!(buffer[(19, 12)].symbol(), "A");
-                })
-                .expect("should render connector curves");
-            insta::assert_snapshot!(
-                "annotation_connector_curves",
-                terminal.backend().to_string()
-            );
         }
     }
 

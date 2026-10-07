@@ -1,6 +1,6 @@
 ---
 name: gen-genetic-engineering
-description: Help users apply the Gen `gen` CLI and Rust library to genetic engineering workflows, including importing FASTA/GenBank/GFA genomes and plasmids, viewing regions and graphs, summarizing operation history and diffs, predicting likely sequence/annotation impacts of edits, updating sequences from explicit strings/files/VCF/GAF/GenBank, designing combinatorial libraries, exporting synthesis or cloning artifacts, and reasoning about primer ordering for synthesis, cloning, validation, or sequencing.
+description: Help users apply the Gen `gen` CLI and Rust library to genetic engineering workflows, including importing FASTA/GenBank/GFA genomes and plasmids, viewing regions and graphs, summarizing operation history and diffs, predicting likely sequence/annotation impacts of edits, updating sequences from explicit strings/files/VCF/GAF/GenBank, designing combinatorial libraries, exporting synthesis or cloning artifacts, and reasoning about primer ordering for synthesis, cloning, validation, or sequencing. Compact graph views mark skipped sequence with single periods, show bracket annotation tails.
 ---
 
 # Gen Genetic Engineering
@@ -69,3 +69,7 @@ Do not pretend `gen` alone predicts functional impact. For impact predictions, c
 - For primer ordering, derive candidate binding regions from exported or extracted sequence, then state that final primer Tm, secondary structure, dimers, off-targets, vendor limits, and assembly chemistry must be checked with appropriate primer-design tools.
 
 Avoid giving operational assistance for unsafe or disallowed biological engineering. If a request involves pathogenicity, toxin expression, evading detection, or harmful organism engineering, refuse that portion and offer benign sequence-management help instead.
+
+## Graph display
+
+Compact nodes use a single period for each skipped sequence run; unannotated long nodes show their two endpoint bases as `N.N`. Annotation tails use `[` or `]`, directed heads use `<` or `>`, and undirected annotations use brackets at both ends. Known current paths align the top sequence row, with annotations growing downward.

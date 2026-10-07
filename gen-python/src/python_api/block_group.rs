@@ -303,8 +303,9 @@ impl PySequenceGraph {
     ///     Defaults to ``False``.
     /// center_reference : bool, optional
     ///     Lay the current path out as one straight row, with variation branching
-    ///     above and below it. Defaults to ``False``.
-    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None, show_history=false, center_reference=false))]
+    ///     above and below it, with annotation rows growing downward from the sequence.
+    ///     Defaults to ``True``; graphs without a path retain centered nodes.
+    #[pyo3(signature = (rows=None, cols=None, detail=None, colors=None, show_history=false, center_reference=true))]
     fn plot(
         slf: &Bound<'_, PySequenceGraph>,
         rows: Option<u32>,

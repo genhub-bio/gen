@@ -437,3 +437,7 @@ edges dimmed; it is not an operation diff.
 Also on both widgets: `clear_highlights()`, `show_path()`, `hide_path()`,
 `show_track(name)`, `hide_track(name)`, `.tracks`, `hide_all_tracks()`, `handle_click(col, row)`.
 Persist annotations through the graph API (`graph.add_annotation`).
+
+Compact graph rendering uses one period (`.`) per skipped sequence run and `N.N`
+for unannotated long nodes. Annotation tails have brackets, directed heads use
+`<` or `>`, and undirected features have brackets at both ends.

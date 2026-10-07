@@ -277,12 +277,21 @@ struct FileTrack {
 }
 
 /// How `plot()` loads and lays out a page.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct PlotOptions {
     /// Keep pruned/retired edit-site edges in the graph, dimmed, instead of removing them.
     pub show_history: bool,
     /// Place the block group's current path on one straight row.
     pub center_reference: bool,
+}
+
+impl Default for PlotOptions {
+    fn default() -> Self {
+        Self {
+            show_history: false,
+            center_reference: true,
+        }
+    }
 }
 
 /// The information needed to lazily build a `GraphPage` on first visit.
@@ -580,13 +589,6 @@ impl GraphPage {
                 OverlaySource::Track(_) | OverlaySource::Path
             )
         });
-        self.controller.set_focused_annotation(None);
-    }
-
-    /// Make `annotation` the one whose pieces are joined by connectors, or clear the focus.
-    fn focus_annotation(&mut self, annotation: Option<&PyAnnotation>) {
-        self.controller
-            .set_focused_annotation(annotation.map(|annotation| annotation.inner.id));
     }
 
     /// Highlight the most recent path associated with this sequence graph.
@@ -933,7 +935,6 @@ impl GraphPage {
         self.controller
             .overlays_mut()
             .retain(|overlay| overlay.span().is_none_or(|span| span.name != name));
-        self.controller.set_focused_annotation(None);
     }
 }
 
@@ -1416,25 +1417,6 @@ impl PyGraphController {
         Ok(())
     }
 
-    /// Connect the pieces of `annotation` across nodes at full detail, replacing any
-    /// previously focused annotation; ``None`` clears the focus. ``show()`` calls this, so
-    /// the most recently shown annotation is the connected one.
-    #[pyo3(signature = (annotation=None))]
-    pub fn focus_annotation(&mut self, annotation: Option<PyRef<PyAnnotation>>) -> PyResult<()> {
-        self.active()?.focus_annotation(annotation.as_deref());
-        Ok(())
-    }
-
-    /// Hash ID of the annotation whose pieces are connected, or ``None``.
-    #[getter]
-    fn focused_annotation(&mut self) -> PyResult<Option<String>> {
-        Ok(self
-            .active()?
-            .controller
-            .focused_annotation()
-            .map(|id| id.to_string()))
-    }
-
     /// Highlight an `Annotation` on the graph as a nameless inline annotation,
     /// so the locus is coloured without duplicating the track label.
     pub fn highlight_annotation_obj(
@@ -1742,36 +1724,21 @@ mod tests {
             source: OverlaySource::Track("gene".to_string()),
             style: PathStyle::new(Color::Red),
         });
-        let unfocused = rendered_text(&mut controller);
-        assert!(
-            !unfocused
-                .chars()
-                .any(|glyph| ('\u{2801}'..='\u{28ff}').contains(&glyph)),
-            "should draw no connectors without a focused annotation"
-        );
-        controller
-            .active()
-            .expect("should have an active page")
-            .controller
-            .set_focused_annotation(Some(HashId::convert_str("gene")));
-
         for detail in ["full", "normal", "minimal", "full"] {
             controller.set_detail(detail).expect("should change detail");
             let text = rendered_text(&mut controller);
-            let full = detail == "full";
+            let annotations_visible = detail != "minimal";
             assert_eq!(
                 text.contains('═'),
-                full,
+                annotations_visible,
                 "annotation bars at {detail} detail"
             );
-            assert_eq!(text.contains('▶'), full, "direction cap at {detail} detail");
             assert_eq!(
-                text.chars()
-                    .any(|glyph| ('\u{2801}'..='\u{28ff}').contains(&glyph)),
-                full,
-                "annotation connector at {detail} detail"
+                text.contains('>'),
+                annotations_visible,
+                "direction cap at {detail} detail"
             );
-            if full {
+            if annotations_visible {
                 assert_eq!(
                     text.matches("gene").count(),
                     1,
@@ -1786,19 +1753,6 @@ mod tests {
         let text = rendered_text(&mut controller);
         assert!(!text.contains('═'), "should remove annotation bars");
         assert!(!text.contains("gene"), "should remove the annotation label");
-        assert!(
-            !text
-                .chars()
-                .any(|glyph| ('\u{2801}'..='\u{28ff}').contains(&glyph)),
-            "should remove annotation connectors"
-        );
-        assert_eq!(
-            controller
-                .focused_annotation()
-                .expect("should read the focused annotation"),
-            None,
-            "should drop the focus on a removed annotation"
-        );
     }
 
     fn rendered_text(controller: &mut PyGraphController) -> String {
