@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -17,7 +17,7 @@ use gen_tui::{
     graph_widget::NODE_GLYPH,
     layout::VisualDetail,
     layout_engine::{BatchId, LayoutEngine},
-    plotter::{NodeRenderer, PathStyle},
+    plotter::{CursorColumns, NodeRenderer, PathStyle},
     theme::current_theme,
     viewport_state::WorldBuffer,
 };
@@ -34,7 +34,10 @@ use crate::{
             AnnotationSpan, LoadedNodeSlices, graph_locus_from_annotation_span,
             span_covered_by_later, span_label_text,
         },
-        compact_annotations::{CompactNode, build_layouts, label_start},
+        compact_annotations::{
+            CompactNode, CompactPiece, build_layouts, build_layouts_for_detail, pack_pieces,
+            piece_label_start,
+        },
         graph_dimming::GraphDimming,
         graph_overlay::{AnnotationColorCache, GraphOverlay, OverlaySource, PathMembership},
         inline_label_placement::draw_label_near_pos,
@@ -311,6 +314,14 @@ where
         self.inner.map_column(node, raw)
     }
 
+    fn cursor_columns(&self, node: &GraphNode) -> Option<CursorColumns> {
+        self.inner.cursor_columns(node)
+    }
+
+    fn content_rect(&self, node: &GraphNode) -> WorldRect {
+        self.inner.content_rect(node)
+    }
+
     fn raw_column(&self, node: &GraphNode, column: i64) -> i64 {
         self.inner.raw_column(node, column)
     }
@@ -568,7 +579,7 @@ impl NodeRenderer<GenGraph> for GenGraphMinimalRenderer {
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) {
         let theme = current_theme();
         let background_style = Style::default().bg(theme[0x05]);
-        buffer.fill_rect(area, ' ');
+
         buffer.set_char_styled(area.left_center(), ' ', background_style);
 
         if render_start_end_node(buffer, area, node_id) {
@@ -640,6 +651,19 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
             .map_or(column, |layer| layer.compact(node).raw_column(column))
     }
 
+    fn cursor_columns(&self, node: &GraphNode) -> Option<CursorColumns> {
+        self.layer.as_ref().map(|layer| {
+            let layout = layer.compact(node);
+            CursorColumns::Positions(
+                layout
+                    .columns
+                    .iter()
+                    .map(|column| layout.margin + column)
+                    .collect(),
+            )
+        })
+    }
+
     fn cursor_row(&self, node: &GraphNode) -> Option<u64> {
         Some(floor_half(self.get_node_size(node).1 as i64) as u64)
     }
@@ -647,12 +671,6 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
     fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, node_id: &GraphNode) {
         let theme = current_theme();
         let body_style = Style::default().bg(theme[0x05]).fg(theme[0x00]);
-        let background_style = if self.layer.is_some() {
-            Style::default().bg(theme[0x00])
-        } else {
-            body_style
-        };
-        buffer.fill_rect_styled(area, ' ', background_style);
         if render_start_end_node(buffer, area, node_id) {
             return;
         }
@@ -669,12 +687,17 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
         // Match full-detail sequence styling only on the center row. Annotation lanes keep
         // the graph background so they do not look like additional sequence rows.
         buffer.fill_rect_styled(
-            WorldRect::from_coords(area.min.x, node_row, area.max.x, node_row),
+            WorldRect::from_coords(
+                area.min.x + layout.margin,
+                node_row,
+                area.max.x - layout.margin,
+                node_row,
+            ),
             ' ',
             Style::default().bg(theme[0x05]),
         );
-        for column in area.min.x..=area.max.x {
-            buffer.set_char_styled(WorldPos::new(column, node_row), '.', body_style);
+        for column in area.min.x + layout.margin..=area.max.x - layout.margin {
+            buffer.set_char_styled(WorldPos::new(column, node_row), '…', body_style);
         }
         for (raw, column) in layout.events.iter().zip(&layout.columns) {
             let base = sequence
@@ -687,37 +710,44 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphTruncatedRenderer<S> 
                 body_style,
             );
         }
-        for piece in &layout.pieces {
-            let row = node_row - 1 - piece.row as i64;
-            let style = Style::default().fg(piece.color).bg(theme[0x00]);
-            for column in piece.left..=piece.right {
-                let glyph = if piece.left == piece.right {
-                    ANNOTATION_BAR
-                } else if column == piece.left {
-                    piece.left_glyph
-                } else if column == piece.right {
-                    piece.right_glyph
-                } else {
-                    ANNOTATION_BAR
-                };
-                buffer.set_char_styled(WorldPos::new(area.min.x + column, row), glyph, style);
-            }
-            if let Some(label) = &piece.label {
-                let width = unicode_width::UnicodeWidthStr::width(label.as_str()) as i64;
-                buffer.set_graphemes_styled(
-                    WorldPos::new(
-                        area.min.x + label_start(piece.left, piece.right, width),
-                        row,
-                    ),
-                    label,
-                    style,
-                );
-            }
-        }
+        render_annotation_pieces(buffer, area, &layout);
     }
 
     fn is_visible(&self, node: &GraphNode) -> bool {
         is_drawn_node(node)
+    }
+}
+
+fn render_annotation_pieces(buffer: &mut WorldBuffer, area: WorldRect, layout: &CompactNode) {
+    let theme = current_theme();
+    let node_row = sequence_row(area);
+    for piece in &layout.pieces {
+        let row = node_row - 1 - piece.row as i64;
+        let style = Style::default().fg(piece.color).bg(theme[0x00]);
+        for column in piece.left..=piece.right {
+            let glyph = if piece.left == piece.right {
+                if piece.left_glyph == ANNOTATION_REVERSE_CAP {
+                    piece.left_glyph
+                } else {
+                    piece.right_glyph
+                }
+            } else if column == piece.left {
+                piece.left_glyph
+            } else if column == piece.right {
+                piece.right_glyph
+            } else {
+                ANNOTATION_BAR
+            };
+            buffer.set_char_styled(WorldPos::new(area.min.x + column, row), glyph, style);
+        }
+        if let Some(label) = &piece.label {
+            let width = unicode_width::UnicodeWidthStr::width(label.as_str()) as i64;
+            buffer.set_graphemes_styled(
+                WorldPos::new(area.min.x + piece_label_start(piece, width), row),
+                label,
+                style,
+            );
+        }
     }
 }
 
@@ -747,7 +777,7 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphFullRenderer<S> {
         let theme = current_theme();
         let background_style = Style::default().bg(theme[0x05]);
         let text_style = Style::default().bg(theme[0x05]).fg(theme[0x00]);
-        buffer.fill_rect(area, ' ');
+
         buffer.set_char_styled(area.left_center(), ' ', background_style);
 
         if render_start_end_node(buffer, area, node_id) {
@@ -769,14 +799,8 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphFullRenderer<S> {
 pub enum LabelPlacement {
     /// Inside the bar, breaking the line but never covering the bar's first or last cell.
     Inside,
-    /// Beside the bar with one cell of air, starting at this node-local column. Preferred
-    /// to the left of the bar, falling back to the right when the bar sits too close to the
-    /// node's start.
+    /// One cell to the left of the bar, starting at this node-local column.
     Beside(i64),
-    /// Nowhere under the node: the bar is drawn alone and the name is left to the floating
-    /// label pass (`draw_annotation_labels`), which places it as close to the node as the
-    /// surrounding cells allow.
-    Floating,
 }
 
 /// One annotation's presence on one node, in that node's local column space, as drawn by
@@ -810,48 +834,10 @@ pub struct AnnotationFlag {
 impl AnnotationFlag {
     fn label_width(&self) -> i64 {
         if self.show_label {
-            self.name.chars().count() as i64
+            unicode_width::UnicodeWidthStr::width(self.name.as_str()) as i64
         } else {
             0
         }
-    }
-
-    /// The node-local columns (`start..end`) this flag occupies for packing: its bar plus,
-    /// when the name sits beside the bar, the name too.
-    fn extent(&self) -> (i64, i64) {
-        match self.label {
-            LabelPlacement::Inside | LabelPlacement::Floating => (self.bar_start, self.bar_end),
-            LabelPlacement::Beside(start) => (
-                start.min(self.bar_start),
-                (start + self.label_width()).max(self.bar_end),
-            ),
-        }
-    }
-
-    /// Whether `column` is the feature's directional end, where the cap is drawn.
-    fn is_cap(&self, column: i64) -> bool {
-        match self.strand {
-            Strand::Forward => !self.continues_right && column == self.bar_end - 1,
-            Strand::Reverse => !self.continues_left && column == self.bar_start,
-            _ => false,
-        }
-    }
-
-    fn cap_at(&self, column: i64) -> Option<char> {
-        if !self.is_cap(column) {
-            return None;
-        }
-        Some(match self.strand {
-            Strand::Forward => ANNOTATION_FORWARD_CAP,
-            _ => ANNOTATION_REVERSE_CAP,
-        })
-    }
-
-    /// The bar columns (`start..end`) the name may be written over: the bar's interior, so
-    /// its first and last cell (and any cap) stay visible around the name.
-    fn text_columns(&self) -> (i64, i64) {
-        let start = self.bar_start + 1;
-        (start, (self.bar_end - 1).max(start))
     }
 }
 
@@ -861,54 +847,38 @@ pub(crate) const ANNOTATION_BAR: char = '═';
 pub(crate) const ANNOTATION_FORWARD_CAP: char = '▶';
 pub(crate) const ANNOTATION_REVERSE_CAP: char = '◀';
 
-/// Decide every flag's label placement and lane for a node `node_width` columns wide, and
-/// return how many lanes the node needs. Flags are sorted into drawing order.
-///
-/// A name that fits inside its bar's interior goes there. Otherwise it is placed one cell
-/// to the left of the bar, or to the right when the left would spill past the node's
-/// start, and from then on counts as part of the flag for spacing. A name that fits on
-/// neither side is left to the floating label pass. Lanes are then assigned by interval
-/// partitioning: flags in column order each take the first lane whose previous flag ends
-/// at least one column before this one starts, which uses the fewest lanes possible for
-/// the given extents.
-pub fn pack_annotation_flags(flags: &mut [AnnotationFlag], node_width: i64) -> usize {
-    for flag in flags.iter_mut() {
-        let label_width = flag.label_width();
-        let (text_start, text_end) = flag.text_columns();
-        flag.label = if label_width <= text_end - text_start {
-            LabelPlacement::Inside
-        } else if flag.bar_start > label_width {
-            LabelPlacement::Beside(flag.bar_start - 1 - label_width)
-        } else if flag.bar_end + 1 + label_width <= node_width {
-            LabelPlacement::Beside(flag.bar_end + 1)
+/// Pack arrows and labels as rigid units. Names use the arrow interior when they fit,
+/// otherwise they sit one cell to its left. The returned height counts occupied rows.
+pub fn pack_annotation_flags(flags: &mut [AnnotationFlag], _node_width: i64) -> usize {
+    flags.sort_by_key(|flag| (flag.bar_start, flag.id, flag.piece));
+    let mut pieces: Vec<_> = flags
+        .iter()
+        .map(|flag| {
+            let width = flag.label_width();
+            CompactPiece {
+                id: flag.id,
+                piece: flag.piece,
+                color: flag.color,
+                row: 0,
+                left: flag.bar_start,
+                right: flag.bar_end - 1,
+                label: flag.show_label.then(|| flag.name.clone()),
+                label_left: flag.show_label && width > flag.bar_end - flag.bar_start - 2,
+                left_glyph: ANNOTATION_BAR,
+                right_glyph: ANNOTATION_BAR,
+            }
+        })
+        .collect();
+    let rows = pack_pieces(&mut pieces, &mut HashMap::new());
+    for (flag, piece) in flags.iter_mut().zip(pieces) {
+        flag.lane = piece.row;
+        flag.label = if piece.label_left {
+            LabelPlacement::Beside(piece_label_start(&piece, flag.label_width()))
         } else {
-            LabelPlacement::Floating
+            LabelPlacement::Inside
         };
     }
-    flags.sort_by(|a, b| {
-        let (a_start, a_end) = a.extent();
-        let (b_start, b_end) = b.extent();
-        a_start
-            .cmp(&b_start)
-            .then((b_end - b_start).cmp(&(a_end - a_start)))
-            .then(a.name.cmp(&b.name))
-    });
-
-    // Exclusive end column of the last flag placed in each lane.
-    let mut lane_ends: Vec<i64> = Vec::new();
-    for flag in flags.iter_mut() {
-        let (start, end) = flag.extent();
-        let lane = lane_ends
-            .iter()
-            .position(|lane_end| *lane_end < start)
-            .unwrap_or_else(|| {
-                lane_ends.push(i64::MIN);
-                lane_ends.len() - 1
-            });
-        lane_ends[lane] = end;
-        flag.lane = lane;
-    }
-    lane_ends.len()
+    rows
 }
 
 #[derive(Clone, Debug, Default)]
@@ -916,6 +886,7 @@ struct PackedAnnotations {
     flags: Vec<AnnotationFlag>,
     lanes: usize,
     compact: CompactNode,
+    full: CompactNode,
 }
 
 /// The per-node annotation flags a [`GenGraphAnnotatedRenderer`] draws, shared between the
@@ -935,7 +906,7 @@ impl Default for NodeAnnotationLayer {
         Self {
             packed: Arc::new(Mutex::new(HashMap::new())),
             size_generation: Arc::new(AtomicU64::new(0)),
-            name_limit: Arc::new(AtomicUsize::new(20)),
+            name_limit: Arc::new(AtomicUsize::new(usize::MAX)),
         }
     }
 }
@@ -945,7 +916,8 @@ impl NodeAnnotationLayer {
         Self::default()
     }
 
-    /// Set the maximum terminal cells in a compact annotation name (default 20).
+    /// Set the maximum terminal cells in annotation names at both detail levels.
+    /// Names are unabridged by default.
     pub fn set_name_limit(&self, limit: usize) {
         if self.name_limit.swap(limit, Ordering::Relaxed) != limit {
             let flags = self
@@ -964,6 +936,17 @@ impl NodeAnnotationLayer {
         )
     }
 
+    fn full(&self, node: &GraphNode) -> CompactNode {
+        self.lock().get(node).map_or_else(
+            || CompactNode {
+                width: node.length(),
+                height: 1,
+                ..CompactNode::default()
+            },
+            |packed| packed.full.clone(),
+        )
+    }
+
     /// Whether any loaded node currently has annotation pieces.
     pub fn has_annotations(&self) -> bool {
         self.lock().values().any(|packed| !packed.flags.is_empty())
@@ -971,16 +954,38 @@ impl NodeAnnotationLayer {
 
     /// Pack `flags` per node and make them the layer's contents.
     pub fn replace(&self, flags_by_node: HashMap<GraphNode, Vec<AnnotationFlag>>) {
-        let mut compact = build_layouts(&flags_by_node, self.name_limit.load(Ordering::Relaxed));
+        let name_limit = self.name_limit.load(Ordering::Relaxed);
+        let mut full = build_layouts_for_detail(&flags_by_node, name_limit, true);
+        let mut compact = build_layouts(&flags_by_node, name_limit);
         let packed: HashMap<GraphNode, PackedAnnotations> = flags_by_node
             .into_iter()
             .map(|(node, mut flags)| {
-                let lanes = pack_annotation_flags(&mut flags, node.length());
+                let full_layout = full
+                    .remove(&node)
+                    .expect("should have full annotation layout");
+                for flag in &mut flags {
+                    let piece = full_layout
+                        .pieces
+                        .iter()
+                        .find(|piece| piece.id == flag.id && piece.piece == flag.piece)
+                        .expect("should have annotation piece");
+                    flag.lane = piece.row;
+                    flag.show_label = piece.label.is_some();
+                    flag.label = if piece.label_left {
+                        LabelPlacement::Beside(
+                            piece_label_start(piece, flag.label_width()) - full_layout.margin,
+                        )
+                    } else {
+                        LabelPlacement::Inside
+                    };
+                }
+                let lanes = (full_layout.height - 1) / 2;
                 (
                     node,
                     PackedAnnotations {
                         flags,
                         lanes,
+                        full: full_layout,
                         compact: compact
                             .remove(&node)
                             .unwrap_or_else(|| CompactNode::empty(node.length())),
@@ -990,8 +995,13 @@ impl NodeAnnotationLayer {
             .collect();
         let mut current = self.lock();
         let geometry = |contents: &HashMap<GraphNode, PackedAnnotations>, node: &GraphNode| {
-            contents.get(node).map_or((1, 1, 0), |packed| {
-                (packed.compact.width, packed.compact.height, packed.lanes)
+            contents.get(node).map_or((1, 1, 1, 1), |packed| {
+                (
+                    packed.compact.width,
+                    packed.compact.height,
+                    packed.full.width,
+                    packed.full.height,
+                )
             })
         };
         let sizes_changed = packed
@@ -1015,17 +1025,6 @@ impl NodeAnnotationLayer {
         self.lock().get(node).map_or(0, |packed| packed.lanes)
     }
 
-    /// The annotations whose name found no room under their node, so they still need a
-    /// floating label.
-    pub fn floating_span_ids(&self) -> HashSet<HashId> {
-        self.lock()
-            .values()
-            .flat_map(|packed| packed.flags.iter())
-            .filter(|flag| flag.label == LabelPlacement::Floating)
-            .map(|flag| flag.id)
-            .collect()
-    }
-
     /// Every flag, grouped by annotation and ordered by piece, with the node each is on.
     fn pieces(&self) -> Vec<Vec<(GraphNode, AnnotationFlag)>> {
         let mut by_id: HashMap<HashId, Vec<(GraphNode, AnnotationFlag)>> = HashMap::new();
@@ -1043,13 +1042,6 @@ impl NodeAnnotationLayer {
         }
         pieces.sort_by_key(|span| span[0].1.id);
         pieces
-    }
-
-    fn flags(&self, node: &GraphNode) -> Vec<AnnotationFlag> {
-        self.lock()
-            .get(node)
-            .map(|packed| packed.flags.clone())
-            .unwrap_or_default()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<GraphNode, PackedAnnotations>> {
@@ -1128,22 +1120,17 @@ fn flag_ends(flags: &[AnnotationFlag]) -> Vec<i64> {
 }
 
 /// Refill `layer` from the span overlays, using the colors [`reapply_overlays`] settled on
-/// (so call it after that pass). Returns the overlays whose name found no room under their
-/// node, for the caller to hand to [`draw_annotation_labels`].
+/// (so call it after that pass). Returns non-annotation overlays for the floating search
+/// label pass; annotation names always have reserved space in their node.
 pub fn update_node_annotations<S: GraphSource<GenGraph>>(
     layer: &NodeAnnotationLayer,
     engine: &LayoutEngine<GenGraph, S>,
     overlays: &[GraphOverlay],
 ) -> Vec<GraphOverlay> {
     layer.replace(annotation_flags_by_node(engine, overlays));
-    let floating = layer.floating_span_ids();
     overlays
         .iter()
-        .filter(|overlay| {
-            overlay
-                .span()
-                .is_some_and(|span| floating.contains(&span.id))
-        })
+        .filter(|overlay| !overlay.source.is_annotation())
         .cloned()
         .collect()
 }
@@ -1369,44 +1356,7 @@ pub fn draw_annotation_connectors(
     layer: &NodeAnnotationLayer,
     focused: Option<HashId>,
 ) {
-    let Some(focused) = focused else {
-        return;
-    };
-    let to_terminal = |x: i64, y: i64| -> Option<(u16, u16)> {
-        if x < 0 || y < 0 || x >= area.width as i64 || y >= area.height as i64 {
-            return None;
-        }
-        Some((area.x + x as u16, area.y + area.height - 1 - y as u16))
-    };
-    let lane_row = |rect: WorldRect, flag: &AnnotationFlag| -> i64 {
-        sequence_row(rect) - 1 - flag.lane as i64
-    };
-    for pieces in layer
-        .pieces()
-        .into_iter()
-        .filter(|pieces| pieces[0].1.id == focused)
-    {
-        for pair in pieces.windows(2) {
-            let ((from_node, from_flag), (to_node, to_flag)) = (&pair[0], &pair[1]);
-            let (Some(from_rect), Some(to_rect)) =
-                (frame.rect_of(*from_node), frame.rect_of(*to_node))
-            else {
-                continue;
-            };
-            let from_x = from_rect.min.x + from_flag.bar_end;
-            let to_x = to_rect.min.x + to_flag.bar_start - 1;
-            if to_x < from_x {
-                continue;
-            }
-            let (Some(from), Some(to)) = (
-                to_terminal(from_x, lane_row(from_rect, from_flag)),
-                to_terminal(to_x, lane_row(to_rect, to_flag)),
-            ) else {
-                continue;
-            };
-            draw_braille_curve(buf, from, to, from_flag.color);
-        }
-    }
+    draw_annotation_layout_connectors(buf, area, frame, layer, focused, true);
 }
 
 /// Draw the focused span between its compact endpoint cells on adjacent nodes.
@@ -1416,6 +1366,17 @@ pub fn draw_compact_annotation_connectors(
     frame: &FrameIndex<GraphNode>,
     layer: &NodeAnnotationLayer,
     focused: Option<HashId>,
+) {
+    draw_annotation_layout_connectors(buf, area, frame, layer, focused, false);
+}
+
+fn draw_annotation_layout_connectors(
+    buf: &mut Buffer,
+    area: Rect,
+    frame: &FrameIndex<GraphNode>,
+    layer: &NodeAnnotationLayer,
+    focused: Option<HashId>,
+    full: bool,
 ) {
     let Some(focused) = focused else {
         return;
@@ -1438,8 +1399,16 @@ pub fn draw_compact_annotation_connectors(
             else {
                 continue;
             };
-            let from_layout = layer.compact(from_node);
-            let to_layout = layer.compact(to_node);
+            let from_layout = if full {
+                layer.full(from_node)
+            } else {
+                layer.compact(from_node)
+            };
+            let to_layout = if full {
+                layer.full(to_node)
+            } else {
+                layer.compact(to_node)
+            };
             let Some(from_piece) = from_layout
                 .pieces
                 .iter()
@@ -1484,9 +1453,8 @@ fn sequence_row(area: WorldRect) -> i64 {
 
 /// `NodeRenderer` for the highest GenGraph zoom levels with annotations drawn under each
 /// node as packed flags: a bar over the feature's columns, a triangle cap on its
-/// directional end, and its name inside the bar (inverted) when it fits or beside it when
-/// not. Sizing grows with the number of lanes the node's flags pack into, so the layout
-/// reserves the rows instead of letting neighbors overdraw them.
+/// directional end, and a name inside it or one cell to its left. The layout reserves annotation rows and transparent padding so neighbors cannot
+/// overdraw labels while edges remain visible through the padding.
 pub struct GenGraphAnnotatedRenderer<S> {
     source: S,
     cache: Mutex<HashMap<GraphNode, String>>,
@@ -1501,63 +1469,34 @@ impl<S: SequenceSource> GenGraphAnnotatedRenderer<S> {
             layer,
         }
     }
-
-    fn render_flag(
-        &self,
-        buffer: &mut WorldBuffer,
-        area: WorldRect,
-        row: i64,
-        flag: &AnnotationFlag,
-    ) {
-        let theme = current_theme();
-        let bar_style = Style::default().fg(flag.color).bg(theme[0x00]);
-        let local_x = |column: i64| area.min.x + column;
-
-        for column in flag.bar_start..flag.bar_end {
-            let glyph = flag.cap_at(column).unwrap_or(ANNOTATION_BAR);
-            buffer.set_char_styled(WorldPos::new(local_x(column), row), glyph, bar_style);
-        }
-
-        match flag.label {
-            LabelPlacement::Beside(start) => {
-                buffer.set_string_styled(WorldPos::new(local_x(start), row), &flag.name, bar_style);
-            }
-            LabelPlacement::Floating => {}
-            LabelPlacement::Inside => {
-                // Center the name in whatever part of the bar is on screen right now, so a
-                // long feature scrolled half off the viewport still shows its name where
-                // the user can see it; once even that is too narrow, clip the name.
-                let visible = buffer.visible_world_area();
-                let (text_start, text_end) = flag.text_columns();
-                let visible_start = text_start.max(visible.min.x - area.min.x);
-                let visible_end = text_end.min(visible.max.x - area.min.x + 1);
-                let visible_width = visible_end - visible_start;
-                let label_width = flag.label_width();
-                if visible_width <= 0 || label_width == 0 {
-                    return;
-                }
-                let text_x = if label_width <= visible_width {
-                    visible_start + (visible_width - label_width) / 2
-                } else {
-                    visible_start
-                };
-                let text: String = flag.name.chars().take(visible_width as usize).collect();
-                buffer.set_string_styled(WorldPos::new(local_x(text_x), row), &text, bar_style);
-            }
-        }
-    }
 }
 
 impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> {
     fn get_node_size(&self, node: &GraphNode) -> (u64, u64) {
         start_end_node_size(node).unwrap_or_else(|| {
-            let lanes = self.layer.lanes(node) as u64;
-            (node.length() as u64, 2 * lanes + 1)
+            let layout = self.layer.full(node);
+            (layout.width as u64, layout.height as u64)
         })
     }
 
     fn size_generation(&self) -> u64 {
         self.layer.size_generation()
+    }
+
+    fn map_column(&self, node: &GraphNode, raw: i64) -> i64 {
+        self.layer.full(node).margin + raw
+    }
+
+    fn raw_column(&self, node: &GraphNode, column: i64) -> i64 {
+        (column - self.layer.full(node).margin).clamp(0, (node.length() - 1).max(0))
+    }
+
+    fn cursor_columns(&self, node: &GraphNode) -> Option<CursorColumns> {
+        let margin = self.layer.full(node).margin;
+        Some(CursorColumns::Range(
+            margin,
+            margin + node.length().max(1) - 1,
+        ))
     }
 
     /// The sequence row (see [`sequence_row`]); the flag lanes around it are only decoration.
@@ -1569,11 +1508,17 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
         let theme = current_theme();
         let background_style = Style::default().bg(theme[0x05]);
         let text_style = Style::default().bg(theme[0x05]).fg(theme[0x00]);
-        buffer.fill_rect_styled(area, ' ', Style::default().bg(theme[0x00]));
+
         let sequence_y = sequence_row(area);
-        let sequence_pos = WorldPos::new(area.min.x, sequence_y);
+        let layout = self.layer.full(node_id);
+        let sequence_pos = WorldPos::new(area.min.x + layout.margin, sequence_y);
         buffer.fill_rect_styled(
-            WorldRect::from_coords(area.min.x, sequence_y, area.max.x, sequence_y),
+            WorldRect::from_coords(
+                sequence_pos.x,
+                sequence_y,
+                sequence_pos.x + node_id.length().max(1) - 1,
+                sequence_y,
+            ),
             ' ',
             background_style,
         );
@@ -1585,13 +1530,7 @@ impl<S: SequenceSource> NodeRenderer<GenGraph> for GenGraphAnnotatedRenderer<S> 
             .unwrap_or_else(|_| "Unknown Sequence".to_string());
         buffer.set_string_styled(sequence_pos, &sequence, text_style);
 
-        for flag in self.layer.flags(node_id) {
-            let row = sequence_pos.y - 1 - flag.lane as i64;
-            if row < area.min.y {
-                continue;
-            }
-            self.render_flag(buffer, area, row, &flag);
-        }
+        render_annotation_pieces(buffer, area, &layout);
     }
 
     fn is_visible(&self, node: &GraphNode) -> bool {
@@ -2301,13 +2240,17 @@ pub fn draw_annotation_labels(
         5
     };
     for label in &labels.labels {
-        let bounds = if labels.detail_level == VisualDetail::Truncated {
+        let bounds = if labels.detail_level != VisualDetail::Minimal {
             labels
                 .compact
                 .as_ref()
                 .and_then(|layer| {
                     locus_label_bounds_mapped(&label.locus, &view_state.frame, |node, raw| {
-                        layer.compact(&node).map_column(raw)
+                        if labels.detail_level == VisualDetail::Full {
+                            layer.full(&node).margin + raw
+                        } else {
+                            layer.compact(&node).map_column(raw)
+                        }
                     })
                 })
                 .or_else(|| {
@@ -2777,7 +2720,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pack_annotation_flags_places_names_inside_or_beside() {
+    fn test_pack_annotation_flags_places_names_inside_or_left() {
         let mut flags = vec![
             flag("AmpR", 10, 20, Strand::Forward),
             flag("snug", 14, 18, Strand::Forward),
@@ -2791,22 +2734,22 @@ mod tests {
         assert_eq!(
             placement_of(&flags, "snug").label,
             LabelPlacement::Beside(9),
-            "a name as wide as its bar would cover the bar's ends, so it goes beside"
+            "a name as wide as its bar would cover the bar's ends, so it goes left"
         );
         assert_eq!(
             placement_of(&flags, "long name here").label,
             LabelPlacement::Beside(5),
-            "a name wider than its bar goes one cell to the left of the bar"
+            "a wider name uses existing room left of its bar"
         );
         assert_eq!(
             placement_of(&flags, "promoter").label,
-            LabelPlacement::Beside(5),
-            "falls back to the right when the left would spill past the node start"
+            LabelPlacement::Beside(-9),
+            "the node will reserve padding for label overhang"
         );
         assert_eq!(
             placement_of(&flags, "no room for this name").label,
-            LabelPlacement::Floating,
-            "a name that fits on neither side is left to the floating label pass"
+            LabelPlacement::Beside(-17),
+            "long names use left placement with transparent padding"
         );
     }
 
@@ -2827,7 +2770,7 @@ mod tests {
         ];
         assert_eq!(pack_annotation_flags(&mut flags, 40), 2);
 
-        // A name beside its bar counts toward the flag's extent.
+        // Labels to the left count as part of the arrow for row packing.
         let mut flags = vec![
             flag("z", 2, 4, Strand::Unknown),
             flag("abcdef", 10, 12, Strand::Unknown),
@@ -2883,6 +2826,84 @@ mod tests {
     }
 
     #[test]
+    fn test_full_annotation_padding_preserves_nucleotide_mapping() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("padded sequence"),
+            sequence_start: 2,
+            sequence_end: 6,
+        };
+        let layer = NodeAnnotationLayer::new();
+        layer.replace(HashMap::from([(
+            node,
+            vec![flag("long feature name", 0, 4, Strand::Forward)],
+        )]));
+        let renderer = GenGraphAnnotatedRenderer::new(SyntheticSequenceSource, layer.clone());
+        let layout = layer.full(&node);
+        assert_eq!(renderer.get_node_size(&node), (40, 3));
+        assert!(layout.pieces[0].label_left);
+        for raw in 0..node.length() {
+            assert_eq!(renderer.map_column(&node, raw), layout.margin + raw);
+            assert_eq!(
+                renderer.raw_column(&node, renderer.map_column(&node, raw)),
+                raw
+            );
+        }
+        assert_eq!(renderer.raw_column(&node, 0), 0);
+        assert_eq!(renderer.raw_column(&node, layout.width - 1), 3);
+        assert_eq!(layout.pieces[0].left, renderer.map_column(&node, 0));
+        assert_eq!(layout.pieces[0].right, renderer.map_column(&node, 3));
+    }
+
+    #[test]
+    fn test_annotation_padding_preserves_previously_drawn_edges() {
+        let node = GraphNode {
+            node_id: HashId::convert_str("transparent padding"),
+            sequence_start: 0,
+            sequence_end: 4,
+        };
+        let layer = NodeAnnotationLayer::new();
+        layer.replace(HashMap::from([(
+            node,
+            vec![flag("long feature name", 0, 4, Strand::Forward)],
+        )]));
+        let renderers: Vec<Box<dyn NodeRenderer<GenGraph>>> = vec![
+            Box::new(GenGraphAnnotatedRenderer::new(
+                RepeatingSequenceSource,
+                layer.clone(),
+            )),
+            Box::new(GenGraphTruncatedRenderer::with_layer(
+                RepeatingSequenceSource,
+                layer,
+            )),
+        ];
+        for renderer in renderers {
+            let (width, height) = renderer.get_node_size(&node);
+            let area = WorldRect::from_coords(2, 2, width as i64 + 1, height as i64 + 1);
+            let mut viewport = ViewportState::new();
+            viewport.viewport_bounds = Rect::new(0, 0, 100, 20);
+            viewport.camera_current = WorldPos::new(50, 10);
+            let mut buffer = Buffer::empty(viewport.viewport_bounds);
+            let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport);
+            let edge_style = Style::default().fg(Color::Red).bg(Color::Blue);
+            for row in area.min.y..=area.max.y {
+                for column in area.min.x..=area.max.x {
+                    world_buffer.set_char_styled(WorldPos::new(column, row), '─', edge_style);
+                }
+            }
+            let existing =
+                world_buffer.get_char_styled(WorldPos::new(area.min.x, sequence_row(area)));
+            renderer.render_node(&mut world_buffer, area, &node);
+            for position in [
+                WorldPos::new(area.min.x, sequence_row(area)),
+                WorldPos::new(area.max.x, sequence_row(area)),
+                area.max,
+            ] {
+                assert_eq!(world_buffer.get_char_styled(position), existing);
+            }
+        }
+    }
+
+    #[test]
     fn test_compact_name_limit_rebuilds_node_geometry() {
         let node = GraphNode {
             node_id: HashId::convert_str("named"),
@@ -2897,7 +2918,7 @@ mod tests {
         let original_width = layer.compact(&node).width;
         assert_eq!(
             layer.compact(&node).pieces[0].label.as_deref(),
-            Some("abcdefghijklmnopqrs…")
+            Some("abcdefghijklmnopqrstuvwxyz")
         );
         let generation = layer.size_generation();
         layer.set_name_limit(4);
@@ -2938,8 +2959,8 @@ mod tests {
         let annotation = world_buffer
             .get_char_styled(WorldPos::new(area.min.x, bar_row - 1))
             .expect("should paint the annotation row");
-        assert_eq!(above.1.bg, Some(theme[0x00]));
-        for column in area.min.x..=area.max.x {
+        assert_eq!(above.1.bg, Some(Color::Reset));
+        for column in area.min.x + layout.margin..=area.max.x - layout.margin {
             let bar = world_buffer
                 .get_char_styled(WorldPos::new(column, bar_row))
                 .expect("should paint the sequence row across its width");
@@ -2949,7 +2970,7 @@ mod tests {
                 .iter()
                 .zip(&layout.columns)
                 .find(|(_, event_column)| layout.margin + **event_column == local)
-                .map_or('.', |(raw, _)| {
+                .map_or('…', |(raw, _)| {
                     "ACGT".chars().nth(*raw as usize % 4).unwrap()
                 });
             assert_eq!(bar.0, expected);
@@ -3165,7 +3186,7 @@ mod tests {
         let mut world_buffer = WorldBuffer::new(&mut buffer, &viewport);
         renderer.render_node(&mut world_buffer, area, &middle);
         let row = sequence_row(area);
-        for column in area.min.x..=area.max.x {
+        for column in area.min.x + layout.margin..=area.max.x - layout.margin {
             assert_eq!(
                 world_buffer
                     .get_char_styled(WorldPos::new(column, row))
@@ -3176,7 +3197,7 @@ mod tests {
                     .iter()
                     .zip(&layout.columns)
                     .find(|(_, mapped)| layout.margin + **mapped == column - area.min.x)
-                    .map_or('.', |(raw, _)| "ACGT"
+                    .map_or('…', |(raw, _)| "ACGT"
                         .chars()
                         .nth(*raw as usize % 4)
                         .unwrap()),
@@ -3205,7 +3226,7 @@ mod tests {
         let one_lane = renderer.size_generation();
         assert_ne!(one_lane, initial);
 
-        // Moving a flag within its lane keeps both compact width and full-detail height stable.
+        // Moving these endpoints preserves both compact and full-detail dimensions.
         layer.replace(HashMap::from([(
             node,
             vec![flag("a", 2, 12, Strand::Forward)],
@@ -4148,7 +4169,12 @@ mod tests {
 
         update_node_annotations(&layer, &engine, &overlays);
 
-        let flags = layer.flags(&plasmid);
+        let flags = layer
+            .lock()
+            .get(&plasmid)
+            .expect("should have plasmid annotations")
+            .flags
+            .clone();
         let named = |name: &str| {
             let mut named: Vec<&AnnotationFlag> =
                 flags.iter().filter(|flag| flag.name == name).collect();

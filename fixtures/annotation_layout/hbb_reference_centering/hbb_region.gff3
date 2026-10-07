@@ -1,0 +1,11 @@
+##gff-version 3
+##sequence-region HBB_region 1 6000
+#!source Ensembl release REST API, GRCh38 11:5224001-5230000
+HBB_region	ensembl_havana	gene	1464	5395	.	-	.	ID=gene_1464;Name=HBB
+HBB_region	ensembl_havana	mRNA	1464	3071	.	-	.	ID=mRNA_1464;Name=HBB-201
+HBB_region	ensembl_havana	exon	2930	3071	.	-	.	ID=exon_2930;Name=HBB exon 1
+HBB_region	ensembl_havana	exon	2577	2799	.	-	.	ID=exon_2577;Name=HBB exon 2
+HBB_region	ensembl_havana	exon	1464	1726	.	-	.	ID=exon_1464;Name=HBB exon 3
+HBB_region	ensembl_havana	CDS	2930	3021	.	-	0	ID=CDS_2930;Name=HBB CDS
+HBB_region	ensembl_havana	CDS	2577	2799	.	-	1	ID=CDS_2577;Name=HBB CDS
+HBB_region	ensembl_havana	CDS	1598	1726	.	-	0	ID=CDS_1598;Name=HBB CDS

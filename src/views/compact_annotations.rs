@@ -18,6 +18,7 @@ pub(crate) struct CompactPiece {
     pub piece: usize,
     pub color: Color,
     pub row: usize,
+    pub label_left: bool,
     pub left: i64,
     pub right: i64,
     pub label: Option<String>,
@@ -41,8 +42,8 @@ impl CompactNode {
         let mut events = sequence_anchors(length);
         events.sort_unstable();
         Self {
-            columns: (0..events.len() as i64).collect(),
-            width: events.len().max(1) as i64,
+            width: compact_columns(&events).last().copied().unwrap_or(0) + 1,
+            columns: compact_columns(&events),
             events,
             height: 1,
             ..Self::default()
@@ -75,6 +76,19 @@ impl CompactNode {
             .partition_point(|value| *value < column - self.margin);
         self.events[index.min(self.events.len() - 1)]
     }
+}
+
+/// A skipped run always occupies one ellipsis cell, independent of annotation names.
+fn compact_columns(events: &[i64]) -> Vec<i64> {
+    let mut columns = Vec::with_capacity(events.len());
+    let mut column = 0;
+    for (index, event) in events.iter().enumerate() {
+        if index > 0 {
+            column += if *event - events[index - 1] > 1 { 2 } else { 1 };
+        }
+        columns.push(column);
+    }
+    columns
 }
 
 // Preserve a little sequence context even when no annotation ends on this slice.
@@ -135,11 +149,27 @@ pub(crate) fn label_start(left: i64, right: i64, width: i64) -> i64 {
     (left + right + 1 - width).div_euclid(2)
 }
 
+pub(crate) fn piece_label_start(piece: &CompactPiece, width: i64) -> i64 {
+    if piece.label_left {
+        piece.left - width - 1
+    } else {
+        label_start(piece.left, piece.right, width)
+    }
+}
+
 /// Build all nodes together so labels favor the largest sequence piece and row preferences
 /// can follow a span through its nodes.
 pub(crate) fn build_layouts(
     flags_by_node: &HashMap<GraphNode, Vec<AnnotationFlag>>,
     name_limit: usize,
+) -> HashMap<GraphNode, CompactNode> {
+    build_layouts_for_detail(flags_by_node, name_limit, false)
+}
+
+pub(crate) fn build_layouts_for_detail(
+    flags_by_node: &HashMap<GraphNode, Vec<AnnotationFlag>>,
+    name_limit: usize,
+    full: bool,
 ) -> HashMap<GraphNode, CompactNode> {
     let mut pieces_by_annotation: HashMap<HashId, Vec<(usize, i64)>> = HashMap::new();
     for flags in flags_by_node.values() {
@@ -205,47 +235,29 @@ pub(crate) fn build_layouts(
         }
         events.sort_unstable();
         events.dedup();
-        let mut columns: Vec<i64> = (0..events.len() as i64).collect();
-        for flag in flags {
-            if label_piece.get(&flag.id) != Some(&flag.piece) {
-                continue;
-            }
-            let left = if flag.continues_left {
-                0
-            } else {
-                events
-                    .binary_search(&flag.bar_start)
-                    .expect("should find start event")
-            };
-            let right = if flag.continues_right {
-                events.len() - 1
-            } else {
-                events
-                    .binary_search(&(flag.bar_end - 1))
-                    .expect("should find end event")
-            };
-            let name = short_name(&flag.name, name_limit);
-            let width = UnicodeWidthStr::width(name.as_str()) as i64;
-            let required = width + 1;
-            let extra = (required - (columns[right] - columns[left])).max(0);
-            for column in &mut columns[if right == left { right + 1 } else { right }..] {
-                *column += extra;
-            }
-        }
+        let columns: Vec<i64> = if full {
+            events.clone()
+        } else {
+            compact_columns(&events)
+        };
         let mut ordered: Vec<_> = flags.iter().collect();
         ordered.sort_by_key(|flag| (flag.bar_start, flag.id, flag.piece));
         let mut margin = 0;
         let mut pieces = Vec::with_capacity(flags.len());
         for flag in ordered {
             let left_event = if flag.continues_left {
-                columns[0]
+                0
             } else {
                 columns[events
                     .binary_search(&flag.bar_start)
                     .expect("should find start event")]
             };
             let right_event = if flag.continues_right {
-                *columns.last().expect("should have a compact column")
+                if full {
+                    node.length() - 1
+                } else {
+                    *columns.last().expect("should have a compact column")
+                }
             } else {
                 columns[events
                     .binary_search(&(flag.bar_end - 1))
@@ -253,17 +265,13 @@ pub(crate) fn build_layouts(
             };
             let label = (label_piece.get(&flag.id) == Some(&flag.piece))
                 .then(|| short_name(&flag.name, name_limit));
-            let single_column_label_width = if left_event == right_event {
-                label
-                    .as_deref()
-                    .map_or(0, |text| UnicodeWidthStr::width(text) as i64 + 1)
-            } else {
-                0
-            };
-            let right_event = right_event + single_column_label_width;
-            if let Some(text) = &label {
-                let width = UnicodeWidthStr::width(text.as_str()) as i64;
-                margin = margin.max(-label_start(left_event, right_event, width));
+            let label_width = label
+                .as_deref()
+                .map_or(0, |text| UnicodeWidthStr::width(text) as i64);
+            let outside = label.is_some() && label_width > right_event - left_event - 1;
+            let label_left = outside;
+            if label_left {
+                margin = margin.max(label_width + 1 - left_event);
             }
             let (left_glyph, right_glyph) =
                 end_glyphs(flag.strand, flag.continues_left, flag.continues_right);
@@ -272,6 +280,7 @@ pub(crate) fn build_layouts(
                 piece: flag.piece,
                 color: flag.color,
                 row: 0,
+                label_left,
                 left: left_event,
                 right: right_event,
                 label,
@@ -279,63 +288,32 @@ pub(crate) fn build_layouts(
                 right_glyph,
             });
         }
-        let mut rows: Vec<Vec<(i64, i64)>> = Vec::new();
+        let sequence_width = if full {
+            node.length().max(1)
+        } else {
+            columns.last().copied().unwrap_or(0) + 1
+        };
+        let right_overhang = pieces
+            .iter()
+            .map(|piece| {
+                piece.label.as_deref().map_or(0, |text| {
+                    let width = UnicodeWidthStr::width(text) as i64;
+                    (piece_label_start(piece, width) + width - sequence_width).max(0)
+                })
+            })
+            .max()
+            .unwrap_or(0);
+        margin = margin.max(right_overhang);
         for piece in &mut pieces {
             piece.left += margin;
             piece.right += margin;
-            let label_width = piece
-                .label
-                .as_deref()
-                .map_or(0, |text| UnicodeWidthStr::width(text) as i64);
-            let label_start = if piece.label.is_some() {
-                label_start(piece.left, piece.right, label_width)
-            } else {
-                piece.left
-            };
-            let interval = (
-                piece.left.min(label_start),
-                (piece.right + 1).max(label_start + label_width),
-            );
-            let wanted = preferred.get(&piece.id).copied().unwrap_or(0);
-            let row = (0..=rows.len())
-                .filter(|&row| {
-                    rows.get(row).is_none_or(|intervals| {
-                        intervals
-                            .iter()
-                            .all(|other| interval.1 < other.0 || other.1 < interval.0)
-                    })
-                })
-                .min_by_key(|&row| (row.abs_diff(wanted), row))
-                .expect("should have a free new row");
-            if row == rows.len() {
-                rows.push(Vec::new());
-            }
-            rows[row].push(interval);
-            piece.row = row;
-            preferred.insert(piece.id, row);
         }
+        let rows = pack_pieces(&mut pieces, &mut preferred);
         result.insert(
             *node,
             CompactNode {
-                width: pieces
-                    .iter()
-                    .map(|piece| {
-                        let label_width = piece
-                            .label
-                            .as_deref()
-                            .map_or(0, |label| UnicodeWidthStr::width(label) as i64);
-                        if piece.label.is_some() {
-                            (piece.right + 1).max(
-                                label_start(piece.left, piece.right, label_width) + label_width,
-                            )
-                        } else {
-                            piece.right + 1
-                        }
-                    })
-                    .max()
-                    .unwrap_or(1)
-                    .max(margin + columns.last().copied().unwrap_or(0) + 1),
-                height: 2 * rows.len() + 1,
+                width: sequence_width + 2 * margin,
+                height: 2 * rows + 1,
                 margin,
                 events,
                 columns,
@@ -347,6 +325,41 @@ pub(crate) fn build_layouts(
     result
 }
 
+/// Pack an arrow and its name as one interval. Names that do not fit inside extend
+/// the interval to the left; sequence coordinates remain unchanged.
+pub(crate) fn pack_pieces(
+    pieces: &mut [CompactPiece],
+    preferred: &mut HashMap<HashId, usize>,
+) -> usize {
+    let mut rows: Vec<Vec<(i64, i64)>> = Vec::new();
+    for piece in pieces {
+        let width = piece
+            .label
+            .as_deref()
+            .map_or(0, |text| UnicodeWidthStr::width(text) as i64);
+        let interval = (
+            piece.left.min(piece_label_start(piece, width)),
+            piece.right + 1,
+        );
+        let wanted = preferred.get(&piece.id).copied().unwrap_or(0);
+        let row = (0..=rows.len())
+            .filter(|&row| {
+                rows.get(row).is_none_or(|occupied| {
+                    occupied
+                        .iter()
+                        .all(|other| interval.1 < other.0 || other.1 < interval.0)
+                })
+            })
+            .min_by_key(|&row| (row.abs_diff(wanted), row))
+            .expect("should have a free new row");
+        rows.resize_with(rows.len().max(row + 1), Vec::new);
+        rows[row].push(interval);
+        piece.row = row;
+        preferred.insert(piece.id, row);
+    }
+    rows.len()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -355,7 +368,10 @@ mod tests {
     use gen_graph::GraphNode;
     use ratatui::style::Color;
 
-    use super::{CompactNode, build_layouts, end_glyphs, label_start, short_name};
+    use super::{
+        CompactNode, build_layouts, build_layouts_for_detail, end_glyphs, label_start,
+        piece_label_start, short_name,
+    };
     use crate::views::gen_graph_widget::{AnnotationFlag, LabelPlacement};
 
     fn node(name: &str) -> GraphNode {
@@ -394,7 +410,10 @@ mod tests {
         let layouts = build_layouts(&flags, 10);
         assert_eq!(layouts[&nested].events, [2, 4, 5, 9]);
         assert_eq!(layouts[&crossing].events, [2, 4, 5, 9]);
-        assert!(layouts[&nested].pieces[0].right - layouts[&nested].pieces[0].left >= 3);
+        assert_eq!(
+            layouts[&nested].pieces[0].right - layouts[&nested].pieces[0].left,
+            5
+        );
         assert_eq!(layouts[&nested].height, 5);
     }
 
@@ -413,11 +432,11 @@ mod tests {
     }
 
     #[test]
-    fn test_adjacent_labels_use_separate_rows() {
+    fn test_ellipsis_gap_allows_disjoint_units_to_share_rows() {
         let graph_node = node("adjacent labels");
         let flags = HashMap::from([(graph_node, vec![flag("A", 0, 2, 4), flag("B", 0, 5, 7)])]);
         let layout = &build_layouts(&flags, 10)[&graph_node];
-        assert_eq!(layout.pieces[0].right + 1, layout.pieces[1].left);
+        assert_eq!(layout.pieces[0].right + 2, layout.pieces[1].left);
         assert_ne!(layout.pieces[0].row, layout.pieces[1].row);
     }
 
@@ -443,7 +462,8 @@ mod tests {
             .iter()
             .find(|piece| piece.label.as_deref() == Some("one"))
             .unwrap();
-        assert!(one.right > one.left);
+        assert_eq!(one.right, one.left);
+        assert!(one.label_left);
         assert_eq!((one.left_glyph, one.right_glyph), ('═', '▶'));
         let continued = layout
             .pieces
@@ -460,8 +480,9 @@ mod tests {
         let layout = &build_layouts(&flags, 20)[&graph_node];
         let piece = &layout.pieces[0];
         let name_start = label_start(piece.left, piece.right, 8);
-        assert!(name_start > piece.left);
-        assert!(name_start + 8 <= piece.right);
+        assert_eq!(piece.left, piece.right);
+        assert!(piece.label_left);
+        assert_eq!(name_start, label_start(piece.left, piece.right, 8));
         assert_eq!(layout.height, 3);
     }
 
@@ -614,8 +635,8 @@ mod tests {
         assert!(layouts[&middle].base_markers.is_empty());
         let labeled = &layouts[&middle].pieces[0];
         let name_start = label_start(labeled.left, labeled.right, 4);
-        assert!(name_start > labeled.left);
-        assert!(name_start + 4 <= labeled.right);
+        assert!(labeled.label_left);
+        assert_eq!(name_start, labeled.left);
         assert_eq!(layouts[&last].pieces[0].label, None);
         assert_eq!(layouts[&last].base_markers, [7]);
     }
@@ -638,6 +659,65 @@ mod tests {
     }
 
     #[test]
+    fn test_labels_add_symmetric_padding_without_stretching_sequence_columns() {
+        let graph_node = GraphNode {
+            sequence_end: 4,
+            ..node("short sequence")
+        };
+        let flags = HashMap::from([(graph_node, vec![flag("long feature name", 0, 0, 4)])]);
+        for full in [false, true] {
+            let layout = &build_layouts_for_detail(&flags, usize::MAX, full)[&graph_node];
+            let piece = &layout.pieces[0];
+            assert!(piece.label_left);
+            assert_eq!(piece.left, layout.margin);
+            assert_eq!(piece.right, layout.width - layout.margin - 1);
+            assert_eq!(layout.columns, vec![0, 2, 3]);
+            for raw in &layout.events {
+                assert_eq!(layout.raw_column(layout.map_column(*raw)), *raw);
+            }
+            let width = 17;
+            assert!(piece_label_start(piece, width) >= 0);
+            assert!(piece_label_start(piece, width) + width <= layout.width);
+            assert_eq!(layout.height, 3);
+        }
+    }
+
+    #[test]
+    fn test_left_placement_uses_existing_sequence_space_without_padding() {
+        let graph_node = node("existing label space");
+        let flags = HashMap::from([(graph_node, vec![flag("a", 0, 0, 20), flag("x", 0, 10, 11)])]);
+        for full in [false, true] {
+            let layouts = build_layouts_for_detail(&flags, usize::MAX, full);
+            let layout = &layouts[&graph_node];
+            let piece = layout
+                .pieces
+                .iter()
+                .find(|piece| piece.label.as_deref() == Some("x"))
+                .expect("should carry x label");
+            assert!(piece.label_left);
+            assert_eq!(layout.margin, 0);
+            assert_eq!(piece_label_start(piece, 1), piece.left - 2);
+        }
+    }
+
+    #[test]
+    fn test_left_labels_move_together_with_arrows_when_extents_overlap() {
+        let graph_node = node("overlapping names");
+        let flags = HashMap::from([(
+            graph_node,
+            vec![
+                flag("first long feature", 0, 2, 4),
+                flag("second long feature", 0, 5, 7),
+            ],
+        )]);
+        let layouts = build_layouts_for_detail(&flags, usize::MAX, true);
+        let pieces = &layouts[&graph_node].pieces;
+        assert!(pieces.iter().all(|piece| piece.label_left));
+        assert_ne!(pieces[0].row, pieces[1].row);
+        assert_eq!(layouts[&graph_node].height, 5);
+    }
+
+    #[test]
     fn test_empty_node_has_single_cell() {
         let empty = CompactNode::empty(0);
         assert_eq!((empty.width, empty.height), (1, 1));
@@ -655,7 +735,16 @@ mod tests {
             };
             let layout =
                 &build_layouts(&HashMap::from([(graph_node, Vec::new())]), 20)[&graph_node];
-            assert_eq!(layout.width, length.min(3));
+            assert_eq!(
+                layout.width,
+                if length <= 3 {
+                    length
+                } else if length == 4 {
+                    4
+                } else {
+                    5
+                }
+            );
             assert_eq!(layout.events.first(), Some(&0));
             assert_eq!(layout.events.last(), Some(&(length - 1)));
             for raw in &layout.events {

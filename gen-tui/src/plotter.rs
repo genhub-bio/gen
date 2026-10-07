@@ -73,6 +73,61 @@ impl PathStyle {
     }
 }
 
+/// Sequence columns available to the cursor, excluding decorative padding and omitted runs.
+#[derive(Clone, Debug)]
+pub enum CursorColumns {
+    /// Every column in this inclusive range is a sequence character.
+    Range(i64, i64),
+    /// Only these ordered columns contain retained sequence characters.
+    Positions(Vec<i64>),
+}
+
+impl CursorColumns {
+    /// First and last accessible column, inclusive.
+    pub fn bounds(&self) -> (i64, i64) {
+        match self {
+            Self::Range(first, last) => (*first, *last),
+            Self::Positions(columns) => (
+                *columns.first().unwrap_or(&0),
+                *columns.last().unwrap_or(&0),
+            ),
+        }
+    }
+
+    /// Closest accessible column, preferring the left column on ties.
+    pub fn nearest(&self, column: i64) -> i64 {
+        match self {
+            Self::Range(first, last) => column.clamp(*first, *last),
+            Self::Positions(columns) => columns
+                .iter()
+                .copied()
+                .min_by_key(|candidate| candidate.abs_diff(column))
+                .unwrap_or(0),
+        }
+    }
+
+    /// First accessible column at or beyond a requested column in the travel direction.
+    pub fn next(&self, column: i64, forward: bool) -> Option<i64> {
+        match self {
+            Self::Range(first, last) => (*first..=*last).contains(&column).then_some(column),
+            Self::Positions(columns) => {
+                if forward {
+                    columns
+                        .iter()
+                        .copied()
+                        .find(|candidate| *candidate >= column)
+                } else {
+                    columns
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|candidate| *candidate <= column)
+                }
+            }
+        }
+    }
+}
+
 /// Domain-side trait bundling node sizing and rendering for a single, fixed
 /// level of detail. A widget or event loop picks which concrete `NodeRenderer`
 /// is active (e.g. per zoom level) and borrows it immutably for rendering.
@@ -113,6 +168,28 @@ where
     /// cursor moves, clicks, and jumps always land on it.
     fn cursor_row(&self, _node: &G::NodeId) -> Option<u64> {
         None
+    }
+
+    /// Columns containing sequence characters; `None` permits every column of the node.
+    fn cursor_columns(&self, _node: &G::NodeId) -> Option<CursorColumns> {
+        None
+    }
+
+    /// The node-local sequence rectangle that may receive highlights and dimming.
+    /// Decoration outside this rectangle leaves previously painted edges untouched.
+    fn content_rect(&self, node: &G::NodeId) -> WorldRect {
+        let (width, height) = self.get_node_size(node);
+        let (left, right) = self
+            .cursor_columns(node)
+            .map_or((0, width.saturating_sub(1) as i64), |columns| {
+                columns.bounds()
+            });
+        let (bottom, top) = self
+            .cursor_row(node)
+            .map_or((0, height.saturating_sub(1) as i64), |row| {
+                (row as i64, row as i64)
+            });
+        WorldRect::from_coords(left, bottom, right, top)
     }
 
     /// Whether `node` should sit at y = 0. Layout aligns centered nodes across layers while
@@ -165,6 +242,14 @@ where
         (**self).cursor_row(node)
     }
 
+    fn cursor_columns(&self, node: &G::NodeId) -> Option<CursorColumns> {
+        (**self).cursor_columns(node)
+    }
+
+    fn content_rect(&self, node: &G::NodeId) -> WorldRect {
+        (**self).content_rect(node)
+    }
+
     fn is_centered(&self, node: &G::NodeId) -> bool {
         (**self).is_centered(node)
     }
@@ -206,6 +291,14 @@ where
 
     fn cursor_row(&self, node: &G::NodeId) -> Option<u64> {
         (**self).cursor_row(node)
+    }
+
+    fn cursor_columns(&self, node: &G::NodeId) -> Option<CursorColumns> {
+        (**self).cursor_columns(node)
+    }
+
+    fn content_rect(&self, node: &G::NodeId) -> WorldRect {
+        (**self).content_rect(node)
     }
 
     fn is_centered(&self, node: &G::NodeId) -> bool {
@@ -290,13 +383,20 @@ pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
                 let node_id = <G as NodeIndexable>::from_index(original_graph, domain_idx.index());
                 let world_rect = WorldRect::from_center_and_size(*world_pos, node.size);
                 renderer.render_node(buffer, world_rect, &node_id);
+                let content = renderer.content_rect(&node_id);
+                let content_rect = WorldRect::from_coords(
+                    world_rect.min.x + content.min.x,
+                    world_rect.min.y + content.min.y,
+                    world_rect.min.x + content.max.x,
+                    world_rect.min.y + content.max.y,
+                );
 
                 // If lowlighted, dim the node background to theme[0x04].
                 // Applied before highlights so highlights take priority.
                 if node_lowlights.contains(world_pos) {
                     let dim = theme[0x04];
-                    for y in world_rect.min.y..=world_rect.max.y {
-                        for x in world_rect.min.x..=world_rect.max.x {
+                    for y in content_rect.min.y..=content_rect.max.y {
+                        for x in content_rect.min.x..=content_rect.max.x {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let new_style = if ch == NODE_GLYPH {
@@ -323,8 +423,8 @@ pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
                         Color::Reset => theme[0x07],
                         c => c,
                     };
-                    for y in world_rect.min.y..=world_rect.max.y {
-                        for x in world_rect.min.x..=world_rect.max.x {
+                    for y in content_rect.min.y..=content_rect.max.y {
+                        for x in content_rect.min.x..=content_rect.max.x {
                             let pos = WorldPos::new(x, y);
                             if let Some((ch, style)) = buffer.get_char_styled(pos) {
                                 let new_style = if ch == NODE_GLYPH {
@@ -347,10 +447,10 @@ pub(crate) fn plot_viewport_graph_with_highlights<V, G>(
                         Color::Reset => theme[0x07],
                         color => color,
                     };
-                    let x0 = (world_rect.min.x + tl.0).max(world_rect.min.x);
-                    let x1 = (world_rect.min.x + br.0).min(world_rect.max.x);
-                    let y0 = (world_rect.min.y + tl.1).max(world_rect.min.y);
-                    let y1 = (world_rect.min.y + br.1).min(world_rect.max.y);
+                    let x0 = (world_rect.min.x + tl.0).max(content_rect.min.x);
+                    let x1 = (world_rect.min.x + br.0).min(content_rect.max.x);
+                    let y0 = (world_rect.min.y + tl.1).max(content_rect.min.y);
+                    let y1 = (world_rect.min.y + br.1).min(content_rect.max.y);
                     for y in y0..=y1 {
                         for x in x0..=x1 {
                             let pos = WorldPos::new(x, y);
