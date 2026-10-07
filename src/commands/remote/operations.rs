@@ -204,7 +204,7 @@ struct GraphTransferAuthorization {
 }
 
 const PUSH_AUTHORIZATION_REFRESH_MARGIN_SECONDS: i64 = 60;
-const DIRECT_GCS_UPLOAD_REQUEST_COUNT: u32 = 10;
+const DIRECT_GCS_UPLOAD_CONCURRENCY: u32 = 10;
 
 type PushCapabilityFetcher =
     dyn Fn() -> Result<CapabilityResponse, RemoteClientError> + Send + Sync + 'static;
@@ -905,7 +905,7 @@ fn push_graph_through_direct_session_inner(
     let session =
         BlockCacheSessionOptions::for_uri(capability.session_id.to_string(), scope, operation_id)
             .map_err(|error| PushGraphTransferError::database("attaching GCS session", error))?
-            .request_count(DIRECT_GCS_UPLOAD_REQUEST_COUNT)
+            .upload_concurrency(DIRECT_GCS_UPLOAD_CONCURRENCY)
             .auth_callback(move |_storage, _account, _container, reason| {
                 renewal_callback.auth_token(reason)
             })
