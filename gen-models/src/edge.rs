@@ -436,11 +436,12 @@ impl Edge {
         Ok(intervals)
     }
 
-    /// Records the endpoints of a non-zero jump within one backing node.
+    /// Records a coordinate jump whose endpoints belong to the same backing node.
     ///
-    /// `blocks_from_edges` uses the source as an outgoing jump coordinate and the target as an
-    /// incoming jump coordinate. Keeping these sets separate identifies where adjacent jumps or
-    /// another edge meet the jump.
+    /// `blocks_from_edges` calls this for its initial edges and for neighboring edges fetched while
+    /// completing partially described nodes. The source is an outgoing jump coordinate and the
+    /// target is an incoming jump coordinate. Keeping those sets separate lets block generation
+    /// identify where one jump arrives and another leaves.
     fn record_same_node_jump_coordinates(
         edge: &Edge,
         outgoing_coordinates_by_node_id: &mut HashMap<HashId, HashSet<i64>>,
@@ -506,32 +507,22 @@ impl Edge {
     /// the block group, and calls `get_block_intervals` to construct both blocks with sequences
     /// and zero-width junction blocks.
     ///
-    /// For example, two adjacent deletions retain each original base while also exposing the path
-    /// that skips both. Parenthesized nodes are zero-width junctions and bracketed nodes contain
-    /// real sequence:
+    /// Adjacent deletions keep both deleted regions on the reference route while exposing a route
+    /// that skips them in sequence. Parenthesized nodes are zero-width positions; bracketed nodes
+    /// contain sequence:
     ///
     /// ```text
-    ///                  +----> [A] ----+
-    ///                  |              |
-    /// [TAAT] -> (0,0) -+------------> (1,1) -+----> [T] ----+
-    ///                                           |             |
-    ///                                           +-----------> [GATAA]
+    ///                   +--> [first region] --+
+    ///                   |                     |
+    /// [prefix] -> (p) --+---------------------+--> (q) --+--> [second region] --+
+    ///                                                    |                      |
+    ///                                                    +----------------------+--> [suffix]
     /// ```
     ///
-    /// The path `(0,0) -> (1,1)` deletes `A`; `(1,1) -> [GATAA]` deletes `T`. Following both
-    /// edges gives the iterative-deletion route from `[TAAT]` to `[GATAA]` without adding a
-    /// reconstructed bypass edge.
-    ///
-    /// More generally, graph construction can produce a chain of junctions between sequence
-    /// blocks:
-    ///
-    /// ```text
-    /// [real sequence] -> (junction) -> (junction) -> [real sequence]
-    ///                       0 bases       0 bases
-    /// ```
-    ///
-    /// Traversal passes through any number of junctions, consuming zero sequence, until it reaches
-    /// another real block.
+    /// Each deletion edge skips one region. Their shared position joins the two edges, so a path
+    /// can take both deletions without adding a reconstructed bypass edge. A path may pass through
+    /// any number of consecutive zero-width positions before reaching a sequence block; these
+    /// steps consume no sequence.
     pub fn blocks_from_edges(
         conn: &GraphConnection,
         workspace: &Workspace,
@@ -542,8 +533,9 @@ impl Edge {
         let mut node_ids = IndexSet::new();
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
-        // Same-node coordinate jumps consume no intervening sequence. Their endpoints need a
-        // junction when another edge meets the same coordinate.
+        // A same-node coordinate jump connects positions without consuming the intervening
+        // sequence. Track where jumps leave and arrive so their intersections can become
+        // junctions.
         let mut outgoing_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
             HashMap::new();
         let mut incoming_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
@@ -672,12 +664,16 @@ impl Edge {
             let incoming_jump_coordinates = incoming_jump_coordinates_by_node_id
                 .get(node_id)
                 .unwrap_or(&empty_jumps);
-            // Two adjacent deletions add edges A:8->T:2 and T:2->T:6, both with chromosome index
-            // -1. A zero-width junction at T:2 lets the built graph follow both edges:
+            // An incoming jump and an outgoing jump that meet need a shared zero-width position:
             //
-            //     Original: [A:0..10] -- A:10->T:0 --> [T:0..10]
-            //     Deleted:  [A:0..8] -- -1 A:8->T:2 --> (T:2) -- -1 T:2->T:6 --> [T:6..10]
-            //                                                   zero-width junction
+            //                +--> [first region] --+
+            //                |                     |
+            //     [prefix] --+-- incoming jump ----+--> (position) --+--> [second region] --+
+            //                                           0 bases      |                      |
+            //                                                        +-- outgoing jump -----+--> [suffix]
+            //
+            // Shared endpoints with other edges are also routing positions. A lone jump connects
+            // sequence blocks directly when neither endpoint needs a junction.
             let mut junction_coordinates = outgoing_jump_coordinates
                 .intersection(incoming_jump_coordinates)
                 .copied()
@@ -813,9 +809,11 @@ impl Edge {
     /// Returns the in-memory block connections represented by one input edge.
     ///
     /// `build_graph` calls this after coordinate lookup may have returned both a sequence block and
-    /// a junction. Same-coordinate edges connect the surrounding sequence through that junction;
-    /// shared positions and same-node jumps keep the sequence projections needed when markers are
-    /// filtered or pruned. These returned connections are graph projections, not database edges.
+    /// a junction. An incoming edge ends at the junction and a following edge leaves from it, so
+    /// traversal can continue through the shared position. Same-coordinate edges connect the
+    /// surrounding sequence through a junction; shared positions and same-node jumps retain
+    /// sequence projections needed when markers are filtered or pruned. The returned connections
+    /// are graph projections, not database edges.
     fn block_connections<'a>(
         &self,
         source_blocks: &[&'a GroupBlock],
