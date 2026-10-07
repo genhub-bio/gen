@@ -1,5 +1,5 @@
 use gen_core::Sha256Hash;
-use rusqlite::{Row, params};
+use rusqlite::{Row, params, types::Type};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -7,6 +7,8 @@ use thiserror::Error;
 use crate::{ModelSelect, db::GraphConnection};
 
 /// A typed sample metadata value.
+///
+/// Postcard persists enum variant indices. Preserve this order and append new variants.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub enum MetadataValue {
     /// A text value.
@@ -23,7 +25,7 @@ pub enum MetadataValue {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ModelSelect)]
 #[model_select(
     table = "sample_metadata",
-    select = "hash, sample_name, key, value_text, value_integer, value_float, value_boolean",
+    select = "hash, sample_name, key, value",
     from_row = SampleMetadata::from_row
 )]
 pub struct SampleMetadata {
@@ -45,7 +47,10 @@ pub enum SampleMetadataError {
     /// The database rejected the operation.
     #[error(transparent)]
     Database(#[from] rusqlite::Error),
-    /// Non-finite values cannot be persisted reliably in SQLite.
+    /// The metadata value could not be serialized.
+    #[error(transparent)]
+    Serialization(#[from] postcard::Error),
+    /// Metadata floats must remain valid in all supported export formats.
     #[error("sample metadata float values must be finite")]
     NonFiniteFloat,
 }
@@ -85,12 +90,7 @@ impl SampleMetadata {
             MetadataValue::Float(float) if *float == 0.0 => MetadataValue::Float(0.0),
             value => value.clone(),
         };
-        let (text, integer, float, boolean) = match &value {
-            MetadataValue::Text(text) => (Some(text.as_str()), None, None, None),
-            MetadataValue::Integer(integer) => (None, Some(*integer), None, None),
-            MetadataValue::Float(float) => (None, None, Some(*float), None),
-            MetadataValue::Boolean(boolean) => (None, None, None, Some(*boolean)),
-        };
+        let encoded_value = postcard::to_stdvec(&value)?;
 
         // Length prefixes and a type tag keep field boundaries and numeric types distinct.
         let mut hasher = Sha256::new();
@@ -119,21 +119,16 @@ impl SampleMetadata {
         let hash = Sha256Hash(hasher.finalize().into());
         let mut sql = String::from(
             "INSERT INTO sample_metadata
-             (hash, sample_name, key, value_text, value_integer, value_float, value_boolean)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (hash, sample_name, key, value)
+             VALUES (?1, ?2, ?3, ?4)",
         );
         if replace {
             sql.push_str(
                 " ON CONFLICT(sample_name, key) DO UPDATE SET
-                  hash = excluded.hash, value_text = excluded.value_text,
-                  value_integer = excluded.value_integer, value_float = excluded.value_float,
-                  value_boolean = excluded.value_boolean",
+                  hash = excluded.hash, value = excluded.value",
             );
         }
-        conn.execute(
-            &sql,
-            params![hash, sample_name, key, text, integer, float, boolean],
-        )?;
+        conn.execute(&sql, params![hash, sample_name, key, encoded_value])?;
         Ok(Self {
             hash,
             sample_name: sample_name.to_string(),
@@ -143,19 +138,21 @@ impl SampleMetadata {
     }
 
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
-        let values = (
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<i64>>(4)?,
-            row.get::<_, Option<f64>>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-        );
-        let value = match values {
-            (Some(text), None, None, None) => MetadataValue::Text(text),
-            (None, Some(integer), None, None) => MetadataValue::Integer(integer),
-            (None, None, Some(float), None) if float.is_finite() => MetadataValue::Float(float),
-            (None, None, None, Some(boolean @ (0 | 1))) => MetadataValue::Boolean(boolean == 1),
-            _ => return Err(rusqlite::Error::InvalidQuery),
-        };
+        let encoded_value: Vec<u8> = row.get(3)?;
+        let (value, remaining) = postcard::take_from_bytes::<MetadataValue>(&encoded_value)
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(3, Type::Blob, Box::new(error))
+            })?;
+        if !remaining.is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if matches!(&value, MetadataValue::Float(float) if !float.is_finite()) {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                3,
+                Type::Blob,
+                Box::new(SampleMetadataError::NonFiniteFloat),
+            ));
+        }
         Ok(Self {
             hash: row.get(0)?,
             sample_name: row.get(1)?,
@@ -296,23 +293,71 @@ mod tests {
             },
         )
         .expect("should create sample");
-        for values in [
-            "NULL, NULL, NULL, NULL",
-            "NULL, NULL, NULL, 2",
-            "NULL, NULL, NULL, -1",
-            "NULL, NULL, NULL, 0.5",
-            "NULL, NULL, NULL, 'invalid'",
-            "NULL, 1, NULL, 1",
-            "'text', 1, NULL, NULL",
-            "NULL, 'invalid', NULL, NULL",
-            "NULL, 1.5, NULL, NULL",
-            "NULL, NULL, 'invalid', NULL",
-        ] {
+        for value in ["NULL", "'invalid'", "1", "1.5"] {
             let sql = format!(
-                "INSERT INTO sample_metadata (hash, sample_name, key, value_text, value_integer, value_float, value_boolean)
-                 VALUES (?1, 'sample', 'key', {values})"
+                "INSERT INTO sample_metadata (hash, sample_name, key, value)
+                 VALUES (?1, 'sample', 'key', {value})"
             );
             assert!(conn.execute(&sql, params![vec![0u8; 32]]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_sample_metadata_rejects_invalid_encoded_values() {
+        let conn = get_connection(None).expect("should open database");
+        Sample::create(
+            &conn,
+            NewSample {
+                name: "sample",
+                ..Default::default()
+            },
+        )
+        .expect("should create sample");
+        let mut trailing_bytes =
+            postcard::to_stdvec(&MetadataValue::Boolean(true)).expect("should encode boolean");
+        trailing_bytes.push(0);
+        let mut invalid_values = vec![vec![], vec![255], vec![3, 2], trailing_bytes];
+        for float in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            invalid_values.push(
+                postcard::to_stdvec(&MetadataValue::Float(float))
+                    .expect("should encode non-finite float for corruption test"),
+            );
+        }
+        for encoded_value in invalid_values {
+            conn.execute(
+                "INSERT INTO sample_metadata (hash, sample_name, key, value)
+                 VALUES (?1, 'sample', 'key', ?2)",
+                params![vec![0u8; 32], encoded_value],
+            )
+            .expect("should insert corrupt metadata");
+            assert!(SampleMetadata::select(&conn).load().is_err());
+            conn.execute("DELETE FROM sample_metadata", [])
+                .expect("should remove corrupt metadata");
+        }
+    }
+
+    #[test]
+    fn test_sample_metadata_persisted_encoding() {
+        // These bytes define the stored format independently of Rust enum refactors.
+        for (value, encoded_value) in [
+            (MetadataValue::Text("x".to_string()), vec![0, 1, b'x']),
+            (MetadataValue::Integer(-1), vec![1, 1]),
+            (
+                MetadataValue::Float(1.0),
+                vec![2, 0, 0, 0, 0, 0, 0, 240, 63],
+            ),
+            (MetadataValue::Boolean(false), vec![3, 0]),
+            (MetadataValue::Boolean(true), vec![3, 1]),
+        ] {
+            assert_eq!(
+                postcard::to_stdvec(&value).expect("should encode value"),
+                encoded_value
+            );
+            assert_eq!(
+                postcard::from_bytes::<MetadataValue>(&encoded_value)
+                    .expect("should decode stored value"),
+                value
+            );
         }
     }
 
