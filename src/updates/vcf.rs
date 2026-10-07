@@ -1679,4 +1679,45 @@ mod tests {
 
         assert!(SampleLineage::get_parents(conn, "child", None).is_empty());
     }
+
+    /// Separated deletions from one VCF spell the sequence with both deleted regions removed.
+    #[test]
+    fn test_separated_deletions_in_one_vcf_add_each_deletion_and_their_combination() {
+        let context = setup_gen();
+        let collection = "test".to_string();
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        import_fasta(
+            &context,
+            &fixtures.join("simple.fa").to_str().unwrap().to_string(),
+            &collection,
+            Sample::DEFAULT_NAME,
+            false,
+            &[],
+        )
+        .unwrap();
+        update_with_vcf(
+            &context,
+            &fixtures
+                .join("simple_separated_deletions.vcf")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            &collection,
+            "".to_string(),
+            None,
+            vec![Sample::DEFAULT_NAME.to_string()],
+            false,
+        )
+        .unwrap();
+
+        let conn = context.graph().conn();
+        let block_group = get_sample_bg(conn, &collection, "separated");
+        let sequences =
+            BlockGroup::get_all_sequences(conn, context.workspace(), &block_group.id, false)
+                .unwrap();
+        assert_eq!(
+            sequences,
+            HashSet::from(["ATCGATCGAGCGATCGGGAACACACAGAGA".to_string()])
+        );
+    }
 }

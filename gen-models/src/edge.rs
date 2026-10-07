@@ -11,6 +11,7 @@ use gen_core::{
 use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
+use petgraph::algo::kosaraju_scc;
 use rusqlite::{ToSql, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -437,11 +438,10 @@ impl Edge {
 
     /// Records a coordinate jump whose endpoints belong to the same backing node.
     ///
-    /// `blocks_from_edges` calls this for both its initial edges and any edges fetched while
+    /// `blocks_from_edges` calls this for its initial edges and for neighboring edges fetched while
     /// completing partially described nodes. The source is an outgoing jump coordinate and the
     /// target is an incoming jump coordinate. Keeping those sets separate lets block generation
-    /// identify coordinates where one jump arrives and another leaves; those coordinates need
-    /// junctions.
+    /// identify where one jump arrives and another leaves.
     fn record_same_node_jump_coordinates(
         edge: &Edge,
         outgoing_coordinates_by_node_id: &mut HashMap<HashId, HashSet<i64>>,
@@ -461,6 +461,58 @@ impl Edge {
         }
     }
 
+    /// Finds base boundaries that need a shared zero-width position.
+    ///
+    /// In reference `TACG`, deleting `A` spells `TCG`, deleting `C` spells `TAG`, and taking both
+    /// deletions spells `TG`. The empty position `(2,2)` between `A` and `C` connects the deletion
+    /// edges even when no sequence block remains between them:
+    ///
+    /// ```text
+    /// [T] --+--> [A] --+
+    ///       |          |
+    ///       +----------+--> (2,2) --+--> [C] --+
+    ///                               |          |
+    ///                               +----------+--> [G]
+    /// ```
+    fn shared_position_coordinates(edges: &[AugmentedEdge]) -> HashSet<BlockKey> {
+        let mut outgoing_coordinates = HashSet::new();
+        // Same-coordinate edges have a separate projection for connections between adjacent
+        // sequence slices.
+        // Distinct edges identify coordinates that need a shared site.
+        for augmented_edge in edges {
+            let edge = &augmented_edge.edge;
+            if !edge.is_same_coordinate_edge()
+                && !is_terminal(edge.source_node_id)
+                && !is_terminal(edge.target_node_id)
+            {
+                outgoing_coordinates.insert(BlockKey {
+                    node_id: edge.source_node_id,
+                    coordinate: edge.source_coordinate,
+                });
+            }
+        }
+
+        let mut incoming_coordinates = HashSet::new();
+        for augmented_edge in edges {
+            let edge = &augmented_edge.edge;
+            if !is_terminal(edge.target_node_id)
+                && !is_terminal(edge.source_node_id)
+                && !edge.is_same_coordinate_edge()
+                && outgoing_coordinates.contains(&BlockKey {
+                    node_id: edge.target_node_id,
+                    coordinate: edge.target_coordinate,
+                })
+            {
+                incoming_coordinates.insert(BlockKey {
+                    node_id: edge.target_node_id,
+                    coordinate: edge.target_coordinate,
+                });
+            }
+        }
+
+        incoming_coordinates
+    }
+
     /// Computes the backing-node slices from the stored block group edges.
     ///
     /// Graph construction, sequence enumeration, GFA export, and diff reconstruction use this as
@@ -469,32 +521,40 @@ impl Edge {
     /// the block group, and calls `get_block_intervals` to construct both blocks with sequences
     /// and zero-width junction blocks.
     ///
-    /// For example, two adjacent deletions retain each original base while also exposing the path
-    /// that skips both. Parenthesized nodes are zero-width junctions and bracketed nodes contain
-    /// real sequence:
+    /// In reference `TACG`, deleting `A` gives `TCG`, deleting the adjacent `C` gives `TAG`, and
+    /// both deletions give `TG`. The empty position `(2,2)` between `A` and `C` joins the deletion
+    /// edges. Parenthesized nodes are zero-width positions; bracketed nodes contain sequence:
     ///
     /// ```text
-    ///                  +----> [A] ----+
-    ///                  |              |
-    /// [TAAT] -> (0,0) -+------------> (1,1) -+----> [T] ----+
-    ///                                           |             |
-    ///                                           +-----------> [GATAA]
+    /// [T] --+--> [A] --+
+    ///       |          |
+    ///       +----------+--> (2,2) --+--> [C] --+
+    ///                               |          |
+    ///                               +----------+--> [G]
     /// ```
     ///
-    /// The path `(0,0) -> (1,1)` deletes `A`; `(1,1) -> [GATAA]` deletes `T`. Following both
-    /// edges gives the iterative-deletion route from `[TAAT]` to `[GATAA]` without adding a
-    /// reconstructed bypass edge.
+    /// Deleting `A` skips `[A]`, and deleting `C` skips `[C]`. Their shared position joins the two
+    /// edges, so a path can take both deletions without adding a reconstructed bypass edge. A path
+    /// may pass through any number of consecutive zero-width positions before reaching a sequence
+    /// block; these steps consume no sequence.
     ///
-    /// More generally, graph construction can produce a chain of junctions between sequence
-    /// blocks:
+    /// Consider a substitution of the first base of `TAAT`, changing `T` to `G` while keeping the
+    /// original sequence:
     ///
     /// ```text
-    /// [real sequence] -> (junction) -> (junction) -> [real sequence]
-    ///                       0 bases       0 bases
+    ///                     +--> [T] --+
+    ///                     |          |
+    /// [AC] --> (0,0) -----+--> [G] --+--> [AAT]
     /// ```
     ///
-    /// Traversal passes through any number of junctions, consuming zero sequence, until it reaches
-    /// another real block.
+    /// The incoming edge reaches the start of `TAAT`; the substitution leaves that same boundary
+    /// for `[G]`. No `TAAT` bases precede its first `T`, so no nonempty sequence slice ends at that
+    /// boundary for the outgoing edit. `(0,0)` is an empty position at the start of `TAAT`, not a
+    /// graph coordinate, and supplies the shared endpoint. The two paths spell `ACTAAT` and
+    /// `ACGAAT`.
+    ///
+    /// If the input has only the incoming edge from `[AC]` to `TAAT`, fetched neighboring edges
+    /// can reveal the substitution. Include those edges when choosing the zero-width blocks.
     pub fn blocks_from_edges(
         conn: &GraphConnection,
         workspace: &Workspace,
@@ -505,13 +565,14 @@ impl Edge {
         let mut node_ids = IndexSet::new();
         let mut starts_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
         let mut ends_by_node_id: HashMap<HashId, HashSet<i64>> = HashMap::new();
-        // A same-node coordinate jump connects two positions without consuming the intervening
+        // A same-node coordinate jump connects positions without consuming the intervening
         // sequence. Track where jumps leave and arrive so their intersections can become
         // junctions.
         let mut outgoing_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
             HashMap::new();
         let mut incoming_jump_coordinates_by_node_id: HashMap<HashId, HashSet<i64>> =
             HashMap::new();
+        let mut routing_edges = edges.to_vec();
         for edge in edges.iter().map(|edge| &edge.edge) {
             Self::record_same_node_jump_coordinates(
                 edge,
@@ -561,15 +622,15 @@ impl Edge {
             queried_node_ids.extend(incomplete_node_ids.iter().copied());
             let mut next_incomplete_node_ids = HashSet::new();
 
-            for edge in Edge::edges_for_block_group_nodes(
+            let neighboring_edges = Edge::edges_for_block_group_nodes(
                 conn,
                 block_group_id,
                 &incomplete_node_ids,
                 history_ref,
-            )?
-            .iter()
-            .map(|augmented_edge| &augmented_edge.edge)
-            {
+            )?;
+            for augmented_edge in neighboring_edges {
+                routing_edges.push(augmented_edge.clone());
+                let edge = &augmented_edge.edge;
                 Self::record_same_node_jump_coordinates(
                     edge,
                     &mut outgoing_jump_coordinates_by_node_id,
@@ -605,6 +666,14 @@ impl Edge {
         }
 
         let node_ids = node_ids.iter().copied().collect::<Vec<HashId>>();
+        let shared_position_coordinates = Self::shared_position_coordinates(&routing_edges);
+        let mut shared_position_coordinates_by_node_id = HashMap::<HashId, HashSet<i64>>::new();
+        for position in shared_position_coordinates {
+            shared_position_coordinates_by_node_id
+                .entry(position.node_id)
+                .or_default()
+                .insert(position.coordinate);
+        }
         let sequences_by_node_id =
             Node::get_sequences_by_node_ids(conn, workspace, &node_ids, history_ref);
 
@@ -620,24 +689,37 @@ impl Edge {
             let empty_ends = HashSet::new();
             let starts = starts_by_node_id.get(node_id).unwrap_or(&empty_starts);
             let ends = ends_by_node_id.get(node_id).unwrap_or(&empty_ends);
-            // Adjacent same-node jumps share a coordinate: one jump arrives at k and the next
-            // leaves from k. Add k as a junction so the graph connects both jumps:
-            //
-            //     [real sequence] -> (k,k) -> [real sequence]
-            //                           0 bases
-            //
-            // Only coordinates in both sets become junctions. A lone jump has no shared coordinate
-            // and connects real sequence blocks directly.
+            let empty_jumps = HashSet::new();
             let outgoing_jump_coordinates = outgoing_jump_coordinates_by_node_id
                 .get(node_id)
-                .unwrap_or(&empty_starts);
+                .unwrap_or(&empty_jumps);
             let incoming_jump_coordinates = incoming_jump_coordinates_by_node_id
                 .get(node_id)
-                .unwrap_or(&empty_ends);
-            let junction_coordinates = outgoing_jump_coordinates
+                .unwrap_or(&empty_jumps);
+            // In `TACG`, the same-node jump deleting `A` arrives at `(2,2)` and the same-node jump
+            // deleting the adjacent `C` leaves from that empty position:
+            //
+            //     [T] --+--> [A] --+
+            //           |          |
+            //           +----------+--> (2,2) --+--> [C] --+
+            //                                   |          |
+            //                                   +----------+--> [G]
+            //
+            // Shared endpoints with other edges are also routing positions. A lone jump connects
+            // sequence blocks directly when neither endpoint needs a junction.
+            let mut junction_coordinates = outgoing_jump_coordinates
                 .intersection(incoming_jump_coordinates)
                 .copied()
                 .collect::<HashSet<_>>();
+            junction_coordinates.extend(outgoing_jump_coordinates.intersection(starts).copied());
+            junction_coordinates.extend(incoming_jump_coordinates.intersection(ends).copied());
+            junction_coordinates.extend(
+                shared_position_coordinates_by_node_id
+                    .get(node_id)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
             let block_intervals = Edge::get_block_intervals(starts, ends, &junction_coordinates)?;
 
             for (start, end) in block_intervals {
@@ -705,14 +787,16 @@ impl Edge {
     /// `junction -> sequence` connections without adding a junction self-loop. With no junction,
     /// the Cartesian product keeps the direct connection between sequence blocks.
     ///
-    /// ```text
-    /// without a junction:  [sequence ending at k] ---> [sequence starting at k]
+    /// For reference `TACG`, `[A]` and `[C]` meet at offset `2`:
     ///
-    /// with a junction:     [sequence ending at k] ---> (k,k) ---> [sequence starting at k]
+    /// ```text
+    /// without a junction:  [A] ---> [C]
+    ///
+    /// with a junction:     [A] ---> (2,2) ---> [C]
     /// ```
     ///
     /// The same-coordinate edge therefore preserves the same route after the junction is
-    /// introduced without creating `(k,k) -> (k,k)`.
+    /// introduced without creating `(2,2) -> (2,2)`.
     fn same_coordinate_block_connections<'a>(
         source_blocks: &[&'a GroupBlock],
         target_blocks: &[&'a GroupBlock],
@@ -757,23 +841,66 @@ impl Edge {
             .collect()
     }
 
-    /// Returns the in-memory block connections represented by one input edge.
+    /// Returns the graph links represented by one stored edge.
     ///
-    /// `build_graph` calls this after coordinate lookup may have returned both a sequence block and
-    /// a junction. Same-coordinate edges connect the surrounding sequence through that junction;
-    /// all other edges connect to the junction and let the next input edge continue from it. These
-    /// returned connections are a graph projection and are not additional database edges.
+    /// In `TACG`, deleting `A` gives `TCG`, deleting the adjacent `C` gives `TAG`, and taking both
+    /// deletions gives `TG`. The first deletion jumps from after `T` to the boundary between `A`
+    /// and `C`; the second leaves from that same boundary. The empty position lets the deletions
+    /// combine without consuming either deleted base:
+    ///
+    /// ```text
+    /// [T] --+--> [A] --+
+    ///       |          |
+    ///       +----------+--> (2,2) --+--> [C] --+
+    ///                               |          |
+    ///                               +----------+--> [G]
+    /// ```
+    ///
+    /// `(2,2)` is the empty position between `A` and `C`. Edges connecting adjacent sequence
+    /// slices at the same coordinate pass through such positions without adding a self-loop.
+    ///
+    /// If an edit starts at a shared boundary or a deletion jump stays within one sequence node,
+    /// keep the sequence slice as a source alongside any zero-width position. For deleting `C` in
+    /// `TACG`, `[A]` can reach `[G]` directly or through `(2,2)`. The direct route remains available
+    /// if the connection between adjacent sequence slices is filtered out. A deletion jump also
+    /// keeps possible target slices unless its target boundary is shared. These graph links
+    /// represent one stored edge, not new stored edges.
+    ///
+    /// Both delete-`C` links below keep the same stored edge identity:
+    ///
+    /// ```text
+    /// [A] --+-- delete C -----------------------------+
+    ///       |                                         |
+    ///       +-- reference --> (2,2) -- delete C ------+--> [G]
+    /// ```
     fn block_connections<'a>(
         &self,
         source_blocks: &[&'a GroupBlock],
         target_blocks: &[&'a GroupBlock],
+        source_is_shared_position: bool,
+        target_is_shared_position: bool,
     ) -> Vec<(&'a GroupBlock, &'a GroupBlock)> {
         if self.is_same_coordinate_edge() {
             return Self::same_coordinate_block_connections(source_blocks, target_blocks);
         }
 
-        let source_blocks = Self::select_junction_or_sequence_blocks(source_blocks);
-        let target_blocks = Self::select_junction_or_sequence_blocks(target_blocks);
+        let same_node_jump = self.source_node_id == self.target_node_id;
+        let source_blocks = if source_is_shared_position || same_node_jump {
+            source_blocks.to_vec()
+        } else {
+            Self::select_junction_or_sequence_blocks(source_blocks)
+        };
+        let target_blocks = if target_is_shared_position {
+            target_blocks
+                .iter()
+                .copied()
+                .filter(|block| block.start == block.end)
+                .collect()
+        } else if same_node_jump {
+            target_blocks.to_vec()
+        } else {
+            Self::select_junction_or_sequence_blocks(target_blocks)
+        };
         source_blocks
             .into_iter()
             .cartesian_product(target_blocks)
@@ -799,16 +926,20 @@ impl Edge {
     /// in-memory graph connections:
     ///
     /// ```text
-    /// [real sequence] -- preserve marker --> (junction) -- preserve marker --> [real sequence]
-    ///                                          0 bases
+    /// [ATA] -- reference --> (3,3) -- reference --> [CG]
+    ///                           0 bases
     /// ```
     ///
-    /// The junction is the generated node. The two labels represent copied chromosome-index
+    /// `(3,3)` is the generated node. The reference labels represent copied chromosome-index
     /// metadata on the projected connections; neither connection is added to the database.
+    ///
+    /// One stored edge may produce several graph links. Each link keeps the edge's ID and metadata;
+    /// the pair map retains the original `Edge`, so pruning recognizes the links as one edit.
     pub fn build_graph(
         edges: &[AugmentedEdge],
         blocks: &[GroupBlock],
     ) -> (GenGraph, HashMap<(i64, i64), Edge>) {
+        let shared_position_coordinates = Self::shared_position_coordinates(edges);
         let graph_node_for_block = |block: &GroupBlock| GraphNode {
             node_id: block.node_id,
             sequence_start: block.start,
@@ -844,10 +975,19 @@ impl Edge {
 
         let mut graph = GenGraph::new();
         let mut edges_by_node_pair = HashMap::new();
+        let mut position_exit_projections = Vec::new();
+        let graph_edge_for = |augmented_edge: &AugmentedEdge| GraphEdge {
+            edge_id: augmented_edge.edge.id,
+            source_strand: augmented_edge.edge.source_strand,
+            target_strand: augmented_edge.edge.target_strand,
+            chromosome_index: augmented_edge.chromosome_index,
+            phased: augmented_edge.phased,
+            created_on: augmented_edge.created_on,
+        };
         for block in blocks {
             graph.add_node(graph_node_for_block(block));
         }
-        for augmented_edge in edges {
+        for (edge_index, augmented_edge) in edges.iter().enumerate() {
             let edge = &augmented_edge.edge;
             let source_key = BlockKey {
                 node_id: edge.source_node_id,
@@ -866,19 +1006,18 @@ impl Edge {
                 // A coordinate may match both a sequence block and a junction. When connecting
                 // to junctions, multiple edges may be needed to fully represent the graph.
                 // `block_connections` orchestrates this.
-                for (source_block, target_block) in
-                    edge.block_connections(source_blocks, target_blocks)
-                {
+                let source_is_shared_position = shared_position_coordinates.contains(&source_key);
+                let target_is_shared_position = shared_position_coordinates.contains(&target_key);
+                let connections = edge.block_connections(
+                    source_blocks,
+                    target_blocks,
+                    source_is_shared_position,
+                    target_is_shared_position,
+                );
+                for (source_block, target_block) in &connections {
                     let source_node = graph_node_for_block(source_block);
                     let target_node = graph_node_for_block(target_block);
-                    let graph_edge = GraphEdge {
-                        edge_id: edge.id,
-                        source_strand: edge.source_strand,
-                        target_strand: edge.target_strand,
-                        chromosome_index: augmented_edge.chromosome_index,
-                        phased: augmented_edge.phased,
-                        created_on: augmented_edge.created_on,
-                    };
+                    let graph_edge = graph_edge_for(augmented_edge);
                     if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
                         existing_edges.push(graph_edge);
                     } else {
@@ -886,7 +1025,116 @@ impl Edge {
                     }
                     edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
                 }
+
+                if target_is_shared_position && !edge.is_same_coordinate_edge() {
+                    let target_sequences = target_blocks
+                        .iter()
+                        .copied()
+                        .filter(|block| block.start != block.end)
+                        .collect::<Vec<_>>();
+                    for (source_block, position_block) in connections
+                        .iter()
+                        .filter(|(_, target_block)| target_block.start == target_block.end)
+                    {
+                        for target_sequence in &target_sequences {
+                            position_exit_projections.push((
+                                *source_block,
+                                *position_block,
+                                *target_sequence,
+                                edge_index,
+                            ));
+                        }
+                    }
+                }
             }
+        }
+
+        // With no possible cycle-exit links, there is nothing to check.
+        if position_exit_projections.is_empty() {
+            return (graph, edges_by_node_pair);
+        }
+
+        // Another edit can split inserted `GG` into `[G]` slices `0..1` and `1..2`; a partial
+        // graph fragment can discover this cut from a neighboring edge. If the connection between
+        // adjacent sequence slices is filtered or absent, supplied edges still give
+        // `(3,3) -> [G](0..1)` and `[G](1..2) -> (3,3)`, but omit the middle `[G] -> [G]` link.
+        // The intact `[GG]` cycle shown below has no such gap and needs no temporary link.
+        //
+        // For SCC classification only, the loop skips zero-width blocks and matches positive-
+        // length slices on the same node when one ends where the next begins (here, offset `1`).
+        // It adds the missing `[G] -> [G]` link without stored edge metadata, then records the
+        // pair for removal. These links let the cycle check see the return across both slices:
+        //
+        //               +--> [G] (0..1) -- temporary connection --> [G] (1..2) --+
+        //               |                                                        |
+        // [ATA] --> (3,3) <------------------------------------------------------+
+        let mut continuity_edges = Vec::new();
+        for source_block in blocks.iter().filter(|block| block.start != block.end) {
+            let next_block_key = BlockKey {
+                node_id: source_block.node_id,
+                coordinate: source_block.end,
+            };
+            if let Some(target_blocks) = blocks_by_start.get(&next_block_key) {
+                for target_block in target_blocks
+                    .iter()
+                    .filter(|block| block.start != block.end)
+                {
+                    let source_node = graph_node_for_block(source_block);
+                    let target_node = graph_node_for_block(target_block);
+                    if !graph.contains_edge(source_node, target_node) {
+                        graph.add_edge(source_node, target_node, Vec::new());
+                        continuity_edges.push((source_node, target_node));
+                    }
+                }
+            }
+        }
+
+        // Use the graph with adjacent sequence slices connected to decide whether a candidate
+        // returns to its position.
+        let component_by_node = kosaraju_scc(&graph)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(component, nodes)| nodes.into_iter().map(move |node| (node, component)))
+            .collect::<HashMap<_, _>>();
+        // The SCCs use those temporary links. Remove them in reverse insertion order before
+        // applying real exit projections, restoring the stored-edge graph and its edge ordering.
+        for (source_node, target_node) in continuity_edges.into_iter().rev() {
+            graph.remove_edge(source_node, target_node);
+        }
+
+        // In intact reference `ATACG`, inserting `GG` between `[ATA]` and `[CG]` spells `ATAGGCG`.
+        // For the candidate below, `source_block` is `[GG]`, `position_block` is `(3,3)`, and
+        // `target_block` is `[CG]`. If `[GG]` and `(3,3)` are in the same SCC, the return path
+        // exists, so this adds the real `[GG] -> [CG]` projection using the return edge's metadata.
+        // The original cycle remains:
+        //
+        //               +----> [GG] ---+
+        //               |              |
+        // [ATA] --> (3,3) <------------+
+        //               |              |
+        //               +--------------+--> [CG]
+        //
+        // This happens for all insertions that do not replace bases -- such as inserting
+        // "AAA" at m123:10-10.
+        // An acyclic route gets no shortcut: it could bypass a touching edit and restore a
+        // replaced reference base, such as the first `T` in `TAAT` after `T` becomes `G`.
+        for (source_block, position_block, target_block, edge_index) in position_exit_projections {
+            let source_node = graph_node_for_block(source_block);
+            let position_node = graph_node_for_block(position_block);
+            let target_node = graph_node_for_block(target_block);
+            if component_by_node.get(&source_node) != component_by_node.get(&position_node) {
+                continue;
+            }
+
+            let augmented_edge = &edges[edge_index];
+            let edge = &augmented_edge.edge;
+            let graph_edge = graph_edge_for(augmented_edge);
+            if let Some(existing_edges) = graph.edge_weight_mut(source_node, target_node) {
+                existing_edges.push(graph_edge);
+            } else {
+                graph.add_edge(source_node, target_node, vec![graph_edge]);
+            }
+            edges_by_node_pair.insert((source_block.id, target_block.id), edge.clone());
         }
 
         (graph, edges_by_node_pair)

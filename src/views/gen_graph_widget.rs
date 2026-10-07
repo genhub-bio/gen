@@ -256,32 +256,120 @@ pub fn create_gen_graph_widget<'a>(
     GraphWidget::with_renderer(renderer)
 }
 
-/// Compute lowlights from the normal pruning result when a canonical start exists.
-///
-/// The visual graph retains every element so it can be dimmed rather than removed.
-/// Comparing it with a cloned, normally pruned graph keeps its lowlights exactly in
-/// sync with `BlockGroup::prune_graph`.
-fn compute_normal_pruning_lowlights(
+/// Contract zero-width routing positions in a display copy while retaining real cycles
+/// and edge metadata in the source graph used by sequence operations.
+fn graph_for_display(graph: &GenGraph) -> GenGraph {
+    let mut contracted_graph = graph.clone();
+    let junctions = graph
+        .nodes()
+        .filter(is_zero_width_junction)
+        .collect::<Vec<_>>();
+
+    for junction in junctions {
+        let incoming = contracted_graph
+            .neighbors_directed(junction, Direction::Incoming)
+            .filter(|source| *source != junction)
+            .filter_map(|source| {
+                contracted_graph
+                    .edge_weight(source, junction)
+                    .map(|edges| (source, edges.clone()))
+            })
+            .collect::<Vec<_>>();
+        let outgoing = contracted_graph
+            .neighbors_directed(junction, Direction::Outgoing)
+            .filter(|target| *target != junction)
+            .filter_map(|target| {
+                contracted_graph
+                    .edge_weight(junction, target)
+                    .map(|edges| (target, edges.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        for (source, incoming_edges) in &incoming {
+            for (target, outgoing_edges) in &outgoing {
+                if source == target {
+                    continue;
+                }
+
+                let mut projected_edges = incoming_edges.clone();
+                for edge in outgoing_edges {
+                    if !projected_edges.contains(edge) {
+                        projected_edges.push(*edge);
+                    }
+                }
+                if let Some(existing_edges) = contracted_graph.edge_weight_mut(*source, *target) {
+                    for edge in projected_edges {
+                        if !existing_edges.contains(&edge) {
+                            existing_edges.push(edge);
+                        }
+                    }
+                } else {
+                    contracted_graph.add_edge(*source, *target, projected_edges);
+                }
+            }
+        }
+
+        contracted_graph.remove_node(junction);
+    }
+
+    let retained_nodes = graph
+        .nodes()
+        .filter(|node| !is_zero_width_junction(node))
+        .collect::<Vec<_>>();
+    let node_order = retained_nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (*node, index))
+        .collect::<HashMap<_, _>>();
+    let mut display_graph = GenGraph::new();
+    for node in &retained_nodes {
+        display_graph.add_node(*node);
+    }
+    for source in &retained_nodes {
+        let mut targets = contracted_graph
+            .neighbors_directed(*source, Direction::Outgoing)
+            .collect::<Vec<_>>();
+        targets.sort_unstable_by_key(|target| node_order[target]);
+        for target in targets {
+            let edge_bundle = contracted_graph
+                .edge_weight(*source, target)
+                .expect("should retain contracted edge bundle")
+                .clone();
+            display_graph.add_edge(*source, target, edge_bundle);
+        }
+    }
+
+    display_graph
+}
+
+/// Project the source graph and its actual pruning result before comparing dimmed routes.
+fn display_graph_with_lowlights(
     graph: &GenGraph,
-) -> (HashSet<(GraphNode, GraphNode)>, HashSet<GraphNode>) {
+) -> (
+    GenGraph,
+    HashSet<(GraphNode, GraphNode)>,
+    HashSet<GraphNode>,
+) {
     let mut pruned_graph = graph.clone();
     BlockGroup::prune_graph(&mut pruned_graph);
 
-    let dimmed_edges = graph
+    let display_graph = graph_for_display(graph);
+    let pruned_display_graph = graph_for_display(&pruned_graph);
+    let dimmed_edges = display_graph
         .all_edges()
         .filter_map(|(source_node, target_node, _)| {
-            pruned_graph
+            pruned_display_graph
                 .edge_weight(source_node, target_node)
                 .is_none()
                 .then_some((source_node, target_node))
         })
         .collect();
-    let dimmed_nodes = graph
+    let dimmed_nodes = display_graph
         .nodes()
-        .filter(|node| !pruned_graph.contains_node(*node))
+        .filter(|node| !pruned_display_graph.contains_node(*node))
         .collect();
 
-    (dimmed_edges, dimmed_nodes)
+    (display_graph, dimmed_edges, dimmed_nodes)
 }
 
 /// Create a configured GraphController for a GenGraph with the standard theme and settings.
@@ -298,8 +386,8 @@ fn compute_normal_pruning_lowlights(
 pub fn create_gen_graph_controller(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
-    let (dimmed_edges, dimmed_nodes) = compute_normal_pruning_lowlights(&graph);
-    create_gen_graph_controller_with_lowlights(graph, dimmed_edges, dimmed_nodes)
+    let (display_graph, dimmed_edges, dimmed_nodes) = display_graph_with_lowlights(&graph);
+    create_gen_graph_controller_with_lowlights(display_graph, dimmed_edges, dimmed_nodes)
 }
 
 /// Create a configured controller for graphs whose edges must remain fully visible.
@@ -309,7 +397,11 @@ pub fn create_gen_graph_controller(
 pub fn create_gen_graph_controller_without_dimming(
     graph: GenGraph,
 ) -> GraphController<GenGraph, GenGraphNodeSizer> {
-    create_gen_graph_controller_with_lowlights(graph, HashSet::new(), HashSet::new())
+    create_gen_graph_controller_with_lowlights(
+        graph_for_display(&graph),
+        HashSet::new(),
+        HashSet::new(),
+    )
 }
 
 fn create_gen_graph_controller_with_lowlights(
@@ -1147,13 +1239,54 @@ mod tests {
             .collect();
         assert_eq!(
             highlighted_edges,
-            vec![
-                (node_a, first_junction),
-                (first_junction, node_t),
-                (node_t, second_junction),
-                (second_junction, node_gataa),
-            ]
+            vec![(node_a, node_t), (node_t, node_gataa),]
         );
+    }
+
+    #[test]
+    fn test_display_projection_contracts_positions_and_preserves_pruned_dimming() {
+        let terminal = |node_id| GraphNode {
+            node_id,
+            sequence_start: 0,
+            sequence_end: 0,
+        };
+        let start = terminal(PATH_START_NODE_ID);
+        let upstream = midpoint_node(1, 0, 1);
+        let junction = midpoint_node(2, 1, 1);
+        let downstream = midpoint_node(3, 0, 1);
+        let end = terminal(PATH_END_NODE_ID);
+        let edge = |edge_id: &str, chromosome_index| {
+            vec![GraphEdge {
+                edge_id: HashId::convert_str(edge_id),
+                source_strand: Strand::Forward,
+                target_strand: Strand::Forward,
+                chromosome_index,
+                phased: 0,
+                created_on: 0,
+            }]
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(
+            start,
+            upstream,
+            edge("projection-start", NO_CHROMOSOME_INDEX),
+        );
+        graph.add_edge(
+            upstream,
+            junction,
+            edge("projection-marker", PRESERVE_EDIT_SITE_CHROMOSOME_INDEX),
+        );
+        graph.add_edge(junction, downstream, Vec::new());
+        graph.add_edge(downstream, end, edge("projection-end", NO_CHROMOSOME_INDEX));
+
+        let (display_graph, dimmed_edges, dimmed_nodes) = display_graph_with_lowlights(&graph);
+
+        assert!(graph.contains_node(junction));
+        assert!(!display_graph.contains_node(junction));
+        assert!(display_graph.edge_weight(upstream, downstream).is_some());
+        assert!(dimmed_edges.contains(&(upstream, downstream)));
+        assert!(dimmed_nodes.contains(&downstream));
+        assert!(dimmed_nodes.contains(&end));
     }
 
     #[test]

@@ -7,8 +7,8 @@
 //! 3. Reorder vertices in each rank to reduce crossings
 //! 4. Calculate the final coordinates.
 //!
-//! Currently, phase 2 to 4 are implemented, Cycle removal might be added at
-//! a later time.
+//! Cycle removal, ranking, crossing reduction, and coordinate assignment are
+//! implemented as separate phases.
 //!
 //! The whole algorithm roughly follows the 1993 paper "A technique for drawing
 //! directed graphs" by Gansner et al. It can be found
@@ -189,10 +189,10 @@ pub fn run_sugiyama_algorithm(
     info!(target: "layouting", "Start building layout");
     info!(target: "layouting", "Configuration is: {:?}", config);
 
-    // Phase 0: Cycle Removal
-    info!(target: "layouting", "Skipping phase 0: Cycle Removal");
-    //info!(target: "layouting", "Executing phase 0: Cycle Removal");
-    //let _reversed_edges = p0::remove_cycles(&mut vertex_graph);
+    // Phase 0 removes cycles from the derived layout graph so ranking can
+    // assign each vertex to a layer without changing the source graph.
+    info!(target: "layouting", "Executing phase 0: Cycle Removal");
+    let _reversed_edges = p0::remove_cycles(vertex_graph);
 
     // Phase 1: Layering/Ranking
     info!(target: "layouting", "Executing phase 1: Ranking");

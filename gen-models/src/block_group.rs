@@ -17,6 +17,7 @@ use gen_graph::{
 };
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
+use petgraph::visit::NodeIndexable as _;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -571,14 +572,35 @@ impl BlockGroup {
     pub fn prune_graph(graph: &mut GenGraph) {
         // Prunes a graph by removing edges on the same chromosome_index. This means if 2 edges are
         // both "chromosome index 0", we keep the newer one.
+        // For ordinary variants, `chromosome_index` identifies the chromatid that carries them;
+        // variants on the same index occur together.
+        // Inserting `GG` between `[ATA]` and `[CG]` in `ATACG` gives the stored return edge from
+        // `[GG]` to `(3,3)` a following-base projection to `[CG]` as well:
+        //
+        // [GG] --+--> (3,3)
+        //        |
+        //        +--> [CG]
+        //
+        // Both projections share the same stored edge ID and `created_on`. At each source,
+        // `created_on` selects the newest stored edge origin per chromatid; its `edge_id` keeps
+        // every projection of that origin.
+        // Walk node indices directly and defer graph-link removal; reuse `outgoing_targets` so
+        // the chromatid records on each connection can be filtered after outgoing-edge iteration
+        // without snapshotting all nodes.
         let mut root_nodes = HashSet::new();
-        let mut edges_to_remove: Vec<(GraphNode, GraphNode)> = vec![];
-        for node in graph.nodes() {
-            if node.node_id == PATH_START_NODE_ID {
-                root_nodes.insert(node);
+        let mut edges_to_remove = Vec::new();
+        let mut outgoing_targets = Vec::new();
+        for node_index in 0..graph.node_count() {
+            let source_node = graph.from_index(node_index);
+            if source_node.node_id == PATH_START_NODE_ID {
+                root_nodes.insert(source_node);
             }
-            let mut edges_by_ci: HashMap<i64, (GraphNode, GraphNode, i64)> = HashMap::new();
-            for (source_node, target_node, edge_weights) in graph.edges(node) {
+            outgoing_targets.clear();
+            let mut latest_edges_by_chromosome_index = HashMap::<i64, (i64, HashId)>::new();
+            for (_, target_node, edge_weights) in graph.edges(source_node) {
+                outgoing_targets.push(target_node);
+                // Reserved `chromosome_index` annotations do not compete for the newest ordinary
+                // edge per chromatid.
                 for edge_weight in edge_weights {
                     if edge_weight.chromosome_index == NO_CHROMOSOME_INDEX {
                         continue;
@@ -587,30 +609,73 @@ impl BlockGroup {
                         continue;
                     }
                     if edge_weight.chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
-                        edges_to_remove.push((source_node, target_node));
                         continue;
                     }
-                    edges_by_ci
+                    latest_edges_by_chromosome_index
                         .entry(edge_weight.chromosome_index)
-                        .and_modify(|(source, target, created_on)| {
+                        .and_modify(|(created_on, edge_id)| {
                             if edge_weight.created_on > *created_on {
-                                edges_to_remove.push((*source, *target));
-                                *source = source_node;
-                                *target = target_node;
                                 *created_on = edge_weight.created_on;
-                            } else {
-                                edges_to_remove.push((source_node, target_node));
+                                *edge_id = edge_weight.edge_id;
                             }
                         })
-                        .or_insert((source_node, target_node, edge_weight.created_on));
+                        .or_insert((edge_weight.created_on, edge_weight.edge_id));
+                }
+            }
+            // A graph connection can carry `GraphEdge` annotations for multiple chromatids.
+            // Filter each chromatid's records independently; for reference `AC`, chromatid 0
+            // changes `C` to `T` while chromatid 1 keeps `C` (`@` is `created_on`):
+            //
+            // Before:
+            // [A] --+-- chromatid0@1, chromatid1@1 --> [C]
+            //       |
+            //       +-- chromatid0@2 ----------------> [T]
+            // After:
+            // [A] --+-- chromatid1@1 ----------------> [C]
+            //       |
+            //       +-- chromatid0@2 ----------------> [T]
+            //
+            // `NO_CHROMOSOME_INDEX` and `INDETERMINATE_CHROMOSOME_INDEX` annotations remain;
+            // these reserved indices are not ordinary chromatid IDs.
+            // `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` annotations do not compete for an ordinary
+            // edge origin and are removed.
+            // Keep a connection whose `Vec<GraphEdge>` is already empty; remove a connection with
+            // records only after all its stored edge records have been filtered out.
+            for target_node in outgoing_targets.iter().copied() {
+                let should_remove = {
+                    let edge_weights = graph
+                        .edge_weight_mut(source_node, target_node)
+                        .expect("should retain outgoing edge weights");
+                    if edge_weights.is_empty() {
+                        false
+                    } else {
+                        edge_weights.retain(|edge_weight| {
+                            let chromosome_index = edge_weight.chromosome_index;
+                            if chromosome_index == NO_CHROMOSOME_INDEX
+                                || chromosome_index == INDETERMINATE_CHROMOSOME_INDEX
+                            {
+                                true
+                            } else if chromosome_index == PRESERVE_EDIT_SITE_CHROMOSOME_INDEX {
+                                false
+                            } else {
+                                latest_edges_by_chromosome_index
+                                    .get(&chromosome_index)
+                                    .is_some_and(|(_, edge_id)| edge_weight.edge_id == *edge_id)
+                            }
+                        });
+                        edge_weights.is_empty()
+                    }
+                };
+                if should_remove {
+                    edges_to_remove.push((source_node, target_node));
                 }
             }
         }
-
-        for (source, target) in edges_to_remove.iter() {
-            graph.remove_edge(*source, *target);
+        for (source_node, target_node) in edges_to_remove {
+            graph.remove_edge(source_node, target_node);
         }
 
+        // Remove nodes made unreachable by the deleted connections after all edge pruning is done.
         let reachable_nodes = all_reachable_nodes(&*graph, &Vec::from_iter(root_nodes));
         let mut to_remove = vec![];
         for node in graph.nodes() {
@@ -885,9 +950,26 @@ impl BlockGroup {
             .map(|x| &x.value)
             .collect();
         assert_eq!(previous_start_blocks.len(), 1);
-        let start_block = if start_blocks[0].start == change.region.start {
-            // First part of this block will be replaced/deleted, need to get previous block to add
-            // edge including it
+        // For an optional deletion (`preserve_edge = true`) of the first `T` at path range `2..3`
+        // in `[AC] -> [TAAT]`, with the alternative incoming route `[AC] -> [GG] -> [TAAT]`,
+        // `start_blocks[0] = [TAAT]` (path start `2`, local start `0`) and
+        // `previous_start_blocks[0] = [AC]`. Using `[TAAT]` makes a same-node deletion `0 -> 1`;
+        // downstream block and graph construction lets both incoming routes use `(0,0)` in
+        // `[TAAT]` to reach `[AAT]`, while retaining the `[T]` reference route for this optional
+        // deletion:
+        //
+        // [AC] --+----------------------+
+        //        |                      |
+        //        +--> [GG] -------------+--> (0,0) --+--> [T] --+
+        //                                            |          |
+        //                                            +----------+--> [AAT]
+        //
+        // Anchoring at `[AC]` would leave the `[GG]` arrival out of the deletion. At a block start,
+        // only an insertion or path-origin edit uses the previous block; an insertion inside a
+        // sequence slice stays anchored in that slice.
+        let start_block = if start_blocks[0].start == change.region.start
+            && (change.region.start == 0 || change.region.start == change.region.end)
+        {
             previous_start_blocks[0]
         } else {
             start_blocks[0]
@@ -1307,6 +1389,7 @@ mod tests {
     use capnp::message::TypedBuilder;
     use chrono::Utc;
     use gen_core::{NO_CHROMOSOME_INDEX, region::RegionResolutionError};
+    use gen_graph::GraphEdge;
 
     use super::*;
     use crate::{
@@ -1320,6 +1403,53 @@ mod tests {
             create_bg, get_connection, interval_tree_verify, setup_block_group, test_workspace,
         },
     };
+
+    #[test]
+    fn test_touching_deletions_add_each_deletion_and_their_combination() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        for (start, end, bases) in [(8, 12, ""), (12, 16, "")] {
+            let (node_id, length) = if bases.is_empty() {
+                (HashId::convert_str(""), 0)
+            } else {
+                let sequence = Sequence::new()
+                    .sequence_type("DNA")
+                    .sequence(bases)
+                    .save(conn)
+                    .unwrap();
+                let node_id = Node::create(
+                    conn,
+                    &sequence.hash,
+                    &HashId::convert_str(&format!("edit-{bases}-{start}")),
+                )
+                .unwrap();
+                (node_id, sequence.length)
+            };
+            let block = PathBlock {
+                node_id,
+                block_sequence: bases.to_string(),
+                sequence_start: 0,
+                sequence_end: length,
+                path_start: start,
+                path_end: end,
+                strand: Strand::Forward,
+            };
+            let region =
+                ResolvedGenRegion::from_path(conn, block_group_id, &path, start, end).unwrap();
+            let change = BlockGroupChange {
+                region,
+                path_accession: None,
+                block,
+                chromosome_index: NO_CHROMOSOME_INDEX,
+                phased: 0,
+                preserve_edge: true,
+            };
+            BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+        }
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(sequences.len(), 4);
+    }
 
     mod region_resolver {
         use super::*;
@@ -4589,5 +4719,512 @@ mod tests {
                 ])
             );
         }
+    }
+
+    fn insert_test_edit(
+        conn: &GraphConnection,
+        block_group_id: HashId,
+        path: &Path,
+        start: i64,
+        end: i64,
+        bases: &str,
+        preserve_edge: bool,
+    ) {
+        let (node_id, length) = if bases.is_empty() {
+            (HashId::convert_str(""), 0)
+        } else {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(bases)
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(
+                conn,
+                &sequence.hash,
+                &HashId::convert_str(&format!("test-edit-{start}-{end}-{bases}")),
+            )
+            .unwrap();
+            (node_id, sequence.length)
+        };
+        let block = PathBlock {
+            node_id,
+            block_sequence: bases.to_string(),
+            sequence_start: 0,
+            sequence_end: length,
+            path_start: start,
+            path_end: end,
+            strand: Strand::Forward,
+        };
+        let region = ResolvedGenRegion::from_path(conn, block_group_id, path, start, end).unwrap();
+        let change = BlockGroupChange {
+            region,
+            path_accession: None,
+            block,
+            chromosome_index: NO_CHROMOSOME_INDEX,
+            phased: 0,
+            preserve_edge,
+        };
+        BlockGroup::insert_change(conn, test_workspace(), &change).unwrap();
+    }
+
+    /// A deletion touching an insertion or substitution has four spelled combinations.
+    #[test]
+    fn test_deletion_and_touching_edit_add_each_edit_and_their_combination() {
+        let suffix = format!("{}{}", "C".repeat(10), "G".repeat(10));
+        for (start, end, bases, combined) in [
+            (
+                12,
+                12,
+                "GG",
+                format!("{}GG{}{}", "A".repeat(8), "T".repeat(8), suffix),
+            ),
+            (
+                12,
+                13,
+                "A",
+                format!("{}A{}{}", "A".repeat(8), "T".repeat(7), suffix),
+            ),
+        ] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            insert_test_edit(conn, block_group_id, &path, 8, 12, "", true);
+            insert_test_edit(conn, block_group_id, &path, start, end, bases, true);
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(sequences.len(), 4, "{bases}");
+            assert!(sequences.contains(&combined), "{bases}");
+        }
+    }
+
+    /// A deletion is applied to each existing route that arrives at the edited node.
+    #[test]
+    fn test_deletion_adds_an_edge_from_every_route_arriving_at_the_node() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        let a_node_id = HashId::convert_str("test-a-node");
+        let t_node_id = HashId::convert_str("test-t-node");
+        let mut alternatives = Vec::new();
+        for (label, bases) in [
+            ("first-alternative", "GGGG"),
+            ("second-alternative", "CCCC"),
+        ] {
+            let sequence = Sequence::new()
+                .sequence_type("DNA")
+                .sequence(bases)
+                .save(conn)
+                .unwrap();
+            let node_id = Node::create(conn, &sequence.hash, &HashId::convert_str(label)).unwrap();
+            let into = Edge::create(
+                conn,
+                a_node_id,
+                10,
+                Strand::Forward,
+                node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            let out = Edge::create(
+                conn,
+                node_id,
+                4,
+                Strand::Forward,
+                t_node_id,
+                0,
+                Strand::Forward,
+            )
+            .unwrap();
+            BlockGroupEdge::bulk_create(
+                conn,
+                &[into.id, out.id].map(|edge_id| BlockGroupEdgeData {
+                    block_group_id,
+                    edge_id,
+                    chromosome_index: NO_CHROMOSOME_INDEX,
+                    phased: 0,
+                }),
+            );
+            alternatives.push(bases);
+        }
+        insert_test_edit(conn, block_group_id, &path, 10, 12, "", true);
+
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        let a = "A".repeat(10);
+        let t = "T".repeat(10);
+        let t_after_deletion = "T".repeat(8);
+        let c = "C".repeat(10);
+        let g = "G".repeat(10);
+        let expected = alternatives
+            .into_iter()
+            .flat_map(|alternative| {
+                [
+                    format!("{a}{alternative}{t}{c}{g}"),
+                    format!("{a}{alternative}{t_after_deletion}{c}{g}"),
+                ]
+            })
+            .chain([
+                format!("{a}{t}{c}{g}"),
+                format!("{a}{t_after_deletion}{c}{g}"),
+            ])
+            .collect::<HashSet<_>>();
+        assert_eq!(sequences, expected);
+    }
+
+    /// A second insertion at one point goes in front of the first in the combined route.
+    #[test]
+    #[ignore = "Repeated insertion ordering is outside this fix"]
+    fn test_second_insertion_at_one_point_goes_in_front_of_the_first() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        insert_test_edit(conn, block_group_id, &path, 10, 10, "GG", true);
+        insert_test_edit(conn, block_group_id, &path, 10, 10, "CC", true);
+
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        let a = "A".repeat(10);
+        let t = "T".repeat(10);
+        let c = "C".repeat(10);
+        let g = "G".repeat(10);
+        assert_eq!(
+            sequences,
+            HashSet::from([
+                format!("{a}{t}{c}{g}"),
+                format!("{a}GG{t}{c}{g}"),
+                format!("{a}CC{t}{c}{g}"),
+                format!("{a}CCGG{t}{c}{g}"),
+            ])
+        );
+    }
+
+    /// An optional deletion must not restore sequence retired by a touching homozygous edit.
+    #[test]
+    fn test_homozygous_edit_touching_optional_deletion_does_not_restore_reference() {
+        let suffix = format!("{}{}{}", "T".repeat(5), "C".repeat(10), "G".repeat(10));
+        for new_bases in ["NNNN", ""] {
+            let edits = [(8, 12, "", true), (12, 15, new_bases, false)];
+            for edits in [edits, [edits[1], edits[0]]] {
+                let conn = &get_connection(None).unwrap();
+                let (block_group_id, path) = setup_block_group(conn);
+                for (start, end, bases, preserve_edge) in edits {
+                    insert_test_edit(
+                        conn,
+                        block_group_id,
+                        &path,
+                        start,
+                        end,
+                        bases,
+                        preserve_edge,
+                    );
+                }
+
+                let sequences =
+                    BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                        .unwrap();
+                let expected = HashSet::from([
+                    format!("{}{}{}", "A".repeat(10), "T".repeat(2), new_bases) + &suffix,
+                    format!("{}{}", "A".repeat(8), new_bases) + &suffix,
+                ]);
+                assert_eq!(sequences, expected, "{new_bases:?} {edits:?}");
+            }
+        }
+    }
+
+    /// A homozygous edit replaces the original allele and leaves one spelled sequence.
+    #[test]
+    fn test_homozygous_edit_retires_the_replaced_edge() {
+        let conn = &get_connection(None).unwrap();
+        let (block_group_id, path) = setup_block_group(conn);
+        insert_test_edit(conn, block_group_id, &path, 10, 12, "NNNN", false);
+
+        let sequences =
+            BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true).unwrap();
+        assert_eq!(
+            sequences,
+            HashSet::from([format!(
+                "{}NNNN{}{}{}",
+                "A".repeat(10),
+                "T".repeat(8),
+                "C".repeat(10),
+                "G".repeat(10)
+            )])
+        );
+    }
+
+    /// A heterozygous edit beside a homozygous edit keeps the homozygous allele in either order.
+    #[test]
+    fn test_heterozygous_edit_next_to_homozygous_edit_does_not_fan_out_the_parent_allele() {
+        let homozygous = (10, 15, "NNNN", false);
+        let heterozygous = (15, 17, "GG", true);
+        for edits in [[homozygous, heterozygous], [heterozygous, homozygous]] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            for (start, end, bases, preserve_edge) in edits {
+                insert_test_edit(
+                    conn,
+                    block_group_id,
+                    &path,
+                    start,
+                    end,
+                    bases,
+                    preserve_edge,
+                );
+            }
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(sequences.len(), 2, "{edits:?}");
+            assert_eq!(
+                sequences,
+                HashSet::from([
+                    "AAAAAAAAAANNNNTTTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                    "AAAAAAAAAANNNNGGTTTCCCCCCCCCCGGGGGGGGGG".to_string(),
+                ]),
+                "{edits:?}"
+            );
+        }
+    }
+
+    /// Deletions at the contig ends leave paths connected to the marker nodes.
+    #[test]
+    fn test_deletion_at_a_contig_end_attaches_to_the_marker_node() {
+        let reference = format!(
+            "{}{}{}{}",
+            "A".repeat(10),
+            "T".repeat(10),
+            "C".repeat(10),
+            "G".repeat(10)
+        );
+        let expected_deleted = [
+            format!(
+                "{}{}{}{}",
+                "A".repeat(8),
+                "T".repeat(10),
+                "C".repeat(10),
+                "G".repeat(10)
+            ),
+            format!(
+                "{}{}{}{}",
+                "A".repeat(10),
+                "T".repeat(10),
+                "C".repeat(10),
+                "G".repeat(8)
+            ),
+        ];
+        for ((start, end), deleted) in [(0, 2), (38, 40)].into_iter().zip(expected_deleted) {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            insert_test_edit(conn, block_group_id, &path, start, end, "", true);
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(
+                sequences,
+                HashSet::from([reference.clone(), deleted]),
+                "{start}-{end}"
+            );
+        }
+    }
+
+    /// Insertions at either contig end sit beside the corresponding marker node.
+    #[test]
+    fn test_insertion_at_a_contig_end_sits_next_to_the_marker_node() {
+        let reference = format!(
+            "{}{}{}{}",
+            "A".repeat(10),
+            "T".repeat(10),
+            "C".repeat(10),
+            "G".repeat(10)
+        );
+        for (position, inserted) in [
+            (0, format!("GG{reference}")),
+            (40, format!("{reference}GG")),
+        ] {
+            let conn = &get_connection(None).unwrap();
+            let (block_group_id, path) = setup_block_group(conn);
+            insert_test_edit(conn, block_group_id, &path, position, position, "GG", true);
+
+            let sequences =
+                BlockGroup::get_all_sequences(conn, test_workspace(), &block_group_id, true)
+                    .unwrap();
+            assert_eq!(
+                sequences,
+                HashSet::from([reference.clone(), inserted]),
+                "{position}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prune_graph_keeps_all_projections_for_latest_edge_origin() {
+        let graph_node = |node_id, sequence_start, sequence_end| GraphNode {
+            node_id,
+            sequence_start,
+            sequence_end,
+        };
+        let start = graph_node(PATH_START_NODE_ID, 0, 0);
+        let position = graph_node(HashId::convert_str("prune-projection-position"), 2, 2);
+        let sequence = graph_node(HashId::convert_str("prune-projection-sequence"), 2, 5);
+        let newer_target = graph_node(HashId::convert_str("prune-projection-newer"), 0, 1);
+        let unweighted_target =
+            graph_node(HashId::convert_str("prune-projection-unweighted"), 0, 1);
+        let old_edge_id = HashId::convert_str("prune-projection-old-edge");
+        let new_edge_id = HashId::convert_str("prune-projection-new-edge");
+        let graph_edge = |edge_id, chromosome_index, created_on| GraphEdge {
+            edge_id,
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index,
+            phased: 0,
+            created_on,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(
+            start,
+            position,
+            vec![
+                graph_edge(old_edge_id, 0, 1),
+                graph_edge(HashId::convert_str("other-chromosome"), 1, 1),
+            ],
+        );
+        graph.add_edge(start, sequence, vec![graph_edge(old_edge_id, 0, 1)]);
+        graph.add_edge(start, unweighted_target, Vec::new());
+
+        // Before / after first prune:
+        // start --[old:c0@1, other:c1@1]--> position
+        // start --[old:c0@1]-------------> sequence
+        // start --[]---------------------> unweighted_target
+        BlockGroup::prune_graph(&mut graph);
+        assert!(graph.edge_weight(start, position).is_some());
+        assert!(graph.edge_weight(start, sequence).is_some());
+
+        graph.add_edge(start, newer_target, vec![graph_edge(new_edge_id, 0, 2)]);
+        // Before second prune:
+        // start --[old:c0@1, other:c1@1]--> position
+        // start --[old:c0@1]-------------> sequence
+        // start --[new:c0@2]-------------> newer_target
+        // start --[]---------------------> unweighted_target
+        BlockGroup::prune_graph(&mut graph);
+
+        // After second prune, chr1 keeps the position connection; the obsolete sequence
+        // route is removed. The empty connection has no chromosome weight to compete.
+        // start --[other:c1@1]--> position
+        // start --[new:c0@2]----> newer_target
+        // start --[]------------> unweighted_target
+        let position_edges = graph.edge_weight(start, position).unwrap();
+        assert_eq!(position_edges.len(), 1);
+        assert_eq!(position_edges[0].chromosome_index, 1);
+        assert!(graph.edge_weight(start, sequence).is_none());
+        assert_eq!(
+            graph.edge_weight(start, newer_target).unwrap()[0].edge_id,
+            new_edge_id
+        );
+        assert!(
+            graph
+                .edge_weight(start, unweighted_target)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_prune_graph_keeps_all_projections_of_the_latest_edge() {
+        let graph_node = |node_id, sequence_start, sequence_end| GraphNode {
+            node_id,
+            sequence_start,
+            sequence_end,
+        };
+        let start = graph_node(PATH_START_NODE_ID, 0, 0);
+        let sequence_node_id = HashId::convert_str("prune-latest-sequence");
+        let position = graph_node(sequence_node_id, 2, 2);
+        let sequence = graph_node(sequence_node_id, 2, 5);
+        let obsolete = graph_node(HashId::convert_str("prune-latest-obsolete"), 0, 1);
+        let latest_edge_id = HashId::convert_str("prune-latest-edge");
+        let obsolete_edge_id = HashId::convert_str("prune-obsolete-edge");
+        let graph_edge = |edge_id, created_on| GraphEdge {
+            edge_id,
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+            phased: 0,
+            created_on,
+        };
+        let mut graph = GenGraph::new();
+        // A returning insertion at an ambiguous boundary can project one stored edge to
+        // both the zero-width position and following sequence; both projections share its
+        // edge id and timestamp while an older origin competes.
+        graph.add_edge(start, position, vec![graph_edge(latest_edge_id, 2)]);
+        graph.add_edge(start, sequence, vec![graph_edge(latest_edge_id, 2)]);
+        graph.add_edge(start, obsolete, vec![graph_edge(obsolete_edge_id, 1)]);
+
+        // Before prune:
+        // start --[latest:c0@2]--> position(2,2)
+        // start --[latest:c0@2]--> sequence(2,5)
+        // start --[old:c0@1]-----> obsolete
+        BlockGroup::prune_graph(&mut graph);
+
+        // After prune, both latest projections survive and the older origin is removed:
+        // start --[latest:c0@2]--> position(2,2)
+        // start --[latest:c0@2]--> sequence(2,5)
+        for projection in [position, sequence] {
+            assert_eq!(
+                graph.edge_weight(start, projection).unwrap()[0].edge_id,
+                latest_edge_id
+            );
+        }
+        assert!(graph.edge_weight(start, obsolete).is_none());
+    }
+
+    #[test]
+    fn test_prune_graph_retains_other_chromosomes_on_a_superseded_connection() {
+        let graph_node = |node_id, sequence_start, sequence_end| GraphNode {
+            node_id,
+            sequence_start,
+            sequence_end,
+        };
+        let start = graph_node(PATH_START_NODE_ID, 0, 0);
+        let mixed_target = graph_node(HashId::convert_str("prune-mixed-target"), 2, 2);
+        let newer_target = graph_node(HashId::convert_str("prune-newer-target"), 3, 4);
+        let old_edge_id = HashId::convert_str("prune-mixed-old-edge");
+        let other_chromosome_edge_id = HashId::convert_str("prune-mixed-other-chromosome");
+        let newer_edge_id = HashId::convert_str("prune-mixed-newer-edge");
+        let graph_edge = |edge_id, chromosome_index, created_on| GraphEdge {
+            edge_id,
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index,
+            phased: 0,
+            created_on,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(
+            start,
+            mixed_target,
+            vec![
+                graph_edge(old_edge_id, 0, 1),
+                graph_edge(other_chromosome_edge_id, 1, 1),
+            ],
+        );
+        graph.add_edge(start, newer_target, vec![graph_edge(newer_edge_id, 0, 2)]);
+
+        BlockGroup::prune_graph(&mut graph);
+
+        // Both chromosomes initially follow the same branch. The later chr0 edit reroutes
+        // only that chromosome, so pruning removes its weight while chr1 still needs the branch.
+        // Before: start --[old:c0@1, other:c1@1]--> mixed_target
+        //         start --[new:c0@2]--------------> newer_target
+        // After:  start --[other:c1@1]------------> mixed_target
+        //         start --[new:c0@2]--------------> newer_target
+        let mixed_weights = graph.edge_weight(start, mixed_target).unwrap();
+        assert_eq!(mixed_weights.len(), 1);
+        assert_eq!(mixed_weights[0].edge_id, other_chromosome_edge_id);
+        assert_eq!(mixed_weights[0].chromosome_index, 1);
+        assert_eq!(
+            graph.edge_weight(start, newer_target).unwrap()[0].edge_id,
+            newer_edge_id
+        );
     }
 }

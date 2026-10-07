@@ -1,0 +1,8 @@
+##fileformat=VCFv4.1
+##reference=simple.fa
+##contig=<ID=m123,length=34>
+##phasing=none
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	separated
+m123	9	.	ATC	A	1611.92	.		GT	1
+m123	12	.	GAT	G	1611.92	.		GT	1
