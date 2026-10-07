@@ -168,6 +168,7 @@ CREATE TABLE gen_asset_refs (
   name TEXT,
   created_on INTEGER NOT NULL,
   upstream_asset_ref_id BLOB,
+  materialized_checksum BLOB,
   FOREIGN KEY(upstream_asset_ref_id) REFERENCES gen_asset_refs(id)
 ) STRICT;
 CREATE INDEX gen_asset_refs_upstream_idx ON gen_asset_refs(upstream_asset_ref_id);

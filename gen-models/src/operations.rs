@@ -32,7 +32,8 @@ use uuid::Uuid;
 use crate::{
     Direction, ModelSelect, ModelSelectError,
     assets::{
-        AssetRef, AssetRole, AssetUri, LocalAssetUri, OperationAsset, OperationKind, OperationLog,
+        AssetRef, AssetRole, AssetUri, CompressionType, LocalAssetUri, OperationAsset,
+        OperationKind, OperationLog, stage_bgzf_asset_copy,
     },
     db::{ConfigConnection, DbContext},
     errors::{
@@ -67,6 +68,8 @@ pub struct OperationFileInfo {
     pub asset_uri: String,
     pub file_type: FileTypes,
     pub checksum: Option<Sha256Hash>,
+    #[serde(default)]
+    pub materialized_checksum: Option<Sha256Hash>,
 }
 
 impl OperationFile {
@@ -125,9 +128,7 @@ impl OperationFile {
         let file_type = file_addition.file_type.as_str();
         Ok(AssetRef {
             id: AssetRef::id_hash(
-                &file_addition.asset_uri,
-                file_type,
-                file_addition.checksum.as_ref(),
+                &file_addition,
                 &self.role,
                 Some(&logical_path),
                 Some(&self.filename),
@@ -136,6 +137,7 @@ impl OperationFile {
             uri: file_addition.asset_uri,
             file_type: file_type.to_string(),
             checksum: file_addition.checksum,
+            materialized_checksum: file_addition.materialized_checksum,
             size: None,
             role: self.role.clone(),
             logical_path: Some(logical_path),
@@ -147,14 +149,18 @@ impl OperationFile {
 
     /// Resolves the path stored in operation metadata without materializing remote assets.
     ///
-    /// Local inputs use their content-addressed repository path and therefore require a checksum;
-    /// remote inputs keep their URI so they can be accessed lazily.
+    /// Local inputs keep their original logical path, and remote inputs keep their URI for lazy
+    /// access.
     pub fn storage_file_path(
         workspace: &Workspace,
         path_or_uri: &str,
         checksum: Option<&Sha256Hash>,
     ) -> Result<String, FileAdditionError> {
         if LocalAssetUri::is_local_path_or_file_uri(path_or_uri) {
+            if !LocalAssetUri::is_index_path(path_or_uri) {
+                let source_path = LocalAssetUri::resolve_input_source_path(workspace, path_or_uri)?;
+                return LocalAssetUri::logical_file_path(workspace, &source_path);
+            }
             let checksum = checksum.ok_or_else(|| {
                 FileAdditionError::ChecksumError(format!(
                     "local operation file has no checksum: {path_or_uri}"
@@ -400,6 +406,9 @@ pub struct FileAddition {
     pub asset_uri: String,
     pub file_type: FileTypes,
     pub checksum: Option<Sha256Hash>,
+    /// SHA-256 of the workspace bytes when they differ from the retained archive bytes.
+    #[serde(default)]
+    pub materialized_checksum: Option<Sha256Hash>,
 }
 
 impl FileAddition {
@@ -413,10 +422,13 @@ impl FileAddition {
         feature = "profiling",
         tracing::instrument(skip(workspace, checksum_override))
     )]
-    /// Prepares an asset reference for operation storage without eagerly reading remote content.
+    /// Retains local source content and validates any supplied checksum against it.
     ///
-    /// Local content is copied and hashed as part of retention. Remote content uses an optional
-    /// checksum supplied by a caller that performed useful streaming work.
+    /// Local assets are retained as BGZF compressed assets; plain inputs record their source checksum separately,
+    /// and ordinary gzip inputs are recompressed as bgzf. Native BGZF is stored unchanged. Index sidecars remain
+    /// unchanged for direct access by index readers. Remote content remains a lazy URI and can carry an
+    /// optional checksum supplied by a caller that already streamed it for useful work; preparation
+    /// does not download or verify remote bytes.
     pub fn prepare(
         workspace: &Workspace,
         file_path: &str,
@@ -424,16 +436,60 @@ impl FileAddition {
         checksum_override: Option<Sha256Hash>,
     ) -> Result<FileAddition, FileAdditionError> {
         let asset_uri = <dyn AssetUri>::new(workspace, file_path);
-        let checksum = asset_uri.prepare_asset(workspace, checksum_override)?;
-        let stored_asset_uri = match checksum.as_ref() {
-            Some(checksum) => asset_uri.stored_asset_uri(workspace, checksum)?,
-            None => asset_uri.uri().to_string(),
-        };
+        let is_local = LocalAssetUri::is_local_path_or_file_uri(file_path);
+        let (checksum, materialized_checksum, stored_asset_uri) =
+            if is_local && !LocalAssetUri::is_index_path(file_path) {
+                let source_reader = asset_uri.reader(workspace)?;
+                let (compression_type, replayed_reader) = CompressionType::sniff(source_reader)
+                    .map_err(FileAdditionError::FileReadError)?;
+                let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
+                    workspace,
+                    file_type,
+                    replayed_reader,
+                    compression_type,
+                    checksum_override,
+                )
+                .map_err(|error| match error {
+                    FileAdditionError::ChecksumError(message) => {
+                        FileAdditionError::ChecksumError(format!("{message}: {file_path}"))
+                    }
+                    error => error,
+                })?;
+                let repo_root = workspace.repo_root()?;
+                let asset_path = workspace.asset_dir()?.join(format!(
+                    "{archive_checksum}.{}.bgz",
+                    FileTypes::suffix(file_type)
+                ));
+                let relative_path = asset_path
+                    .strip_prefix(&repo_root)
+                    .map_err(|_| FileAdditionError::PathOutsideRepo {
+                        path: asset_path.clone(),
+                        repo_root,
+                    })?
+                    .to_string_lossy();
+                let stored_asset_uri = LocalAssetUri::asset_uri(&relative_path);
+                let materialized_checksum =
+                    (compression_type == CompressionType::Plain).then_some(source_checksum);
+                (
+                    Some(archive_checksum),
+                    materialized_checksum,
+                    stored_asset_uri,
+                )
+            } else {
+                let checksum = asset_uri.prepare_asset(workspace, checksum_override)?;
+                let stored_asset_uri = match checksum.as_ref() {
+                    Some(checksum) => asset_uri.stored_asset_uri(workspace, checksum)?,
+                    None => asset_uri.uri().to_string(),
+                };
+                (checksum, None, stored_asset_uri)
+            };
+
         Ok(FileAddition {
             id: LocalAssetUri::generate_file_addition_id(checksum.as_ref(), &stored_asset_uri),
             asset_uri: stored_asset_uri,
             file_type,
             checksum,
+            materialized_checksum,
         })
     }
 
@@ -961,6 +1017,7 @@ mod tests {
     use super::*;
     use crate::{
         assets::{AssetRef, AssetRole, OperationAsset, OperationLog},
+        file_types::FileTypes,
         history::{HistoryStore, dolt::DoltHistoryStore},
         test_helpers::setup_gen,
     };
@@ -1573,19 +1630,19 @@ mod tests {
     }
 
     #[test]
-    fn operation_add_file_keeps_compression_suffix_for_asset_path() {
+    fn test_native_bgzf_generic_asset_keeps_bytes_and_source_path() {
         let context = setup_gen();
         let fixture_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/simple.fa.bgz");
         let outside_dir = tempfile::tempdir().unwrap();
-        let outside_path = outside_dir.path().join("simple.fa.bgz");
+        let outside_path = outside_dir.path().join("opaque.bin");
         fs::copy(&fixture_path, &outside_path).unwrap();
         let outside_path_string = outside_path.to_string_lossy().to_string();
 
         let file_addition = FileAddition::prepare(
             context.workspace(),
             &outside_path_string,
-            FileTypes::Fasta,
+            FileTypes::None,
             None,
         )
         .unwrap();
@@ -1598,11 +1655,20 @@ mod tests {
         let checksum = file_addition
             .checksum
             .expect("local file addition should have a checksum");
+        let archived_path = context
+            .workspace()
+            .asset_dir()
+            .unwrap()
+            .join(file_addition.hashed_filename().unwrap());
 
-        assert_eq!(storage_path, format!(".gen/assets/{checksum}.fa.bgz"));
+        assert_eq!(storage_path, ".gen/outside_root/opaque.bin");
+        assert_eq!(
+            fs::read(archived_path).unwrap(),
+            fs::read(fixture_path).unwrap()
+        );
         assert_eq!(
             file_addition.asset_uri,
-            LocalAssetUri::asset_uri(".gen/outside_root/simple.fa.bgz"),
+            LocalAssetUri::asset_uri(&format!(".gen/assets/{checksum}.none.bgz")),
         );
     }
 
@@ -1611,25 +1677,78 @@ mod tests {
         let context = setup_gen();
         let repo_root = context.workspace().repo_root().unwrap();
 
-        let file1_path = repo_root.join("test_file.txt");
-        fs::write(&file1_path, b"Test file content").unwrap();
+        let file1_path = repo_root.join("test_file.bin");
+        let file_contents = b"\x00\xffgeneric binary asset\x80";
+        fs::write(&file1_path, file_contents).unwrap();
         let file1_path_str = file1_path.to_string_lossy().to_string();
         let fa1 =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
+            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::None, None)
                 .expect("should prepare file addition");
 
-        let checksum = calculate_file_checksum(&file1_path_str).unwrap();
-        let expected_asset_path = format!(".gen/assets/{checksum}.txt");
+        let archive_checksum = fa1.checksum.expect("should checksum generic BGZF asset");
+        let materialized_checksum = fa1
+            .materialized_checksum
+            .expect("should checksum original generic bytes");
+        let expected_asset_path = format!(".gen/assets/{archive_checksum}.none.bgz");
         assert_eq!(
             fa1.asset_uri,
             LocalAssetUri::asset_uri(&expected_asset_path)
         );
         assert_eq!(fa1.file_path(), expected_asset_path);
-
-        let relative1_id = LocalAssetUri::generate_file_addition_id(
-            Some(&checksum),
-            &LocalAssetUri::asset_uri(&expected_asset_path),
+        assert_eq!(
+            calculate_file_checksum(&file1_path).unwrap(),
+            materialized_checksum
         );
+        let archive_path = context.workspace().asset_dir().unwrap().join(
+            fa1.hashed_filename()
+                .expect("should derive generic BGZF filename"),
+        );
+        let mut decoded = noodles::bgzf::io::Reader::new(
+            fs::File::open(archive_path).expect("should open generic BGZF asset"),
+        );
+        let mut decoded_contents = Vec::new();
+        std::io::Read::read_to_end(&mut decoded, &mut decoded_contents)
+            .expect("should decode generic BGZF asset");
+        assert_eq!(decoded_contents, file_contents);
+
+        for (file_type, filename) in [
+            (FileTypes::Changeset, "generic_changeset.dat"),
+            (FileTypes::Tabix, "generic_tabix.dat"),
+        ] {
+            let source_path = repo_root.join(filename);
+            fs::write(&source_path, file_contents).expect("should write generic binary asset");
+            let addition = FileAddition::prepare(
+                context.workspace(),
+                source_path
+                    .to_str()
+                    .expect("should encode generic asset path"),
+                file_type,
+                None,
+            )
+            .expect("should archive formerly excluded file type as BGZF");
+            let archive_path = context.workspace().asset_dir().unwrap().join(
+                addition
+                    .hashed_filename()
+                    .expect("should derive generic archive filename"),
+            );
+            let mut decoded = noodles::bgzf::io::Reader::new(
+                fs::File::open(archive_path).expect("should open generic BGZF asset"),
+            );
+            let mut decoded_contents = Vec::new();
+            std::io::Read::read_to_end(&mut decoded, &mut decoded_contents)
+                .expect("should decode generic BGZF asset");
+
+            assert!(
+                addition
+                    .asset_uri
+                    .ends_with(&format!(".{}.bgz", FileTypes::suffix(file_type))),
+                "{file_type:?} should use its BGZF archive suffix"
+            );
+            assert_eq!(decoded_contents, file_contents);
+        }
+
+        let relative1_id =
+            LocalAssetUri::generate_file_addition_id(Some(&archive_checksum), &fa1.asset_uri);
 
         assert_eq!(fa1.id, relative1_id);
         assert!(
@@ -1646,43 +1765,39 @@ mod tests {
 
         // Second call with same file should return the same FileAddition
         let fa2 =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
+            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::None, None)
                 .expect("should prepare same file addition");
 
         assert_eq!(fa1, fa2);
 
         let file2_path = repo_root.join("nested").join("file2.txt");
         fs::create_dir_all(file2_path.parent().unwrap()).unwrap();
-        fs::write(&file2_path, b"Test file content").unwrap();
+        fs::write(&file2_path, file_contents).unwrap();
         let file2_path_str = file2_path.to_string_lossy().to_string();
 
         let fa3 =
-            FileAddition::prepare(context.workspace(), &file2_path_str, FileTypes::Fasta, None)
+            FileAddition::prepare(context.workspace(), &file2_path_str, FileTypes::None, None)
                 .expect("should prepare matching file addition");
 
         assert_eq!(fa1.id, fa3.id);
 
         fs::write(&file1_path, b"new content").unwrap();
         let fa1_new =
-            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::Fasta, None)
+            FileAddition::prepare(context.workspace(), &file1_path_str, FileTypes::None, None)
                 .expect("should prepare updated file addition");
 
         assert_ne!(fa1.id, fa1_new.id);
 
         let outside_dir = tempfile::tempdir().unwrap();
-        let outside_file = outside_dir.path().join("simple.fa");
-        fs::write(&outside_file, b"Outside repo file").unwrap();
+        let outside_file = outside_dir.path().join("opaque.bin");
+        fs::write(&outside_file, file_contents).unwrap();
         let outside_path = outside_file.to_string_lossy().to_string();
 
         let outside =
-            FileAddition::prepare(context.workspace(), &outside_path, FileTypes::Fasta, None)
+            FileAddition::prepare(context.workspace(), &outside_path, FileTypes::None, None)
                 .expect("should prepare external file addition");
 
-        assert_eq!(
-            outside.asset_uri,
-            LocalAssetUri::asset_uri(".gen/outside_root/simple.fa")
-        );
-        assert_eq!(outside.file_path(), ".gen/outside_root/simple.fa");
+        assert!(outside.asset_uri.ends_with(".none.bgz"));
         assert!(
             context
                 .workspace()
@@ -1695,6 +1810,214 @@ mod tests {
                 )
                 .exists()
         );
+    }
+
+    #[test]
+    fn test_plain_local_file_is_archived_as_bgzf_with_both_checksums() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let source_path = repo_root.join("input.vcf");
+        let source_contents = b"##fileformat=VCFv4.3\n#CHROM\tPOS\tID\nchr1\t1\t.\n";
+        fs::write(&source_path, source_contents).expect("should write plain VCF source");
+
+        let file_addition = FileAddition::prepare(
+            context.workspace(),
+            source_path.to_str().expect("should encode VCF source path"),
+            FileTypes::VCF,
+            None,
+        )
+        .expect("should archive plain VCF as BGZF");
+        let archive_checksum = file_addition
+            .checksum
+            .expect("should calculate archive checksum");
+        let materialized_checksum = file_addition
+            .materialized_checksum
+            .expect("should calculate source checksum");
+        let asset_dir = context.workspace().asset_dir().unwrap();
+        let archive_path = asset_dir.join(
+            file_addition
+                .hashed_filename()
+                .expect("should derive content-addressed archive filename"),
+        );
+
+        assert_eq!(
+            file_addition.asset_uri,
+            LocalAssetUri::asset_uri(&format!(".gen/assets/{archive_checksum}.vcf.bgz"))
+        );
+        assert_eq!(
+            calculate_file_checksum(&source_path).unwrap(),
+            materialized_checksum
+        );
+        assert_eq!(
+            calculate_file_checksum(&archive_path).unwrap(),
+            archive_checksum
+        );
+        assert_ne!(archive_checksum, materialized_checksum);
+        assert_eq!(fs::read(&source_path).unwrap(), source_contents);
+        let verified_addition = FileAddition::prepare(
+            context.workspace(),
+            source_path.to_str().expect("should encode VCF source path"),
+            FileTypes::VCF,
+            Some(materialized_checksum),
+        )
+        .expect("should verify the supplied checksum against the plain source bytes");
+        assert_eq!(verified_addition.checksum, Some(archive_checksum));
+
+        let mut decoded = noodles::bgzf::io::Reader::new(
+            fs::File::open(&archive_path).expect("should open retained BGZF archive"),
+        );
+        let mut decoded_contents = Vec::new();
+        std::io::Read::read_to_end(&mut decoded, &mut decoded_contents)
+            .expect("should decode retained BGZF archive");
+        assert_eq!(decoded_contents, source_contents);
+    }
+
+    #[test]
+    fn test_index_suffixes_remain_raw_for_direct_index_readers() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let asset_dir = context.workspace().asset_dir().unwrap();
+        let index_contents = b"index bytes\n";
+
+        for extension in ["fai", "gzi", "tbi", "csi", "bai", "BAI"] {
+            let source_path = repo_root.join(format!("reference.fa.{extension}"));
+            fs::write(&source_path, index_contents).expect("should write raw index file");
+
+            let addition = FileAddition::prepare(
+                context.workspace(),
+                source_path.to_str().expect("should encode index path"),
+                FileTypes::Fasta,
+                None,
+            )
+            .expect("should retain index bytes without BGZF encoding");
+            let archived_path = asset_dir.join(
+                addition
+                    .hashed_filename()
+                    .expect("should derive retained index filename"),
+            );
+            let source_checksum = calculate_file_checksum(&source_path).unwrap();
+            let archived_checksum = calculate_file_checksum(&archived_path).unwrap();
+            let storage_path = OperationFile::storage_file_path(
+                context.workspace(),
+                source_path.to_str().expect("should encode index path"),
+                addition.checksum.as_ref(),
+            )
+            .expect("should preserve the index sidecar path");
+
+            assert_eq!(addition.materialized_checksum, None);
+            assert_eq!(addition.checksum.as_ref(), Some(&source_checksum));
+            assert_eq!(archived_checksum, source_checksum);
+            assert_eq!(fs::read(archived_path).unwrap(), index_contents);
+            assert!(addition.asset_uri.ends_with(&format!(".fa.{extension}")));
+            assert_eq!(storage_path, format!("reference.fa.{extension}"));
+        }
+    }
+
+    #[test]
+    fn test_bam_bgzf_asset_is_retained_byte_identically() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let source_path = repo_root.join("minimal.bam");
+
+        let mut bam_contents = b"BAM\x01".to_vec();
+        bam_contents.extend_from_slice(&0_i32.to_le_bytes());
+        bam_contents.extend_from_slice(&0_i32.to_le_bytes());
+
+        let mut bgzf_writer = noodles::bgzf::io::writer::Builder::default()
+            .set_compression_level(noodles::bgzf::io::writer::CompressionLevel::NONE)
+            .build_from_writer(Vec::new());
+        bgzf_writer
+            .write_all(&bam_contents)
+            .expect("should write minimal BAM bytes");
+        let bam_bgzf_contents = bgzf_writer
+            .finish()
+            .expect("should finish BGZF-compressed BAM bytes");
+        fs::write(&source_path, &bam_bgzf_contents).expect("should write BGZF BAM asset");
+
+        let addition = FileAddition::prepare(
+            context.workspace(),
+            source_path.to_str().expect("should encode BAM path"),
+            FileTypes::None,
+            None,
+        )
+        .expect("should retain BGZF-compressed BAM bytes");
+        let checksum = addition
+            .checksum
+            .as_ref()
+            .expect("should checksum the retained BAM asset");
+        let archived_path = context
+            .workspace()
+            .asset_dir()
+            .unwrap()
+            .join(addition.hashed_filename().unwrap());
+        let storage_path = OperationFile::storage_file_path(
+            context.workspace(),
+            source_path.to_str().expect("should encode BAM path"),
+            Some(checksum),
+        )
+        .expect("should preserve the BAM logical path");
+
+        assert_eq!(addition.materialized_checksum, None);
+        assert_eq!(calculate_file_checksum(&source_path).unwrap(), *checksum);
+        assert_eq!(calculate_file_checksum(&archived_path).unwrap(), *checksum);
+        assert_eq!(fs::read(archived_path).unwrap(), bam_bgzf_contents);
+        assert_eq!(storage_path, "minimal.bam");
+
+        let mut decoded = noodles::bgzf::io::Reader::new(Cursor::new(bam_bgzf_contents));
+        let mut decoded_contents = Vec::new();
+        std::io::Read::read_to_end(&mut decoded, &mut decoded_contents)
+            .expect("should decode the retained BAM bytes");
+        assert_eq!(decoded_contents, bam_contents);
+    }
+
+    #[test]
+    fn test_existing_gzip_generic_file_is_normalized_as_bgzf() {
+        let context = setup_gen();
+        let repo_root = context.workspace().repo_root().unwrap();
+        let asset_dir = context.workspace().asset_dir().unwrap();
+        let source_path = repo_root.join("opaque.bin.gz");
+        let decoded_source_contents = b"\x00\xffgeneric gzip asset\x80";
+        let mut gzip_encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip_encoder
+            .write_all(decoded_source_contents)
+            .expect("should write gzip asset content");
+        let gzip_contents = gzip_encoder
+            .finish()
+            .expect("should finish gzip asset content");
+        fs::write(&source_path, &gzip_contents).expect("should write compressed generic bytes");
+
+        let source_checksum = calculate_file_checksum(&source_path).unwrap();
+        let addition = FileAddition::prepare(
+            context.workspace(),
+            source_path
+                .to_str()
+                .expect("should encode compressed generic path"),
+            FileTypes::None,
+            Some(source_checksum),
+        )
+        .expect("should normalize ordinary gzip generic asset as BGZF");
+        let archive_checksum = addition.checksum.expect("should checksum BGZF archive");
+        let archived_path = asset_dir.join(
+            addition
+                .hashed_filename()
+                .expect("should derive compressed generic filename"),
+        );
+        let mut decoded = noodles::bgzf::io::Reader::new(
+            fs::File::open(&archived_path).expect("should open normalized generic archive"),
+        );
+        let mut decoded_contents = Vec::new();
+        std::io::Read::read_to_end(&mut decoded, &mut decoded_contents)
+            .expect("should decode normalized generic archive");
+
+        assert_eq!(addition.materialized_checksum, None);
+        assert_eq!(
+            calculate_file_checksum(archived_path).unwrap(),
+            archive_checksum
+        );
+        assert_eq!(decoded_contents, decoded_source_contents);
+        assert_eq!(fs::read(source_path).unwrap(), gzip_contents);
+        assert!(addition.asset_uri.ends_with(".none.bgz"));
     }
 
     #[test]
@@ -1741,10 +2064,11 @@ mod tests {
         let context = setup_gen();
         let path = context.workspace().repo_root().unwrap().join("asset.fa");
         fs::write(&path, "actual contents").expect("should write local asset");
+        let file_path = path.to_str().expect("should encode local asset path");
 
         let error = FileAddition::prepare(
             context.workspace(),
-            path.to_str().expect("should encode local asset path"),
+            file_path,
             FileTypes::Fasta,
             Some(Sha256Hash::convert_str("different contents")),
         )
@@ -1753,6 +2077,10 @@ mod tests {
         assert!(
             matches!(error, FileAdditionError::ChecksumError(_)),
             "should report a checksum error: {error}"
+        );
+        assert!(
+            error.to_string().contains(file_path),
+            "checksum error should include the source path: {error}"
         );
         assert_eq!(
             fs::read_dir(context.workspace().asset_dir().unwrap())

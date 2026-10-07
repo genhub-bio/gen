@@ -417,7 +417,7 @@ mod diff_views {
 }
 
 mod operation_history {
-    use gen_models::assets::OperationLog;
+    use gen_models::{assets::OperationLog, operations::calculate_file_checksum};
 
     use super::{
         DoltHistoryStore, HistoryStore, PathBuf, assert_success, asset_refs,
@@ -430,6 +430,8 @@ mod operation_history {
         let repo_dir = tempdir().expect("should create temp repo directory");
         let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let fasta_path = fixtures_dir.join("simple.fa");
+        let materialized_checksum =
+            calculate_file_checksum(&fasta_path).expect("should checksum the original plain FASTA");
 
         let init_output = run_gen(repo_dir.path(), &["init"]);
         assert_success(&init_output, "gen init should succeed");
@@ -451,8 +453,10 @@ mod operation_history {
         let refs = asset_refs(repo_dir.path());
         assert!(
             refs.iter().any(|asset_ref| {
-                asset_ref.uri == "file://.gen/outside_root/simple.fa"
+                asset_ref.uri.ends_with(".fa.bgz")
+                    && asset_ref.logical_path.as_deref() == Some(".gen/outside_root/simple.fa")
                     && asset_ref.name.as_deref() == Some("simple.fa")
+                    && asset_ref.materialized_checksum == Some(materialized_checksum)
             }),
             "external FASTA should be namespaced away from workspace-root files: {refs:?}"
         );
@@ -2729,6 +2733,7 @@ mod branch_history {
 mod remotes {
     use std::{
         collections::HashMap,
+        fs::File,
         io::{Read as _, Write as _},
         net::{TcpListener, TcpStream},
         sync::{
@@ -2743,6 +2748,7 @@ mod remotes {
     use gen_models::{
         assets::{Assets, LocalAssetUri, materialization_destination_path},
         history::dolt::{add_remote, push},
+        operations::{calculate_file_checksum, calculate_reader_checksum},
     };
     use rusqlite::{Connection, RemoteServer};
     use serde_json::json;
@@ -2938,14 +2944,52 @@ mod remotes {
                 let materialized_contents = fs::read(&materialized_path).unwrap_or_else(|error| {
                     panic!("should read {}: {error}", materialized_path.display())
                 });
+                let archive_checksum = asset
+                    .checksum
+                    .expect("should have an archive checksum for the materialized local asset");
+                assert_eq!(
+                    calculate_file_checksum(&versioned_path)
+                        .expect("should checksum archived asset"),
+                    archive_checksum,
+                    "{} should match its archived checksum",
+                    versioned_path.display()
+                );
+                let expected_materialized_checksum =
+                    asset.materialized_checksum.unwrap_or(archive_checksum);
+                let expected_contents = if asset.materialized_checksum.is_some() {
+                    let mut reader = noodles::bgzf::io::Reader::new(
+                        File::open(&versioned_path)
+                            .expect("should open BGZF archive for materialization"),
+                    );
+                    let mut decoded_contents = Vec::new();
+                    std::io::Read::read_to_end(&mut reader, &mut decoded_contents)
+                        .expect("should decode archived BGZF bytes");
+                    assert_eq!(
+                        calculate_reader_checksum(decoded_contents.as_slice())
+                            .expect("should checksum decoded asset contents"),
+                        expected_materialized_checksum,
+                        "{} should match its materialized checksum",
+                        versioned_path.display()
+                    );
+                    decoded_contents
+                } else {
+                    versioned_contents.clone()
+                };
+                assert_eq!(
+                    calculate_reader_checksum(materialized_contents.as_slice())
+                        .expect("should checksum materialized asset contents"),
+                    expected_materialized_checksum,
+                    "{} should match its materialized checksum",
+                    materialized_path.display()
+                );
                 assert_eq!(
                     materialized_contents,
-                    versioned_contents,
-                    "{} should contain the branch-head version stored at {}",
+                    expected_contents,
+                    "{} should contain the materialized branch-head version from {}",
                     materialized_path.display(),
                     versioned_path.display()
                 );
-                (logical_path, versioned_contents)
+                (logical_path, materialized_contents)
             })
             .collect::<Vec<_>>();
         assets.sort_by(|left, right| left.0.cmp(&right.0));
@@ -3417,6 +3461,19 @@ mod remotes {
         );
         let cloned_fasta_before_pull = fs::read(cloned_repo_path.join(logical_path))
             .expect("file clone should materialize the original FASTA");
+        let old_fasta_asset = asset_refs(&cloned_repo_path)
+            .into_iter()
+            .find(|asset_ref| asset_ref.logical_path.as_deref() == Some(logical_path))
+            .expect("should find the original FASTA AssetRef");
+        let old_fasta_archive_path = materialization_destination_path(
+            &Workspace::new(&cloned_repo_path),
+            &old_fasta_asset.uri,
+            old_fasta_asset.checksum.as_ref(),
+            None,
+        )
+        .expect("should resolve original FASTA archive path");
+        let old_fasta_archive_contents = fs::read(&old_fasta_archive_path)
+            .expect("should read original versioned FASTA archive");
 
         fs::write(&remote_fasta_path, updated_fasta)
             .expect("should update the remote logical FASTA");
@@ -3457,7 +3514,7 @@ mod remotes {
         assert!(
             asset_store_contents(&cloned_repo_path)
                 .iter()
-                .any(|(_, contents)| contents == &cloned_fasta_before_pull),
+                .any(|(_, contents)| contents == &old_fasta_archive_contents),
             "the superseded FASTA should remain available only by its versioned filename"
         );
     }
@@ -3534,6 +3591,19 @@ mod remotes {
         );
         let cloned_fasta_before_pull = fs::read(cloned_repo_path.join(logical_path))
             .expect("HTTP clone should materialize the original FASTA");
+        let old_fasta_asset = asset_refs(&cloned_repo_path)
+            .into_iter()
+            .find(|asset_ref| asset_ref.logical_path.as_deref() == Some(logical_path))
+            .expect("should find the original FASTA AssetRef");
+        let old_fasta_archive_path = materialization_destination_path(
+            &Workspace::new(&cloned_repo_path),
+            &old_fasta_asset.uri,
+            old_fasta_asset.checksum.as_ref(),
+            None,
+        )
+        .expect("should resolve original FASTA archive path");
+        let old_fasta_archive_contents = fs::read(&old_fasta_archive_path)
+            .expect("should read original versioned FASTA archive");
 
         // Now we update the source repo, push it, and verify that on pulling changes we get the new files.
         fs::write(&source_fasta_path, updated_fasta)
@@ -3581,7 +3651,7 @@ mod remotes {
         assert!(
             asset_store_contents(&cloned_repo_path)
                 .iter()
-                .any(|(_, contents)| contents == &cloned_fasta_before_pull),
+                .any(|(_, contents)| contents == &old_fasta_archive_contents),
             "the superseded FASTA should remain available only by its versioned filename"
         );
 
