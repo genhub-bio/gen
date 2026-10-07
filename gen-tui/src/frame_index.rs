@@ -1,6 +1,9 @@
 use std::{collections::HashMap, hash::Hash};
 
-use crate::geometry::{Point, WorldRect};
+use crate::{
+    geometry::{Point, WorldRect},
+    plotter::CursorColumns,
+};
 
 /// Horizontal/vertical navigation direction over placed nodes: `Left`/`Right` cross to the
 /// adjacent layer, `Up`/`Down` move within the current layer.
@@ -15,7 +18,7 @@ pub enum Direction {
 /// One node the painter assigned coordinates to: its signed screen rect (the camera can
 /// place nodes at negative screen coordinates) plus the layer navigation needs.
 /// `layer` mirrors `LayoutNode::layer`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PlacedNode<N> {
     pub id: N,
     pub rect: WorldRect,
@@ -23,6 +26,8 @@ pub struct PlacedNode<N> {
     /// The renderer's `NodeRenderer::cursor_row` for this node: the only row, counted up from
     /// the bottom of `rect`, the cursor may sit on, or `None` for any row.
     pub cursor_row: Option<u64>,
+    /// Sequence columns available to the cursor within the node rectangle.
+    pub cursor_columns: Option<CursorColumns>,
 }
 
 /// The per-frame product of a `GraphPainter::render` call: every node the painter placed,
@@ -112,6 +117,13 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
             .and_then(|&index| self.placed[index].cursor_row)
     }
 
+    /// Sequence columns the renderer makes available in a placed node.
+    pub fn cursor_columns(&self, id: N) -> Option<&CursorColumns> {
+        self.by_id
+            .get(&id)
+            .and_then(|&index| self.placed[index].cursor_columns.as_ref())
+    }
+
     /// The layer a node was placed in, whether or not it is currently visible.
     pub fn layer_of(&self, id: N) -> Option<i32> {
         self.by_id.get(&id).map(|&index| self.placed[index].layer)
@@ -187,7 +199,7 @@ impl<N: Copy + Eq + Hash> FrameIndex<N> {
     /// `Up`/`Down` pick the nearest node within the same layer.
     pub fn neighbor(&self, id: N, direction: Direction) -> Option<N> {
         let index = *self.by_id.get(&id)?;
-        let origin = self.placed[index];
+        let origin = &self.placed[index];
 
         match direction {
             Direction::Left | Direction::Right => {
@@ -241,6 +253,7 @@ mod tests {
             rect,
             layer,
             cursor_row: None,
+            cursor_columns: None,
         }
     }
 

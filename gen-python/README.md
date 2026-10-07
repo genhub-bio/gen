@@ -218,14 +218,15 @@ At full detail, the widget uses the CLI's annotation display: packed directional
 bars beneath nodes. `widget.show(annotation)` also joins the fragments of that one
 annotation with a dotted Braille curve; showing another annotation moves the curve to it,
 and `widget.clear_highlights()` removes it.
-Names that do not fit beside their bars fall back to floating labels. Annotation colors
-apply to bars, connectors, and labels; sequence characters keep their normal colors. Use
-`widget.zoom_in()` to reach full detail and see this display.
+Both full and compact detail center annotation names inside their arrows when they fit
+between the endpoint glyphs, or one cell to the left otherwise. Arrows and names
+move together when packed into rows. Nodes reserve transparent horizontal and vertical padding as
+needed; labels never stretch the sequence or use floating placement. Annotation colors
+apply to bars, connectors, and labels; sequence characters keep their normal colors.
 
-At truncated detail, nodes reserve at least three sequence columns (or one per base
-for nodes shorter than three bases). Annotation ends stay in sequence order, and
-labels can expand the node. Nodes of one to three bases show their complete sequence;
-longer nodes show bases at distinct mapped positions and dots in expanded gaps.
+Compact detail replaces skipped sequence runs with an ellipsis (`…`) while retaining
+distinct annotation endpoint columns. These ellipses do not expand with label length. Full detail shows every nucleotide. In both views, arrow endpoints align with
+the corresponding displayed bases, and horizontal padding centers the sequence.
 
 ## Annotation files
 

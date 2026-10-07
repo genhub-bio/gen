@@ -550,6 +550,7 @@ where
                 rect,
                 layer: node.layer.unwrap_or_default(),
                 cursor_row: visual.cursor_row(&node_id),
+                cursor_columns: visual.cursor_columns(&node_id),
             })
         })
         .collect();

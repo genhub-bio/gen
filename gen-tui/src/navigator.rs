@@ -6,6 +6,7 @@ use crate::{
     frame_index::{Direction, FrameIndex},
     geometry::{Point, WorldPos, WorldRect, floor_half},
     graph_widget::style_cursor_cell,
+    plotter::CursorColumns,
     theme::current_theme,
     viewport_state::{ViewportState, WorldBuffer},
 };
@@ -50,14 +51,27 @@ impl<N: Copy + Eq + Hash> CursorState<N> {
         self.fractional.1 = rect.fraction_of(WorldPos::new(rect.left(), y)).1;
     }
 
-    /// Put the cursor on the only row its node's renderer lets it sit on, if the node is placed
-    /// in `frame` and restricted to one (see `NodeRenderer::cursor_row`).
-    pub fn hold_to_cursor_row(&mut self, frame: &FrameIndex<N>) {
+    /// Snap to the nearest retained sequence column, leaving the cursor row unchanged.
+    pub fn hold_to_columns(&mut self, rect: WorldRect, columns: &CursorColumns) {
+        let column = rect.point_at_fraction(self.fractional).x - rect.left();
+        self.fractional.0 = rect
+            .fraction_of(WorldPos::new(
+                rect.left() + columns.nearest(column),
+                rect.bottom(),
+            ))
+            .0;
+    }
+
+    /// Keep the cursor on its renderer's accessible sequence row and columns.
+    pub fn hold_to_cursor_content(&mut self, frame: &FrameIndex<N>) {
         let Some(node) = self.node else {
             return;
         };
         if let (Some(rect), Some(row)) = (frame.rect_of(node), frame.cursor_row(node)) {
             self.hold_to_row(rect, row);
+        }
+        if let (Some(rect), Some(columns)) = (frame.rect_of(node), frame.cursor_columns(node)) {
+            self.hold_to_columns(rect, columns);
         }
     }
 }
@@ -78,11 +92,15 @@ impl Navigator {
         let node = cursor.node.ok_or("No node associated with cursor")?;
         let rect = frame.rect_of(node).ok_or("Node not found in frame")?;
         let current = rect.point_at_fraction(cursor.fractional);
-        let new_x = current.x + delta;
-
-        if new_x >= rect.left() && new_x <= rect.right() {
+        let column = current.x + delta - rect.left();
+        let next = frame.cursor_columns(node).map_or_else(
+            || (0..=rect.width()).contains(&column).then_some(column),
+            |columns| columns.next(column, delta > 0),
+        );
+        if let Some(column) = next {
+            let new_x = rect.left() + column;
             cursor.fractional = rect.fraction_of(WorldPos::new(new_x, current.y));
-            cursor.hold_to_cursor_row(frame);
+            cursor.hold_to_cursor_content(frame);
             return Ok(());
         }
 
@@ -95,7 +113,7 @@ impl Navigator {
             Some(target) => {
                 let target_frac_x = if delta > 0 { 0.0 } else { 1.0 };
                 cursor.set_node(target, (target_frac_x, cursor.fractional.1));
-                cursor.hold_to_cursor_row(frame);
+                cursor.hold_to_cursor_content(frame);
                 Ok(())
             }
             None => Err(if delta > 0 {
@@ -135,7 +153,7 @@ impl Navigator {
             Some(target) => {
                 let target_frac_y = if delta > 0 { 0.0 } else { 1.0 };
                 cursor.set_node(target, (cursor.fractional.0, target_frac_y));
-                cursor.hold_to_cursor_row(frame);
+                cursor.hold_to_cursor_content(frame);
                 Ok(())
             }
             None => Err("No node found in same layer in that direction".to_string()),
@@ -183,7 +201,7 @@ impl Navigator {
                     .fraction_of(WorldPos::new(rect.left() + column, rect.bottom()))
                     .0;
                 cursor.set_node(node, (x, 0.5));
-                cursor.hold_to_cursor_row(frame);
+                cursor.hold_to_cursor_content(frame);
                 return Ok(());
             }
             node = frame.neighbor(node, direction).ok_or(if forward {
@@ -250,9 +268,55 @@ mod tests {
                 rect,
                 layer,
                 cursor_row: None,
+                cursor_columns: None,
             })
             .collect();
         FrameIndex::build(placed, WorldRect::from_coords(0, 0, 100, 100))
+    }
+
+    #[test]
+    fn test_cursor_skips_padding_and_omitted_sequence_columns() {
+        let frame = FrameIndex::build(
+            vec![
+                PlacedNode {
+                    id: 0,
+                    rect: WorldRect::from_coords(0, 0, 10, 4),
+                    layer: 0,
+                    cursor_row: Some(2),
+                    cursor_columns: Some(CursorColumns::Positions(vec![3, 5, 6])),
+                },
+                PlacedNode {
+                    id: 1,
+                    rect: WorldRect::from_coords(20, 0, 30, 4),
+                    layer: 1,
+                    cursor_row: Some(2),
+                    cursor_columns: Some(CursorColumns::Range(2, 4)),
+                },
+            ],
+            WorldRect::from_coords(0, 0, 100, 100),
+        );
+        let mut cursor = CursorState {
+            node: Some(0),
+            fractional: (0.0, 0.0),
+            visible: true,
+        };
+        cursor.hold_to_cursor_content(&frame);
+        let position = |cursor: &CursorState<u32>| {
+            frame
+                .rect_of(cursor.node.expect("should select node"))
+                .expect("should place node")
+                .point_at_fraction(cursor.fractional)
+        };
+        assert_eq!(position(&cursor), WorldPos::new(3, 2));
+        Navigator::move_horizontal(&mut cursor, 1, &frame).expect("should skip ellipsis");
+        assert_eq!(position(&cursor), WorldPos::new(5, 2));
+        Navigator::move_horizontal(&mut cursor, 1, &frame).expect("should reach last base");
+        assert_eq!(position(&cursor), WorldPos::new(6, 2));
+        Navigator::move_horizontal(&mut cursor, 1, &frame).expect("should jump over padding");
+        assert_eq!(cursor.node, Some(1));
+        assert_eq!(position(&cursor), WorldPos::new(22, 2));
+        Navigator::move_horizontal(&mut cursor, -1, &frame).expect("should return to last base");
+        assert_eq!(position(&cursor), WorldPos::new(6, 2));
     }
 
     #[test]
@@ -421,6 +485,7 @@ mod tests {
                     rect: WorldRect::from_coords(left, 0, left + 8, 4),
                     layer: id as i32,
                     cursor_row: Some(1),
+                    cursor_columns: None,
                 })
                 .collect();
             let frame = FrameIndex::build(placed, WorldRect::from_coords(0, 0, 100, 100));

@@ -367,7 +367,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         match self.node_hit(terminal_x, terminal_y) {
             Some((node, frac)) => {
                 self.cursor.set_node(node, frac);
-                self.cursor.hold_to_cursor_row(&self.frame);
+                self.cursor.hold_to_cursor_content(&self.frame);
                 self.show_cursor();
                 self.rebase_camera_to_cursor();
                 true
@@ -881,6 +881,13 @@ where
                 WorldRect::from_center_and_size(WorldPos::ZERO, self.visual.get_node_size(&node));
             state.cursor.hold_to_row(rect, row);
         }
+        if let Some(node) = state.cursor.node
+            && let Some(columns) = self.visual.cursor_columns(&node)
+        {
+            let rect =
+                WorldRect::from_center_and_size(WorldPos::ZERO, self.visual.get_node_size(&node));
+            state.cursor.hold_to_columns(rect, &columns);
+        }
 
         // A pending go-to centers the cursor's screen position so the anchor projection
         // lands the target exactly at (or snapped to an edge of) the requested spot. A snapped
@@ -1013,7 +1020,7 @@ where
                 state.cursor.set_node(branch, state.cursor.fractional);
             }
         }
-        state.cursor.hold_to_cursor_row(&frame);
+        state.cursor.hold_to_cursor_content(&frame);
         if let Some(overlay_fn) = self.overlay_fn {
             overlay_fn(buf, &frame);
         }
@@ -1886,6 +1893,7 @@ mod tests {
         use super::*;
         use crate::{
             graph_widget::NODE_GLYPH,
+            plotter::CursorColumns,
             testing::mocks::{MockDomainGraph, TestGraphs},
             viewport_state::WorldBuffer,
         };
@@ -1905,6 +1913,10 @@ mod tests {
 
             fn render_node(&self, buffer: &mut WorldBuffer, area: WorldRect, _node_id: &NodeIndex) {
                 buffer.set_char_styled(area.center(), NODE_GLYPH, Style::default());
+            }
+
+            fn cursor_columns(&self, _node: &NodeIndex) -> Option<CursorColumns> {
+                Some(CursorColumns::Range(1, 3))
             }
 
             fn cursor_row(&self, _node: &NodeIndex) -> Option<u64> {
@@ -2024,6 +2036,67 @@ mod tests {
                 clicked_column,
                 rect.left() + 1,
                 "should keep the clicked column"
+            );
+        }
+
+        #[test]
+        fn test_highlights_and_dimming_preserve_padding_cells() {
+            let mut engine = LayoutEngine::new(TestGraphs::domain_simple_chain());
+            let mut state = GraphViewState::default();
+            render(&mut engine, &mut state);
+            state.cursor.visible = false;
+            let target = NodeIndex::new(1);
+            let baseline = render(&mut engine, &mut state);
+            let rect = state.frame.rect_of(target).expect("should place target");
+            let padding = [
+                rect.min,
+                rect.max,
+                WorldPos::new(rect.left(), rect.bottom() + CURSOR_ROW as i64),
+            ];
+            for decoration in 0..3 {
+                if decoration == 0 {
+                    state.dim_node(target);
+                }
+                if decoration == 1 {
+                    state.set_node_highlight(target, PathStyle::new(Color::Red));
+                }
+                if decoration == 2 {
+                    state.set_cell_highlight(target, (0, 0), (4, 4), PathStyle::new(Color::Blue));
+                }
+                let decorated = render(&mut engine, &mut state);
+                for position in padding {
+                    let cell = state
+                        .screen_to_terminal(position.x, position.y)
+                        .expect("should show padding");
+                    assert_eq!(decorated[cell], baseline[cell]);
+                }
+                let cell = state
+                    .screen_to_terminal(rect.left() + 1, rect.bottom() + CURSOR_ROW as i64)
+                    .expect("should show content");
+                assert_ne!(decorated[cell].bg, baseline[cell].bg);
+            }
+        }
+
+        #[test]
+        fn test_click_and_go_to_padding_land_on_sequence_columns() {
+            let mut engine = LayoutEngine::new(TestGraphs::domain_simple_chain());
+            let mut state = GraphViewState::default();
+            render(&mut engine, &mut state);
+            let target = NodeIndex::new(1);
+            state.go_to_node(target, (0.0, 0.0));
+            render(&mut engine, &mut state);
+            let rect = state.frame.rect_of(target).expect("should place target");
+            assert_eq!(
+                rect.point_at_fraction(state.cursor.fractional).x,
+                rect.left() + 1
+            );
+            let (column, row) = state
+                .screen_to_terminal(rect.right(), rect.top())
+                .expect("should show padding");
+            assert!(state.handle_click(column, row));
+            assert_eq!(
+                rect.point_at_fraction(state.cursor.fractional),
+                WorldPos::new(rect.left() + 3, rect.bottom() + CURSOR_ROW as i64)
             );
         }
 
