@@ -28,8 +28,14 @@ VCF, one graph has many paths. `graph.all_sequences()` yields every path as a `S
 (`str(sequence)` is its bases). `locus.sequence` is the string for one region. A `Sample`
 holds several graphs; a `Repository` holds samples, branches and history.
 
-Full typed signatures and docstrings: `help(gen.Repository)` or
-`gen-python/python/gen/gen/__init__.pyi`.
+Before using a method you have not used, check its real signature. Do not guess method
+names, argument names or return types.
+
+1. One method: `help(gen.Repository.update_with_vcf)`.
+2. The whole API at a glance: read the installed type stub.
+   ```bash
+   find "$(python -c 'import gen, pathlib; print(pathlib.Path(gen.__file__).parent)')" -name '*.pyi'
+   ```
 
 ## Read the reference for your step before you do it
 
@@ -39,6 +45,7 @@ Full typed signatures and docstrings: `help(gen.Repository)` or
 | edit sequence, apply variants, search, cut out or join pieces, translate, annotate, build a combinatorial library | [references/design.md](references/design.md) |
 | branch, merge, undo, inspect history, clone, push or pull | [references/version-control.md](references/version-control.md) |
 | show or inspect a graph, or give the user a picture of one | [references/visualize.md](references/visualize.md) |
+| run `gen` shell commands, or do something only the CLI offers | [references/cli.md](references/cli.md) |
 
 A typical job crosses several rows: import (files), branch (version control), edit (design),
 check (visualize), export (files). Read each reference when you reach that step; they are
@@ -77,7 +84,10 @@ graph.export_fasta("design.fa")                             # files.md (whole sa
   VCF updates return `list[Sample]`, most other updates return one `Sample`.
 - Cells that mutate fail when re-run ("already exists"). In notebooks pass `exist_ok=True` to
   `import_sequence`, `sample.copy` and `checkout(..., create=True)` to reuse the earlier result.
-- Don't switch to the CLI after a `TypeError`; check the signature in the `.pyi`.
-- Use the CLI only for patches and operation diffs, which have no Python binding.
+- Don't switch to the CLI after a `TypeError`; check the signature with `help()` or the stub.
+- Python is the default. Use the CLI only for what Python lacks (`gen diff`, `gen view-diff`,
+  patches, `gen transform`, `gen propagate-annotations`), or when the user wants shell
+  commands or Python is unavailable. `references/cli.md` maps every CLI command to its Python
+  call and has the command recipes. Both work on the same `.gen` workspace.
 - Gen exposes sequence context; primer thermodynamics, specificity and functional predictions
   need domain tools.

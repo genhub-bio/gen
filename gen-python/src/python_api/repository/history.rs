@@ -350,7 +350,8 @@ impl PyRepository {
             .map(|branches| branches.into_iter().find(|branch| branch.is_current))
     }
 
-    /// Creates a branch at HEAD, or at `start` (an operation or its hash) when supplied.
+    /// Creates a branch named `name` at HEAD, or at `start` (an operation or its hash) when
+    /// supplied. It does not switch to the new branch; use `checkout()` for that.
     #[pyo3(signature = (name, start=None))]
     fn create_branch(
         &self,
@@ -419,7 +420,8 @@ impl PyRepository {
         self.find_branch(&name)
     }
 
-    /// Returns operations for the current branch or a named branch.
+    /// Returns operations for the current branch or a named branch, newest first. `limit` caps how
+    /// many are returned.
     #[pyo3(signature = (branch=None, limit=None))]
     fn get_operations(
         &self,
@@ -472,7 +474,8 @@ impl PyRepository {
     ///
     /// The content is stored once, inside `.gen`, and recorded as its own operation (with
     /// `message` when given). Adding the same file again fails. Use `asset.path` to locate the
-    /// stored copy or `asset.save_as(name)` to write a copy under a name you choose.
+    /// stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
+    /// the path of the file to store.
     #[pyo3(signature = (filename, message=None))]
     fn add_file(
         &self,

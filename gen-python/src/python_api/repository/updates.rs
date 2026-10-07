@@ -25,6 +25,10 @@ use crate::python_api::{
 impl PyRepository {
     /// Replace the region `region_name` of `sample` with the sequence in a FASTA file, storing the
     /// result as `new_sample`. Returns the new `Sample`.
+    ///
+    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
+    /// against the workspace directory instead of the current directory. `collection` defaults to
+    /// the default collection.
     #[pyo3(signature = (filename, sample, new_sample, region_name, collection=None))]
     fn update_with_fasta(
         &self,
@@ -74,6 +78,10 @@ impl PyRepository {
 
     /// Apply the graph in a GFA file to `sample`, storing the result as `new_sample`. Returns the
     /// new `Sample`.
+    ///
+    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
+    /// against the workspace directory instead of the current directory. `collection` defaults to
+    /// the default collection.
     #[pyo3(signature = (filename, sample, new_sample, collection=None))]
     fn update_with_gfa(
         &self,
@@ -106,6 +114,10 @@ impl PyRepository {
 
     /// Apply a GAF alignment file with its CSV of replacement sequences, writing the result to
     /// `sample` (derived from `parent_sample` when given). Returns that `Sample`.
+    ///
+    /// `filename` and `csv` are path strings; give absolute paths, because a relative path may be
+    /// resolved against the workspace directory instead of the current directory. `collection`
+    /// defaults to the default collection.
     #[pyo3(signature = (filename, csv, sample, parent_sample=None, collection=None))]
     fn update_with_gaf(
         &self,
@@ -140,10 +152,14 @@ impl PyRepository {
     }
 
     /// Apply variants from a VCF file to the `reference` sample (a name or list of names), creating
-    /// one
-    /// `Sample` per VCF sample column (or only `sample`). With `in_place=True` the reference is
-    /// edited
-    /// instead. Returns the list of `Sample` objects.
+    /// one `Sample` per VCF sample column (or only `sample`). With `in_place=True` the reference is
+    /// edited instead. Returns the list of `Sample` objects.
+    ///
+    /// `genotype` (for example `"0/1"`) is the genotype to assign when the VCF has no genotype data
+    /// of its own. `filename` is a path string; give an absolute path, because a relative path may
+    /// be resolved against the workspace directory instead of the current directory. `collection`
+    /// defaults to the default collection. A contig name that differs from the graph's name needs
+    /// `add_reference_alias()`.
     #[pyo3(signature = (filename, reference=None, genotype=None, sample=None, in_place=false, collection=None))]
     fn update_with_vcf(
         &self,
@@ -208,6 +224,10 @@ impl PyRepository {
 
     /// Update `sample` with the sequences and features of a GenBank file. `create_missing=True`
     /// allows graphs not yet in the sample. Returns the updated `Sample`.
+    ///
+    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
+    /// against the workspace directory instead of the current directory. `collection` defaults to
+    /// the default collection.
     #[pyo3(signature = (filename, sample, create_missing=false, collection=None))]
     fn update_with_genbank(
         &self,
@@ -255,6 +275,8 @@ impl PyRepository {
     /// Replace the region `path_name` of `sample` with a combinatorial library built from
     /// `parts_list` (columns of named `Sequence` alternatives), storing the result as
     /// `new_sample_name`. Returns the new `Sample`.
+    ///
+    /// `collection` defaults to the default collection.
     #[pyo3(signature = (sample, new_sample_name, path_name, parts_list, collection=None))]
     fn update_with_library(
         &self,
@@ -292,6 +314,11 @@ impl PyRepository {
 
     /// Like `update_with_library`, with the parts given as a named-parts FASTA (`parts`) and a
     /// headerless CSV (`library`). Returns the new `Sample`.
+    ///
+    /// `sample` is the sample to update, `new_sample` the sample created for the result, and
+    /// `path_name` the region of `sample` that the library replaces. `parts` and `library` are path
+    /// strings; give absolute paths, because a relative path may be resolved against the workspace
+    /// directory instead of the current directory. `collection` defaults to the default collection.
     #[pyo3(signature = (sample, new_sample, path_name, library, parts, collection=None))]
     fn update_with_library_files(
         &self,

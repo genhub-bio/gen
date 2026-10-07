@@ -501,7 +501,8 @@ class Repository:
         self, name: builtins.str, start: str | HashId | Operation | None = None
     ) -> Branch:
         r"""
-        Creates a branch at HEAD, or at `start` (an operation or its hash) when supplied.
+        Creates a branch named `name` at HEAD, or at `start` (an operation or its hash) when
+        supplied. It does not switch to the new branch; use `checkout()` for that.
         """
     def delete_branch(self, branch: str | Branch) -> None:
         r"""
@@ -527,7 +528,8 @@ class Repository:
         limit: typing.Optional[builtins.int] = None,
     ) -> builtins.list[Operation]:
         r"""
-        Returns operations for the current branch or a named branch.
+        Returns operations for the current branch or a named branch, newest first. `limit` caps how
+        many are returned.
         """
     def get_assets(self, branch: str | Branch | None = None) -> builtins.list[Asset]:
         r"""
@@ -544,7 +546,8 @@ class Repository:
 
         The content is stored once, inside `.gen`, and recorded as its own operation (with
         `message` when given). Adding the same file again fails. Use `asset.path` to locate the
-        stored copy or `asset.save_as(name)` to write a copy under a name you choose.
+        stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
+        the path of the file to store.
         """
     def merge(self, branch: str | Branch) -> Operation:
         r"""
@@ -572,7 +575,8 @@ class Repository:
 
         The format is inferred from the filename unless provided. A neighboring tabix index is
         discovered unless an index path is provided. The file's features then appear in
-        `graph.annotations` and in plots of every sequence graph they land on.
+        `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
+        display and track name; `message` is the operation's commit message.
         """
     def import_fasta(
         self,
@@ -584,6 +588,10 @@ class Repository:
         Import every record of a FASTA file into `sample` (default sample if omitted) and return the
         `Sample` holding one sequence graph per record. Fails if the same contents were already
         imported.
+
+        `filename` is a path string; give an absolute path, because a relative path may be resolved
+        against the workspace directory instead of the current directory. `collection` defaults to
+        the default collection.
         """
     def import_reference_fasta(
         self,
@@ -594,6 +602,10 @@ class Repository:
         r"""
         Import a FASTA file as the reference sample `reference`, which other samples (for example
         VCF variants) are derived against. Returns the `Sample`.
+
+        `filename` is a path string; give an absolute path, because a relative path may be resolved
+        against the workspace directory instead of the current directory. `collection` defaults to
+        the default collection.
         """
     def import_sequence(
         self,
@@ -614,6 +626,10 @@ class Repository:
         defaults to the default sample, "reference"; call it repeatedly with the same `sample` to
         build up a sample from several sequences. With `circular=True` the sequence is stored as a
         circular graph. Each call is its own operation, so use `import_fasta` for large files.
+
+        `collection` defaults to the default collection. A graph with this name must not already
+        exist in the sample; with `exist_ok=True`, one holding exactly this sequence is returned
+        as it is instead of raising.
         """
     def import_reference_sequence(
         self,
@@ -626,7 +642,8 @@ class Repository:
         exist_ok: builtins.bool = False,
     ) -> SequenceGraph:
         r"""
-        Like `import_sequence`, but adds to a reference sample.
+        Like `import_sequence`, but adds to the reference sample `reference` (a name or a
+        `Sample`); `sequence`, `name`, `circular`, `collection` and `exist_ok` behave the same.
         """
     def import_gfa(
         self,
@@ -637,6 +654,10 @@ class Repository:
         r"""
         Import a GFA file as one sequence graph, preserving its nodes and edges, and return that
         `SequenceGraph`.
+
+        `sample` defaults to the default sample. `filename` is a path string; give an absolute path,
+        because a relative path may be resolved against the workspace directory instead of the
+        current directory. `collection` defaults to the default collection.
         """
     def import_genbank(
         self,
@@ -647,6 +668,10 @@ class Repository:
         r"""
         Import a GenBank file, including its features (readable through `graph.annotations`), and
         return the `Sample`.
+
+        `sample` defaults to the default sample. `filename` is a path string; give an absolute path,
+        because a relative path may be resolved against the workspace directory instead of the
+        current directory. `collection` defaults to the default collection.
         """
     def import_library(
         self,
@@ -659,6 +684,9 @@ class Repository:
         Build a combinatorial library from `parts_list`, a list of columns each holding alternative
         named `Sequence` objects, and return the resulting `SequenceGraph`. Every path through the
         graph is one assembled design; read them with `graph.all_sequences()`.
+
+        `library_name` names the new graph; `sample` and `collection` default to the default sample
+        and collection.
         """
     def import_library_files(
         self,
@@ -672,6 +700,11 @@ class Repository:
         Build a combinatorial library from files: `parts` is a FASTA of named parts and `library` a
         headerless CSV with one column per slot and alternatives in rows. Returns the
         `SequenceGraph`.
+
+        `library_name` names the new graph; `sample` and `collection` default to the default sample
+        and collection. `parts` and `library` are path strings; give absolute paths, because a
+        relative path may be resolved against the workspace directory instead of the current
+        directory.
         """
     def __new__(
         cls,
@@ -702,7 +735,8 @@ class Repository:
         """
     def add_remote(self, name: builtins.str, url: builtins.str) -> Remote:
         r"""
-        Adds a named repository remote.
+        Adds a named repository remote. `name` is how you refer to it afterwards (for example
+        `origin`) and `url` is where it lives.
         """
     def remove_remote(self, remote: str | Remote) -> None:
         r"""
@@ -724,6 +758,9 @@ class Repository:
     ) -> None:
         r"""
         Pushes a local branch using the same remote workflow as the Gen CLI.
+
+        `force=True` overwrites the remote branch even when its history has diverged; it
+        discards remote work, so use it only when asked.
         """
     def pull(
         self, remote: str | Remote | None = None, branch: str | Branch | None = None
@@ -743,7 +780,8 @@ class Repository:
         r"""
         Build a junction-aware k-mer seed index for every sequence graph in the repository and save
         it to `.gen/search_index/{sequence_graph_id}.bin`. Later calls to `search()` load it
-        automatically; `SequenceGraph.build_index()` indexes just one graph.
+        automatically; `SequenceGraph.build_index()` indexes just one graph. `sequence_kind` is one
+        of the kinds accepted by `search()` and `k` is the k-mer length.
         """
     def search(
         self,
@@ -782,6 +820,10 @@ class Repository:
         r"""
         Replace the region `region_name` of `sample` with the sequence in a FASTA file, storing the
         result as `new_sample`. Returns the new `Sample`.
+
+        `filename` is a path string; give an absolute path, because a relative path may be resolved
+        against the workspace directory instead of the current directory. `collection` defaults to
+        the default collection.
         """
     def update_with_gfa(
         self,
@@ -793,6 +835,10 @@ class Repository:
         r"""
         Apply the graph in a GFA file to `sample`, storing the result as `new_sample`. Returns the
         new `Sample`.
+
+        `filename` is a path string; give an absolute path, because a relative path may be resolved
+        against the workspace directory instead of the current directory. `collection` defaults to
+        the default collection.
         """
     def update_with_gaf(
         self,
@@ -805,6 +851,10 @@ class Repository:
         r"""
         Apply a GAF alignment file with its CSV of replacement sequences, writing the result to
         `sample` (derived from `parent_sample` when given). Returns that `Sample`.
+
+        `filename` and `csv` are path strings; give absolute paths, because a relative path may be
+        resolved against the workspace directory instead of the current directory. `collection`
+        defaults to the default collection.
         """
     def update_with_vcf(
         self,
@@ -817,10 +867,14 @@ class Repository:
     ) -> builtins.list[Sample]:
         r"""
         Apply variants from a VCF file to the `reference` sample (a name or list of names), creating
-        one
-        `Sample` per VCF sample column (or only `sample`). With `in_place=True` the reference is
-        edited
-        instead. Returns the list of `Sample` objects.
+        one `Sample` per VCF sample column (or only `sample`). With `in_place=True` the reference is
+        edited instead. Returns the list of `Sample` objects.
+
+        `genotype` (for example `"0/1"`) is the genotype to assign when the VCF has no genotype data
+        of its own. `filename` is a path string; give an absolute path, because a relative path may
+        be resolved against the workspace directory instead of the current directory. `collection`
+        defaults to the default collection. A contig name that differs from the graph's name needs
+        `add_reference_alias()`.
         """
     def update_with_genbank(
         self,
@@ -832,6 +886,10 @@ class Repository:
         r"""
         Update `sample` with the sequences and features of a GenBank file. `create_missing=True`
         allows graphs not yet in the sample. Returns the updated `Sample`.
+
+        `filename` is a path string; give an absolute path, because a relative path may be resolved
+        against the workspace directory instead of the current directory. `collection` defaults to
+        the default collection.
         """
     def update_with_library(
         self,
@@ -845,6 +903,8 @@ class Repository:
         Replace the region `path_name` of `sample` with a combinatorial library built from
         `parts_list` (columns of named `Sequence` alternatives), storing the result as
         `new_sample_name`. Returns the new `Sample`.
+
+        `collection` defaults to the default collection.
         """
     def update_with_library_files(
         self,
@@ -858,6 +918,11 @@ class Repository:
         r"""
         Like `update_with_library`, with the parts given as a named-parts FASTA (`parts`) and a
         headerless CSV (`library`). Returns the new `Sample`.
+
+        `sample` is the sample to update, `new_sample` the sample created for the result, and
+        `path_name` the region of `sample` that the library replaces. `parts` and `library` are path
+        strings; give absolute paths, because a relative path may be resolved against the workspace
+        directory instead of the current directory. `collection` defaults to the default collection.
         """
 
 @typing.final
@@ -928,7 +993,8 @@ class Sample:
         The destination name must not already exist, unless `exist_ok=True`, which returns the
         existing sample as it is now (including any edits) instead of copying again; use that in
         notebook cells that may be run more than once. The returned sample is
-        ready for explicit in-place edits on its sequence graphs. The copy is
+        ready for explicit in-place edits on its sequence graphs. `new_name` is the name of the
+        copy. The copy is
         recorded as its own operation, using ``message`` as the operation's
         commit message when given, or a generated description otherwise.
         """
@@ -1409,6 +1475,8 @@ class SequenceGraph:
         stack : bool, optional
             Add the insertion alongside the existing routes instead of retiring the connections
             it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
+        message : str, optional
+            Commit message for the recorded operation.
         """
 
 @typing.final

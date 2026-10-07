@@ -1356,6 +1356,8 @@ impl PySequenceGraph {
     /// stack : bool, optional
     ///     Add the insertion alongside the existing routes instead of retiring the connections
     ///     it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
+    /// message : str, optional
+    ///     Commit message for the recorded operation.
     #[pyo3(signature = (sequence, *, before=None, after=None, message=None, stack=false))]
     fn insert(
         &self,

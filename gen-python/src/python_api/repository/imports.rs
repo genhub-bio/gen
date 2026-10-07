@@ -228,7 +228,8 @@ impl PyRepository {
     ///
     /// The format is inferred from the filename unless provided. A neighboring tabix index is
     /// discovered unless an index path is provided. The file's features then appear in
-    /// `graph.annotations` and in plots of every sequence graph they land on.
+    /// `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
+    /// display and track name; `message` is the operation's commit message.
     #[pyo3(signature = (filename, format=None, index=None, name=None, message=None))]
     fn import_annotations(
         &self,
@@ -255,6 +256,9 @@ impl PyRepository {
     /// `Sample` holding one sequence graph per record. Fails if the same contents were already
     /// imported.
     ///
+    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
+    /// against the workspace directory instead of the current directory. `collection` defaults to
+    /// the default collection.
     /// For a remote indexed BGZF FASTA, pass its `.fai` and `.gzi` files explicitly with `fai`
     /// and `gzi`.
     #[pyo3(signature = (filename, sample=None, collection=None, fai=None, gzi=None))]
@@ -302,6 +306,9 @@ impl PyRepository {
     /// Import a FASTA file as the reference sample `reference`, which other samples (for example
     /// VCF variants) are derived against. Returns the `Sample`.
     ///
+    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
+    /// against the workspace directory instead of the current directory. `collection` defaults to
+    /// the default collection.
     /// For a remote indexed BGZF FASTA, pass its `.fai` and `.gzi` files explicitly with `fai`
     /// and `gzi`.
     #[pyo3(signature = (filename, reference, collection=None, fai=None, gzi=None))]
@@ -363,6 +370,10 @@ impl PyRepository {
     /// defaults to the default sample, "reference"; call it repeatedly with the same `sample` to
     /// build up a sample from several sequences. With `circular=True` the sequence is stored as a
     /// circular graph. Each call is its own operation, so use `import_fasta` for large files.
+    ///
+    /// `collection` defaults to the default collection. A graph with this name must not already
+    /// exist in the sample; with `exist_ok=True`, one holding exactly this sequence is returned
+    /// as it is instead of raising.
     #[pyo3(signature = (sequence, name=None, sample=None, circular=false, collection=None, *, exist_ok=false))]
     pub fn import_sequence(
         &self,
@@ -386,7 +397,8 @@ impl PyRepository {
         self.import_sequence_entry(&entry, &collection, &sample, circular, exist_ok)
     }
 
-    /// Like `import_sequence`, but adds to a reference sample.
+    /// Like `import_sequence`, but adds to the reference sample `reference` (a name or a
+    /// `Sample`); `sequence`, `name`, `circular`, `collection` and `exist_ok` behave the same.
     #[pyo3(signature = (sequence, reference, name=None, circular=false, collection=None, *, exist_ok=false))]
     pub fn import_reference_sequence(
         &self,
@@ -436,6 +448,10 @@ impl PyRepository {
 
     /// Import a GFA file as one sequence graph, preserving its nodes and edges, and return that
     /// `SequenceGraph`.
+    ///
+    /// `sample` defaults to the default sample. `filename` is a path string; give an absolute path,
+    /// because a relative path may be resolved against the workspace directory instead of the
+    /// current directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, sample=None, collection=None))]
     fn import_gfa(
         &self,
@@ -476,6 +492,10 @@ impl PyRepository {
 
     /// Import a GenBank file, including its features (readable through `graph.annotations`), and
     /// return the `Sample`.
+    ///
+    /// `sample` defaults to the default sample. `filename` is a path string; give an absolute path,
+    /// because a relative path may be resolved against the workspace directory instead of the
+    /// current directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, sample=None, collection=None))]
     fn import_genbank(
         &self,
@@ -530,6 +550,9 @@ impl PyRepository {
     /// Build a combinatorial library from `parts_list`, a list of columns each holding alternative
     /// named `Sequence` objects, and return the resulting `SequenceGraph`. Every path through the
     /// graph is one assembled design; read them with `graph.all_sequences()`.
+    ///
+    /// `library_name` names the new graph; `sample` and `collection` default to the default sample
+    /// and collection.
     #[pyo3(signature = (library_name, parts_list, sample=None, collection=None))]
     fn import_library(
         &self,
@@ -585,6 +608,11 @@ impl PyRepository {
     /// Build a combinatorial library from files: `parts` is a FASTA of named parts and `library` a
     /// headerless CSV with one column per slot and alternatives in rows. Returns the
     /// `SequenceGraph`.
+    ///
+    /// `library_name` names the new graph; `sample` and `collection` default to the default sample
+    /// and collection. `parts` and `library` are path strings; give absolute paths, because a
+    /// relative path may be resolved against the workspace directory instead of the current
+    /// directory.
     #[pyo3(signature = (library_name, parts, library, sample=None, collection=None))]
     fn import_library_files(
         &self,

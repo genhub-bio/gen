@@ -99,7 +99,8 @@ impl PyRepository {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
-    /// Adds a named repository remote.
+    /// Adds a named repository remote. `name` is how you refer to it afterwards (for example
+    /// `origin`) and `url` is where it lives.
     fn add_remote(&self, name: &str, url: &str) -> PyResult<PyRemote> {
         ModelRemote::create(self.context.config().conn(), name, url)
             .map(PyRemote::from)
@@ -155,6 +156,9 @@ impl PyRepository {
     }
 
     /// Pushes a local branch using the same remote workflow as the Gen CLI.
+    ///
+    /// `force=True` overwrites the remote branch even when its history has diverged; it
+    /// discards remote work, so use it only when asked.
     #[pyo3(signature = (remote=None, branch=None, force=false))]
     fn push(
         &mut self,

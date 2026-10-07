@@ -3,9 +3,11 @@
 Signatures were checked against `gen-python/src/python_api/` and the stub
 `gen-python/python/gen/gen/__init__.pyi`, which has every signature and docstring. Check
 `help()` in the actual interpreter when using a different release. File APIs take filename
-strings, not `Path` objects. Use absolute paths: a relative filename is resolved against the
-workspace directory, not the current directory, so `import_fasta("plasmid.fa")` fails with
-"No such file" when the file sits next to your script.
+strings, not `Path` objects. Use absolute paths: some methods
+(`import_fasta`, `update_with_fasta`, `add_file`) resolve a relative filename against the
+workspace directory, not the current directory, and others (`import_genbank`) use the current
+directory. `import_fasta("plasmid.fa")` fails with "No such file" when the file sits next to
+your script.
 
 Contents: choosing an import; imports and return types; Biopython records; annotation files;
 updating a sample from a file; keeping other files; exports; mistakes to avoid.

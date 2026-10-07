@@ -17,7 +17,8 @@ use crate::python_api::{
 impl PyRepository {
     /// Build a junction-aware k-mer seed index for every sequence graph in the repository and save
     /// it to `.gen/search_index/{sequence_graph_id}.bin`. Later calls to `search()` load it
-    /// automatically; `SequenceGraph.build_index()` indexes just one graph.
+    /// automatically; `SequenceGraph.build_index()` indexes just one graph. `sequence_kind` is one
+    /// of the kinds accepted by `search()` and `k` is the k-mer length.
     #[pyo3(signature = (sequence_kind="dna", k=16))]
     pub fn build_index(&self, sequence_kind: &str, k: usize) -> PyResult<()> {
         let kind = parse_sequence_kind(sequence_kind)?;

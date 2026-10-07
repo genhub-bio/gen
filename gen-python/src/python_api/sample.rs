@@ -154,7 +154,8 @@ impl PySample {
     /// The destination name must not already exist, unless `exist_ok=True`, which returns the
     /// existing sample as it is now (including any edits) instead of copying again; use that in
     /// notebook cells that may be run more than once. The returned sample is
-    /// ready for explicit in-place edits on its sequence graphs. The copy is
+    /// ready for explicit in-place edits on its sequence graphs. `new_name` is the name of the
+    /// copy. The copy is
     /// recorded as its own operation, using ``message`` as the operation's
     /// commit message when given, or a generated description otherwise.
     #[pyo3(signature = (new_name, message=None, *, exist_ok=false))]
