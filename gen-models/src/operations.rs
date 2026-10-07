@@ -1879,8 +1879,13 @@ mod tests {
         let asset_dir = context.workspace().asset_dir().unwrap();
         let index_contents = b"index bytes\n";
 
-        for extension in ["fai", "gzi", "tbi", "csi", "bai", "BAI"] {
-            let source_path = repo_root.join(format!("reference.fa.{extension}"));
+        for (index, extension) in ["fai", "gzi", "tbi", "csi", "bai", "BAI"]
+            .iter()
+            .enumerate()
+        {
+            // Distinct stems keep case variants separate on case-insensitive filesystems.
+            let filename = format!("reference_{index}.fa.{extension}");
+            let source_path = repo_root.join(&filename);
             fs::write(&source_path, index_contents).expect("should write raw index file");
 
             let addition = FileAddition::prepare(
@@ -1909,7 +1914,7 @@ mod tests {
             assert_eq!(archived_checksum, source_checksum);
             assert_eq!(fs::read(archived_path).unwrap(), index_contents);
             assert!(addition.asset_uri.ends_with(&format!(".fa.{extension}")));
-            assert_eq!(storage_path, format!("reference.fa.{extension}"));
+            assert_eq!(storage_path, filename);
         }
     }
 
