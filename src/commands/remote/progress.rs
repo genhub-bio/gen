@@ -1,7 +1,7 @@
 use std::{
     io::{self, IsTerminal as _, Write as _},
     sync::{
-        Arc, Mutex, OnceLock, Weak,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Sender},
     },
@@ -19,7 +19,60 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 type ProgressSink = dyn Fn(&str) + Send + Sync;
 type SharedActivity = Arc<Mutex<Instant>>;
-static ACTIVE_INDICATIF: OnceLock<Mutex<Weak<IndicatifOutput>>> = OnceLock::new();
+
+/// Shared progress output for one remote operation.
+///
+/// Keeping one context for the full push lets graph, asset, heartbeat, and phase output use the
+/// same terminal bars without process-global coordination.
+#[derive(Clone)]
+pub(crate) struct TransferProgress {
+    output: ProgressOutput,
+}
+
+impl TransferProgress {
+    pub(crate) fn stderr() -> Self {
+        Self {
+            output: ProgressOutput::stderr(),
+        }
+    }
+
+    pub(crate) fn println(&self, line: &str) {
+        self.output.println(line);
+    }
+
+    pub(crate) fn heartbeat(&self, phase: &str) -> ProgressHeartbeat {
+        ProgressHeartbeat::start(
+            self.output.clone(),
+            Arc::new(Mutex::new(Instant::now())),
+            phase.to_string(),
+            HEARTBEAT_INTERVAL,
+        )
+    }
+
+    pub(crate) fn graph_reporter(
+        &self,
+        attempt: usize,
+        attempts: usize,
+    ) -> GraphUploadProgressReporter {
+        GraphUploadProgressReporter::with_output(self.output.clone(), attempt, attempts)
+    }
+
+    pub(crate) fn asset_reporter(
+        &self,
+        index: usize,
+        total: usize,
+        name: String,
+        total_bytes: u64,
+    ) -> AssetUploadProgressReporter {
+        AssetUploadProgressReporter::with_output(
+            self.output.clone(),
+            index,
+            total,
+            name,
+            total_bytes,
+        )
+    }
+}
 
 #[derive(Clone)]
 struct ProgressOutput {
@@ -30,26 +83,9 @@ struct ProgressOutput {
 
 impl ProgressOutput {
     fn stderr() -> Self {
-        Self::stderr_with_active_handler(false)
-    }
-
-    fn active_or_stderr() -> Self {
-        Self::stderr_with_active_handler(true)
-    }
-
-    fn stderr_with_active_handler(use_active: bool) -> Self {
-        let active = use_active.then(|| {
-            ACTIVE_INDICATIF.get().and_then(|active| {
-                active
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .upgrade()
-            })
+        let indicatif = Self::select_indicatif(io::stderr().is_terminal(), || {
+            Arc::new(IndicatifOutput::new())
         });
-        let indicatif =
-            Self::select_indicatif(active.flatten(), io::stderr().is_terminal(), || {
-                Arc::new(IndicatifOutput::new())
-            });
         Self {
             sink: Arc::new(|line| {
                 let _ = writeln!(io::stderr().lock(), "{line}");
@@ -60,17 +96,12 @@ impl ProgressOutput {
     }
 
     fn select_indicatif(
-        active: Option<Arc<IndicatifOutput>>,
         stderr_is_terminal: bool,
         make_terminal: impl FnOnce() -> Arc<IndicatifOutput>,
     ) -> Option<Arc<IndicatifOutput>> {
-        active
+        stderr_is_terminal
+            .then(make_terminal)
             .filter(|indicatif| !indicatif.handler.is_hidden())
-            .or_else(|| {
-                stderr_is_terminal
-                    .then(make_terminal)
-                    .filter(|indicatif| !indicatif.handler.is_hidden())
-            })
     }
 
     fn reporter(&self) -> ThrottledOutput {
@@ -89,19 +120,6 @@ impl ProgressOutput {
         } else {
             (self.sink)(line);
         }
-    }
-
-    fn register_active(&self) {
-        let Some(indicatif) = &self.indicatif else {
-            return;
-        };
-        if indicatif.handler.is_hidden() {
-            return;
-        }
-        let active = ACTIVE_INDICATIF.get_or_init(|| Mutex::new(Weak::new()));
-        *active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(indicatif);
     }
 
     fn start_phase(&self, phase: &str) -> Option<ProgressBar> {
@@ -182,9 +200,7 @@ impl IndicatifOutput {
         let mut details = Vec::new();
         if let Some(progress) = logical {
             details.push(format!(
-                "Dolt payload bytes: {} of {} ({} of {})",
-                progress.acknowledged_bytes,
-                progress.planned_bytes,
+                "Dolt payload bytes: {} of {}",
                 format_bytes(progress.acknowledged_bytes),
                 format_bytes(progress.planned_bytes),
             ));
@@ -311,10 +327,6 @@ impl IndicatifOutput {
         drop(state);
         self.set_details(&[]);
     }
-
-    fn println(&self, message: &str) {
-        let _ = self.handler.println(message);
-    }
 }
 
 /// Periodically reports that a long upload phase is still waiting for real progress.
@@ -328,16 +340,6 @@ pub(crate) struct ProgressHeartbeat {
 }
 
 impl ProgressHeartbeat {
-    pub(crate) fn waiting(phase: &str) -> Self {
-        let now = Instant::now();
-        Self::start(
-            ProgressOutput::active_or_stderr(),
-            Arc::new(Mutex::new(now)),
-            phase.to_string(),
-            HEARTBEAT_INTERVAL,
-        )
-    }
-
     fn start(
         output: ProgressOutput,
         activity: Arc<Mutex<Instant>>,
@@ -458,7 +460,6 @@ impl ThrottledOutput {
 #[derive(Clone)]
 pub(crate) struct GraphUploadProgressReporter {
     output: Arc<ThrottledOutput>,
-    logical_output: Arc<ThrottledOutput>,
     attempt: usize,
     attempts: usize,
     started: Instant,
@@ -469,17 +470,10 @@ pub(crate) struct GraphUploadProgressReporter {
 }
 
 impl GraphUploadProgressReporter {
-    pub(crate) fn new(attempt: usize, attempts: usize) -> Self {
-        let output = ProgressOutput::stderr();
-        output.register_active();
-        Self::with_output(output, attempt, attempts)
-    }
-
     fn with_output(output: ProgressOutput, attempt: usize, attempts: usize) -> Self {
         let now = Instant::now();
         Self {
             output: Arc::new(output.reporter()),
-            logical_output: Arc::new(output.reporter()),
             attempt,
             attempts,
             started: now,
@@ -546,22 +540,23 @@ impl GraphUploadProgressReporter {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = now;
                 if let Some(previous) = previous {
-                    self.logical_output.report(
-                        &format!(
-                            "Dolt logical chunk plan {} was replanned after: {}",
-                            previous.plan_number,
-                            format_logical_chunk_progress(previous),
-                        ),
-                        true,
+                    log::debug!(
+                        "Dolt logical chunk plan {} was replanned after: {}",
+                        previous.plan_number,
+                        format_logical_chunk_progress(previous),
                     );
                 }
+                log::debug!(
+                    "Dolt logical chunk transfer plan {}: {} destination-missing chunks ({} bytes; {}).",
+                    plan_number,
+                    missing_chunk_count,
+                    missing_payload_bytes,
+                    format_bytes(missing_payload_bytes),
+                );
                 (
                     format!(
-                        "Dolt logical chunk transfer plan {}: {} destination-missing chunks ({} logical payload bytes); {} bytes.",
-                        plan_number,
-                        missing_chunk_count,
+                        "Preparing upload: {missing_chunk_count} chunks ({}).",
                         format_bytes(missing_payload_bytes),
-                        missing_payload_bytes,
                     ),
                     true,
                 )
@@ -570,7 +565,7 @@ impl GraphUploadProgressReporter {
                 acknowledged_chunk_count,
                 acknowledged_payload_bytes,
             } => {
-                let message = {
+                let logical = {
                     let mut logical_chunks = self
                         .logical_chunks
                         .lock()
@@ -588,42 +583,43 @@ impl GraphUploadProgressReporter {
                     }
                     progress.acknowledged_chunks = acknowledged_chunk_count;
                     progress.acknowledged_bytes = acknowledged_payload_bytes;
-                    format!(
-                        "Dolt logical chunks acknowledged for plan {}: {}",
-                        progress.plan_number,
-                        format_logical_chunk_progress(*progress),
-                    )
+                    *progress
                 };
+                let message = self
+                    .latest
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .map_or_else(
+                        || {
+                            format!(
+                                "Graph upload attempt {}/{}: Dolt logical chunk progress: {}",
+                                self.attempt,
+                                self.attempts,
+                                format_logical_chunk_progress(logical),
+                            )
+                        },
+                        |latest| self.format(latest),
+                    );
                 (message, false)
             }
         };
-        if let Some(indicatif) = &self.logical_output.output.indicatif {
+        if let Some(indicatif) = &self.output.output.indicatif {
+            let logical = *self
+                .logical_chunks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let gcs = *self
+                .latest
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            indicatif.graph_progress(logical, gcs);
             if is_plan {
-                if force {
-                    self.logical_output.println(&message);
-                }
-                let logical = *self
-                    .logical_chunks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let gcs = *self
-                    .latest
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                indicatif.graph_progress(logical, gcs);
-            } else {
-                let logical = *self
-                    .logical_chunks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let gcs = *self
-                    .latest
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                indicatif.graph_progress(logical, gcs);
+                self.output.println(&message);
             }
         } else {
-            self.logical_output.report(&message, force);
+            if !message.is_empty() {
+                self.output.report(&message, force);
+            }
         }
     }
 
@@ -636,24 +632,23 @@ impl GraphUploadProgressReporter {
             return;
         };
         let outcome = if push_succeeded {
-            "after Dolt push returned successfully"
+            "succeeded"
         } else {
-            "after Dolt push returned an error"
+            "failed"
         };
-        let summary = format!(
-            "Final Dolt logical chunk transfer counters for plan {} {outcome}: {}",
+        log::debug!(
+            "Dolt logical chunk transfer plan {} {outcome}: {}; exact payload bytes {} of {}.",
             progress.plan_number,
             format_logical_chunk_progress(progress),
+            progress.acknowledged_bytes,
+            progress.planned_bytes,
         );
-        if let Some(indicatif) = &self.logical_output.output.indicatif {
+        if let Some(indicatif) = &self.output.output.indicatif {
             let gcs = *self
                 .latest
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             indicatif.graph_progress(Some(progress), gcs);
-            self.logical_output.println(&summary);
-        } else {
-            self.logical_output.report(&summary, true);
         }
     }
 
@@ -751,6 +746,24 @@ impl GraphUploadProgressReporter {
             } else {
                 self.output.report(&self.format(latest), true);
             }
+        } else if let Some(logical) = *self
+            .logical_chunks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let message = format!(
+                "Graph upload attempt {}/{}: Dolt logical chunk progress: {}; GCS block counters were not reported.",
+                self.attempt,
+                self.attempts,
+                format_logical_chunk_progress(logical),
+            );
+            if let Some(indicatif) = &self.output.output.indicatif {
+                indicatif.graph_progress(Some(logical), None);
+                indicatif.finish_bar("Graph logical counters captured", false);
+                self.output.println(&message);
+            } else {
+                self.output.report(&message, true);
+            }
         }
     }
 
@@ -820,12 +833,6 @@ pub(crate) struct AssetUploadProgressReporter {
 }
 
 impl AssetUploadProgressReporter {
-    pub(crate) fn new(index: usize, total: usize, name: String, total_bytes: u64) -> Self {
-        let output = ProgressOutput::stderr();
-        output.register_active();
-        Self::with_output(output, index, total, name, total_bytes)
-    }
-
     fn with_output(
         output: ProgressOutput,
         index: usize,
@@ -1057,20 +1064,6 @@ impl<R: io::Read> io::Read for UploadBodyReader<R> {
     }
 }
 
-pub(crate) fn write_progress_line(message: &str) {
-    if let Some(indicatif) = ACTIVE_INDICATIF.get().and_then(|active| {
-        active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .upgrade()
-            .filter(|indicatif| !indicatif.handler.is_hidden())
-    }) {
-        indicatif.println(message);
-    } else {
-        let _ = writeln!(io::stderr().lock(), "{message}");
-    }
-}
-
 fn percentage(bytes: u64, total: u64) -> u64 {
     if total == 0 {
         return 100;
@@ -1134,7 +1127,7 @@ pub(crate) fn format_elapsed(elapsed: Duration) -> String {
 mod tests {
     use std::{
         io::{Cursor, Read as _},
-        sync::{Arc, Mutex, Weak},
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
@@ -1145,8 +1138,9 @@ mod tests {
     };
 
     use super::{
-        ACTIVE_INDICATIF, AssetUploadProgressReporter, BarKind, GraphUploadProgressReporter,
-        IndicatifOutput, LogicalChunkProgress, ProgressHeartbeat, ProgressOutput, UploadBodyReader,
+        AssetUploadProgressReporter, BarKind, GraphUploadProgressReporter, IndicatifOutput,
+        LogicalChunkProgress, ProgressHeartbeat, ProgressOutput, TransferProgress,
+        UploadBodyReader,
     };
 
     #[derive(Debug)]
@@ -1196,31 +1190,6 @@ mod tests {
 
         fn flush(&self) -> std::io::Result<()> {
             Ok(())
-        }
-    }
-
-    struct ActiveIndicatifGuard {
-        previous: Weak<IndicatifOutput>,
-    }
-
-    impl ActiveIndicatifGuard {
-        fn install(indicatif: &Arc<IndicatifOutput>) -> Self {
-            let active = ACTIVE_INDICATIF.get_or_init(|| Mutex::new(Weak::new()));
-            let previous = std::mem::replace(
-                &mut *active.lock().expect("should lock active indicatif handler"),
-                Arc::downgrade(indicatif),
-            );
-            Self { previous }
-        }
-    }
-
-    impl Drop for ActiveIndicatifGuard {
-        fn drop(&mut self) {
-            if let Some(active) = ACTIVE_INDICATIF.get() {
-                *active
-                    .lock()
-                    .expect("should restore active indicatif handler") = self.previous.clone();
-            }
         }
     }
 
@@ -1331,7 +1300,7 @@ mod tests {
             .iter()
             .map(ProgressBar::message)
             .collect::<Vec<_>>();
-        assert!(detail_messages[0].contains("Dolt payload bytes: 256 of 1024"));
+        assert!(detail_messages[0].contains("Dolt payload bytes: 256 B of 1.0 KiB"));
         assert!(detail_messages[1].contains("GCS blocks: 2 of 4; 1 uploaded, 1 reused"));
         assert!(detail_messages[2].contains("GCS block-data bytes: 256 of 512"));
 
@@ -1425,7 +1394,7 @@ mod tests {
         ));
         let (mut output, lines) = captured_output(Duration::ZERO);
 
-        output.indicatif = ProgressOutput::select_indicatif(None, true, || Arc::clone(&hidden));
+        output.indicatif = ProgressOutput::select_indicatif(true, || Arc::clone(&hidden));
         let status_output = output.clone();
         let progress = GraphUploadProgressReporter::with_output(output, 1, 1);
         progress.report_dolt_progress(DoltPushProgressEvent::Plan {
@@ -1453,8 +1422,8 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("Dolt logical chunk transfer plan 1")),
-            "fallback output should include the native plan: {lines:?}"
+                .any(|line| line.contains("Preparing upload: 2 chunks (1.0 KiB).")),
+            "fallback output should show plan totals before upload: {lines:?}"
         );
         assert!(
             lines
@@ -1475,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn test_waiting_phase_and_operation_lines_reuse_the_active_indicatif_handler() {
+    fn test_waiting_phase_and_operation_lines_share_explicit_indicatif_context() {
         let terminal_output = Arc::new(Mutex::new(Vec::new()));
         let handler = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(
             RecordingTerm {
@@ -1483,9 +1452,15 @@ mod tests {
             },
         )));
         let indicatif = Arc::new(IndicatifOutput::with_handler(handler));
-        let _active_handler = ActiveIndicatifGuard::install(&indicatif);
+        let progress = TransferProgress {
+            output: ProgressOutput {
+                sink: Arc::new(|_| {}),
+                interval: Duration::from_secs(1),
+                indicatif: Some(indicatif),
+            },
+        };
 
-        let heartbeat = ProgressHeartbeat::waiting("publishing graph manifest");
+        let heartbeat = progress.heartbeat("publishing graph manifest");
         assert_eq!(
             heartbeat
                 .bar
@@ -1495,7 +1470,7 @@ mod tests {
             "publishing graph manifest"
         );
 
-        super::write_progress_line("Graph manifest published.");
+        progress.println("Graph manifest published.");
         let rendered = String::from_utf8_lossy(
             &terminal_output
                 .lock()
@@ -1504,11 +1479,11 @@ mod tests {
         .into_owned();
         assert!(
             rendered.contains("publishing graph manifest"),
-            "waiting phase should render through the active MultiProgress handler: {rendered:?}"
+            "waiting phase should render through the explicit MultiProgress context: {rendered:?}"
         );
         assert!(
             rendered.contains("Graph manifest published."),
-            "operation status should use the active MultiProgress handler: {rendered:?}"
+            "operation status should use the explicit MultiProgress context: {rendered:?}"
         );
     }
 
@@ -1532,10 +1507,10 @@ mod tests {
         });
         {
             let mut throttle = progress
-                .logical_output
+                .output
                 .state
                 .lock()
-                .expect("should lock logical progress throttle");
+                .expect("should lock unified progress throttle");
             throttle.last_output = Some(Instant::now() - Duration::from_secs(61));
         }
         progress.report_dolt_progress(DoltPushProgressEvent::Uploaded {
@@ -1545,22 +1520,51 @@ mod tests {
         progress.finish_dolt_progress(true);
 
         let lines = lines.lock().expect("should read interleaved progress");
-        assert_eq!(lines.len(), 4);
-        assert!(lines[0].contains("Dolt logical chunk transfer plan 1"));
-        assert!(lines[0].contains("8 destination-missing chunks (12.0 KiB logical payload bytes)"));
-        assert!(lines[1].contains(
-            "Dolt logical chunk progress: 0 of 8 destination-missing chunks acknowledged (0%)"
-        ));
-        assert!(lines[1].contains("GCS block counters: 1 GCS blocks uploaded (4.0 KiB)"));
-        assert!(lines[2].contains("Dolt logical chunks acknowledged for plan 1"));
-        assert!(lines[2].contains("5 of 8 destination-missing chunks acknowledged (62%)"));
-        assert!(lines[2].contains("9.0 KiB of 12.0 KiB logical payload bytes acknowledged (75%)"));
-        assert!(lines[3].contains("Final Dolt logical chunk transfer counters"));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "Preparing upload: 8 chunks (12.0 KiB).");
+        assert!(lines[1].contains("Graph upload attempt 1/2:"));
+        assert!(lines[1].contains("5 of 8 destination-missing chunks acknowledged (62%)"));
+        assert!(lines[1].contains("9.0 KiB of 12.0 KiB logical payload bytes acknowledged (75%)"));
+        assert!(lines[1].contains("GCS block counters: 2 GCS blocks uploaded (8.0 KiB)"));
         assert!(
             lines
                 .iter()
                 .all(|line| !line.contains("GCS block total and byte size pending"))
         );
+    }
+
+    #[test]
+    fn test_finish_forces_unified_logical_and_block_counters_before_throttle_interval() {
+        let (output, lines) = captured_output(Duration::from_secs(60));
+        let progress = GraphUploadProgressReporter::with_output(output, 1, 1);
+        progress.report_dolt_progress(DoltPushProgressEvent::Plan {
+            missing_chunk_count: 3,
+            missing_payload_bytes: 1536,
+        });
+        progress.report_dolt_progress(DoltPushProgressEvent::Uploaded {
+            acknowledged_chunk_count: 2,
+            acknowledged_payload_bytes: 1024,
+        });
+        progress.report(UploadProgress {
+            uploaded_blocks: 2,
+            uploaded_bytes: 512,
+            reused_blocks: 1,
+            reused_bytes: 256,
+            expected: Some(UploadPlan {
+                blocks: 4,
+                bytes: 1024,
+            }),
+        });
+        progress.finish();
+
+        let lines = lines.lock().expect("should read forced final progress");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "Preparing upload: 3 chunks (1.5 KiB).");
+        assert!(lines[1].contains("2 of 3 destination-missing chunks acknowledged (66%)"));
+        assert!(lines[1].contains("1.0 KiB of 1.5 KiB logical payload bytes acknowledged (66%)"));
+        assert!(lines[1].contains("GCS blocks handled: 3 of 4 (75%)"));
+        assert!(lines[1].contains("768 B of 1.0 KiB GCS block-data bytes handled (75%)"));
+        assert!(!lines[1].contains("Final Dolt logical chunk"));
     }
 
     #[test]
@@ -1605,20 +1609,16 @@ mod tests {
         progress.finish_dolt_progress(false);
 
         let lines = lines.lock().expect("should read replanned progress");
-        assert!(lines.iter().any(|line| {
-            line.contains("Dolt logical chunk plan 1 was replanned after")
-                && line.contains("3 of 5 destination-missing chunks acknowledged (60%)")
-        }));
-        assert!(lines.iter().any(|line| {
-            line.contains("Dolt logical chunk transfer plan 2")
-                && line.contains("2 destination-missing chunks (4.0 KiB logical payload bytes)")
-        }));
-        assert!(lines.iter().any(|line| {
-            line.contains("Final Dolt logical chunk transfer counters for plan 2")
-                && line.contains("0 of 2 destination-missing chunks acknowledged (0%)")
-                && line.contains("0 B of 4.0 KiB logical payload bytes acknowledged (0%)")
-                && line.contains("after Dolt push returned an error")
-        }));
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "Preparing upload: 5 chunks (10.0 KiB).");
+        assert!(lines[1].contains("3 of 5 destination-missing chunks acknowledged (60%)"));
+        assert_eq!(lines[2], "Preparing upload: 2 chunks (4.0 KiB).");
+        assert!(lines.iter().all(|line| !line.contains("plan ")));
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("Final Dolt logical chunk"))
+        );
     }
 
     #[test]
@@ -1632,9 +1632,7 @@ mod tests {
         progress.finish_dolt_progress(true);
 
         let lines = lines.lock().expect("should read empty chunk plan progress");
-        assert!(lines[0].contains("0 destination-missing chunks (0 B logical payload bytes)"));
-        assert!(lines[1].contains("not applicable (no logical chunk work planned)"));
-        assert!(lines.iter().all(|line| !line.contains("100%")));
+        assert_eq!(lines.as_slice(), ["Preparing upload: 0 chunks (0 B)."]);
     }
 
     #[test]
