@@ -3585,23 +3585,38 @@ mod tests {
     }
 
     mod annotation_snapshots {
+        use std::{collections::HashSet, io::Cursor, path::Path};
+
+        use gen_annotations::translate::gff::translate_gff;
         use gen_core::{HashId, PATH_END_NODE_ID, PATH_START_NODE_ID, Strand};
         use gen_graph::{GenGraph, GraphEdge, GraphNode};
+        use gen_models::sample::Sample;
         use gen_tui::{
-            GraphViewState, frame_index::Direction, graph_view::GraphView,
+            GraphViewState,
+            frame_index::Direction,
+            graph_view::GraphView,
+            plotter::{LineStyle, PathStyle},
             testing::create_test_terminal,
         };
         use ratatui::{style::Color, widgets::StatefulWidget as _};
 
         use super::{RepeatingSequenceSource, span_overlay};
-        use crate::views::{
-            gen_graph_widget::{
-                AnnotationLabels, AnnotationStarts, FULL_ZOOM_LEVEL, NodeAnnotationLayer,
-                apply_zoom_level, create_annotated_gen_graph_engine, draw_annotation_connectors,
-                draw_annotation_labels, draw_braille_curve, draw_compact_annotation_connectors,
-                reapply_overlays, update_node_annotations,
+        use crate::{
+            imports::fasta::import_fasta,
+            test_helpers::setup_gen,
+            updates::vcf::update_with_vcf,
+            views::{
+                annotations::parse_translated_gff,
+                gen_graph_widget::{
+                    AnnotationLabels, AnnotationStarts, FULL_ZOOM_LEVEL, NodeAnnotationLayer,
+                    SequenceSource, apply_zoom_level, create_annotated_gen_graph_engine,
+                    draw_annotation_connectors, draw_annotation_labels, draw_braille_curve,
+                    draw_compact_annotation_connectors, reapply_overlays, update_node_annotations,
+                },
+                graph_overlay::{
+                    AnnotationColorCache, GraphOverlay, OverlayContent, OverlaySource,
+                },
             },
-            graph_overlay::{AnnotationColorCache, GraphOverlay},
         };
 
         fn node(name: &str, length: i64) -> GraphNode {
@@ -3662,15 +3677,38 @@ mod tests {
         /// `render`, also returning the annotation starts and view state it rendered with.
         fn render_view(
             graph: GenGraph,
-            mut overlays: Vec<GraphOverlay>,
+            overlays: Vec<GraphOverlay>,
             zoom_level: usize,
             size: (u16, u16),
             focused: Option<HashId>,
         ) -> (String, AnnotationStarts, GraphViewState<GraphNode>) {
+            render_view_with_source(
+                graph,
+                RepeatingSequenceSource,
+                overlays,
+                zoom_level,
+                size,
+                focused,
+                None,
+            )
+        }
+
+        fn render_view_with_source<S: SequenceSource + Clone>(
+            graph: GenGraph,
+            source: S,
+            mut overlays: Vec<GraphOverlay>,
+            zoom_level: usize,
+            size: (u16, u16),
+            focused: Option<HashId>,
+            centered: Option<GraphNode>,
+        ) -> (String, AnnotationStarts, GraphViewState<GraphNode>) {
             let layer = NodeAnnotationLayer::new();
             let (mut engine, zoom_levels, mut view_state) =
-                create_annotated_gen_graph_engine(graph, RepeatingSequenceSource, layer.clone());
+                create_annotated_gen_graph_engine(graph, source, layer.clone());
             apply_zoom_level(&mut view_state, zoom_level, &zoom_levels);
+            if let Some(node) = centered {
+                view_state.go_to_node(node, (0.5, 0.5));
+            }
             let mut colors = AnnotationColorCache::new();
             let mut terminal = create_test_terminal(size.0, size.1);
             for _ in 0..2 {
@@ -3718,6 +3756,131 @@ mod tests {
             }
             let starts = AnnotationStarts::new(&engine, &overlays);
             (terminal.backend().to_string(), starts, view_state)
+        }
+
+        // Import the real reference and variants before translating annotations onto the
+        // edited sample. This covers labels and connectors across VCF-created node slices.
+        fn render_annotated_variant_fixture(
+            folder: &str,
+            fasta: &str,
+            gff: &str,
+            vcf: &str,
+            sample: &str,
+            position: i64,
+        ) -> String {
+            let context = setup_gen();
+            let connection = context.graph().conn();
+            let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/annotation_layout")
+                .join(folder);
+            let fasta_path = directory.join(fasta).to_string_lossy().into_owned();
+            let vcf_path = directory.join(vcf).to_string_lossy().into_owned();
+            import_fasta(
+                &context,
+                &fasta_path,
+                folder,
+                Sample::DEFAULT_NAME,
+                false,
+                &[],
+            )
+            .expect("should import reference fixture");
+            update_with_vcf(
+                &context,
+                &vcf_path,
+                folder,
+                String::new(),
+                None,
+                vec![Sample::DEFAULT_NAME.to_string()],
+                false,
+            )
+            .expect("should import variant fixture");
+            let graph = Sample::get_graph(connection, context.workspace(), folder, sample, None)
+                .expect("should load variant graph");
+            assert!(
+                graph.node_count() > 3,
+                "VCF should split the reference into nodes"
+            );
+            let node_filter: HashSet<_> = graph.nodes().map(|node| node.node_id).collect();
+            let centered = graph
+                .nodes()
+                .filter(|node| node.sequence_start <= position && node.sequence_end > position)
+                .max_by_key(|node| node.length())
+                .expect("should find reference slice around annotated variants");
+            let mut translated = Vec::new();
+            let annotations =
+                std::fs::read(directory.join(gff)).expect("should read annotation fixture");
+            translate_gff(
+                connection,
+                context.workspace(),
+                folder,
+                sample,
+                None,
+                Cursor::new(annotations),
+                &mut translated,
+            )
+            .expect("should translate annotations onto variant sample");
+            let spans = parse_translated_gff(
+                Cursor::new(translated),
+                &node_filter,
+                folder,
+                Default::default(),
+            );
+            assert!(
+                !spans.is_empty(),
+                "fixture annotations should reach the graph"
+            );
+            let overlays = spans
+                .into_iter()
+                .map(|span| GraphOverlay {
+                    content: OverlayContent::Span(span),
+                    source: OverlaySource::Track(folder.to_string()),
+                    style: PathStyle {
+                        color: Color::Reset,
+                        line_style: LineStyle::Normal,
+                        merge_glyphs: true,
+                    },
+                })
+                .collect();
+            render_view_with_source(
+                graph,
+                (connection, context.workspace()),
+                overlays,
+                FULL_ZOOM_LEVEL - 1,
+                (140, 45),
+                None,
+                Some(centered),
+            )
+            .0
+        }
+
+        #[test]
+        fn test_annotation_hbb_vcf() {
+            insta::assert_snapshot!(
+                "annotation_hbb_vcf",
+                render_annotated_variant_fixture(
+                    "hbb_reference_centering",
+                    "hbb_region.fa",
+                    "hbb_region.gff3",
+                    "hbb_variants.vcf",
+                    "HG00096",
+                    2600,
+                )
+            );
+        }
+
+        #[test]
+        fn test_annotation_sarscov2_vcf() {
+            insta::assert_snapshot!(
+                "annotation_sarscov2_vcf",
+                render_annotated_variant_fixture(
+                    "sarscov2_reference_centering",
+                    "NC_045512.2.fa",
+                    "NC_045512.2.gff3",
+                    "lineages.vcf",
+                    "Delta",
+                    27650,
+                )
+            );
         }
 
         #[test]
