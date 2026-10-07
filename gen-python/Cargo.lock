@@ -1466,6 +1466,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tui-widget-list",
+ "unicode-segmentation",
+ "unicode-width",
  "url",
  "url-parse",
  "uuid",
@@ -1520,7 +1522,7 @@ dependencies = [
  "gen-core",
  "gen-graph",
  "gen-models",
- "itertools",
+ "itertools 0.14.0",
  "petgraph 0.6.5",
  "rusqdoltlite",
  "tempfile",
@@ -1611,13 +1613,15 @@ name = "gen-tui"
 version = "0.3.1"
 dependencies = [
  "crossterm",
- "itertools",
+ "itertools 0.14.0",
  "log",
  "petgraph 0.6.5",
  "ratatui",
  "rust-sugiyama",
  "serde",
  "thiserror 2.0.18",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2952,6 +2956,16 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
 ]
 
 [[package]]

@@ -6,11 +6,15 @@ use std::{
 };
 
 use r#gen::views::{
+    annotation_files::{AnnotationFileEntry, load_annotation_file_entries},
     annotation_track::{
         AnnotationSpan, AnnotationTrack, LoadedNodeSlices, annotation_span_from_graph_locus,
         graph_locus_from_annotation_span,
     },
-    annotations::{parse_translated_bed, parse_translated_gff},
+    annotations::{
+        AnnotationFileTrackRequest, load_annotation_file_track, parse_translated_bed,
+        parse_translated_bed_file, parse_translated_gff, parse_translated_gff_file,
+    },
     gen_graph_controller::{AnnotationDisplay, ClickOutcome, GenGraphController},
     graph_database::GraphDatabase,
     graph_overlay::{
@@ -22,7 +26,7 @@ use gen_annotations::{
     projection::annotation_segments,
     translate::{bed::translate_bed, gff::translate_gff},
 };
-use gen_core::{HashId, Workspace};
+use gen_core::{HashId, Workspace, is_terminal};
 use gen_models::{
     annotations::Annotation, block_group::BlockGroup, db::GraphConnection, sample::Sample,
 };
@@ -261,6 +265,15 @@ struct GraphPage {
     /// Set once Python has set up the annotation groups (with or without colors). Survives
     /// cloning so that cell-display clones do not set them up again.
     annotation_groups_loaded: bool,
+    annotation_files: Vec<FileTrack>,
+}
+
+#[derive(Clone)]
+struct FileTrack {
+    entry: AnnotationFileEntry,
+    shown: bool,
+    index_available: bool,
+    loaded_window: Option<(i64, i64)>,
 }
 
 /// How `plot()` loads and lays out a page.
@@ -324,6 +337,7 @@ impl GraphPage {
             name,
             controller,
             annotation_groups_loaded: false,
+            annotation_files: Vec::new(),
         })
     }
 
@@ -346,12 +360,26 @@ impl GraphPage {
 
     /// Draw the graph, its annotation flags and floating labels into `graph_area`.
     fn render_into(&mut self, buf: &mut Buffer, graph_area: Rect) {
+        if self.annotation_files.is_empty() {
+            let mut database = self.controller.database_mut().clone();
+            if let Ok(conn) = database.connection() {
+                self.show_all_annotation_files(conn);
+            }
+        }
         self.controller.render_settled(
             buf,
             graph_area,
             AnnotationDisplay::FlagsUnderNodes,
             Style::default(),
         );
+        if self.refresh_annotation_files_for_viewport() {
+            self.controller.render_settled(
+                buf,
+                graph_area,
+                AnnotationDisplay::FlagsUnderNodes,
+                Style::default(),
+            );
+        }
     }
 
     fn resolve_color(&mut self, color: Option<&str>) -> PyResult<Color> {
@@ -417,6 +445,11 @@ impl GraphPage {
             .find(|entry| entry.name == name)
             .map(|entry| entry.id.clone())
     }
+}
+
+fn expand_query_window(window: (i64, i64)) -> (i64, i64) {
+    let span = (window.1 - window.0).max(1);
+    (window.0.saturating_sub(span), window.1.saturating_add(span))
 }
 
 fn annotation_style(color: Color) -> PathStyle {
@@ -608,6 +641,13 @@ impl GraphPage {
     /// Show the annotation group `group` again after `remove_track` or
     /// `clear_all_annotations` hid it.
     pub fn add_track_group(&mut self, group: &str) -> PyResult<()> {
+        if self.annotation_group_id(group).is_none() {
+            let mut database = self.controller.database_mut().clone();
+            let conn = database.connection().map_err(runtime_error)?;
+            if self.show_annotation_file(conn, group) {
+                return Ok(());
+            }
+        }
         let group_id = self.annotation_group_id(group).ok_or_else(|| {
             PyRuntimeError::new_err(format!("no annotation group named {group:?}"))
         })?;
@@ -806,6 +846,11 @@ impl GraphPage {
     /// Remove the track `name`: an annotation group stays hidden for later batches too, until
     /// `add_track_group` shows it again.
     pub fn remove_track(&mut self, name: &str) {
+        for file in &mut self.annotation_files {
+            if file.entry.display_name == name {
+                file.shown = false;
+            }
+        }
         if let Some(group_id) = self.annotation_group_id(name) {
             self.controller
                 .set_annotation_group_enabled(&group_id, false);
@@ -817,6 +862,9 @@ impl GraphPage {
 
     /// Clear all annotations from the graph, hiding every annotation group.
     pub fn clear_all_annotations(&mut self) {
+        for file in &mut self.annotation_files {
+            file.shown = false;
+        }
         let group_ids: Vec<String> = self
             .controller
             .annotation_group_entries()
@@ -890,6 +938,19 @@ impl GraphPage {
 }
 
 impl GraphPage {
+    fn visible_coordinate_window(&self) -> Option<(i64, i64)> {
+        let world = self.controller.engine().active_world()?;
+        let mut start = i64::MAX;
+        let mut end = i64::MIN;
+        for node in world.members() {
+            if !is_terminal(node.node_id) {
+                start = start.min(node.sequence_start);
+                end = end.max(node.sequence_end);
+            }
+        }
+        (start <= end).then_some((start, end))
+    }
+
     /// Read the repository's annotation files, keeping the display state of ones already known.
     fn sync_annotation_files(&mut self, conn: &GraphConnection) {
         let entries = load_annotation_file_entries(conn, None);
@@ -923,18 +984,21 @@ impl GraphPage {
         index: usize,
         window: Option<(i64, i64)>,
     ) -> bool {
-        let Some(block_group_id) = self.block_group_id else {
+        let Some(block_group_id) = self.block_group_id() else {
             return false;
         };
         let Ok(block_group) = BlockGroup::get_by_id(conn, &block_group_id, None) else {
             return false;
         };
-        let node_filter = self.all_node_ids();
+        let node_filter = self.controller.loaded_node_ids();
         let entry = self.annotation_files[index].entry.clone();
+        let Ok(workspace) = workspace_for_connection(conn) else {
+            return false;
+        };
         let loaded = load_annotation_file_track(&AnnotationFileTrackRequest {
             conn,
             history_ref: None,
-            workspace: &self.workspace,
+            workspace: &workspace,
             collection_name: &block_group.collection_name,
             sample_name: &block_group.sample_name,
             block_group_name: Some(&block_group.name),
@@ -946,10 +1010,10 @@ impl GraphPage {
             return false;
         };
         let name = entry.display_name.clone();
-        self.overlays.retain(
+        self.controller.overlays_mut().retain(
             |overlay| !matches!(&overlay.source, OverlaySource::Track(track) if *track == name),
         );
-        self.push_track_as_overlays(loaded.track);
+        self.push_track(&loaded.track.name, loaded.track.annotations);
         let file = &mut self.annotation_files[index];
         file.shown = true;
         file.index_available = loaded.index_available;
@@ -960,7 +1024,7 @@ impl GraphPage {
     /// The window of sequence coordinates to read an indexed file for: the viewport and as much
     /// again on each side, so small camera moves don't reload.
     fn annotation_query_window(&self) -> Option<(i64, i64)> {
-        current_view_coordinate_window(&self.controller).map(expand_query_window)
+        self.visible_coordinate_window().map(expand_query_window)
     }
 
     /// Show every annotation file, as database groups are all shown when a graph is plotted.
@@ -989,7 +1053,7 @@ impl GraphPage {
 
     /// Reload shown, indexed files whose loaded window no longer covers the viewport.
     fn refresh_annotation_files_for_viewport(&mut self) -> bool {
-        let Some(visible) = current_view_coordinate_window(&self.controller) else {
+        let Some(visible) = self.visible_coordinate_window() else {
             return false;
         };
         let window = expand_query_window(visible);
@@ -1007,15 +1071,44 @@ impl GraphPage {
         if stale.is_empty() {
             return false;
         }
-        let Ok(conn) = self.open_conn() else {
+        let mut database = self.controller.database_mut().clone();
+        let Ok(conn) = database.connection() else {
             return false;
         };
         let mut reloaded = false;
         for index in stale {
-            reloaded |= self.load_annotation_file(&conn, index, Some(window));
+            reloaded |= self.load_annotation_file(conn, index, Some(window));
         }
         reloaded
     }
+}
+
+/// Parse a translated GFF3 or BED file into an `AnnotationTrack`.
+///
+/// The file must use node hash-ID strings as reference names (i.e. the
+/// "translated" format produced by gen's GFF/BED translation step).
+fn load_track_from_file(
+    file_path: &str,
+    display_name: &str,
+    node_filter: &HashSet<HashId>,
+) -> Result<AnnotationTrack, Box<dyn std::error::Error>> {
+    let path = std::path::Path::new(file_path);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let spans = match ext.as_str() {
+        "gff" | "gff3" => parse_translated_gff_file(path, node_filter, display_name)?,
+        "bed" => parse_translated_bed_file(path, node_filter, display_name)?,
+        other => {
+            return Err(format!(
+                "unsupported annotation file type: {other:?}; expected .gff, .gff3, or .bed"
+            )
+            .into());
+        }
+    };
+    Ok(AnnotationTrack::new(display_name.to_string(), spans))
 }
 
 /// The database handle a `PySequenceGraph`'s widget reads through, pinned to the branch it
@@ -1378,12 +1471,20 @@ impl PyGraphController {
     /// `add_track_group` accepts, independent of which tracks are currently displayed.
     #[getter]
     pub fn track_names(&mut self) -> PyResult<Vec<String>> {
-        Ok(self
-            .active()?
+        let page = self.active()?;
+        let mut database = page.controller.database_mut().clone();
+        let conn = database.connection().map_err(runtime_error)?;
+        page.sync_annotation_files(conn);
+        Ok(page
             .controller
             .annotation_group_entries()
             .iter()
             .map(|entry| entry.name.clone())
+            .chain(
+                page.annotation_files
+                    .iter()
+                    .map(|file| file.entry.display_name.clone()),
+            )
             .collect())
     }
 
