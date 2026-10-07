@@ -436,6 +436,30 @@ class Repository:
         r"""
         The repository's default remote, if one is configured.
         """
+    def add_reference_alias(
+        self,
+        reference_name: builtins.str,
+        *,
+        refseq_accession_id: typing.Optional[builtins.str] = None,
+        genbank_id: typing.Optional[builtins.str] = None,
+        ensembl_id: typing.Optional[builtins.str] = None,
+        ucsc_id: typing.Optional[builtins.str] = None,
+        custom_id: typing.Optional[builtins.str] = None,
+        chromosome: typing.Optional[builtins.int] = None,
+    ) -> None:
+        r"""
+        Declare that several names refer to the same reference sequence, so VCF and annotation
+        files that use another naming scheme still match it.
+
+        `reference_name` is only a label for the group. One of the identifiers must equal the name
+        of the sequence graph in the repository (for example `genbank_id="NC_000007.14"` for a
+        graph named that); a file that calls the sequence any other alias then resolves to it.
+        `refseq_accession_id` and `genbank_id` also match without their version suffix;
+        `ensembl_id`, `custom_id` and `chromosome` also match with `chr`, `Chr`, `chrom`, `Chrom`,
+        `chromosome` and `Chromosome` prefixes (use `chromosome` for cases like Roman numerals,
+        11 for ensembl `XI`); `ucsc_id` matches as given. Give at least one identifier. Recorded as
+        its own operation.
+        """
     def stitch(
         self,
         parts: typing.Sequence[SequenceGraph | Locus],

@@ -2,7 +2,10 @@ use r#gen::commands::graph_operations::{
     derive_chunks::derive_chunks_operation, derive_subgraph::derive_subgraph_operation,
 };
 use gen_core::{Strand, region::Region};
-use gen_models::operations::{OperationInfo, OperationSummary};
+use gen_models::{
+    operations::{OperationInfo, OperationSummary},
+    reference_alias::ReferenceAlias,
+};
 use pyo3::{
     exceptions::{PyRuntimeError, PyTypeError, PyValueError},
     prelude::*,
@@ -20,6 +23,78 @@ use crate::python_api::{
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyRepository {
+    /// Declare that several names refer to the same reference sequence, so VCF and annotation
+    /// files that use another naming scheme still match it.
+    ///
+    /// `reference_name` is only a label for the group. One of the identifiers must equal the name
+    /// of the sequence graph in the repository (for example `genbank_id="NC_000007.14"` for a
+    /// graph named that); a file that calls the sequence any other alias then resolves to it.
+    /// `refseq_accession_id` and `genbank_id` also match without their version suffix;
+    /// `ensembl_id`, `custom_id` and `chromosome` also match with `chr`, `Chr`, `chrom`, `Chrom`,
+    /// `chromosome` and `Chromosome` prefixes (use `chromosome` for cases like Roman numerals,
+    /// 11 for ensembl `XI`); `ucsc_id` matches as given. Give at least one identifier. Recorded as
+    /// its own operation.
+    #[pyo3(signature = (
+        reference_name,
+        *,
+        refseq_accession_id=None,
+        genbank_id=None,
+        ensembl_id=None,
+        ucsc_id=None,
+        custom_id=None,
+        chromosome=None,
+    ))]
+    #[expect(clippy::too_many_arguments, reason = "mirrors the CLI flags")]
+    fn add_reference_alias(
+        &self,
+        reference_name: &str,
+        refseq_accession_id: Option<String>,
+        genbank_id: Option<String>,
+        ensembl_id: Option<String>,
+        ucsc_id: Option<String>,
+        custom_id: Option<String>,
+        chromosome: Option<i64>,
+    ) -> PyResult<()> {
+        if refseq_accession_id.is_none()
+            && genbank_id.is_none()
+            && ensembl_id.is_none()
+            && ucsc_id.is_none()
+            && custom_id.is_none()
+            && chromosome.is_none()
+        {
+            return Err(PyValueError::new_err(
+                "add_reference_alias() needs at least one alias identifier",
+            ));
+        }
+        run_context_operation_write(
+            &self.context,
+            |context| {
+                ReferenceAlias::create(
+                    context.graph().conn(),
+                    reference_name,
+                    refseq_accession_id,
+                    genbank_id,
+                    ucsc_id,
+                    ensembl_id,
+                    custom_id,
+                    chromosome,
+                )
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                Ok((
+                    (),
+                    OperationSummary::new(
+                        OperationInfo {
+                            files: vec![],
+                            description: "add_reference_alias".to_string(),
+                        },
+                        format!("add aliases for reference '{reference_name}'"),
+                    ),
+                ))
+            },
+            |error| PyRuntimeError::new_err(format!("failed to add reference alias: {error}")),
+        )
+    }
+
     /// Split the region of `sample` into chunks, either at `breakpoints` or every `chunk_size`
     /// bases, and store them in `new_sample`. Returns the new `Sample`. See also `graph.chunks()`.
     #[pyo3(name = "_derive_chunks")]

@@ -118,6 +118,19 @@ creating one `Sample` per VCF sample column, or only the column named by `sample
 `in_place=True` the reference itself is edited. The reference sample must already exist, for example from
 `import_reference_fasta()`.
 
+When a VCF, GFF or BED names a contig differently from the graph (`chr7` in the file, `NC_000007.14`
+in the repository), declare the names once instead of editing the file:
+
+```python
+repo.add_reference_alias("contig 7", genbank_id="NC_000007.14", chromosome=7)
+```
+
+The first argument is only a label. One identifier must equal the graph's own name; the file's
+name then matches through the others (`chromosome=7` also matches `chr7`, `Chromosome7` and so
+on; `refseq_accession_id` and `genbank_id` also match without their version suffix). Give at
+least one identifier. It is recorded as an operation. Without it, a VCF with an unknown contig
+fails with "Region not found".
+
 ```python
 edited = repo.update_with_fasta(
     "parts.fa", sample="parent", new_sample="file-style-design",
