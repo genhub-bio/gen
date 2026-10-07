@@ -461,9 +461,22 @@ impl Edge {
         }
     }
 
+    /// Finds base boundaries that need a shared zero-width position.
+    ///
+    /// In reference `TACG`, deleting `A` spells `TCG`, deleting `C` spells `TAG`, and taking both
+    /// deletions spells `TG`. The empty position `(2,2)` between `A` and `C` connects the deletion
+    /// edges even when no sequence block remains between them:
+    ///
+    /// ```text
+    /// [T] --+--> [A] --+
+    ///       |          |
+    ///       +----------+--> (2,2) --+--> [C] --+
+    ///                               |          |
+    ///                               +----------+--> [G]
+    /// ```
     fn shared_position_coordinates(edges: &[AugmentedEdge]) -> HashSet<BlockKey> {
         let mut outgoing_coordinates = HashSet::new();
-        // Same-coordinate markers already encode continuity.
+        // Same-coordinate edges have their own continuity projection.
         // Distinct edges identify coordinates that need a shared site.
         for augmented_edge in edges {
             let edge = &augmented_edge.edge;
@@ -507,22 +520,40 @@ impl Edge {
     /// the block group, and calls `get_block_intervals` to construct both blocks with sequences
     /// and zero-width junction blocks.
     ///
-    /// Adjacent deletions keep both deleted regions on the reference route while exposing a route
-    /// that skips them in sequence. Parenthesized nodes are zero-width positions; bracketed nodes
-    /// contain sequence:
+    /// In reference `TACG`, deleting `A` gives `TCG`, deleting the adjacent `C` gives `TAG`, and
+    /// both deletions give `TG`. The empty position `(2,2)` between `A` and `C` joins the deletion
+    /// edges. Parenthesized nodes are zero-width positions; bracketed nodes contain sequence:
     ///
     /// ```text
-    ///                   +--> [first region] --+
-    ///                   |                     |
-    /// [prefix] -> (p) --+---------------------+--> (q) --+--> [second region] --+
-    ///                                                    |                      |
-    ///                                                    +----------------------+--> [suffix]
+    /// [T] --+--> [A] --+
+    ///       |          |
+    ///       +----------+--> (2,2) --+--> [C] --+
+    ///                               |          |
+    ///                               +----------+--> [G]
     /// ```
     ///
-    /// Each deletion edge skips one region. Their shared position joins the two edges, so a path
-    /// can take both deletions without adding a reconstructed bypass edge. A path may pass through
-    /// any number of consecutive zero-width positions before reaching a sequence block; these
-    /// steps consume no sequence.
+    /// Deleting `A` skips `[A]`, and deleting `C` skips `[C]`. Their shared position joins the two
+    /// edges, so a path can take both deletions without adding a reconstructed bypass edge. A path
+    /// may pass through any number of consecutive zero-width positions before reaching a sequence
+    /// block; these steps consume no sequence.
+    ///
+    /// Consider a substitution of the first base of `TAAT`, changing `T` to `G` while keeping the
+    /// original sequence:
+    ///
+    /// ```text
+    ///                     +--> [T] --+
+    ///                     |          |
+    /// [AC] --> (0,0) -----+--> [G] --+--> [AAT]
+    /// ```
+    ///
+    /// The incoming edge reaches the start of `TAAT`; the substitution leaves that same boundary
+    /// for `[G]`. No `TAAT` bases precede its first `T`, so no nonempty sequence slice ends at that
+    /// boundary for the outgoing edit. `(0,0)` is an empty position at the start of `TAAT`, not a
+    /// graph coordinate, and supplies the shared endpoint. The two paths spell `ACTAAT` and
+    /// `ACGAAT`.
+    ///
+    /// If the input has only the incoming edge from `[AC]` to `TAAT`, fetched neighboring edges
+    /// can reveal the substitution. Include those edges when choosing the zero-width blocks.
     pub fn blocks_from_edges(
         conn: &GraphConnection,
         workspace: &Workspace,
@@ -664,13 +695,14 @@ impl Edge {
             let incoming_jump_coordinates = incoming_jump_coordinates_by_node_id
                 .get(node_id)
                 .unwrap_or(&empty_jumps);
-            // An incoming jump and an outgoing jump that meet need a shared zero-width position:
+            // In `TACG`, the same-node jump deleting `A` arrives at `(2,2)` and the same-node jump
+            // deleting the adjacent `C` leaves from that empty position:
             //
-            //                +--> [first region] --+
-            //                |                     |
-            //     [prefix] --+-- incoming jump ----+--> (position) --+--> [second region] --+
-            //                                           0 bases      |                      |
-            //                                                        +-- outgoing jump -----+--> [suffix]
+            //     [T] --+--> [A] --+
+            //           |          |
+            //           +----------+--> (2,2) --+--> [C] --+
+            //                                   |          |
+            //                                   +----------+--> [G]
             //
             // Shared endpoints with other edges are also routing positions. A lone jump connects
             // sequence blocks directly when neither endpoint needs a junction.
@@ -754,14 +786,16 @@ impl Edge {
     /// `junction -> sequence` connections without adding a junction self-loop. With no junction,
     /// the Cartesian product keeps the direct connection between sequence blocks.
     ///
-    /// ```text
-    /// without a junction:  [sequence ending at k] ---> [sequence starting at k]
+    /// For reference `TACG`, `[A]` and `[C]` meet at offset `2`:
     ///
-    /// with a junction:     [sequence ending at k] ---> (k,k) ---> [sequence starting at k]
+    /// ```text
+    /// without a junction:  [A] ---> [C]
+    ///
+    /// with a junction:     [A] ---> (2,2) ---> [C]
     /// ```
     ///
     /// The same-coordinate edge therefore preserves the same route after the junction is
-    /// introduced without creating `(k,k) -> (k,k)`.
+    /// introduced without creating `(2,2) -> (2,2)`.
     fn same_coordinate_block_connections<'a>(
         source_blocks: &[&'a GroupBlock],
         target_blocks: &[&'a GroupBlock],
@@ -806,14 +840,38 @@ impl Edge {
             .collect()
     }
 
-    /// Returns the in-memory block connections represented by one input edge.
+    /// Returns the graph links represented by one stored edge.
     ///
-    /// `build_graph` calls this after coordinate lookup may have returned both a sequence block and
-    /// a junction. An incoming edge ends at the junction and a following edge leaves from it, so
-    /// traversal can continue through the shared position. Same-coordinate edges connect the
-    /// surrounding sequence through a junction; shared positions and same-node jumps retain
-    /// sequence projections needed when markers are filtered or pruned. The returned connections
-    /// are graph projections, not database edges.
+    /// In `TACG`, deleting `A` gives `TCG`, deleting the adjacent `C` gives `TAG`, and taking both
+    /// deletions gives `TG`. The first deletion jumps from after `T` to the boundary between `A`
+    /// and `C`; the second leaves from that same boundary. The empty position lets the deletions
+    /// combine without consuming either deleted base:
+    ///
+    /// ```text
+    /// [T] --+--> [A] --+
+    ///       |          |
+    ///       +----------+--> (2,2) --+--> [C] --+
+    ///                               |          |
+    ///                               +----------+--> [G]
+    /// ```
+    ///
+    /// `(2,2)` is the empty position between `A` and `C`. Same-coordinate continuity edges pass
+    /// through such positions without adding a self-loop.
+    ///
+    /// If an edit starts at a shared boundary or a deletion jump stays within one sequence node,
+    /// keep the sequence slice as a source alongside any zero-width position. For deleting `C` in
+    /// `TACG`, `[A]` can reach `[G]` directly or through `(2,2)`. The direct route remains available
+    /// if reference continuity is filtered. A deletion jump also keeps possible target slices
+    /// unless its target boundary is shared. These graph links represent one stored edge, not new
+    /// stored edges.
+    ///
+    /// Both delete-`C` links below keep the same stored edge identity:
+    ///
+    /// ```text
+    /// [A] --+-- delete C -----------------------------+
+    ///       |                                         |
+    ///       +-- reference --> (2,2) -- delete C ------+--> [G]
+    /// ```
     fn block_connections<'a>(
         &self,
         source_blocks: &[&'a GroupBlock],
@@ -867,12 +925,15 @@ impl Edge {
     /// in-memory graph connections:
     ///
     /// ```text
-    /// [real sequence] -- preserve marker --> (junction) -- preserve marker --> [real sequence]
-    ///                                          0 bases
+    /// [ATA] -- reference --> (3,3) -- reference --> [CG]
+    ///                           0 bases
     /// ```
     ///
-    /// The junction is the generated node. The two labels represent copied chromosome-index
+    /// `(3,3)` is the generated node. The reference labels represent copied chromosome-index
     /// metadata on the projected connections; neither connection is added to the database.
+    ///
+    /// One stored edge may produce several graph links. Each link keeps the edge's ID and metadata;
+    /// the pair map retains the original `Edge`, so pruning recognizes the links as one edit.
     pub fn build_graph(
         edges: &[AugmentedEdge],
         blocks: &[GroupBlock],
@@ -987,13 +1048,25 @@ impl Edge {
             }
         }
 
+        // With no possible cycle-exit links, there is nothing to check.
         if position_exit_projections.is_empty() {
             return (graph, edges_by_node_pair);
         }
 
-        // Filtered preserve markers can hide continuity between contiguous slices. Restore it
-        // only while checking whether an edge returns through a position; reverse removal
-        // preserves the graph's original edge and neighbor ordering.
+        // In reference `ATACG`, inserting `GG` between `[ATA]` and `[CG]` spells `ATAGGCG`.
+        // `(3,3)` is the empty position between those reference slices. The right-hand link lets
+        // traversal spell `[GG]` once and continue without revisiting the position:
+        //
+        //               +----> [GG] ---+
+        //               |              |
+        // [ATA] --> (3,3) <------------+
+        //               |              |
+        //               +--------------+--> [CG]
+        //
+        // The extra [GG] -> [CG] link lets traversal spell [GG] once without revisiting (3,3).
+        // The original (3,3) -> [GG] -> (3,3) cycle stays in the graph.
+        // This happens for all insertions that do not replace bases -- such as inserting
+        // "AAA" at m123:10-10.
         let mut continuity_edges = Vec::new();
         for source_block in blocks.iter().filter(|block| block.start != block.end) {
             let next_block_key = BlockKey {
