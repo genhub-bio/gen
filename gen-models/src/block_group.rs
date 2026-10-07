@@ -17,6 +17,7 @@ use gen_graph::{
 };
 use indexmap::IndexSet;
 use intervaltree::IntervalTree;
+use petgraph::visit::NodeIndexable as _;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -573,17 +574,16 @@ impl BlockGroup {
         // both "chromosome index 0", we keep the newer one.
         let mut root_nodes = HashSet::new();
         let mut edges_to_remove = Vec::new();
-        let graph_nodes = graph.nodes().collect::<Vec<_>>();
-        for source_node in graph_nodes {
+        let mut outgoing_targets = Vec::new();
+        for node_index in 0..graph.node_count() {
+            let source_node = graph.from_index(node_index);
             if source_node.node_id == PATH_START_NODE_ID {
                 root_nodes.insert(source_node);
             }
-            let outgoing_targets = graph
-                .edges(source_node)
-                .map(|(_, target_node, _)| target_node)
-                .collect::<Vec<_>>();
+            outgoing_targets.clear();
             let mut latest_edges_by_chromosome_index = HashMap::<i64, (i64, HashId)>::new();
-            for (_, _, edge_weights) in graph.edges(source_node) {
+            for (_, target_node, edge_weights) in graph.edges(source_node) {
+                outgoing_targets.push(target_node);
                 for edge_weight in edge_weights {
                     if edge_weight.chromosome_index == NO_CHROMOSOME_INDEX {
                         continue;
@@ -605,7 +605,7 @@ impl BlockGroup {
                         .or_insert((edge_weight.created_on, edge_weight.edge_id));
                 }
             }
-            for target_node in outgoing_targets {
+            for target_node in outgoing_targets.iter().copied() {
                 let should_remove = {
                     let edge_weights = graph
                         .edge_weight_mut(source_node, target_node)
@@ -5042,13 +5042,27 @@ mod tests {
         graph.add_edge(start, sequence, vec![graph_edge(old_edge_id, 0, 1)]);
         graph.add_edge(start, unweighted_target, Vec::new());
 
+        // Before / after first prune:
+        // start --[old:c0@1, other:c1@1]--> position
+        // start --[old:c0@1]-------------> sequence
+        // start --[]---------------------> unweighted_target
         BlockGroup::prune_graph(&mut graph);
         assert!(graph.edge_weight(start, position).is_some());
         assert!(graph.edge_weight(start, sequence).is_some());
 
         graph.add_edge(start, newer_target, vec![graph_edge(new_edge_id, 0, 2)]);
+        // Before second prune:
+        // start --[old:c0@1, other:c1@1]--> position
+        // start --[old:c0@1]-------------> sequence
+        // start --[new:c0@2]-------------> newer_target
+        // start --[]---------------------> unweighted_target
         BlockGroup::prune_graph(&mut graph);
 
+        // After second prune, chr1 keeps the position connection; the obsolete sequence
+        // route is removed. The empty connection has no chromosome weight to compete.
+        // start --[other:c1@1]--> position
+        // start --[new:c0@2]----> newer_target
+        // start --[]------------> unweighted_target
         let position_edges = graph.edge_weight(start, position).unwrap();
         assert_eq!(position_edges.len(), 1);
         assert_eq!(position_edges[0].chromosome_index, 1);
@@ -5062,6 +5076,104 @@ mod tests {
                 .edge_weight(start, unweighted_target)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_prune_graph_keeps_all_projections_of_the_latest_edge() {
+        let graph_node = |node_id, sequence_start, sequence_end| GraphNode {
+            node_id,
+            sequence_start,
+            sequence_end,
+        };
+        let start = graph_node(PATH_START_NODE_ID, 0, 0);
+        let sequence_node_id = HashId::convert_str("prune-latest-sequence");
+        let position = graph_node(sequence_node_id, 2, 2);
+        let sequence = graph_node(sequence_node_id, 2, 5);
+        let obsolete = graph_node(HashId::convert_str("prune-latest-obsolete"), 0, 1);
+        let latest_edge_id = HashId::convert_str("prune-latest-edge");
+        let obsolete_edge_id = HashId::convert_str("prune-obsolete-edge");
+        let graph_edge = |edge_id, created_on| GraphEdge {
+            edge_id,
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index: 0,
+            phased: 0,
+            created_on,
+        };
+        let mut graph = GenGraph::new();
+        // A returning insertion at an ambiguous boundary can project one stored edge to
+        // both the zero-width position and following sequence; both projections share its
+        // edge id and timestamp while an older origin competes.
+        graph.add_edge(start, position, vec![graph_edge(latest_edge_id, 2)]);
+        graph.add_edge(start, sequence, vec![graph_edge(latest_edge_id, 2)]);
+        graph.add_edge(start, obsolete, vec![graph_edge(obsolete_edge_id, 1)]);
+
+        // Before prune:
+        // start --[latest:c0@2]--> position(2,2)
+        // start --[latest:c0@2]--> sequence(2,5)
+        // start --[old:c0@1]-----> obsolete
+        BlockGroup::prune_graph(&mut graph);
+
+        // After prune, both latest projections survive and the older origin is removed:
+        // start --[latest:c0@2]--> position(2,2)
+        // start --[latest:c0@2]--> sequence(2,5)
+        for projection in [position, sequence] {
+            assert_eq!(
+                graph.edge_weight(start, projection).unwrap()[0].edge_id,
+                latest_edge_id
+            );
+        }
+        assert!(graph.edge_weight(start, obsolete).is_none());
+    }
+
+    #[test]
+    fn test_prune_graph_retains_other_chromosomes_on_a_superseded_connection() {
+        let graph_node = |node_id, sequence_start, sequence_end| GraphNode {
+            node_id,
+            sequence_start,
+            sequence_end,
+        };
+        let start = graph_node(PATH_START_NODE_ID, 0, 0);
+        let mixed_target = graph_node(HashId::convert_str("prune-mixed-target"), 2, 2);
+        let newer_target = graph_node(HashId::convert_str("prune-newer-target"), 3, 4);
+        let old_edge_id = HashId::convert_str("prune-mixed-old-edge");
+        let other_chromosome_edge_id = HashId::convert_str("prune-mixed-other-chromosome");
+        let newer_edge_id = HashId::convert_str("prune-mixed-newer-edge");
+        let graph_edge = |edge_id, chromosome_index, created_on| GraphEdge {
+            edge_id,
+            source_strand: Strand::Forward,
+            target_strand: Strand::Forward,
+            chromosome_index,
+            phased: 0,
+            created_on,
+        };
+        let mut graph = GenGraph::new();
+        graph.add_edge(
+            start,
+            mixed_target,
+            vec![
+                graph_edge(old_edge_id, 0, 1),
+                graph_edge(other_chromosome_edge_id, 1, 1),
+            ],
+        );
+        graph.add_edge(start, newer_target, vec![graph_edge(newer_edge_id, 0, 2)]);
+
+        BlockGroup::prune_graph(&mut graph);
+
+        // Both chromosomes initially follow the same branch. The later chr0 edit reroutes
+        // only that chromosome, so pruning removes its weight while chr1 still needs the branch.
+        // Before: start --[old:c0@1, other:c1@1]--> mixed_target
+        //         start --[new:c0@2]--------------> newer_target
+        // After:  start --[other:c1@1]------------> mixed_target
+        //         start --[new:c0@2]--------------> newer_target
+        let mixed_weights = graph.edge_weight(start, mixed_target).unwrap();
+        assert_eq!(mixed_weights.len(), 1);
+        assert_eq!(mixed_weights[0].edge_id, other_chromosome_edge_id);
+        assert_eq!(mixed_weights[0].chromosome_index, 1);
+        assert_eq!(
+            graph.edge_weight(start, newer_target).unwrap()[0].edge_id,
+            newer_edge_id
         );
     }
 }
