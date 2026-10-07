@@ -1799,6 +1799,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tui-widget-list",
+ "unicode-segmentation",
+ "unicode-width",
  "url",
  "url-parse",
  "uuid",
@@ -1945,6 +1947,8 @@ dependencies = [
  "rust-sugiyama",
  "serde",
  "thiserror 2.0.18",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

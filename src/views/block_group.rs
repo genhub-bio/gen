@@ -35,13 +35,12 @@ use crate::{
         gen_graph_controller::{
             AnnotationDisplay, ClickOutcome, GenGraphController, GraphKeyOutcome, WorldSync,
         },
-        gen_graph_widget::starting_zoom_level,
         graph_database::GraphDatabase,
         graph_overlay::{
             GraphOverlay, OverlaySource, file_track_key, group_track_key, remove_track_overlays,
             replace_track_overlays,
         },
-        lazy_graph_source::{EagerOrSqlSource, probe_block_group_start, seed_block_group_graph},
+        lazy_graph_source::{EagerOrSqlSource, seed_block_group_graph},
         panels::{render_status_bar, render_with_optional_clear},
         region_search::{
             RegionSearchMatch, RegionSearchRequest, activate_search_match, remove_search_overlay,
@@ -197,20 +196,16 @@ pub(crate) struct BlockGroupGraph {
     pub graph: GenGraph,
     /// What the viewer's `LayoutEngine` crawls through.
     pub source: EagerOrSqlSource,
-    /// The zoom level the viewer opens at (see `starting_zoom_level`).
-    pub zoom_index: usize,
 }
 
-/// Load `block_group_id`'s graph, the source its `LayoutEngine` should crawl through, and the
-/// zoom level to open it at.
+/// Load `block_group_id`'s graph and the source its `LayoutEngine` crawls through.
 ///
 /// A historical view (`history_ref: Some(_)`) always eager-loads the full graph up front:
 /// the port queries the lazy path below is built on can only answer for the live graph.
 /// Otherwise, the graph is seeded with just its `PATH_START` sentinel and grown lazily from
 /// SQLite as the viewer's crawl pushes past its frontier - see `SqlGraphSource`, which is what
 /// turns opening a large block group from a full-graph-materializing stall into an
-/// near-instant open. The seed can't tell how many nodes there are, so the zoom level comes
-/// from a small probe crawl of the start instead.
+/// near-instant open.
 pub(crate) fn load_block_group_graph(
     database: &mut GraphDatabase,
     block_group_id: &HashId,
@@ -226,7 +221,6 @@ pub(crate) fn load_block_group_graph(
             history_ref,
         )?;
         return Ok(BlockGroupGraph {
-            zoom_index: starting_zoom_level(&graph),
             graph,
             source: EagerOrSqlSource::Eager(EagerSource),
         });
@@ -236,11 +230,6 @@ pub(crate) fn load_block_group_graph(
     Ok(BlockGroupGraph {
         graph: seed_block_group_graph(conn, block_group_id),
         source: EagerOrSqlSource::Sql(Box::new(source)),
-        zoom_index: starting_zoom_level(&probe_block_group_start(
-            conn,
-            block_group_id,
-            prune_history,
-        )),
     })
 }
 
@@ -539,6 +528,7 @@ pub fn view_block_group<'a>(
         history_ref,
         controller: handed_over,
     } = options;
+    let resumed_inline_view = handed_over.is_some();
     let progress_bar = get_handler();
     let bar = progress_bar.add(get_time_elapsed_bar());
     let _ = progress_bar.println("Loading block group");
@@ -591,6 +581,11 @@ pub fn view_block_group<'a>(
         collection_name,
         history_ref,
     );
+
+    let mut pending_annotation_file_loads =
+        explorer_state.sync_annotation_files(&explorer.data.annotation_files);
+    let mut initial_annotation_focus_pending =
+        current_block_group.is_some() && !resumed_inline_view;
 
     // Create the graph controller and initial graph
     let bar = progress_bar.add(get_time_elapsed_bar());
@@ -733,7 +728,7 @@ pub fn view_block_group<'a>(
                                 | KeyCode::Right
                                 | KeyCode::Up
                                 | KeyCode::Down
-                                | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'w' | 'b')
+                                | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e')
                         )
                     {
                         controller.view_state_mut().show_cursor();
@@ -1003,9 +998,11 @@ pub fn view_block_group<'a>(
                 history_ref,
             ) {
                 explorer.force_reload(&mut explorer_state);
-                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+                let newly_active =
+                    explorer_state.sync_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
                 needs_redraw = true;
+                pending_annotation_file_loads.extend(newly_active);
                 annotation_file_index_available
                     .retain(|id, _| explorer_state.is_annotation_file_active(id));
                 annotation_file_loaded_windows
@@ -1313,7 +1310,7 @@ pub fn view_block_group<'a>(
                         if !controller.view_state().is_cursor_visible() {
                             format!("*drag* pan | *click* select | *↑↓←→* show cursor | *g* search | *tab* {tab_dest}")
                         } else {
-                            format!("*←→↑↓* move | *w/b* next/prev annotation | *enter* details | *+/-* zoom | *p* path | *m* messages | *g* search | *tab* {tab_dest}")
+                            format!("*←→↑↓* move | *w/b* next/prev annotation | *e* next end | *enter* details | *+/-* zoom | *p* path | *m* messages | *g* search | *tab* {tab_dest}")
                         }
                     }
                     FocusZone::Panel => match panel_mode {
@@ -1507,6 +1504,47 @@ pub fn view_block_group<'a>(
         let changed_after_draw = post_draw_sync.changed;
         apply_group_reload(post_draw_sync, &mut explorer_state, &mut messages);
 
+        // Rendering claims the initial graph neighborhood. File projection needs those nodes,
+        // so load defaults only after that first draw (also after changing block groups).
+        if !is_loading
+            && current_block_group.is_some()
+            && controller.engine().active_world().is_some()
+        {
+            for id in pending_annotation_file_loads.drain(..) {
+                if !explorer_state.is_annotation_file_active(&id) {
+                    continue;
+                }
+                explorer_state.annotation_file_toggle_requested = Some(id);
+                let (graph_engine, overlays) = controller.engine_and_overlays_mut();
+                handle_annotation_toggle_requests(
+                    &AnnotationToggleContext {
+                        conn,
+                        history_ref,
+                        workspace,
+                        collection_name,
+                        current_block_group: current_block_group.as_ref(),
+                        graph_engine,
+                        explorer: &explorer,
+                    },
+                    &mut explorer_state,
+                    overlays,
+                    &mut annotation_file_index_available,
+                    &mut annotation_file_loaded_windows,
+                    &mut messages,
+                );
+                needs_redraw = true;
+            }
+        }
+
+        if initial_annotation_focus_pending
+            && !is_loading
+            && pending_annotation_file_loads.is_empty()
+            && controller.engine().active_world().is_some()
+        {
+            needs_redraw |= controller.focus_first_annotation();
+            initial_annotation_focus_pending = false;
+        }
+
         // Update the graph controller if a new block group was selected.
         // This runs after terminal.draw() so the loading indicator is visible
         // for the full duration of the blocking DB work.
@@ -1526,51 +1564,18 @@ pub fn view_block_group<'a>(
                 history_ref,
             ) {
                 explorer.force_reload(&mut explorer_state);
-                explorer_state.retain_annotation_files(&explorer.data.annotation_files);
+                explorer_state.sync_annotation_files(&explorer.data.annotation_files);
                 explorer_state.retain_annotation_groups(&explorer.data.annotation_groups);
             }
             annotation_file_index_available.clear();
             annotation_file_loaded_windows.clear();
             explorer_state.active_annotation_groups.clear();
-            if let Some(block_group) = current_block_group.as_ref() {
-                let node_filter = active_neighborhood_node_ids(controller.engine());
-                let query_window = active_neighborhood_coordinate_window(controller.engine())
-                    .map(expand_query_window);
-                for entry in &explorer.data.annotation_files {
-                    let id = entry.file_addition.id;
-                    if !explorer_state.is_annotation_file_active(&id) {
-                        continue;
-                    }
-                    let request = AnnotationFileTrackRequest {
-                        conn,
-                        history_ref,
-                        workspace,
-                        collection_name,
-                        sample_name: block_group.sample_name.as_str(),
-                        block_group_name: Some(&block_group.name),
-                        query_window,
-                        node_filter: &node_filter,
-                        entry,
-                    };
-                    match load_annotation_file_track(&request) {
-                        Ok(load) => {
-                            replace_track_overlays(
-                                controller.overlays_mut(),
-                                &file_track_key(&id),
-                                load.track.annotations,
-                            );
-                            if let Some(window) = load.loaded_window {
-                                annotation_file_loaded_windows.insert(id, window);
-                            }
-                            annotation_file_index_available.insert(id, load.index_available);
-                        }
-                        Err(err) => {
-                            messages.push_warn(format!("{err}"));
-                            explorer_state.deactivate_annotation_file(&id);
-                        }
-                    }
-                }
-            }
+            pending_annotation_file_loads = explorer_state
+                .active_annotation_files
+                .iter()
+                .copied()
+                .collect();
+            initial_annotation_focus_pending = true;
 
             is_loading = false;
             search_state.clear_matches();
@@ -1581,9 +1586,8 @@ pub fn view_block_group<'a>(
         }
 
         // The overlays, dimming, or loaded graph changed after the frame was rendered. Draw
-        // them immediately instead of waiting for the next keyboard or mouse event to wake the
-        // idle viewer.
-        if changed_after_draw {
+        // them immediately instead of waiting for another input event.
+        if changed_after_draw || needs_redraw {
             needs_redraw = true;
             continue;
         }

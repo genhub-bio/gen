@@ -114,6 +114,9 @@ fn run_inline_event_loop<B: Backend>(
     events: &mut impl EventSource,
 ) -> Result<bool, B::Error> {
     draw_synced(terminal, controller)?;
+    if controller.focus_first_annotation() {
+        draw_synced(terminal, controller)?;
+    }
     loop {
         // Rendering is event-driven (no animation to advance): block indefinitely until the
         // next input event wakes us.
@@ -280,7 +283,7 @@ mod tests {
 
     use super::*;
     use crate::views::{
-        gen_graph_widget::MINIMAL_ZOOM_LEVEL,
+        gen_graph_widget::FULL_ZOOM_LEVEL,
         lazy_graph_source::tests::{setup_circular_block_group, setup_labelled_chain_block_group},
     };
 
@@ -328,7 +331,7 @@ mod tests {
             None,
         )
         .expect("should load the block group");
-        assert_eq!(controller.view_state().zoom_index, MINIMAL_ZOOM_LEVEL);
+        assert_eq!(controller.view_state().zoom_index, FULL_ZOOM_LEVEL);
         assert!(controller.engine().graph().node_count() <= 2);
 
         assert!(!run_script(&mut controller, 12, Vec::new()));

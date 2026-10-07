@@ -71,17 +71,14 @@ pub fn build_window_geometry(
 
 pub(crate) fn style_cursor_cell(buffer: &mut WorldBuffer, pos: WorldPos, theme: &Theme) {
     if let Some((ch, style)) = buffer.get_char_styled(pos) {
-        let foreground = if ch == NODE_GLYPH || style.bg == Some(theme[0x00]) {
-            style.fg.or(style.bg)
-        } else {
-            style.bg.or(style.fg)
-        };
+        let foreground = style.fg.unwrap_or(theme[0x05]);
+        let background = style.bg.unwrap_or(theme[0x00]);
         buffer.set_char_styled(
             pos,
             ch,
             Style {
-                fg: foreground.or(Some(theme[0x05])),
-                bg: Some(theme[0x03]),
+                fg: Some(background),
+                bg: Some(foreground),
                 ..style
             },
         );
@@ -100,7 +97,7 @@ mod tests {
     };
 
     #[test]
-    fn cursor_cell_promotes_node_or_annotation_color_onto_base03() {
+    fn test_cursor_cell_inverts_node_annotation_and_sequence_colors() {
         let area = Rect::new(0, 0, 5, 5);
         let mut viewport = ViewportState::new();
         viewport.camera_current = WorldPos::new(2, 2);
@@ -132,13 +129,13 @@ mod tests {
         style_cursor_cell(&mut world_buffer, minimal_pos, &theme);
         style_cursor_cell(&mut world_buffer, sequence_pos, &theme);
 
-        for (position, foreground) in [
-            ((1, 2), theme[0x08]),
-            ((2, 2), theme[0x0C]),
-            ((3, 2), theme[0x05]),
+        for (position, foreground, background) in [
+            ((1, 2), theme[0x08], theme[0x00]),
+            ((2, 2), theme[0x00], theme[0x0C]),
+            ((3, 2), theme[0x05], theme[0x00]),
         ] {
             assert_eq!(buffer[position].fg, foreground);
-            assert_eq!(buffer[position].bg, theme[0x03]);
+            assert_eq!(buffer[position].bg, background);
         }
     }
 

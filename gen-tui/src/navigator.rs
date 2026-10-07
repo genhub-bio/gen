@@ -1,6 +1,6 @@
 use std::hash::Hash;
 
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use ratatui::{buffer::Buffer, layout::Rect};
 
 use crate::{
     frame_index::{Direction, FrameIndex},
@@ -200,7 +200,7 @@ impl Navigator {
     }
 }
 
-/// Draws the cursor overlay: restyles the cursor's cell and draws `⌃` below it.
+/// Draws the cursor overlay by restyling the cursor's cell.
 /// A view without a cursor (not visible, or no node placed in `frame`) simply skips drawing.
 pub struct CursorOverlay;
 
@@ -230,12 +230,10 @@ impl CursorOverlay {
         viewport_state.viewport_bounds = area;
 
         let theme = current_theme();
-        let indicator_style = Style::default().fg(theme[0x0B]);
         let mut cursor_buffer = WorldBuffer::new(buf, &viewport_state);
 
         let Point { x, y } = rect.point_at_fraction(cursor.fractional);
         style_cursor_cell(&mut cursor_buffer, WorldPos::new(x, y), &theme);
-        cursor_buffer.set_char_styled(WorldPos::new(x, y - 1), '⌃', indicator_style);
     }
 }
 
@@ -258,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_indicators_use_base0b() {
+    fn test_cursor_does_not_draw_caret() {
         let area = Rect::new(0, 0, 20, 10);
         let frame = frame_with(vec![(0, WorldRect::from_coords(5, 3, 8, 5), 0)]);
         let cursor = CursorState {
@@ -268,14 +266,14 @@ mod tests {
         };
         let mut fine_buffer = Buffer::empty(area);
         CursorOverlay::render(area, &mut fine_buffer, &cursor, &frame);
-        let caret = (area.top()..area.bottom())
+        let carets = (area.top()..area.bottom())
             .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
-            .find_map(|position| {
-                let cell = &fine_buffer[position];
-                (cell.symbol() == "⌃").then_some(cell)
+            .filter(|position| {
+                let cell = &fine_buffer[*position];
+                cell.symbol() == "⌃"
             })
-            .expect("should draw the cursor caret");
-        assert_eq!(caret.fg, current_theme()[0x0B]);
+            .count();
+        assert_eq!(carets, 0);
     }
 
     #[test]

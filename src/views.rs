@@ -5,6 +5,7 @@ pub mod annotations;
 pub mod block_group;
 pub mod block_group_inline;
 pub mod collection;
+mod compact_annotations;
 pub mod diff;
 pub mod diff_graph;
 pub mod dot_export;

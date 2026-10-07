@@ -549,7 +549,7 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
     }
 
     /// Move the cursor to the next stop to its right (`forward`) or left, as listed per node
-    /// by `stops` in columns from the node's left edge, and keep the camera following it.
+    /// by `stops` in columns from the node's left edge, and center the camera on it.
     /// See `Navigator::move_to_stop`. The search stays within the active batch: it does not
     /// pass through wormhole doors, so it fails and leaves the cursor in place when no
     /// placed node ahead has a stop.
@@ -563,16 +563,12 @@ impl<N: Copy + Eq + Hash + Ord> GraphViewState<N> {
         } else {
             Direction::Left
         };
-        let before = self.cursor_screen_point();
         Navigator::move_to_stop(&mut self.cursor, direction, &self.frame, stops)?;
-        // A stop off screen would leave the cursor pressed against the edge, where its label
-        // has no room. Pan the world under the cursor instead, by the cursor's own displacement.
-        match (before, self.cursor_screen_point()) {
-            (Some(before), Some(after)) if self.screen_to_terminal(after.x, after.y).is_none() => {
-                self.anchor_camera_on_cursor((before.x, before.y));
-            }
-            _ => self.rebase_camera_to_cursor(),
-        }
+        self.cursor.visible = true;
+        self.anchor_camera_on_cursor((
+            self.last_area.width as i64 / 2,
+            self.last_area.height as i64 / 2,
+        ));
         Ok(())
     }
 
@@ -2049,14 +2045,10 @@ mod tests {
                 .rect_of(target)
                 .expect("should place the target");
             let cursor = rect.point_at_fraction(state.cursor.fractional);
-            let caret = state
-                .screen_to_terminal(cursor.x, cursor.y - 1)
-                .expect("should draw the caret on screen");
-            assert_eq!(
-                buffer[caret].symbol(),
-                "⌃",
-                "the caret should sit under the cursor row"
-            );
+            let cursor_cell = state
+                .screen_to_terminal(cursor.x, cursor.y)
+                .expect("should draw the cursor on screen");
+            assert_ne!(buffer[cursor_cell].symbol(), "⌃");
             assert_eq!(
                 state.camera.map(|camera| camera.anchor_screen.1),
                 Some(cursor.y),
@@ -2122,9 +2114,8 @@ mod tests {
         }
 
         #[test]
-        fn test_stop_off_screen_pans_the_world_under_the_cursor() {
+        fn test_stop_off_screen_centers_the_cursor() {
             let (mut engine, mut state) = chain_with_cursor();
-            let before = cursor_point(&state);
             let target = stop_node(&state, false);
 
             state
@@ -2133,21 +2124,13 @@ mod tests {
             render(&mut engine, &mut state);
 
             assert_eq!(state.cursor.node, Some(target));
-            assert_eq!(
-                cursor_point(&state),
-                before,
-                "the cursor should keep its screen position while the world moves"
-            );
+            assert_eq!(cursor_point(&state), WorldPos::new(15, 5));
         }
 
         #[test]
-        fn test_stop_on_screen_moves_the_cursor_not_the_world() {
+        fn test_stop_on_screen_centers_the_cursor() {
             let (mut engine, mut state) = chain_with_cursor();
             let target = stop_node(&state, true);
-            let target_rect = state
-                .frame
-                .rect_of(target)
-                .expect("should place the target");
 
             state
                 .move_cursor_to_stop(true, |node| if node == target { vec![0] } else { vec![] })
@@ -2155,11 +2138,7 @@ mod tests {
             render(&mut engine, &mut state);
 
             assert_eq!(state.cursor.node, Some(target));
-            assert_eq!(
-                state.frame.rect_of(target),
-                Some(target_rect),
-                "the world should stay put for a stop already on screen"
-            );
+            assert_eq!(cursor_point(&state), WorldPos::new(15, 5));
         }
 
         /// Step through the first door of the rendered world that leads to a successor

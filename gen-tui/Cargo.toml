@@ -8,6 +8,8 @@ homepage = "https://genhub.bio"
 license = "Apache-2.0"
 
 [dependencies]
+unicode-segmentation = "1.12.0"
+unicode-width = "0.2.0"
 rust-sugiyama = { git = "https://github.com/bobvh/rust-sugiyama", rev = "3428ae4a47fdfa51414faee25484bfb4130621f0" }
 itertools = "0.14.0"
 petgraph = { version = "0.6.5", features = ["serde-1"] }
