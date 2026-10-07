@@ -444,12 +444,17 @@ impl FileAddition {
                     .map_err(FileAdditionError::FileReadError)?;
                 let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
                     workspace,
-                    file_path,
                     file_type,
                     replayed_reader,
                     compression_type,
                     checksum_override,
-                )?;
+                )
+                .map_err(|error| match error {
+                    FileAdditionError::ChecksumError(message) => {
+                        FileAdditionError::ChecksumError(format!("{message}: {file_path}"))
+                    }
+                    error => error,
+                })?;
                 let repo_root = workspace.repo_root()?;
                 let asset_path = workspace.asset_dir()?.join(format!(
                     "{archive_checksum}.{}.bgz",
@@ -2059,10 +2064,11 @@ mod tests {
         let context = setup_gen();
         let path = context.workspace().repo_root().unwrap().join("asset.fa");
         fs::write(&path, "actual contents").expect("should write local asset");
+        let file_path = path.to_str().expect("should encode local asset path");
 
         let error = FileAddition::prepare(
             context.workspace(),
-            path.to_str().expect("should encode local asset path"),
+            file_path,
             FileTypes::Fasta,
             Some(Sha256Hash::convert_str("different contents")),
         )
@@ -2071,6 +2077,10 @@ mod tests {
         assert!(
             matches!(error, FileAdditionError::ChecksumError(_)),
             "should report a checksum error: {error}"
+        );
+        assert!(
+            error.to_string().contains(file_path),
+            "checksum error should include the source path: {error}"
         );
         assert_eq!(
             fs::read_dir(context.workspace().asset_dir().unwrap())

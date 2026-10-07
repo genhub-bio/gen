@@ -58,9 +58,14 @@ fn classify_input<R: Read>(mut reader: R) -> io::Result<(CompressionType, Replay
     Ok((encoding, Cursor::new(prefix).chain(reader)))
 }
 
+// This creates a temporary bgzipped file that is then copied into the asset directory.
+//
+// It creates a checksum as the file is read and compressed. If the incoming file is already
+// compressed with bgz, it copied through. If a file is compressed already with an algorithm
+// such as gzip, it is decompressed and then recompressed as bgz. This is because many places will
+// ship a fasta or other assets as a .gz which does not allow random access.
 pub(crate) fn stage_bgzf_asset_copy(
     workspace: &Workspace,
-    source_uri: &str,
     file_type: FileTypes,
     reader: impl Read + 'static,
     compression_type: CompressionType,
@@ -120,16 +125,14 @@ pub(crate) fn stage_bgzf_asset_copy(
         .flush()
         .map_err(FileAdditionError::FileReadError)?;
     let source_checksum = source_checksum_handle.checksum().ok_or_else(|| {
-        FileAdditionError::ChecksumError(format!(
-            "local asset stream did not reach EOF: {source_uri}"
-        ))
+        FileAdditionError::ChecksumError("local asset stream did not reach EOF".to_string())
     })?;
     if let Some(expected_checksum) = source_checksum_override
         && source_checksum != expected_checksum
     {
-        return Err(FileAdditionError::ChecksumError(format!(
-            "local source checksum does not match the provided checksum: {source_uri}"
-        )));
+        return Err(FileAdditionError::ChecksumError(
+            "local source checksum does not match the provided checksum".to_string(),
+        ));
     }
 
     let archive_filename = format!("{archive_checksum}.{}.bgz", FileTypes::suffix(file_type));
@@ -262,5 +265,223 @@ mod tests {
 
         assert_eq!(encoding, CompressionType::Bgzf);
         assert_eq!(replayed_contents, contents);
+    }
+
+    mod stage_bgzf_asset_copy_tests {
+        use std::{
+            fs::{self, File, FileTimes},
+            io::{Cursor, Read, Write as _},
+            time::{Duration, SystemTime},
+        };
+
+        use gen_core::{Sha256Hash, Workspace};
+        use noodles::bgzf;
+        use sha2::{Digest, Sha256};
+        use tempfile::{TempDir, tempdir};
+
+        use super::super::{CompressionType, FileTypes, stage_bgzf_asset_copy};
+
+        fn setup_workspace(temp_dir: &TempDir) -> Workspace {
+            let workspace = Workspace::new(temp_dir.path());
+            workspace.ensure_gen_dir();
+            workspace
+        }
+
+        fn checksum(bytes: &[u8]) -> Sha256Hash {
+            Sha256Hash(Sha256::digest(bytes).into())
+        }
+
+        fn retained_archive_path(
+            workspace: &Workspace,
+            archive_checksum: Sha256Hash,
+        ) -> std::path::PathBuf {
+            workspace
+                .asset_dir()
+                .expect("should find asset directory")
+                .join(format!(
+                    "{archive_checksum}.{}.bgz",
+                    FileTypes::suffix(FileTypes::Fasta)
+                ))
+        }
+
+        fn assert_retained_bgzf_asset(
+            workspace: &Workspace,
+            archive_checksum: Sha256Hash,
+            expected_contents: &[u8],
+        ) -> Vec<u8> {
+            let archive_path = retained_archive_path(workspace, archive_checksum);
+            let archive_bytes = fs::read(archive_path).expect("should read retained BGZF asset");
+            assert_eq!(
+                checksum(&archive_bytes),
+                archive_checksum,
+                "archive checksum should match retained BGZF bytes"
+            );
+            let (compression_type, _) = CompressionType::sniff(Cursor::new(archive_bytes.clone()))
+                .expect("should classify retained BGZF asset");
+            assert_eq!(
+                compression_type,
+                CompressionType::Bgzf,
+                "retained archive should use BGZF compression"
+            );
+            let mut decoder = bgzf::io::Reader::new(Cursor::new(archive_bytes.clone()));
+            let mut decoded_contents = Vec::new();
+            decoder
+                .read_to_end(&mut decoded_contents)
+                .expect("should decode retained BGZF asset");
+            assert_eq!(
+                decoded_contents, expected_contents,
+                "retained BGZF asset should decode to source contents"
+            );
+            archive_bytes
+        }
+
+        #[test]
+        fn test_stage_bgzf_asset_copy_compresses_gzip_input() {
+            let temp_dir = tempdir().expect("should create temporary directory");
+            let workspace = setup_workspace(&temp_dir);
+            let expected_contents = b">sequence\nACGT\n";
+            let mut gzip_writer =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gzip_writer
+                .write_all(expected_contents)
+                .expect("should write gzip source");
+            let source_bytes = gzip_writer.finish().expect("should finish gzip source");
+
+            let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
+                &workspace,
+                FileTypes::Fasta,
+                Cursor::new(source_bytes.clone()),
+                CompressionType::Gzip,
+                None,
+            )
+            .expect("should retain gzip input as BGZF");
+
+            assert_eq!(
+                source_checksum,
+                checksum(&source_bytes),
+                "source checksum should cover the exact gzip input bytes"
+            );
+            assert_retained_bgzf_asset(&workspace, archive_checksum, expected_contents);
+        }
+
+        #[test]
+        fn test_stage_bgzf_asset_copy_retains_bgzf_input() {
+            let temp_dir = tempdir().expect("should create temporary directory");
+            let workspace = setup_workspace(&temp_dir);
+            let expected_contents = b">sequence\nACGT\n";
+            let mut bgzf_writer = bgzf::io::writer::Builder::default()
+                .set_compression_level(bgzf::io::writer::CompressionLevel::NONE)
+                .build_from_writer(Vec::new());
+            bgzf_writer
+                .write_all(expected_contents)
+                .expect("should write BGZF source");
+            let source_bytes = bgzf_writer.finish().expect("should finish BGZF source");
+
+            let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
+                &workspace,
+                FileTypes::Fasta,
+                Cursor::new(source_bytes.clone()),
+                CompressionType::Bgzf,
+                None,
+            )
+            .expect("should retain BGZF input");
+
+            let expected_checksum = checksum(&source_bytes);
+            assert_eq!(source_checksum, expected_checksum);
+            assert_eq!(archive_checksum, expected_checksum);
+            assert_eq!(
+                assert_retained_bgzf_asset(&workspace, archive_checksum, expected_contents),
+                source_bytes,
+                "retained BGZF bytes should be identical to source bytes"
+            );
+        }
+
+        #[test]
+        fn test_stage_bgzf_asset_copy_compresses_plain_input() {
+            let temp_dir = tempdir().expect("should create temporary directory");
+            let workspace = setup_workspace(&temp_dir);
+            let source_bytes = b">sequence\nACGT\n";
+
+            let (archive_checksum, source_checksum) = stage_bgzf_asset_copy(
+                &workspace,
+                FileTypes::Fasta,
+                Cursor::new(source_bytes.to_vec()),
+                CompressionType::Plain,
+                None,
+            )
+            .expect("should retain plain input as BGZF");
+
+            assert_eq!(
+                source_checksum,
+                checksum(source_bytes),
+                "source checksum should cover the exact plain input bytes"
+            );
+            assert_retained_bgzf_asset(&workspace, archive_checksum, source_bytes);
+        }
+
+        #[test]
+        fn test_stage_bgzf_asset_copy_does_not_overwrite_existing_archive() {
+            let temp_dir = tempdir().expect("should create temporary directory");
+            let workspace = setup_workspace(&temp_dir);
+            let mut bgzf_writer = bgzf::io::Writer::new(Vec::new());
+            bgzf_writer
+                .write_all(b">sequence\nACGT\n")
+                .expect("should write BGZF source");
+            let source_bytes = bgzf_writer.finish().expect("should finish BGZF source");
+            let first_result = stage_bgzf_asset_copy(
+                &workspace,
+                FileTypes::Fasta,
+                Cursor::new(source_bytes.clone()),
+                CompressionType::Bgzf,
+                None,
+            )
+            .expect("should retain first BGZF source");
+            let archive_path = retained_archive_path(&workspace, first_result.0);
+            let original_archive_bytes =
+                fs::read(&archive_path).expect("should read first retained BGZF asset");
+
+            let fixed_modified_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+            File::options()
+                .write(true)
+                .open(&archive_path)
+                .expect("should open retained BGZF asset")
+                .set_times(FileTimes::new().set_modified(fixed_modified_time))
+                .expect("should set retained asset modification time");
+            let modified_time_before = fs::metadata(&archive_path)
+                .expect("should inspect retained BGZF asset")
+                .modified()
+                .expect("should read retained asset modification time");
+
+            let second_result = stage_bgzf_asset_copy(
+                &workspace,
+                FileTypes::Fasta,
+                Cursor::new(source_bytes.clone()),
+                CompressionType::Bgzf,
+                None,
+            )
+            .expect("should retain duplicate BGZF source");
+
+            assert_eq!(first_result, second_result);
+            assert_eq!(
+                fs::read(&archive_path).expect("should read retained BGZF asset again"),
+                original_archive_bytes,
+                "existing archive bytes should be unchanged"
+            );
+            assert_eq!(
+                fs::metadata(&archive_path)
+                    .expect("should inspect retained BGZF asset again")
+                    .modified()
+                    .expect("should read retained asset modification time again"),
+                modified_time_before,
+                "existing archive modification time should be unchanged"
+            );
+            assert_eq!(
+                fs::read_dir(workspace.asset_dir().expect("should find asset directory"))
+                    .expect("should read asset directory")
+                    .count(),
+                1,
+                "duplicate retention should leave no staged files behind"
+            );
+        }
     }
 }
