@@ -1053,20 +1053,20 @@ impl Edge {
             return (graph, edges_by_node_pair);
         }
 
-        // In reference `ATACG`, inserting `GG` between `[ATA]` and `[CG]` spells `ATAGGCG`.
-        // `(3,3)` is the empty position between those reference slices. The right-hand link lets
-        // traversal spell `[GG]` once and continue without revisiting the position:
+        // Another edit can split inserted `GG` into `[G]` slices `0..1` and `1..2`; a partial
+        // graph fragment can discover this cut from a neighboring edge. If reference continuity
+        // between the slices is filtered or absent, supplied edges still give `(3,3) -> [G](0..1)`
+        // and `[G](1..2) -> (3,3)`, but omit the middle `[G] -> [G]` link.
+        // The intact `[GG]` cycle shown below has no such gap and needs no temporary link.
         //
-        //               +----> [GG] ---+
-        //               |              |
-        // [ATA] --> (3,3) <------------+
-        //               |              |
-        //               +--------------+--> [CG]
+        // For SCC classification only, the loop skips zero-width blocks and matches positive-
+        // length slices on the same node when one ends where the next begins (here, offset `1`).
+        // It adds the missing `[G] -> [G]` link with an empty weight for topology, then records
+        // the pair for removal. These links let the cycle check see the return across both slices:
         //
-        // The extra [GG] -> [CG] link lets traversal spell [GG] once without revisiting (3,3).
-        // The original (3,3) -> [GG] -> (3,3) cycle stays in the graph.
-        // This happens for all insertions that do not replace bases -- such as inserting
-        // "AAA" at m123:10-10.
+        //               +--> [G] (0..1) -- temporary continuity --> [G] (1..2) --+
+        //               |                                                        |
+        // [ATA] --> (3,3) <------------------------------------------------------+
         let mut continuity_edges = Vec::new();
         for source_block in blocks.iter().filter(|block| block.start != block.end) {
             let next_block_key = BlockKey {
@@ -1088,15 +1088,34 @@ impl Edge {
             }
         }
 
+        // Use the completed continuity view to decide whether a candidate returns to its position.
         let component_by_node = kosaraju_scc(&graph)
             .into_iter()
             .enumerate()
             .flat_map(|(component, nodes)| nodes.into_iter().map(move |node| (node, component)))
             .collect::<HashMap<_, _>>();
+        // The SCCs use those temporary links. Remove them in reverse insertion order before
+        // applying real exit projections, restoring the stored-edge graph and its edge ordering.
         for (source_node, target_node) in continuity_edges.into_iter().rev() {
             graph.remove_edge(source_node, target_node);
         }
 
+        // In intact reference `ATACG`, inserting `GG` between `[ATA]` and `[CG]` spells `ATAGGCG`.
+        // For the candidate below, `source_block` is `[GG]`, `position_block` is `(3,3)`, and
+        // `target_block` is `[CG]`. If `[GG]` and `(3,3)` are in the same SCC, the return path
+        // exists, so this adds the real `[GG] -> [CG]` projection using the return edge's metadata.
+        // The original cycle remains:
+        //
+        //               +----> [GG] ---+
+        //               |              |
+        // [ATA] --> (3,3) <------------+
+        //               |              |
+        //               +--------------+--> [CG]
+        //
+        // This happens for all insertions that do not replace bases -- such as inserting
+        // "AAA" at m123:10-10.
+        // An acyclic route gets no shortcut: it could bypass a touching edit and restore a
+        // replaced reference base, such as the first `T` in `TAAT` after `T` becomes `G`.
         for (source_block, position_block, target_block, edge_index) in position_exit_projections {
             let source_node = graph_node_for_block(source_block);
             let position_node = graph_node_for_block(position_block);
