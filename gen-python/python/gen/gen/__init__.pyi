@@ -134,7 +134,8 @@ class Asset:
         Write a copy of the file to `destination` and return its path.
 
         If `destination` is a directory the copy is named after `.name` inside it. An existing
-        file is only replaced with `overwrite=True`.
+        file is only replaced with `overwrite=True`. A relative `destination` is resolved against
+        the current working directory.
         """
     def __str__(self) -> builtins.str: ...
     def __repr__(self) -> builtins.str: ...
@@ -547,7 +548,8 @@ class Repository:
         The content is stored once, inside `.gen`, and recorded as its own operation (with
         `message` when given). Adding the same file again fails. Use `asset.path` to locate the
         stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
-        the path of the file to store.
+        the path of the file to store; a relative path is resolved against the current working
+        directory.
         """
     def merge(self, branch: str | Branch) -> Operation:
         r"""
@@ -576,7 +578,8 @@ class Repository:
         The format is inferred from the filename unless provided. A neighboring tabix index is
         discovered unless an index path is provided. The file's features then appear in
         `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
-        display and track name; `message` is the operation's commit message.
+        display and track name; `message` is the operation's commit message. `filename` and `index`
+        are path strings; a relative path is resolved against the current working directory.
         """
     def import_fasta(
         self,
@@ -589,9 +592,8 @@ class Repository:
         `Sample` holding one sequence graph per record. Fails if the same contents were already
         imported.
 
-        `filename` is a path string; give an absolute path, because a relative path may be resolved
-        against the workspace directory instead of the current directory. `collection` defaults to
-        the default collection.
+        `filename` is a path string; a relative path is resolved against the current working
+        directory. `collection` defaults to the default collection.
         """
     def import_reference_fasta(
         self,
@@ -603,9 +605,8 @@ class Repository:
         Import a FASTA file as the reference sample `reference`, which other samples (for example
         VCF variants) are derived against. Returns the `Sample`.
 
-        `filename` is a path string; give an absolute path, because a relative path may be resolved
-        against the workspace directory instead of the current directory. `collection` defaults to
-        the default collection.
+        `filename` is a path string; a relative path is resolved against the current working
+        directory. `collection` defaults to the default collection.
         """
     def import_sequence(
         self,
@@ -655,9 +656,9 @@ class Repository:
         Import a GFA file as one sequence graph, preserving its nodes and edges, and return that
         `SequenceGraph`.
 
-        `sample` defaults to the default sample. `filename` is a path string; give an absolute path,
-        because a relative path may be resolved against the workspace directory instead of the
-        current directory. `collection` defaults to the default collection.
+        `sample` defaults to the default sample. `filename` is a path string; a relative path is
+        resolved against the current working directory. `collection` defaults to the default
+        collection.
         """
     def import_genbank(
         self,
@@ -669,9 +670,9 @@ class Repository:
         Import a GenBank file, including its features (readable through `graph.annotations`), and
         return the `Sample`.
 
-        `sample` defaults to the default sample. `filename` is a path string; give an absolute path,
-        because a relative path may be resolved against the workspace directory instead of the
-        current directory. `collection` defaults to the default collection.
+        `sample` defaults to the default sample. `filename` is a path string; a relative path is
+        resolved against the current working directory. `collection` defaults to the default
+        collection.
         """
     def import_library(
         self,
@@ -702,9 +703,8 @@ class Repository:
         `SequenceGraph`.
 
         `library_name` names the new graph; `sample` and `collection` default to the default sample
-        and collection. `parts` and `library` are path strings; give absolute paths, because a
-        relative path may be resolved against the workspace directory instead of the current
-        directory.
+        and collection. `parts` and `library` are path strings; a relative path is resolved against
+        the current working directory.
         """
     def __new__(
         cls,
@@ -821,9 +821,8 @@ class Repository:
         Replace the region `region_name` of `sample` with the sequence in a FASTA file, storing the
         result as `new_sample`. Returns the new `Sample`.
 
-        `filename` is a path string; give an absolute path, because a relative path may be resolved
-        against the workspace directory instead of the current directory. `collection` defaults to
-        the default collection.
+        `filename` is a path string; a relative path is resolved against the current working
+        directory. `collection` defaults to the default collection.
         """
     def update_with_gfa(
         self,
@@ -836,9 +835,8 @@ class Repository:
         Apply the graph in a GFA file to `sample`, storing the result as `new_sample`. Returns the
         new `Sample`.
 
-        `filename` is a path string; give an absolute path, because a relative path may be resolved
-        against the workspace directory instead of the current directory. `collection` defaults to
-        the default collection.
+        `filename` is a path string; a relative path is resolved against the current working
+        directory. `collection` defaults to the default collection.
         """
     def update_with_gaf(
         self,
@@ -852,9 +850,8 @@ class Repository:
         Apply a GAF alignment file with its CSV of replacement sequences, writing the result to
         `sample` (derived from `parent_sample` when given). Returns that `Sample`.
 
-        `filename` and `csv` are path strings; give absolute paths, because a relative path may be
-        resolved against the workspace directory instead of the current directory. `collection`
-        defaults to the default collection.
+        `filename` and `csv` are path strings; a relative path is resolved against the current
+        working directory. `collection` defaults to the default collection.
         """
     def update_with_vcf(
         self,
@@ -871,10 +868,9 @@ class Repository:
         edited instead. Returns the list of `Sample` objects.
 
         `genotype` (for example `"0/1"`) is the genotype to assign when the VCF has no genotype data
-        of its own. `filename` is a path string; give an absolute path, because a relative path may
-        be resolved against the workspace directory instead of the current directory. `collection`
-        defaults to the default collection. A contig name that differs from the graph's name needs
-        `add_reference_alias()`.
+        of its own. `filename` is a path string; a relative path is resolved against the current
+        working directory. `collection` defaults to the default collection. A contig name that
+        differs from the graph's name needs `add_reference_alias()`.
         """
     def update_with_genbank(
         self,
@@ -887,9 +883,8 @@ class Repository:
         Update `sample` with the sequences and features of a GenBank file. `create_missing=True`
         allows graphs not yet in the sample. Returns the updated `Sample`.
 
-        `filename` is a path string; give an absolute path, because a relative path may be resolved
-        against the workspace directory instead of the current directory. `collection` defaults to
-        the default collection.
+        `filename` is a path string; a relative path is resolved against the current working
+        directory. `collection` defaults to the default collection.
         """
     def update_with_library(
         self,
@@ -921,8 +916,8 @@ class Repository:
 
         `sample` is the sample to update, `new_sample` the sample created for the result, and
         `path_name` the region of `sample` that the library replaces. `parts` and `library` are path
-        strings; give absolute paths, because a relative path may be resolved against the workspace
-        directory instead of the current directory. `collection` defaults to the default collection.
+        strings; a relative path is resolved against the current working directory. `collection`
+        defaults to the default collection.
         """
 
 @typing.final

@@ -19,7 +19,10 @@ use pyo3::{
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::PyRepository;
-use crate::python_api::{hash_id::PyHashId, utils::path_to_py_path};
+use crate::python_api::{
+    hash_id::PyHashId,
+    utils::{absolute_path, path_to_py_path},
+};
 
 fn history_err_to_pyerr(error: impl ToString) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
@@ -225,7 +228,8 @@ impl PyAsset {
     /// Write a copy of the file to `destination` and return its path.
     ///
     /// If `destination` is a directory the copy is named after `.name` inside it. An existing
-    /// file is only replaced with `overwrite=True`.
+    /// file is only replaced with `overwrite=True`. A relative `destination` is resolved against
+    /// the current working directory.
     #[pyo3(signature = (destination, *, overwrite=false))]
     #[gen_stub(override_return_type(type_repr = "pathlib.Path", imports = ("pathlib")))]
     fn save_as(
@@ -475,7 +479,8 @@ impl PyRepository {
     /// The content is stored once, inside `.gen`, and recorded as its own operation (with
     /// `message` when given). Adding the same file again fails. Use `asset.path` to locate the
     /// stored copy or `asset.save_as(name)` to write a copy under a name you choose. `filename` is
-    /// the path of the file to store.
+    /// the path of the file to store; a relative path is resolved against the current working
+    /// directory.
     #[pyo3(signature = (filename, message=None))]
     fn add_file(
         &self,
@@ -483,6 +488,7 @@ impl PyRepository {
         filename: PathBuf,
         message: Option<&str>,
     ) -> PyResult<PyAsset> {
+        let filename = absolute_path(&filename)?;
         let path = filename
             .to_str()
             .ok_or_else(|| PyValueError::new_err("filename must be valid UTF-8"))?;

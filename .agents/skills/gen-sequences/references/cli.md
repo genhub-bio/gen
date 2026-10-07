@@ -32,6 +32,9 @@ coordinates by hand. Both operate on the same `.gen` workspace.
 | turn a GAF replacement CSV into FASTA | `gen transform --format-csv-for-gaf` |
 | write an annotation file in another sample's coordinates | `gen propagate-annotations` |
 
+Python resolves relative file paths against the current working directory. The CLI's handling
+of relative paths may differ, so use absolute paths when mixing the two.
+
 Run `gen <command> --help` before presenting a command sequence.
 
 ## Core approach

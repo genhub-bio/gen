@@ -34,7 +34,7 @@ use crate::python_api::{
     hash_id::PyHashId,
     sample::PySample,
     sequence::{PySequence, library_parts},
-    utils::block_group_err_to_pyerr,
+    utils::{absolute_path_string, block_group_err_to_pyerr},
 };
 
 /// Biopython `SeqRecord`s are recognised by shape (`id` and `seq`) so gen never imports Biopython.
@@ -229,7 +229,8 @@ impl PyRepository {
     /// The format is inferred from the filename unless provided. A neighboring tabix index is
     /// discovered unless an index path is provided. The file's features then appear in
     /// `graph.annotations` and in plots of every sequence graph they land on. `name` sets the
-    /// display and track name; `message` is the operation's commit message.
+    /// display and track name; `message` is the operation's commit message. `filename` and `index`
+    /// are path strings; a relative path is resolved against the current working directory.
     #[pyo3(signature = (filename, format=None, index=None, name=None, message=None))]
     fn import_annotations(
         &self,
@@ -239,11 +240,13 @@ impl PyRepository {
         name: Option<&str>,
         message: Option<&str>,
     ) -> PyResult<PyHashId> {
+        let filename = absolute_path_string(filename)?;
+        let index = index.map(absolute_path_string).transpose()?;
         add_annotation_file(
             &self.context,
-            filename,
+            &filename,
             format,
-            index,
+            index.as_deref(),
             name,
             message,
             AnnotationFileChecksumOverrides::default(),
@@ -256,9 +259,9 @@ impl PyRepository {
     /// `Sample` holding one sequence graph per record. Fails if the same contents were already
     /// imported.
     ///
-    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
-    /// against the workspace directory instead of the current directory. `collection` defaults to
-    /// the default collection.
+    /// `filename` is a path string; a relative path is resolved against the current working
+    /// directory. `collection` defaults to the default collection.
+    ///
     /// For a remote indexed BGZF FASTA, pass its `.fai` and `.gzi` files explicitly with `fai`
     /// and `gzi`.
     #[pyo3(signature = (filename, sample=None, collection=None, fai=None, gzi=None))]
@@ -270,6 +273,7 @@ impl PyRepository {
         fai: Option<String>,
         gzi: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_context_operation_write(
@@ -306,9 +310,9 @@ impl PyRepository {
     /// Import a FASTA file as the reference sample `reference`, which other samples (for example
     /// VCF variants) are derived against. Returns the `Sample`.
     ///
-    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
-    /// against the workspace directory instead of the current directory. `collection` defaults to
-    /// the default collection.
+    /// `filename` is a path string; a relative path is resolved against the current working
+    /// directory. `collection` defaults to the default collection.
+    ///
     /// For a remote indexed BGZF FASTA, pass its `.fai` and `.gzi` files explicitly with `fai`
     /// and `gzi`.
     #[pyo3(signature = (filename, reference, collection=None, fai=None, gzi=None))]
@@ -320,6 +324,7 @@ impl PyRepository {
         fai: Option<String>,
         gzi: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
             &self.context,
@@ -449,9 +454,9 @@ impl PyRepository {
     /// Import a GFA file as one sequence graph, preserving its nodes and edges, and return that
     /// `SequenceGraph`.
     ///
-    /// `sample` defaults to the default sample. `filename` is a path string; give an absolute path,
-    /// because a relative path may be resolved against the workspace directory instead of the
-    /// current directory. `collection` defaults to the default collection.
+    /// `sample` defaults to the default sample. `filename` is a path string; a relative path is
+    /// resolved against the current working directory. `collection` defaults to the default
+    /// collection.
     #[pyo3(signature = (filename, sample=None, collection=None))]
     fn import_gfa(
         &self,
@@ -459,6 +464,7 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
+        let filename = absolute_path_string(&filename)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
         run_context_operation_write(
@@ -493,9 +499,9 @@ impl PyRepository {
     /// Import a GenBank file, including its features (readable through `graph.annotations`), and
     /// return the `Sample`.
     ///
-    /// `sample` defaults to the default sample. `filename` is a path string; give an absolute path,
-    /// because a relative path may be resolved against the workspace directory instead of the
-    /// current directory. `collection` defaults to the default collection.
+    /// `sample` defaults to the default sample. `filename` is a path string; a relative path is
+    /// resolved against the current working directory. `collection` defaults to the default
+    /// collection.
     #[pyo3(signature = (filename, sample=None, collection=None))]
     fn import_genbank(
         &self,
@@ -503,6 +509,7 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         let sample = sample.unwrap_or_else(|| Sample::DEFAULT_NAME.to_string());
@@ -610,9 +617,8 @@ impl PyRepository {
     /// `SequenceGraph`.
     ///
     /// `library_name` names the new graph; `sample` and `collection` default to the default sample
-    /// and collection. `parts` and `library` are path strings; give absolute paths, because a
-    /// relative path may be resolved against the workspace directory instead of the current
-    /// directory.
+    /// and collection. `parts` and `library` are path strings; a relative path is resolved against
+    /// the current working directory.
     #[pyo3(signature = (library_name, parts, library, sample=None, collection=None))]
     fn import_library_files(
         &self,
@@ -622,6 +628,8 @@ impl PyRepository {
         sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySequenceGraph> {
+        let parts = absolute_path_string(&parts)?;
+        let library = absolute_path_string(&library)?;
         let parts_list = parse_library(&parts, &library)
             .map_err(|e| PyRuntimeError::new_err(format!("Problem parsing library files: {e}")))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());

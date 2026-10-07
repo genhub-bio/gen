@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use r#gen::{
     fasta::FastaError,
     graphs::combinatorial_library::parse_library,
@@ -11,13 +13,17 @@ use r#gen::{
     },
 };
 use gen_models::{errors::OperationError, sample::Sample};
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use pyo3::{
+    exceptions::{PyFileNotFoundError, PyRuntimeError},
+    prelude::*,
+};
 use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::{PyRepository, run_context_operation_write};
 use crate::python_api::{
     sample::PySample,
     sequence::{PySequence, library_parts},
+    utils::absolute_path_string,
 };
 
 #[gen_stub_pymethods]
@@ -26,9 +32,8 @@ impl PyRepository {
     /// Replace the region `region_name` of `sample` with the sequence in a FASTA file, storing the
     /// result as `new_sample`. Returns the new `Sample`.
     ///
-    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
-    /// against the workspace directory instead of the current directory. `collection` defaults to
-    /// the default collection.
+    /// `filename` is a path string; a relative path is resolved against the current working
+    /// directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, sample, new_sample, region_name, collection=None))]
     fn update_with_fasta(
         &self,
@@ -38,6 +43,7 @@ impl PyRepository {
         region_name: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
             &self.context,
@@ -79,9 +85,8 @@ impl PyRepository {
     /// Apply the graph in a GFA file to `sample`, storing the result as `new_sample`. Returns the
     /// new `Sample`.
     ///
-    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
-    /// against the workspace directory instead of the current directory. `collection` defaults to
-    /// the default collection.
+    /// `filename` is a path string; a relative path is resolved against the current working
+    /// directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, sample, new_sample, collection=None))]
     fn update_with_gfa(
         &self,
@@ -90,6 +95,7 @@ impl PyRepository {
         new_sample: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
             &self.context,
@@ -115,9 +121,8 @@ impl PyRepository {
     /// Apply a GAF alignment file with its CSV of replacement sequences, writing the result to
     /// `sample` (derived from `parent_sample` when given). Returns that `Sample`.
     ///
-    /// `filename` and `csv` are path strings; give absolute paths, because a relative path may be
-    /// resolved against the workspace directory instead of the current directory. `collection`
-    /// defaults to the default collection.
+    /// `filename` and `csv` are path strings; a relative path is resolved against the current
+    /// working directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, csv, sample, parent_sample=None, collection=None))]
     fn update_with_gaf(
         &self,
@@ -127,6 +132,8 @@ impl PyRepository {
         parent_sample: Option<String>,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
+        let csv = absolute_path_string(&csv)?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
             &self.context,
@@ -156,10 +163,9 @@ impl PyRepository {
     /// edited instead. Returns the list of `Sample` objects.
     ///
     /// `genotype` (for example `"0/1"`) is the genotype to assign when the VCF has no genotype data
-    /// of its own. `filename` is a path string; give an absolute path, because a relative path may
-    /// be resolved against the workspace directory instead of the current directory. `collection`
-    /// defaults to the default collection. A contig name that differs from the graph's name needs
-    /// `add_reference_alias()`.
+    /// of its own. `filename` is a path string; a relative path is resolved against the current
+    /// working directory. `collection` defaults to the default collection. A contig name that
+    /// differs from the graph's name needs `add_reference_alias()`.
     #[pyo3(signature = (filename, reference=None, genotype=None, sample=None, in_place=false, collection=None))]
     fn update_with_vcf(
         &self,
@@ -171,6 +177,13 @@ impl PyRepository {
         in_place: bool,
         collection: Option<String>,
     ) -> PyResult<Vec<PySample>> {
+        let filename = absolute_path_string(&filename)?;
+        // The VCF reader unwraps a failed open and would panic instead of raising.
+        if !Path::new(&filename).is_file() {
+            return Err(PyFileNotFoundError::new_err(format!(
+                "no file at '{filename}'"
+            )));
+        }
         let parent_samples = match reference {
             None => vec![],
             Some(ref obj) => {
@@ -225,9 +238,8 @@ impl PyRepository {
     /// Update `sample` with the sequences and features of a GenBank file. `create_missing=True`
     /// allows graphs not yet in the sample. Returns the updated `Sample`.
     ///
-    /// `filename` is a path string; give an absolute path, because a relative path may be resolved
-    /// against the workspace directory instead of the current directory. `collection` defaults to
-    /// the default collection.
+    /// `filename` is a path string; a relative path is resolved against the current working
+    /// directory. `collection` defaults to the default collection.
     #[pyo3(signature = (filename, sample, create_missing=false, collection=None))]
     fn update_with_genbank(
         &self,
@@ -236,6 +248,7 @@ impl PyRepository {
         create_missing: bool,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let filename = absolute_path_string(&filename)?;
         use std::fs::File;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
         run_context_operation_write(
@@ -317,8 +330,8 @@ impl PyRepository {
     ///
     /// `sample` is the sample to update, `new_sample` the sample created for the result, and
     /// `path_name` the region of `sample` that the library replaces. `parts` and `library` are path
-    /// strings; give absolute paths, because a relative path may be resolved against the workspace
-    /// directory instead of the current directory. `collection` defaults to the default collection.
+    /// strings; a relative path is resolved against the current working directory. `collection`
+    /// defaults to the default collection.
     #[pyo3(signature = (sample, new_sample, path_name, library, parts, collection=None))]
     fn update_with_library_files(
         &self,
@@ -329,6 +342,8 @@ impl PyRepository {
         parts: String,
         collection: Option<String>,
     ) -> PyResult<PySample> {
+        let parts = absolute_path_string(&parts)?;
+        let library = absolute_path_string(&library)?;
         let parts_list = parse_library(&parts, &library)
             .map_err(|_| PyRuntimeError::new_err("Couldn't parse library files."))?;
         let collection = collection.unwrap_or_else(|| self.get_default_collection());
