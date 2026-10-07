@@ -12,7 +12,7 @@ use gen_graph::{GenGraph, GraphEdge, GraphNode};
 use indexmap::IndexSet;
 use itertools::Itertools;
 use petgraph::{Direction, algo::kosaraju_scc};
-use rusqlite::{OptionalExtension, ToSql, named_params, params, types::Value};
+use rusqlite::{ToSql, named_params, params, types::Value};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -766,7 +766,9 @@ impl Edge {
                 &mut outgoing_jump_coordinates_by_node_id,
                 &mut incoming_jump_coordinates_by_node_id,
             );
-            if !is_terminal(edge.source_node_id) && !frontier_node_ids.contains(&edge.source_node_id) {
+            if !is_terminal(edge.source_node_id)
+                && !frontier_node_ids.contains(&edge.source_node_id)
+            {
                 node_ids.insert(edge.source_node_id);
             }
             ends_by_node_id
@@ -825,7 +827,9 @@ impl Edge {
                     &mut outgoing_jump_coordinates_by_node_id,
                     &mut incoming_jump_coordinates_by_node_id,
                 );
-                if !is_terminal(edge.source_node_id) && !frontier_node_ids.contains(&edge.source_node_id) {
+                if !is_terminal(edge.source_node_id)
+                    && !frontier_node_ids.contains(&edge.source_node_id)
+                {
                     node_ids.insert(edge.source_node_id);
                 }
                 ends_by_node_id
