@@ -476,7 +476,8 @@ impl Edge {
     /// ```
     fn shared_position_coordinates(edges: &[AugmentedEdge]) -> HashSet<BlockKey> {
         let mut outgoing_coordinates = HashSet::new();
-        // Same-coordinate edges have their own continuity projection.
+        // Same-coordinate edges have a separate projection for connections between adjacent
+        // sequence slices.
         // Distinct edges identify coordinates that need a shared site.
         for augmented_edge in edges {
             let edge = &augmented_edge.edge;
@@ -855,15 +856,15 @@ impl Edge {
     ///                               +----------+--> [G]
     /// ```
     ///
-    /// `(2,2)` is the empty position between `A` and `C`. Same-coordinate continuity edges pass
-    /// through such positions without adding a self-loop.
+    /// `(2,2)` is the empty position between `A` and `C`. Edges connecting adjacent sequence
+    /// slices at the same coordinate pass through such positions without adding a self-loop.
     ///
     /// If an edit starts at a shared boundary or a deletion jump stays within one sequence node,
     /// keep the sequence slice as a source alongside any zero-width position. For deleting `C` in
     /// `TACG`, `[A]` can reach `[G]` directly or through `(2,2)`. The direct route remains available
-    /// if reference continuity is filtered. A deletion jump also keeps possible target slices
-    /// unless its target boundary is shared. These graph links represent one stored edge, not new
-    /// stored edges.
+    /// if the connection between adjacent sequence slices is filtered out. A deletion jump also
+    /// keeps possible target slices unless its target boundary is shared. These graph links
+    /// represent one stored edge, not new stored edges.
     ///
     /// Both delete-`C` links below keep the same stored edge identity:
     ///
@@ -1054,17 +1055,17 @@ impl Edge {
         }
 
         // Another edit can split inserted `GG` into `[G]` slices `0..1` and `1..2`; a partial
-        // graph fragment can discover this cut from a neighboring edge. If reference continuity
-        // between the slices is filtered or absent, supplied edges still give `(3,3) -> [G](0..1)`
-        // and `[G](1..2) -> (3,3)`, but omit the middle `[G] -> [G]` link.
+        // graph fragment can discover this cut from a neighboring edge. If the connection between
+        // adjacent sequence slices is filtered or absent, supplied edges still give
+        // `(3,3) -> [G](0..1)` and `[G](1..2) -> (3,3)`, but omit the middle `[G] -> [G]` link.
         // The intact `[GG]` cycle shown below has no such gap and needs no temporary link.
         //
         // For SCC classification only, the loop skips zero-width blocks and matches positive-
         // length slices on the same node when one ends where the next begins (here, offset `1`).
-        // It adds the missing `[G] -> [G]` link with an empty weight for topology, then records
-        // the pair for removal. These links let the cycle check see the return across both slices:
+        // It adds the missing `[G] -> [G]` link without stored edge metadata, then records the
+        // pair for removal. These links let the cycle check see the return across both slices:
         //
-        //               +--> [G] (0..1) -- temporary continuity --> [G] (1..2) --+
+        //               +--> [G] (0..1) -- temporary connection --> [G] (1..2) --+
         //               |                                                        |
         // [ATA] --> (3,3) <------------------------------------------------------+
         let mut continuity_edges = Vec::new();
@@ -1088,7 +1089,8 @@ impl Edge {
             }
         }
 
-        // Use the completed continuity view to decide whether a candidate returns to its position.
+        // Use the graph with adjacent sequence slices connected to decide whether a candidate
+        // returns to its position.
         let component_by_node = kosaraju_scc(&graph)
             .into_iter()
             .enumerate()

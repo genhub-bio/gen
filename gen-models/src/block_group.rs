@@ -572,6 +572,21 @@ impl BlockGroup {
     pub fn prune_graph(graph: &mut GenGraph) {
         // Prunes a graph by removing edges on the same chromosome_index. This means if 2 edges are
         // both "chromosome index 0", we keep the newer one.
+        // For ordinary variants, `chromosome_index` identifies the chromatid that carries them;
+        // variants on the same index occur together.
+        // Inserting `GG` between `[ATA]` and `[CG]` in `ATACG` gives the stored return edge from
+        // `[GG]` to `(3,3)` a following-base projection to `[CG]` as well:
+        //
+        // [GG] --+--> (3,3)
+        //        |
+        //        +--> [CG]
+        //
+        // Both projections share the same stored edge ID and `created_on`. At each source,
+        // `created_on` selects the newest stored edge origin per chromatid; its `edge_id` keeps
+        // every projection of that origin.
+        // Walk node indices directly and defer graph-link removal; reuse `outgoing_targets` so
+        // the chromatid records on each connection can be filtered after outgoing-edge iteration
+        // without snapshotting all nodes.
         let mut root_nodes = HashSet::new();
         let mut edges_to_remove = Vec::new();
         let mut outgoing_targets = Vec::new();
@@ -584,6 +599,8 @@ impl BlockGroup {
             let mut latest_edges_by_chromosome_index = HashMap::<i64, (i64, HashId)>::new();
             for (_, target_node, edge_weights) in graph.edges(source_node) {
                 outgoing_targets.push(target_node);
+                // Reserved `chromosome_index` annotations do not compete for the newest ordinary
+                // edge per chromatid.
                 for edge_weight in edge_weights {
                     if edge_weight.chromosome_index == NO_CHROMOSOME_INDEX {
                         continue;
@@ -605,6 +622,25 @@ impl BlockGroup {
                         .or_insert((edge_weight.created_on, edge_weight.edge_id));
                 }
             }
+            // A graph connection can carry `GraphEdge` annotations for multiple chromatids.
+            // Filter each chromatid's records independently; for reference `AC`, chromatid 0
+            // changes `C` to `T` while chromatid 1 keeps `C` (`@` is `created_on`):
+            //
+            // Before:
+            // [A] --+-- chromatid0@1, chromatid1@1 --> [C]
+            //       |
+            //       +-- chromatid0@2 ----------------> [T]
+            // After:
+            // [A] --+-- chromatid1@1 ----------------> [C]
+            //       |
+            //       +-- chromatid0@2 ----------------> [T]
+            //
+            // `NO_CHROMOSOME_INDEX` and `INDETERMINATE_CHROMOSOME_INDEX` annotations remain;
+            // these reserved indices are not ordinary chromatid IDs.
+            // `PRESERVE_EDIT_SITE_CHROMOSOME_INDEX` annotations do not compete for an ordinary
+            // edge origin and are removed.
+            // Keep a connection whose `Vec<GraphEdge>` is already empty; remove a connection with
+            // records only after all its stored edge records have been filtered out.
             for target_node in outgoing_targets.iter().copied() {
                 let should_remove = {
                     let edge_weights = graph
@@ -639,6 +675,7 @@ impl BlockGroup {
             graph.remove_edge(source_node, target_node);
         }
 
+        // Remove nodes made unreachable by the deleted connections after all edge pruning is done.
         let reachable_nodes = all_reachable_nodes(&*graph, &Vec::from_iter(root_nodes));
         let mut to_remove = vec![];
         for node in graph.nodes() {
@@ -913,9 +950,23 @@ impl BlockGroup {
             .map(|x| &x.value)
             .collect();
         assert_eq!(previous_start_blocks.len(), 1);
-        // Base-consuming edits at an internal block start use the right-hand block so all routes
-        // arriving at that boundary can take the edit. Insertions and path-origin edits keep the
-        // previous block as their anchor.
+        // For an optional deletion (`preserve_edge = true`) of the first `T` at path range `2..3`
+        // in `[AC] -> [TAAT]`, with the alternative incoming route `[AC] -> [GG] -> [TAAT]`,
+        // `start_blocks[0] = [TAAT]` (path start `2`, local start `0`) and
+        // `previous_start_blocks[0] = [AC]`. Using `[TAAT]` makes a same-node deletion `0 -> 1`;
+        // downstream block and graph construction lets both incoming routes use `(0,0)` in
+        // `[TAAT]` to reach `[AAT]`, while retaining the `[T]` reference route for this optional
+        // deletion:
+        //
+        // [AC] --+----------------------+
+        //        |                      |
+        //        +--> [GG] -------------+--> (0,0) --+--> [T] --+
+        //                                            |          |
+        //                                            +----------+--> [AAT]
+        //
+        // Anchoring at `[AC]` would leave the `[GG]` arrival out of the deletion. At a block start,
+        // only an insertion or path-origin edit uses the previous block; an insertion inside a
+        // sequence slice stays anchored in that slice.
         let start_block = if start_blocks[0].start == change.region.start
             && (change.region.start == 0 || change.region.start == change.region.end)
         {
