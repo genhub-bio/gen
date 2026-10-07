@@ -135,10 +135,9 @@ name with `gen export fasta --sample`.
 
 # FASTA export
 
-`gen export fasta <path> --sample <sample>` exports the stored path sequence
-when a block group has exactly one path. For block groups with zero or multiple
-paths, it exports all graph sequences. Exports with a revision selection use the
-current path at that revision.
+`gen export fasta <path> --sample <sample>` exports the sample's current path
+sequence for each block group. Exports with a revision selection use the current
+path at that revision.
 
 # View diff
 
