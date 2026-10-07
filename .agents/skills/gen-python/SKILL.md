@@ -77,6 +77,12 @@ kernel) have the same methods: `show`, `go_to`, `zoom_in/out`, `scroll_*`, `next
 use the interactive widget freely. `print(widget)` redraws the text view; call `widget.refresh()`
 after graph edits.
 
+**Showing a plot to a user** (`TextWidget` is `TextGraphWidget`): when asked to show, plot, or
+compare graphs outside a live Jupyter kernel, `print(widget)` and paste the output in a fenced
+code block. The first frame printed in a process starts with a `#` orientation header written for
+you; drop it and show only the frame. Later frames have no header. Print one widget per graph
+when comparing, and label each block with the sample or graph name.
+
 ## Rules that prevent mistakes
 
 - Coordinates are `"<name>:<start>-<end>"`, 0-based, half-open. `locus.end()` is the last

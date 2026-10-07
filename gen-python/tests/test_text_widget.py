@@ -39,9 +39,9 @@ class TextGraphWidgetTests(unittest.TestCase):
         first_frame = repr(widget)
         second_frame = repr(widget)
 
-        self.assertIn("# Gen graph textual output", first_frame)
+        self.assertIn("Gen SequenceGraph textual output", first_frame)
         self.assertIn("a", first_frame)
-        self.assertNotIn("# Gen graph textual output", second_frame)
+        self.assertNotIn("Gen SequenceGraph textual output", second_frame)
         self.assertEqual(second_frame.splitlines()[0], "a")
 
     def test_non_jupyter_sessions_use_text_graph_widget(self):

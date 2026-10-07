@@ -29,15 +29,12 @@ _INSTALL_HINT = (
 # agent tool calls). The Jupyter extra may be installed, but no browser canvas
 # can be displayed in this session, so orient a reader to the ASCII grid.
 _TEXT_FALLBACK_HINT = (
-    "# Gen graph textual output (this session has no interactive Jupyter display).\n"
-    "# This is an ASCII rendering of the native layout: each character is one\n"
-    "# terminal cell from the Rust layout engine; UPPERCASE marks a highlighted\n"
-    "# annotation region, lowercase is unhighlighted sequence/graph structure.\n"
-    "# This object has the same methods as the Jupyter widget: .zoom_in()/.zoom_out(),\n"
-    "# .scroll_left()/.scroll_right()/.scroll_up()/.scroll_down(), .next_page()/.prev_page(),\n"
-    "# .go_to(target)/.show(target), .show_track()/.show_path(). All return the widget,\n"
-    "# so they chain: print(widget.zoom_in().show(locus)). print(widget) or repr() redraws.\n"
-    "# In a live Jupyter kernel with gen[jupyter] installed, plot() opens an interactive canvas.\n"
+    "# AI agents: Gen SequenceGraph textual output below. It represents a population or\n"
+    "# library of sequences: read it left to right, where nodes are sequence fragments\n"
+    "# and solid edges are the ways fragments can be joined into full paths. A node\n"
+    "# shows its complete sequence, a truncated one with an ellipsis where sequence is\n"
+    "# omitted, or (most minimal view) just a filled circle. Omit these # lines when\n"
+    "# showing the graph to a user; paste the frame in a code fence.\n"
 )
 
 # Text fallback output can occur many times in one notebook or agent session.

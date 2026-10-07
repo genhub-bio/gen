@@ -363,7 +363,9 @@ cd gen-python && make test           # all three
 `Sample.plot()` / `SequenceGraph.plot()` return a `TextGraphWidget` in plain
 Python, including AI REPLs, even when `gen[jupyter]` is installed. Drive and
 inspect it without a browser or JS; use `repr(widget)` to see the current state
-as ASCII.
+as ASCII (`print(widget)` works too). The first frame printed starts with a `#`
+orientation header meant for the agent; when showing a graph to a user, omit it and paste
+only the frame in a fenced code block.
 
 - A widget from `sample.plot()` pages through every sequence graph in the
   sample; one from `sg.plot()` shows just that one graph (one page).
