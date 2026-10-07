@@ -227,18 +227,19 @@ class RemoteTests(unittest.TestCase):
                     _assets,
                 ):
                     with patch.dict(os.environ, {"GENHUB_API_KEY": "test-key"}):
-                        origin = self.repository.add_remote("origin", url)
-                        self.repository.set_default_remote(origin)
                         for action in ["push", "pull", "fetch"]:
-                            with self.assertRaisesRegex(RuntimeError, f"HTTP {status}"):
-                                getattr(self.repository, action)()
-                            self.assertEqual(
-                                self.repository.current_branch.name, "main"
+                            repository = gen.Repository(
+                                str(self.root / f"{action}-{status}")
                             )
+                            origin = repository.add_remote("origin", url)
+                            repository.set_default_remote(origin)
+                            with self.assertRaisesRegex(RuntimeError, f"HTTP {status}"):
+                                getattr(repository, action)()
+                            self.assertEqual(repository.current_branch.name, "main")
+                            repository = None
                         failed = self.root / f"clone-{status}"
                         with self.assertRaisesRegex(RuntimeError, f"HTTP {status}"):
                             gen.clone(url, path=str(failed))
-                        self.repository.remove_remote(origin)
                     self.assertEqual(len(requests), 4)
                     self.assertTrue(
                         all(
@@ -315,7 +316,7 @@ class RemoteTests(unittest.TestCase):
     @unittest.skipIf(
         os.name == "nt", "mock capabilities use native file remote transport"
     )
-    def test_http_api_key_covers_graph_assets_and_push_completion(self):
+    def test_http_api_key_covers_graph_assets_and_rejects_legacy_push(self):
         upstream_path = self.root / "upstream"
         upstream = gen.Repository(str(upstream_path))
         self.import_sequence(upstream, "base")
@@ -353,6 +354,13 @@ class RemoteTests(unittest.TestCase):
             served_assets.update(known_assets)
             with patch.dict(os.environ, {"GENHUB_API_KEY": "accepted-test-key"}):
                 local = gen.clone(url, path=str(self.root / "clone"))
+                self.assertEqual(
+                    archived_asset_bytes_by_id(local),
+                    known_assets,
+                    "clone should download the reachable graph assets",
+                )
+                local.fetch()
+                local.pull()
                 self.import_sequence(local, "local_change")
                 local_assets = archived_asset_bytes_by_id(local)
                 local_only_asset_ids = local_assets.keys() - known_assets.keys()
@@ -360,17 +368,14 @@ class RemoteTests(unittest.TestCase):
                     local_only_asset_ids,
                     "local import should add archived assets",
                 )
-                known_assets.update(local_assets)
-                local.push(force=True)
-                for asset_id in local_only_asset_ids:
-                    self.assertEqual(
-                        served_assets.get(asset_id),
-                        local_assets[asset_id],
-                        f"push should upload local-only asset {asset_id} "
-                        "with exact archived bytes",
-                    )
-                local.fetch()
-                local.pull()
+                with self.assertRaisesRegex(
+                    RuntimeError, "did not include a direct GCS session"
+                ):
+                    local.push(force=True)
+                self.assertTrue(
+                    local_only_asset_ids.isdisjoint(served_assets.keys()),
+                    "rejected legacy push must not upload local-only assets",
+                )
             authenticated = [
                 (path, body)
                 for path, headers, body in requests
@@ -383,18 +388,18 @@ class RemoteTests(unittest.TestCase):
             ]
             self.assertEqual(
                 [body["operation"] for body in capabilities],
-                ["clone", "push", "pull", "pull", "pull"],
+                ["clone", "pull", "pull", "push"],
             )
-            self.assertTrue(capabilities[1]["force"])
-            self.assertEqual(
-                sum(path.endswith("/asset-transfers") for path, _ in authenticated), 4
+            self.assertTrue(capabilities[3]["force"])
+            self.assertGreaterEqual(
+                sum(path.endswith("/asset-transfers") for path, _ in authenticated), 1
             )
             self.assertEqual(
                 sum(
                     path.endswith("/asset-transfers/complete")
                     for path, _ in authenticated
                 ),
-                1,
+                0,
             )
             self.assertEqual(
                 local.default_remote.url, url.replace("/repos/", "/api/repos/")
