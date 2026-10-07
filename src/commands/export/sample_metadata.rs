@@ -5,10 +5,10 @@ use clap::Args;
 
 use crate::{commands::cli_context::CliContext, exports::sample_metadata::export_sample_metadata};
 
-/// Export sample metadata as a tab-separated file.
+/// Export sample metadata as TSV or JSON.
 #[derive(Debug, Args, Clone)]
 pub struct Command {
-    /// Output TSV file path
+    /// Output file path
     pub path: PathBuf,
     /// Export only this sample's metadata; omit to export all samples
     #[arg(short, long)]
@@ -16,6 +16,9 @@ pub struct Command {
     /// Export only these comma-separated metadata keys; omit to export all keys
     #[arg(long, value_delimiter = ',')]
     pub keys: Option<Vec<String>>,
+    /// Export JSON grouped by sample instead of TSV
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn execute(cli_context: &CliContext, command: Command) -> Result<()> {
@@ -25,5 +28,6 @@ pub fn execute(cli_context: &CliContext, command: Command) -> Result<()> {
         &command.path,
         cli_context.history_ref,
         command.keys.as_deref(),
+        command.json,
     )
 }

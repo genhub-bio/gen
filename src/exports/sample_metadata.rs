@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Result, bail};
 use csv::WriterBuilder;
@@ -7,8 +7,10 @@ use gen_models::{
     sample::Sample,
     sample_metadata::{MetadataValue, SampleMetadata},
 };
+use serde::Serialize;
+use serde_json::Value;
 
-/// Export typed sample metadata as TSV, ordered by sample name and key.
+/// Export typed sample metadata as TSV or grouped JSON, ordered by sample name and key.
 ///
 /// The header is `sample_name`, `key`, `value_type`, and `value`. Value types
 /// are `text`, `integer`, `float`, and `boolean`. Fields containing tabs, newlines, or
@@ -19,6 +21,7 @@ pub fn export_sample_metadata(
     filename: &Path,
     history_ref: Option<&str>,
     keys: Option<&[String]>,
+    json: bool,
 ) -> Result<()> {
     let mut selector = SampleMetadata::select(connection).with_ref(history_ref);
     if let Some(sample_name) = sample_name {
@@ -44,6 +47,27 @@ pub fn export_sample_metadata(
 
     // Load and validate the selection before opening the output so an invalid
     // sample or revision cannot truncate an existing export.
+    if json {
+        let mut samples: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
+        for entry in metadata {
+            let value = match entry.value {
+                MetadataValue::Text(value) => Value::from(value),
+                MetadataValue::Integer(value) => Value::from(value),
+                MetadataValue::Float(value) => Value::from(value),
+                MetadataValue::Boolean(value) => Value::from(value),
+            };
+            samples
+                .entry(entry.sample_name)
+                .or_default()
+                .insert(entry.key, value);
+        }
+        let samples: Vec<_> = samples
+            .into_iter()
+            .map(|(name, metadata)| JsonSample { name, metadata })
+            .collect();
+        fs::write(filename, serde_json::to_vec_pretty(&samples)?)?;
+        return Ok(());
+    }
     let mut writer = WriterBuilder::new().delimiter(b'\t').from_path(filename)?;
     writer.write_record(["sample_name", "key", "value_type", "value"])?;
     for entry in metadata {
@@ -57,6 +81,12 @@ pub fn export_sample_metadata(
     }
     writer.flush()?;
     Ok(())
+}
+
+#[derive(Serialize)]
+struct JsonSample {
+    name: String,
+    metadata: BTreeMap<String, Value>,
 }
 
 #[cfg(test)]
@@ -110,7 +140,7 @@ mod tests {
         }
         let directory = tempdir().expect("should create output directory");
         let output = directory.path().join("metadata.tsv");
-        export_sample_metadata(connection, None, &output, None, None)
+        export_sample_metadata(connection, None, &output, None, None, false)
             .expect("should export all metadata");
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
@@ -148,26 +178,31 @@ mod tests {
                 vec!["sample", "text", "text", special],
             ]
         );
-        export_sample_metadata(connection, Some("other"), &output, None, None)
+        export_sample_metadata(connection, Some("other"), &output, None, None, false)
             .expect("should export selected sample");
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
             .from_path(&output)
             .expect("should open filtered TSV");
         assert_eq!(reader.records().count(), 1);
-        export_sample_metadata(connection, Some("empty"), &output, None, None)
+        export_sample_metadata(connection, Some("empty"), &output, None, None, false)
             .expect("should export sample without metadata");
         let header = "sample_name\tkey\tvalue_type\tvalue\n";
         assert_eq!(
             fs::read_to_string(&output).expect("should read empty export"),
             header
         );
-        assert!(export_sample_metadata(connection, Some("missing"), &output, None, None).is_err());
+        assert!(
+            export_sample_metadata(connection, Some("missing"), &output, None, None, false)
+                .is_err()
+        );
         assert_eq!(
             fs::read_to_string(&output).expect("should preserve output"),
             header
         );
-        assert!(export_sample_metadata(connection, None, directory.path(), None, None).is_err());
+        assert!(
+            export_sample_metadata(connection, None, directory.path(), None, None, false).is_err()
+        );
     }
 
     #[test]
@@ -196,14 +231,21 @@ mod tests {
             "a".to_string(),
             "missing".to_string(),
         ];
-        export_sample_metadata(connection, None, &output, None, Some(&keys))
+        export_sample_metadata(connection, None, &output, None, Some(&keys), false)
             .expect("should export selected keys across samples");
         assert_eq!(
             fs::read_to_string(&output).expect("should read export"),
             "sample_name\tkey\tvalue_type\tvalue\nfirst\ta\tinteger\t1\nfirst\tc\tinteger\t1\nsecond\ta\tinteger\t1\nsecond\tc\tinteger\t1\n"
         );
-        export_sample_metadata(connection, Some("second"), &output, None, Some(&keys))
-            .expect("should combine sample and key filters");
+        export_sample_metadata(
+            connection,
+            Some("second"),
+            &output,
+            None,
+            Some(&keys),
+            false,
+        )
+        .expect("should combine sample and key filters");
         assert_eq!(
             fs::read_to_string(&output).expect("should read export"),
             "sample_name\tkey\tvalue_type\tvalue\nsecond\ta\tinteger\t1\nsecond\tc\tinteger\t1\n"
@@ -214,6 +256,7 @@ mod tests {
             &output,
             None,
             Some(&["missing".to_string()]),
+            false,
         )
         .expect("should export header for unmatched keys");
         assert_eq!(
@@ -228,7 +271,7 @@ mod tests {
         let connection = context.graph().conn();
         let directory = tempdir().expect("should create output directory");
         let output = directory.path().join("metadata.tsv");
-        export_sample_metadata(connection, None, &output, None, None)
+        export_sample_metadata(connection, None, &output, None, None, false)
             .expect("should export empty repository");
         assert_eq!(
             fs::read_to_string(&output).expect("should read export"),
@@ -254,6 +297,7 @@ mod tests {
             &output,
             Some(&original.to_string()),
             None,
+            false,
         )
         .expect("should export historical metadata");
         assert_eq!(
@@ -261,10 +305,17 @@ mod tests {
             "sample_name\tkey\tvalue_type\tvalue\nsample\tscore\tinteger\t1\n"
         );
         assert!(
-            export_sample_metadata(connection, None, &output, Some("missing-revision"), None)
-                .is_err()
+            export_sample_metadata(
+                connection,
+                None,
+                &output,
+                Some("missing-revision"),
+                None,
+                false
+            )
+            .is_err()
         );
-        export_sample_metadata(connection, Some("sample"), &output, None, None)
+        export_sample_metadata(connection, Some("sample"), &output, None, None, false)
             .expect("should export current metadata");
         assert_eq!(
             fs::read_to_string(&output).expect("should read current export"),

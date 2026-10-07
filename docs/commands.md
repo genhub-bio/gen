@@ -51,6 +51,7 @@ Export all sample metadata as TSV, or select a single sample:
 gen export sample-metadata metadata.tsv
 gen export sample-metadata metadata.tsv --sample sample1
 gen export sample-metadata metadata.tsv --keys Score,Count
+gen export sample-metadata metadata.json --json
 gen export --ref HEAD sample-metadata metadata.tsv
 ```
 
@@ -63,6 +64,17 @@ be combined with `--sample`. Omit it to export all keys. Unknown keys are ignore
 An empty selection produces only the header; an unknown sample is an error.
 Sample metadata belongs to samples across collections, so this command does not
 require a collection option. `--ref` uses the data at a given commit or branch.
+
+With `--json`, the output is an array of sample objects with `name` and `metadata`
+fields. Metadata maps keys to JSON strings, numbers, or booleans. The sample, key,
+and history filters apply to JSON exports too. Samples without matching metadata
+are omitted, and an empty selection produces `[]`. TSV remains the default.
+
+```json
+[
+  {"name": "sample1", "metadata": {"Score": 90.68, "Enabled": true}}
+]
+```
 
 # Branches
 

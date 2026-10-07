@@ -1,5 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
+use serde_json::{Value, json};
 use tempfile::tempdir;
 
 fn run_gen(repository: &Path, arguments: &[&str]) {
@@ -82,6 +83,30 @@ fn test_export_sample_metadata_cli() {
         fs::read_to_string(directory.path().join("metadata.tsv")).expect("should read TSV"),
         "sample_name\tkey\tvalue_type\tvalue\nsample_001\tCount\tinteger\t1\nsample_001\tScore\tfloat\t90.68\nsample_002\tCount\tinteger\t2\nsample_002\tScore\tfloat\t27.79\n"
     );
+
+    run_gen(
+        directory.path(),
+        &[
+            "export",
+            "sample-metadata",
+            "samples.json",
+            "--json",
+            "--keys",
+            "Score",
+        ],
+    );
+    let samples: Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("samples.json"))
+            .expect("should read samples JSON"),
+    )
+    .expect("should parse samples JSON");
+    assert_eq!(
+        samples,
+        json!([
+            {"name": "sample_001", "metadata": {"Score": 90.68}},
+            {"name": "sample_002", "metadata": {"Score": 27.79}}
+        ])
+    );
     run_gen(
         directory.path(),
         &[
@@ -143,6 +168,60 @@ fn test_import_sample_metadata_cli_round_trip_and_validation() {
     let input = "sample_name\tkey\tvalue_type\tvalue\nsample\tboolean\tboolean\tfalse\nsample\tfloat\tfloat\t1.25\nsample\tinteger\tinteger\t42\nsample\ttext\ttext\t\"tabs\tand\nquotes\"\"\"\n";
     fs::write(directory.path().join("input.tsv"), input).expect("should write metadata TSV");
     run_gen(directory.path(), &["import", "metadata", "input.tsv"]);
+    run_gen(
+        directory.path(),
+        &["export", "sample-metadata", "metadata.json", "--json"],
+    );
+    let exported: Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("metadata.json")).expect("should read JSON"),
+    )
+    .expect("should parse JSON");
+    assert_eq!(
+        exported,
+        json!([{"name": "sample", "metadata": {
+            "boolean": false, "float": 1.25, "integer": 42, "text": "tabs\tand\nquotes\""
+        }}])
+    );
+    run_gen(
+        directory.path(),
+        &[
+            "export",
+            "--ref",
+            "HEAD",
+            "sample-metadata",
+            "filtered.json",
+            "--json",
+            "--sample",
+            "sample",
+            "--keys",
+            "boolean,integer",
+        ],
+    );
+    let filtered: Value = serde_json::from_str(
+        &fs::read_to_string(directory.path().join("filtered.json"))
+            .expect("should read filtered JSON"),
+    )
+    .expect("should parse filtered JSON");
+    assert_eq!(
+        filtered,
+        json!([{"name": "sample", "metadata": {"boolean": false, "integer": 42}}])
+    );
+    run_gen(
+        directory.path(),
+        &[
+            "export",
+            "sample-metadata",
+            "empty.json",
+            "--json",
+            "--keys",
+            "missing",
+        ],
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("empty.json")).expect("should read empty JSON"),
+        "[]"
+    );
+
     run_gen(
         directory.path(),
         &["export", "sample-metadata", "output.tsv"],
