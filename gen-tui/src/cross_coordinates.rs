@@ -248,6 +248,13 @@ pub fn assign_cross_coordinates(
             .iter()
             .map(|&node_index| graph[node_index].size.1 as i64)
             .collect(),
+        center_offset: node_indices
+            .iter()
+            .map(|&node_index| {
+                let node = &graph[node_index];
+                node.vertical_anchor.center_offset(node.size.1)
+            })
+            .collect(),
         is_dummy: node_indices
             .iter()
             .map(|&node_index| matches!(graph[node_index].role, NodeRole::Routing))
@@ -288,7 +295,7 @@ pub fn center_layers(
             constraints.push(Constraint {
                 from: pair[0].index(),
                 to: pair[1].index(),
-                gap: base_step(graph[pair[0]].size.1 as i64, graph[pair[1]].size.1 as i64) + 1,
+                gap: graph[pair[0]].vertical_separation(&graph[pair[1]]) + 1,
             });
         }
         let data: Vec<_> = layer.iter().copied().filter(|&node_index| {
@@ -405,6 +412,7 @@ struct CrossGraph {
     column: Vec<i64>,
     order: Vec<i64>,
     height: Vec<i64>,
+    center_offset: Vec<i64>,
     is_dummy: Vec<bool>,
     adjacency: Vec<Vec<usize>>,
     min_gap: i64,
@@ -458,10 +466,11 @@ impl CrossGraph {
         }
     }
 
-    /// Minimum centre-to-centre distance between two nodes consecutive in a layer, `above` over
-    /// `below`, from their real heights plus `min_gap`.
-    fn separation(&self, above: usize, below: usize) -> i64 {
-        base_step(self.height[above], self.height[below]) + self.min_gap
+    /// Minimum attachment-row distance for consecutive nodes in increasing world Y.
+    fn separation(&self, lower: usize, upper: usize) -> i64 {
+        base_step(self.height[lower], self.height[upper]) + self.center_offset[lower]
+            - self.center_offset[upper]
+            + self.min_gap
     }
 
     /// Run the four Brandes–Köpf passes and balance them into one coordinate per node.

@@ -7,7 +7,7 @@ use crate::{
     assembly::AssembledLayout,
     distribute_nodes::GapSizes,
     geometry::{WorldPos, WorldRect},
-    layout::{NodeRole, WindowGeometry},
+    layout::{NodeRole, VerticalAnchor, WindowGeometry},
     plotter::NodeRenderer,
     theme::Theme,
     viewport_state::WorldBuffer,
@@ -48,9 +48,23 @@ impl<G: GraphBase> NodeRenderer<G> for MinimalNodeRenderer {
 pub fn build_window_geometry(
     assembled: AssembledLayout,
     gaps: &GapSizes,
+    size_of: impl FnMut(&NodeRole) -> (u64, u64),
+    is_visible: impl Fn(NodeIndex) -> bool,
+    is_centered: impl Fn(NodeIndex) -> bool,
+) -> WindowGeometry {
+    build_window_geometry_with_anchors(assembled, gaps, size_of, is_visible, is_centered, |_| {
+        VerticalAnchor::Center
+    })
+}
+
+/// Build geometry with a per-node vertical attachment row, shared by layout and rendering.
+pub fn build_window_geometry_with_anchors(
+    assembled: AssembledLayout,
+    gaps: &GapSizes,
     mut size_of: impl FnMut(&NodeRole) -> (u64, u64),
     is_visible: impl Fn(NodeIndex) -> bool,
     is_centered: impl Fn(NodeIndex) -> bool,
+    vertical_anchor: impl Fn(NodeIndex) -> VerticalAnchor,
 ) -> WindowGeometry {
     let mut graph = assembled.graph;
     let mut junctions = HashSet::new();
@@ -58,6 +72,7 @@ pub fn build_window_geometry(
     for node in graph.node_weights_mut() {
         node.size = size_of(&node.role);
         if let NodeRole::Data(domain_index) = node.role {
+            node.vertical_anchor = vertical_anchor(domain_index);
             if !is_visible(domain_index) {
                 junctions.insert(domain_index);
             }
@@ -176,6 +191,37 @@ mod tests {
             match role {
                 NodeRole::Data(_) => (5, 3),
                 _ => (1, 1),
+            }
+        }
+
+        #[test]
+        fn test_top_anchors_survive_routing_and_compaction() {
+            let graph = TestGraphs::domain_extended_diamond();
+            let geometry = build_window_geometry_with_anchors(
+                assembled_window(&graph),
+                &GapSizes::default(),
+                |role| match role {
+                    NodeRole::Data(index) => (5, 2 + index.index() as u64 % 5),
+                    _ => (1, 1),
+                },
+                |_| true,
+                |_| false,
+                |_| VerticalAnchor::Top,
+            );
+            for index in geometry.graph.node_indices() {
+                let node = &geometry.graph[index];
+                if matches!(node.role, NodeRole::Data(_)) {
+                    let rect = node.rect(WorldPos::ZERO);
+                    assert_eq!(node.vertical_anchor, VerticalAnchor::Top);
+                    assert_eq!(rect.max.y, node.pos.y);
+                    assert_eq!(rect.max.y - rect.min.y + 1, node.size.1 as i64);
+                    for neighbor in geometry.graph.neighbors(index) {
+                        assert_eq!(
+                            geometry.graph[neighbor].pos.y, rect.max.y,
+                            "edges must attach horizontally on the top row"
+                        );
+                    }
+                }
             }
         }
 

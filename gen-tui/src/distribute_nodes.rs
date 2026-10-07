@@ -87,6 +87,21 @@ impl Axis {
         }
     }
 
+    fn center_offset(self, node: &LayoutNode) -> i64 {
+        match self {
+            Axis::X => 0,
+            Axis::Y => node.vertical_anchor.center_offset(node.size.1),
+        }
+    }
+
+    fn perp_extent(self, node: &LayoutNode) -> Interval {
+        let offset = match self {
+            Axis::X => node.vertical_anchor.center_offset(node.size.1),
+            Axis::Y => 0,
+        };
+        occupied_extent(self.perp_pos(node) + offset, self.perp_size(node))
+    }
+
     fn perp_size(self, node: &LayoutNode) -> i64 {
         match self {
             Axis::X => node.size.1 as i64,
@@ -124,6 +139,7 @@ struct Obstacle {
     /// Size on the solved axis: the node's real size, or 1 for a wire (an
     /// edge line is one cell thick).
     axis_size: i64,
+    center_offset: i64,
     /// Extent on the perpendicular axis: the node's own occupied extent, or
     /// the wire's own line interval (not the whole segment's span).
     perp: Interval,
@@ -213,18 +229,16 @@ impl GapSizes {
     }
 }
 
-/// Center-to-center minimum for an ordered obstacle pair.
+/// Attachment-point minimum for an ordered obstacle pair.
 fn transform_distance(
     gap_sizer: GapSizer,
     lower_incoming_pos: i64,
-    lower_size: i64,
     upper_incoming_pos: i64,
-    upper_size: i64,
+    base: i64,
 ) -> i64 {
-    let base = base_step(lower_size, upper_size);
     let base_gap = u64::try_from(base).expect("should have a nonnegative base step");
-    let incoming_center_distance = lower_incoming_pos.abs_diff(upper_incoming_pos);
-    let suggested_gap = incoming_center_distance.saturating_sub(base_gap);
+    let incoming_distance = lower_incoming_pos.abs_diff(upper_incoming_pos);
+    let suggested_gap = incoming_distance.saturating_sub(base_gap);
     let transformed_gap = gap_sizer(suggested_gap);
     let transformed_gap =
         i64::try_from(transformed_gap).expect("should fit transformed gap in layout coordinates");
@@ -330,7 +344,8 @@ fn solve_axis(
                 Axis::Y => incoming_pos.1,
             },
             axis_size: axis.size(node),
-            perp: occupied_extent(axis.perp_pos(node), axis.perp_size(node)),
+            center_offset: axis.center_offset(node),
+            perp: axis.perp_extent(node),
             is_data: matches!(node.role, NodeRole::Data(_) | NodeRole::Wormhole(_)),
         });
     }
@@ -347,8 +362,8 @@ fn solve_axis(
         if axis.pos(source) != axis.pos(target) {
             continue;
         }
-        let a = occupied_extent(axis.perp_pos(source), axis.perp_size(source));
-        let b = occupied_extent(axis.perp_pos(target), axis.perp_size(target));
+        let a = axis.perp_extent(source);
+        let b = axis.perp_extent(target);
         let line = Interval {
             start: a.end.min(b.end) + 1,
             end: a.start.max(b.start) - 1,
@@ -364,6 +379,7 @@ fn solve_axis(
                     Axis::Y => incoming_pos.1,
                 },
                 axis_size: 1,
+                center_offset: 0,
                 perp: line,
                 is_data: false,
             });
@@ -468,9 +484,8 @@ fn constraint_distance(gaps: &GapSizes, axis: Axis, lower: &Obstacle, upper: &Ob
     transform_distance(
         gap_sizer,
         lower.incoming_axis_pos,
-        lower.axis_size,
         upper.incoming_axis_pos,
-        upper.axis_size,
+        base_step(lower.axis_size, upper.axis_size) + lower.center_offset - upper.center_offset,
     )
 }
 
@@ -491,9 +506,11 @@ fn snap_wormholes_to_neighbor(
         let distance = transform_distance(
             gaps.data_routing_x,
             incoming_positions[&wormhole_idx].0,
-            Axis::X.size(&graph[wormhole_idx]),
             incoming_positions[&neighbor_idx].0,
-            Axis::X.size(&graph[neighbor_idx]),
+            base_step(
+                Axis::X.size(&graph[wormhole_idx]),
+                Axis::X.size(&graph[neighbor_idx]),
+            ),
         );
         let neighbor_x = graph[neighbor_idx].pos.x;
         let side = if graph[wormhole_idx].pos.x <= neighbor_x {
@@ -565,8 +582,50 @@ fn snap_layers_to_anchor_columns(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
-    use crate::{cross_coordinates::assign_cross_coordinates, geometry::LocalPos};
+    use crate::{
+        cross_coordinates::{assign_cross_coordinates, center_layers},
+        geometry::{LocalPos, WorldPos},
+        layout::VerticalAnchor,
+    };
+
+    #[test]
+    fn test_top_anchors_use_upper_nodes_full_height_for_separation() {
+        for height in [4, 9] {
+            let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+            let lower = graph.add_node(data_node(0, 0, 0, (5, 3), Some(0)));
+            let upper = graph.add_node(data_node(1, 0, 1, (5, height), Some(0)));
+            for node in graph.node_weights_mut() {
+                node.vertical_anchor = VerticalAnchor::Top;
+            }
+            assign_cross_coordinates(&mut graph, 1);
+            assert_eq!(graph[upper].pos.y - graph[lower].pos.y, height as i64 + 1);
+            center_layers(&mut graph, &HashSet::from([NodeIndex::new(0)]));
+            assert_eq!(graph[lower].pos.y, 0);
+            assert_eq!(graph[upper].pos.y, height as i64 + 1);
+            compact_layout(&mut graph, &GapSizes::default());
+            let lower_rect = graph[lower].rect(WorldPos::ZERO);
+            let upper_rect = graph[upper].rect(WorldPos::ZERO);
+            assert_eq!(lower_rect.max.y, graph[lower].pos.y);
+            assert_eq!(upper_rect.max.y, graph[upper].pos.y);
+            assert_eq!(upper_rect.min.y - lower_rect.max.y, 2);
+        }
+    }
+
+    #[test]
+    fn test_top_anchored_annotation_blocks_wire_below_sequence() {
+        let mut graph = StableGraph::<LayoutNode, LayoutEdge, Undirected, u32>::default();
+        let annotated = graph.add_node(data_node(0, 0, 0, (5, 6), Some(0)));
+        graph[annotated].vertical_anchor = VerticalAnchor::Top;
+        let left = graph.add_node(LayoutNode::routing(LocalPos::new_xy(-10, -10), (1, 1)));
+        let right = graph.add_node(LayoutNode::routing(LocalPos::new_xy(10, -10), (1, 1)));
+        graph.add_edge(left, right, edge(0, 1));
+        compact_layout(&mut graph, &GapSizes::default());
+        assert_eq!(graph[left].pos.y, graph[right].pos.y);
+        assert!(graph[left].pos.y < graph[annotated].rect(WorldPos::ZERO).min.y);
+    }
 
     #[test]
     fn test_halves() {

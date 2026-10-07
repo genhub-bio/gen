@@ -1,0 +1,25 @@
+---
+source: src/views/gen_graph_widget.rs
+expression: snapshot
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"    ╭─TAAT─┬─ATG.AA─╮                                                           "
+"    │ [p2> │ [cds3> │                                                           "
+"    │      │        │                                                           "
+"  ╟─┼─AAAA─┼─ATG.AA─┼─╢                                                         "
+"    │ [p1> │ [cds1> │                                                           "
+"    │      │        │                                                           "
+"    ╰─CAAC─┴─ATG.AA─╯                                                           "
+"      [p3>   [cds2>                                                             "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "

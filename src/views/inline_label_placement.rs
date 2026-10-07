@@ -18,11 +18,11 @@ fn truncations(label: &str) -> impl Iterator<Item = String> {
 
         candidates.push(label.to_string());
 
-        // Keep at least 2 body characters before the ellipsis.
+        // Keep at least 2 body characters before the period.
         // TODO: this is char-based, not display-width-based.
         for body_len in (2..full_len).rev() {
             let body: String = chars[..body_len].iter().collect();
-            candidates.push(format!("{body}…"));
+            candidates.push(format!("{body}."));
         }
 
         candidates.into_iter()
@@ -73,7 +73,7 @@ fn nearby_candidates(preferred: (u16, u16), search: Rect, label_width: u16) -> V
 /// 2. centered above the annotation rectangle
 /// 3. nearby positions inside the bounded search rectangle
 ///
-/// The full label is tried first. Shorter ellipsis forms are only tried after
+/// The full label is tried first. Shorter period forms are only tried after
 /// all positions have failed for the current text.
 fn try_draw_label_at(
     buf: &mut Buffer,
@@ -122,7 +122,7 @@ fn try_draw_label_at(
 /// 2. centered above the annotation rectangle
 /// 3. nearby positions inside the bounded search rectangle
 ///
-/// The full label is tried first. Shorter ellipsis forms are only tried after
+/// The full label is tried first. Shorter period forms are only tried after
 /// all positions have failed for the current text.
 pub fn draw_label_near_pos(
     buf: &mut Buffer,

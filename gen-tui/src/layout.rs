@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cross_coordinates::{assign_cross_coordinates, center_layers, orient_centered_bubbles},
-    distribute_nodes::{GapSizes, compact_layout},
+    distribute_nodes::{GapSizes, base_step, compact_layout},
     edge_router::{layout_graph_process::prune_pin_stubs, route_graph::make_rectilinear},
-    geometry::LocalPos,
+    geometry::{LocalPos, WorldPos, WorldRect},
     window_graph::{WindowEdge, WindowGraph, WindowNode},
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -137,22 +137,70 @@ pub enum NodeRole {
     Wormhole(NodeIndex),
 }
 
+/// The row used for vertical alignment and edge attachment. World Y increases upward.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerticalAnchor {
+    /// Center the node around its connection row (the historical layout).
+    #[default]
+    Center,
+    /// Place the top row on the connection row, with all remaining rows below it.
+    Top,
+}
+
+impl VerticalAnchor {
+    /// Offset from the connection row to the discrete rectangle center.
+    pub fn center_offset(self, height: u64) -> i64 {
+        match self {
+            Self::Center => 0,
+            Self::Top => -(height as i64 / 2),
+        }
+    }
+
+    /// The occupied rectangle around an attachment point; X remains centered.
+    pub fn rect(self, position: WorldPos, size: (u64, u64)) -> WorldRect {
+        WorldRect::from_center_and_size(
+            WorldPos::new(position.x, position.y + self.center_offset(size.1)),
+            size,
+        )
+    }
+}
+
 /// Layout graphs contain two types of nodes: nodes that represent the input nodes,
 /// and new nodes that were added to route the edges during layout. The role field
 /// with NodeRole enum indicate which type the node is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutNode {
     pub role: NodeRole,
+    /// Edge attachment point: horizontal center and the selected vertical anchor.
     pub pos: LocalPos,
+    /// The row positioned at `pos.y`; remaining rows follow this anchor.
+    #[serde(default)]
+    pub vertical_anchor: VerticalAnchor,
     pub size: (u64, u64),
     /// Layer information from Sugiyama algorithm. Only valid for Data nodes.
     pub layer: Option<i32>,
 }
 
 impl LayoutNode {
+    /// The occupied rectangle, translated by a world offset.
+    pub fn rect(&self, offset: WorldPos) -> WorldRect {
+        self.vertical_anchor.rect(
+            WorldPos::new(self.pos.x + offset.x, self.pos.y + offset.y),
+            self.size,
+        )
+    }
+
+    /// Minimum distance to the next node in increasing world Y, before any blank rows.
+    pub(crate) fn vertical_separation(&self, next: &Self) -> i64 {
+        base_step(self.size.1 as i64, next.size.1 as i64)
+            + self.vertical_anchor.center_offset(self.size.1)
+            - next.vertical_anchor.center_offset(next.size.1)
+    }
+
     pub fn new(role: NodeRole, pos: LocalPos, size: (u64, u64), layer: Option<i32>) -> Self {
         Self {
             role,
+            vertical_anchor: VerticalAnchor::Center,
             pos,
             size,
             layer,

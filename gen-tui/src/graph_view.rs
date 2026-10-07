@@ -877,15 +877,19 @@ where
             && self.visual.is_visible(&node)
             && let Some(row) = self.visual.cursor_row(&node)
         {
-            let rect =
-                WorldRect::from_center_and_size(WorldPos::ZERO, self.visual.get_node_size(&node));
+            let rect = self
+                .visual
+                .vertical_anchor(&node)
+                .rect(WorldPos::ZERO, self.visual.get_node_size(&node));
             state.cursor.hold_to_row(rect, row);
         }
         if let Some(node) = state.cursor.node
             && let Some(columns) = self.visual.cursor_columns(&node)
         {
-            let rect =
-                WorldRect::from_center_and_size(WorldPos::ZERO, self.visual.get_node_size(&node));
+            let rect = self
+                .visual
+                .vertical_anchor(&node)
+                .rect(WorldPos::ZERO, self.visual.get_node_size(&node));
             state.cursor.hold_to_columns(rect, &columns);
         }
 

@@ -299,8 +299,8 @@ pub(crate) fn make_rectilinear(
                         // Create new Data node in combined graph
                         let pos = LocalPos::new(adjusted_position.into());
                         let role = layout_node.role.clone();
-                        let new_layout_node =
-                            LayoutNode::new(role.clone(), pos, layout_node.size, layout_node.layer);
+                        let mut new_layout_node = layout_node.clone();
+                        new_layout_node.pos = pos;
                         log::debug!(
                             "edge_router: adding new node with role={:?} at position ({}, {})",
                             role,
@@ -326,8 +326,8 @@ pub(crate) fn make_rectilinear(
                         // Create new non-Data node in combined graph
                         let pos = LocalPos::new(adjusted_position.into());
                         let role = layout_node.role.clone();
-                        let new_layout_node =
-                            LayoutNode::new(role.clone(), pos, layout_node.size, layout_node.layer);
+                        let mut new_layout_node = layout_node.clone();
+                        new_layout_node.pos = pos;
                         log::debug!(
                             "edge_router: adding new node with role={:?} at position ({}, {})",
                             role,

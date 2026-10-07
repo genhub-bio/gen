@@ -891,7 +891,8 @@ fn layout_layer_internal(
         let new_position = (right_boundary, node.pos.y);
         // Create layout node with updated x position
         let new_pos = LocalPos::new(new_position.into());
-        let updated_node = LayoutNode::new(node.role.clone(), new_pos, node.size, node.layer);
+        let mut updated_node = node.clone();
+        updated_node.pos = new_pos;
         let node_idx = layer_graph.add_node(updated_node);
         position_to_node_idx.insert(new_position, node_idx);
         right_array_idx_to_node.insert(array_idx, node_idx);

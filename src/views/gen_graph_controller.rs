@@ -45,8 +45,7 @@ use crate::views::{
         self, AnnotationLabels, AnnotationStarts, CenteredPath, FULL_ZOOM_LEVEL,
         MINIMAL_ZOOM_LEVEL, NodeAnnotationLayer, OverlayInputs, SendSyncZoomLevels,
         build_send_sync_annotated_zoom_levels, center_zoom_levels,
-        create_send_sync_annotated_gen_graph_engine_lazy, draw_annotation_connectors,
-        draw_annotation_labels, draw_compact_annotation_connectors, reapply_overlays,
+        create_send_sync_annotated_gen_graph_engine_lazy, draw_annotation_labels, reapply_overlays,
         starting_zoom_level, update_node_annotations,
     },
     graph_database::GraphDatabase,
@@ -135,7 +134,7 @@ pub struct GenGraphController {
     /// The path whose nodes the renderers center on y = 0; see
     /// [`Self::with_centered_current_path`].
     centered_path: CenteredPath,
-    /// Whether opened block groups center on their current path.
+    /// Whether opened block groups align their current path and grow nodes downward (default).
     center_current_path: bool,
     /// Where annotations start and end on each loaded node, for the `w`/`b`/`e` keys. Rebuilt with the
     /// highlights whatever the annotation display, so the stops don't depend on flags being
@@ -171,9 +170,6 @@ pub struct GenGraphController {
     /// against (`None` once the overlays are rebuilt).
     annotation_labels: AnnotationLabels,
     labelled_overlay_inputs: Option<(OverlayInputs, AnnotationDisplay)>,
-    /// The annotation whose pieces are joined by connectors at full detail, e.g. the one a
-    /// notebook's `show()` pointed at. Dropped once no overlay carries it any more.
-    focused_annotation: Option<HashId>,
     /// Colors requested for annotation group annotations by id, applied whenever a batch's
     /// groups are loaded: `Some` pins that color, `None` hides the annotation.
     annotation_color_overrides: HashMap<HashId, Option<Color>>,
@@ -186,8 +182,8 @@ pub struct GenGraphController {
 /// what the other draws, and its own database connection, opened on first use.
 impl Clone for GenGraphController {
     fn clone(&self) -> Self {
-        let node_annotations = NodeAnnotationLayer::new();
         let centered_path = self.centered_path.detached_copy();
+        let node_annotations = NodeAnnotationLayer::with_centered_path(centered_path.clone());
         let zoom_levels = center_zoom_levels(
             build_send_sync_annotated_zoom_levels(
                 self.database.sequence_source(),
@@ -219,7 +215,7 @@ impl Clone for GenGraphController {
             floating_overlays: None,
             annotation_labels: AnnotationLabels::default(),
             labelled_overlay_inputs: None,
-            focused_annotation: self.focused_annotation,
+
             annotation_color_overrides: self.annotation_color_overrides.clone(),
             disabled_annotation_groups: self.disabled_annotation_groups.clone(),
         }
@@ -235,7 +231,8 @@ impl GenGraphController {
             sequence_start: 0,
             sequence_end: 0,
         });
-        let node_annotations = NodeAnnotationLayer::new();
+        let centered_path = CenteredPath::new();
+        let node_annotations = NodeAnnotationLayer::with_centered_path(centered_path.clone());
         let zoom_index = starting_zoom_level(&graph);
         let (engine, zoom_levels, view_state) = create_send_sync_annotated_gen_graph_engine_lazy(
             graph,
@@ -244,7 +241,6 @@ impl GenGraphController {
             node_annotations.clone(),
             zoom_index,
         );
-        let centered_path = CenteredPath::new();
         let zoom_levels = center_zoom_levels(zoom_levels, &centered_path);
         Self {
             database,
@@ -256,7 +252,7 @@ impl GenGraphController {
             dimming: GraphDimming::default(),
             node_annotations,
             centered_path,
-            center_current_path: false,
+            center_current_path: true,
             annotation_starts: AnnotationStarts::default(),
             cursor_raw_before_truncation: None,
             block_group: None,
@@ -270,7 +266,7 @@ impl GenGraphController {
             floating_overlays: None,
             annotation_labels: AnnotationLabels::default(),
             labelled_overlay_inputs: None,
-            focused_annotation: None,
+
             annotation_color_overrides: HashMap::new(),
             disabled_annotation_groups: HashSet::new(),
         }
@@ -299,7 +295,7 @@ impl GenGraphController {
     /// Center the block groups opened from now on on their current path: every graph node the
     /// path runs through is placed at y = 0 (within layers where it is the only such node), so
     /// the reference reads as a straight line. Only the path's own edges are loaded, never the
-    /// block group's.
+    /// block group's. Enabled by default; graphs without a path retain centered node geometry.
     pub fn with_centered_current_path(self, center_current_path: bool) -> Self {
         Self {
             center_current_path,
@@ -345,7 +341,7 @@ impl GenGraphController {
         self.overlays.clear();
         self.node_annotations.replace(HashMap::new());
         self.cursor_raw_before_truncation = None;
-        self.focused_annotation = None;
+
         self.overlays_dirty = true;
         Ok(())
     }
@@ -397,15 +393,6 @@ impl GenGraphController {
     pub fn pin_annotation_color(&mut self, id: HashId, color: Color) {
         self.annotation_colors.pin(id, color);
         self.overlays_dirty = true;
-    }
-
-    /// Join the pieces of annotation `id` with connectors at full or truncated detail.
-    pub fn set_focused_annotation(&mut self, id: Option<HashId>) {
-        self.focused_annotation = id;
-    }
-
-    pub fn focused_annotation(&self) -> Option<HashId> {
-        self.focused_annotation
     }
 
     fn change_zoom(&mut self, mut index: usize) {
@@ -937,14 +924,6 @@ impl GenGraphController {
             annotation_display,
         );
         if self.overlays_dirty || self.applied_overlay_inputs != Some(overlay_inputs) {
-            if let Some(focused) = self.focused_annotation
-                && !self
-                    .overlays
-                    .iter()
-                    .any(|overlay| overlay.span().is_some_and(|span| span.id == focused))
-            {
-                self.focused_annotation = None;
-            }
             reapply_overlays(
                 &self.engine,
                 &mut self.view_state,
@@ -992,24 +971,6 @@ impl GenGraphController {
                     .with_compact_layout(self.node_annotations.clone());
             self.labelled_overlay_inputs = Some(label_inputs);
         }
-        if flags_drawn {
-            draw_annotation_connectors(
-                buf,
-                area,
-                &self.view_state.frame,
-                &self.node_annotations,
-                self.focused_annotation,
-            );
-        }
-        if detail_level == VisualDetail::Truncated {
-            draw_compact_annotation_connectors(
-                buf,
-                area,
-                &self.view_state.frame,
-                &self.node_annotations,
-                self.focused_annotation,
-            );
-        }
         draw_annotation_labels(buf, area, &self.view_state, &self.annotation_labels);
     }
 
@@ -1039,6 +1000,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use gen_core::Workspace;
     use gen_models::{db::get_connection, path::Path};
+    use gen_tui::VerticalAnchor;
     use ratatui::{Terminal, backend::TestBackend, style::Style};
 
     use super::{AnnotationDisplay, GenGraphController, GraphKeyOutcome};
@@ -1066,6 +1028,65 @@ mod tests {
     fn test_controller_can_be_held_by_the_python_and_r_widgets() {
         fn assert_owned_and_shareable<T: Send + Sync + 'static>() {}
         assert_owned_and_shareable::<GenGraphController>();
+    }
+
+    #[test]
+    fn test_layout_defaults_follow_path_availability() {
+        let directory = tempfile::tempdir().expect("should create a temporary directory");
+        let database_path = directory.path().join("graph.db");
+        let (block_group_id, edge_ids) =
+            setup_labelled_chain_block_group(&database_path, &["x", "y"]);
+        let connection = get_connection(&database_path).expect("should connect to the database");
+        let workspace = Workspace::from_current_dir();
+        let mut controller = GenGraphController::for_block_group(
+            GraphDatabase::for_connection(&connection, &workspace)
+                .expect("should open the graph database"),
+            &block_group_id,
+            None,
+        )
+        .expect("should load the block group");
+        let node = controller
+            .engine
+            .graph()
+            .nodes()
+            .next()
+            .expect("should have a graph node");
+        assert_eq!(
+            controller.zoom_levels[FULL_ZOOM_LEVEL]
+                .1
+                .vertical_anchor(&node),
+            VerticalAnchor::Center
+        );
+        Path::create(&connection, "chain", &block_group_id, &edge_ids)
+            .expect("should create a path");
+        controller
+            .open_block_group(&block_group_id)
+            .expect("should reopen the graph");
+        assert_eq!(
+            controller.zoom_levels[FULL_ZOOM_LEVEL]
+                .1
+                .vertical_anchor(&node),
+            VerticalAnchor::Top
+        );
+        let cloned = controller.clone();
+        assert_eq!(
+            cloned.zoom_levels[FULL_ZOOM_LEVEL].1.vertical_anchor(&node),
+            VerticalAnchor::Top
+        );
+        controller = controller.with_centered_current_path(false);
+        controller
+            .open_block_group(&block_group_id)
+            .expect("should reopen with symmetric layout");
+        assert_eq!(
+            controller.zoom_levels[FULL_ZOOM_LEVEL]
+                .1
+                .vertical_anchor(&node),
+            VerticalAnchor::Center
+        );
+        assert_eq!(
+            cloned.zoom_levels[FULL_ZOOM_LEVEL].1.vertical_anchor(&node),
+            VerticalAnchor::Top
+        );
     }
 
     #[test]
@@ -1372,6 +1393,55 @@ mod tests {
             controller.overlays_mut().clear();
             draw(&mut controller, &mut terminal, display);
             assert_eq!(controller.detail_level(), VisualDetail::Full);
+        }
+
+        #[test]
+        fn test_known_path_keeps_sequence_cursor_on_top_when_zooming() {
+            let directory = tempfile::tempdir().expect("should create temporary directory");
+            let database_path = directory.path().join("graph.db");
+            let (block_group_id, edge_ids) =
+                setup_labelled_chain_block_group(&database_path, &["x", "y", "z"]);
+            let connection =
+                get_connection(&database_path).expect("should connect to the database");
+            Path::create(&connection, "chain", &block_group_id, &edge_ids)
+                .expect("should create the reference path");
+            let workspace = Workspace::from_current_dir();
+            let mut terminal =
+                Terminal::new(TestBackend::new(60, 15)).expect("should create a terminal");
+            let display = AnnotationDisplay::FlagsUnderNodes;
+            let mut controller = full_detail_chain(
+                &connection,
+                &workspace,
+                &block_group_id,
+                &mut terminal,
+                display,
+            );
+            let chain = active_chain(&controller);
+            annotate(&mut controller, &chain[..3]);
+            controller.view_state_mut().go_to_node(chain[1], (0.5, 0.0));
+            for compact in [false, true, false] {
+                if compact {
+                    controller.zoom_out();
+                } else {
+                    controller.zoom_in();
+                }
+                draw(&mut controller, &mut terminal, display);
+                let (rect, row) = cursor_rect_and_row(&controller);
+                assert!(
+                    rect.height() > 0,
+                    "should retain annotation rows below the sequence"
+                );
+                assert_eq!(row, rect.max.y, "cursor must stay on the top sequence row");
+                let node = controller
+                    .view_state()
+                    .cursor
+                    .node
+                    .expect("should have cursor node");
+                let renderer = &controller.zoom_levels()[controller.view_state().zoom_index].1;
+                assert_eq!(renderer.vertical_anchor(&node), VerticalAnchor::Top);
+                let content = renderer.content_rect(&node);
+                assert_eq!(rect.min.y + content.max.y, row);
+            }
         }
 
         #[test]

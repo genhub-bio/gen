@@ -15,9 +15,9 @@ use crate::{
     assembly::AssembledLayout,
     distribute_nodes::GapSizes,
     frame_index::{FrameIndex, PlacedNode},
-    geometry::{LocalPos, WorldPos, WorldRect, floor_half},
-    graph_widget::build_window_geometry,
-    layout::{NodeRole, WindowGeometry},
+    geometry::{WorldPos, WorldRect, floor_half},
+    graph_widget::build_window_geometry_with_anchors,
+    layout::{LayoutNode, NodeRole, WindowGeometry},
     plotter::{
         CellHighlight, NodeRenderer, PathStyle, PlotDecorations,
         plot_viewport_graph_with_highlights,
@@ -222,7 +222,7 @@ impl WindowScene {
         let is_visible = |node_index: NodeIndex| {
             visual.is_visible(&<G as NodeIndexable>::from_index(graph, node_index.index()))
         };
-        let geometry = build_window_geometry(
+        let geometry = build_window_geometry_with_anchors(
             window,
             gaps,
             |role| match role {
@@ -235,6 +235,9 @@ impl WindowScene {
             is_visible,
             |node_index| {
                 visual.is_centered(&<G as NodeIndexable>::from_index(graph, node_index.index()))
+            },
+            |node_index| {
+                visual.vertical_anchor(&<G as NodeIndexable>::from_index(graph, node_index.index()))
             },
         );
         let viewport_graph = ViewportGraph::from_window_geometry(&geometry, &backward_edges);
@@ -291,25 +294,19 @@ impl WindowScene {
         G: GraphBase + NodeIndexable,
     {
         let node_index = NodeIndex::new(<G as NodeIndexable>::to_index(graph, node));
-        let (pos, size) = data_node_placement(&self.geometry, node_index)?;
-        let local = WorldRect::from_center_and_size(pos.point(), size).point_at_fraction(fraction);
+        let node = data_node_placement(&self.geometry, node_index)?;
+        let local = node.rect(WorldPos::ZERO).point_at_fraction(fraction);
         let offset = anchor_offset(&self.geometry, graph, camera);
         Some(WorldPos::new(local.x + offset.x, local.y + offset.y))
     }
 }
 
 /// The local position and size `geometry` gives the data node for `node_index`.
-fn data_node_placement(
-    geometry: &WindowGeometry,
-    node_index: NodeIndex,
-) -> Option<(LocalPos, (u64, u64))> {
+fn data_node_placement(geometry: &WindowGeometry, node_index: NodeIndex) -> Option<&LayoutNode> {
     geometry
         .graph
         .node_weights()
-        .find_map(|node| match node.role {
-            NodeRole::Data(data_index) if data_index == node_index => Some((node.pos, node.size)),
-            _ => None,
-        })
+        .find(|node| matches!(node.role, NodeRole::Data(data_index) if data_index == node_index))
 }
 
 /// The translation from `geometry`'s local coordinate space to screen space such that the
@@ -324,15 +321,12 @@ where
     let anchor_layout = data_node_placement(geometry, anchor_node_index);
 
     // An invisible anchor was placed as the routing node its edges meet at.
-    let Some((pos, size)) = anchor_layout.or_else(|| {
-        geometry
-            .junction_node(anchor_node_index)
-            .map(|node| (node.pos, node.size))
-    }) else {
+    let Some(node) = anchor_layout.or_else(|| geometry.junction_node(anchor_node_index)) else {
         return WorldPos::ZERO;
     };
 
-    let anchor_point = WorldRect::from_center_and_size(pos.point(), size)
+    let anchor_point = node
+        .rect(WorldPos::ZERO)
         .point_at_fraction(camera.anchor_fraction);
 
     WorldPos::new(
@@ -543,8 +537,7 @@ where
                 return None;
             };
             let node_id = <G as NodeIndexable>::from_index(graph, node_index.index());
-            let center = WorldPos::new(node.pos.x + offset.x, node.pos.y + offset.y);
-            let rect = WorldRect::from_center_and_size(center, node.size);
+            let rect = node.rect(offset);
             Some(PlacedNode {
                 id: node_id,
                 rect,
@@ -607,8 +600,7 @@ where
                 .find_map(|edge| edge.weight().bundle.first().map(|&(boundary, _)| boundary))?;
             let boundary_id = <G as NodeIndexable>::from_index(graph, boundary_index.index());
             let target_id = <G as NodeIndexable>::from_index(graph, target_index.index());
-            let center = WorldPos::new(placed.pos.x + offset.x, placed.pos.y + offset.y);
-            let rect = WorldRect::from_center_and_size(center, placed.size);
+            let rect = placed.rect(offset);
             Some((rect, boundary_id, target_id))
         })
         .collect()
