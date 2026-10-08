@@ -48,7 +48,7 @@ class EditingTestCase(unittest.TestCase):
         )
         try:
             next(graph for graph in copy if graph.name == sequence_graph.name).delete(
-                locus
+                locus, keep_reference_path=True
             )
         except ValueError:
             return False
@@ -564,9 +564,8 @@ class LibraryGraphEditingTests(EditingTestCase):
         self.assertEqual(self.path_count(), 1)
         self.assertFalse(self.is_editable(self.graph, self.alternative))
 
-    @unittest.skip("Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands.")
     def test_stacked_replace_leaves_every_alternative_live(self):
-        self.graph.replace(self.alternative, "GGGGGG", stack=True)
+        self.graph.replace(self.alternative, "GGGGGG", stack=True, keep_reference_path=True)
 
         self.assertTrue(self.contains(self.graph, self.LEFT + "GGGGGG" + self.RIGHT))
         self.assertTrue(self.contains(self.graph, self.LEFT + self.FIRST + self.RIGHT))
@@ -597,9 +596,8 @@ class GfaMotifEditingTests(EditingTestCase):
 
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDxxIJKL", "ABEFxxIJKL"])
 
-    @unittest.skip("Needs Path::validate_ordered_edges to accept edges that meet at the same coordinate; that relaxation is a separate PR. Re-enable when it lands.")
     def test_substituting_the_first_base_of_a_node_changes_every_route_into_it(self):
-        self.graph.replace(self.nodes["E"].slice(0, 1), "x")
+        self.graph.replace(self.nodes["E"].slice(0, 1), "x", keep_reference_path=True)
 
         self.assertEqual(self.sequences(), ["ABCDGHKL", "ABCDxJKL", "ABEFxJKL"])
 
@@ -647,6 +645,38 @@ class GfaMotifDuplicatedNodeTests(EditingTestCase):
             self.sequences(graph),
             ["ABCDGGIJKL", "ABCDGHKL", "ABCDxyKL", "ABEFIJKL"],
         )
+
+
+class KeepReferencePathTests(EditingTestCase):
+    """``keep_reference_path=True`` edits the routes but leaves the current path as it was."""
+
+    def setUp(self):
+        super().setUp()
+        self.graph = self.repository.import_sequence("AAAACCCCGGGG", name="v", sample="p")
+        self.graph.delete("v:4-8")
+
+    def sequences(self):
+        return sorted({str(sequence) for sequence in self.graph.all_sequences()})
+
+    def test_an_edit_next_to_an_earlier_deletion_is_refused_by_default(self):
+        with self.assertRaisesRegex(RuntimeError, "is not after"):
+            self.graph.delete("v:4-6")
+        self.assertEqual(self.sequences(), ["AAAAGGGG"])
+
+    def test_keep_reference_path_edits_the_routes_and_not_the_path(self):
+        self.graph.delete("v:4-6", keep_reference_path=True)
+
+        self.assertEqual(self.sequences(), ["AAAAGG"])
+        self.assertEqual(self.export_sequence(self.graph), "AAAAGGGG")
+
+    def test_keep_reference_path_on_an_edit_that_worked_leaves_the_path_alone(self):
+        graph = self.repository.import_sequence("AAAACCCCGGGG", name="w", sample="q")
+        graph.replace("w:4-8", "TT", keep_reference_path=True)
+
+        self.assertEqual(
+            sorted({str(sequence) for sequence in graph.all_sequences()}), ["AAAATTGGGG"]
+        )
+        self.assertEqual(self.export_sequence(graph), "AAAACCCCGGGG")
 
 
 if __name__ == "__main__":

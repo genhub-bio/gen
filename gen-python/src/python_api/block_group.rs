@@ -44,7 +44,9 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use super::{
     annotation::PyAnnotation,
-    editing::{EditKind, EditRequest, InsertSite, edit_sequence_graph, insert_at_positions},
+    editing::{
+        EditKind, EditMode, EditRequest, InsertSite, edit_sequence_graph, insert_at_positions,
+    },
     graph_node::PyGraphNode,
     graph_read::{current_graph, locus_from_region, shortest_route},
     graph_search::PyGraphLocus,
@@ -1264,7 +1266,13 @@ impl PySequenceGraph {
     ///     alongside it (default ``False``). A stacked replacement never
     ///     becomes the reference route: the sequence graph's current Path is
     ///     left exactly as it was, even when the target lies on it.
-    #[pyo3(signature = (target, sequence, message=None, stack=false))]
+    /// keep_reference_path : bool, optional
+    ///     Write the edit's routes but leave the sequence graph's current Path as it was
+    ///     (default ``False``). Use it when the edit raises ``Invalid path ... is not after
+    ///     ...`` because it sits right next to an earlier edit. The graph's routes are still
+    ///     edited, so ``all_sequences()`` shows the change, but ``export_fasta()`` and the
+    ///     current Path keep their sequence from before the edit.
+    #[pyo3(signature = (target, sequence, message=None, stack=false, keep_reference_path=false))]
     fn replace(
         &self,
         #[gen_stub(override_type(type_repr = "str | Locus | Annotation", imports = ()))]
@@ -1272,12 +1280,16 @@ impl PySequenceGraph {
         sequence: &str,
         message: Option<&str>,
         stack: bool,
+        keep_reference_path: bool,
     ) -> PyResult<PyGraphLocus> {
         let request = EditRequest {
             kind: EditKind::Replace,
             sequence,
             message,
-            stack,
+            mode: EditMode {
+                stack,
+                keep_reference_path,
+            },
         };
         edit_sequence_graph(self, target, &request).map(|locus| {
             PyGraphLocus::with_context(
@@ -1306,19 +1318,29 @@ impl PySequenceGraph {
     ///     A stacked deletion never becomes the reference route: the
     ///     sequence graph's current Path is left exactly as it was, even
     ///     when the target lies on it.
-    #[pyo3(signature = (target, message=None, stack=false))]
+    /// keep_reference_path : bool, optional
+    ///     Write the edit's routes but leave the sequence graph's current Path as it was
+    ///     (default ``False``). Use it when the edit raises ``Invalid path ... is not after
+    ///     ...`` because it sits right next to an earlier edit. The graph's routes are still
+    ///     edited, so ``all_sequences()`` shows the change, but ``export_fasta()`` and the
+    ///     current Path keep their sequence from before the edit.
+    #[pyo3(signature = (target, message=None, stack=false, keep_reference_path=false))]
     fn delete(
         &self,
         #[gen_stub(override_type(type_repr = "str | Locus | Annotation", imports = ()))]
         target: &Bound<'_, PyAny>,
         message: Option<&str>,
         stack: bool,
+        keep_reference_path: bool,
     ) -> PyResult<()> {
         let request = EditRequest {
             kind: EditKind::Delete,
             sequence: "",
             message,
-            stack,
+            mode: EditMode {
+                stack,
+                keep_reference_path,
+            },
         };
         edit_sequence_graph(self, target, &request).map(|_| ())
     }
@@ -1364,9 +1386,15 @@ impl PySequenceGraph {
     /// stack : bool, optional
     ///     Add the insertion alongside the existing routes instead of retiring the connections
     ///     it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
+    /// keep_reference_path : bool, optional
+    ///     Write the edit's routes but leave the sequence graph's current Path as it was
+    ///     (default ``False``). Use it when the edit raises ``Invalid path ... is not after
+    ///     ...`` because it sits right next to an earlier edit. The graph's routes are still
+    ///     edited, so ``all_sequences()`` shows the change, but ``export_fasta()`` and the
+    ///     current Path keep their sequence from before the edit.
     /// message : str, optional
     ///     Commit message for the recorded operation.
-    #[pyo3(signature = (sequence, *, before=None, after=None, message=None, stack=false))]
+    #[pyo3(signature = (sequence, *, before=None, after=None, message=None, stack=false, keep_reference_path=false))]
     fn insert(
         &self,
         sequence: &str,
@@ -1376,7 +1404,12 @@ impl PySequenceGraph {
         after: Option<&Bound<'_, PyAny>>,
         message: Option<&str>,
         stack: bool,
+        keep_reference_path: bool,
     ) -> PyResult<PyGraphLocus> {
+        let mode = EditMode {
+            stack,
+            keep_reference_path,
+        };
         let before = before.map(positions_of).transpose()?;
         let after = after.map(positions_of).transpose()?;
         let site = match (&after, &before) {
@@ -1395,7 +1428,7 @@ impl PySequenceGraph {
                 ));
             }
         };
-        insert_at_positions(self, &site, sequence, message, stack).map(|locus| {
+        insert_at_positions(self, &site, sequence, message, mode).map(|locus| {
             PyGraphLocus::with_context(locus, self.context.clone()).attached_to(Some(self.clone()))
         })
     }

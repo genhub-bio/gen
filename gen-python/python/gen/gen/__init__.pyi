@@ -1376,6 +1376,7 @@ class SequenceGraph:
         sequence: builtins.str,
         message: typing.Optional[builtins.str] = None,
         stack: builtins.bool = False,
+        keep_reference_path: builtins.bool = False,
     ) -> Locus:
         r"""
         Replace the sequence covered by ``target`` with ``sequence``.
@@ -1394,12 +1395,19 @@ class SequenceGraph:
             alongside it (default ``False``). A stacked replacement never
             becomes the reference route: the sequence graph's current Path is
             left exactly as it was, even when the target lies on it.
+        keep_reference_path : bool, optional
+            Write the edit's routes but leave the sequence graph's current Path as it was
+            (default ``False``). Use it when the edit raises ``Invalid path ... is not after
+            ...`` because it sits right next to an earlier edit. The graph's routes are still
+            edited, so ``all_sequences()`` shows the change, but ``export_fasta()`` and the
+            current Path keep their sequence from before the edit.
         """
     def delete(
         self,
         target: str | Locus | Annotation,
         message: typing.Optional[builtins.str] = None,
         stack: builtins.bool = False,
+        keep_reference_path: builtins.bool = False,
     ) -> None:
         r"""
         Delete the sequence covered by ``target``.
@@ -1420,6 +1428,12 @@ class SequenceGraph:
             A stacked deletion never becomes the reference route: the
             sequence graph's current Path is left exactly as it was, even
             when the target lies on it.
+        keep_reference_path : bool, optional
+            Write the edit's routes but leave the sequence graph's current Path as it was
+            (default ``False``). Use it when the edit raises ``Invalid path ... is not after
+            ...`` because it sits right next to an earlier edit. The graph's routes are still
+            edited, so ``all_sequences()`` shows the change, but ``export_fasta()`` and the
+            current Path keep their sequence from before the edit.
         """
     def insert(
         self,
@@ -1429,6 +1443,7 @@ class SequenceGraph:
         after: Position | SuperPosition | None = None,
         message: typing.Optional[builtins.str] = None,
         stack: builtins.bool = False,
+        keep_reference_path: builtins.bool = False,
     ) -> Locus:
         r"""
         Insert ``sequence`` next to a position.
@@ -1472,6 +1487,12 @@ class SequenceGraph:
         stack : bool, optional
             Add the insertion alongside the existing routes instead of retiring the connections
             it lands on (default ``False``). A stacked insertion leaves the current Path as it was.
+        keep_reference_path : bool, optional
+            Write the edit's routes but leave the sequence graph's current Path as it was
+            (default ``False``). Use it when the edit raises ``Invalid path ... is not after
+            ...`` because it sits right next to an earlier edit. The graph's routes are still
+            edited, so ``all_sequences()`` shows the change, but ``export_fasta()`` and the
+            current Path keep their sequence from before the edit.
         message : str, optional
             Commit message for the recorded operation.
         """

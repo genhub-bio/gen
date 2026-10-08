@@ -77,6 +77,9 @@ graph.export_fasta("design.fa")                             # files.md (whole sa
   applies to every route through its coordinates. Inserting before the first or after the last
   base of a stacked edit's original sequence raises `ValueError`, since the alternative shares
   those points; insert inside it or at the alternative's ends.
+- `keep_reference_path=True` edits the routes without updating the current path. Use it when an
+  edit next to an earlier edit raises `Invalid path ... is not after ...`; default FASTA then
+  keeps the pre-edit sequence, so read `all_sequences()`.
 - Graph-level exports cover the **whole sample**, not only that graph.
 - Mutating calls record operations themselves; there is no transaction API. `repo.get_operations()`
   is the audit trail.
