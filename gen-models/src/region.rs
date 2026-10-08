@@ -334,25 +334,16 @@ fn resolve_target(
     region: &Region,
     target: RegionTarget,
 ) -> Result<ResolvedGenRegion, GenRegionError> {
-    let (start, end) = match (region.start, region.end) {
-        (None, None) => (target.anchor_start, target.anchor_end),
-        (Some(start), None) => {
-            if target.kind == RegionTargetKind::Path || target.kind == RegionTargetKind::BlockGroup
-            {
-                (start, target.feature_length)
-            } else {
-                (target.anchor_start + start, target.anchor_end)
-            }
+    let (start, end) = match target.kind {
+        RegionTargetKind::Annotation | RegionTargetKind::Accession => {
+            region.resolve_relative_bounds(target.anchor_start, target.anchor_end)?
         }
-        (Some(start), Some(end)) => {
-            if target.kind == RegionTargetKind::Path || target.kind == RegionTargetKind::BlockGroup
-            {
-                (start, end)
-            } else {
-                (target.anchor_start + start, target.anchor_start + end)
-            }
-        }
-        (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
+        RegionTargetKind::Path | RegionTargetKind::BlockGroup => match (region.start, region.end) {
+            (None, None) => (target.anchor_start, target.anchor_end),
+            (Some(start), None) => (start, target.feature_length),
+            (Some(start), Some(end)) => (start, end),
+            (None, Some(_)) => return Err(RegionParseError::InvalidSyntax.into()),
+        },
     };
 
     let out_of_bounds = match target.kind {

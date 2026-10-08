@@ -1,9 +1,8 @@
 //! GFF parsing and translation adapters.
 //!
-//! The caller selects the source and opens it.  These functions only match records from that
-//! already-selected source, build the existing annotation value, and hand matched records to the
-//! established graph translator.  The record-based entry points are the seam for a future indexed
-//! lookup that can supply matches without scanning the source here.
+//! The source of the GFF file comes from the caller, this file works off a readable input.
+//! The readers here carry out parsing that input, matching identifiers, and returning an
+//! Annotation object for use downstream.
 
 use std::{
     io::{BufRead, Cursor, Read},

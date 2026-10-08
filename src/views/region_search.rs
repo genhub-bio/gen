@@ -1,7 +1,10 @@
 #[cfg(test)]
 use std::path::PathBuf;
 
-use gen_core::{HashId, Strand, Workspace, region::Region};
+use gen_core::{
+    HashId, Strand, Workspace,
+    region::{Region, normalize_user_search_region},
+};
 use gen_graph::GenGraph;
 #[cfg(test)]
 use gen_models::db::DbContext;
@@ -54,26 +57,12 @@ fn resolved_match_label(query: &str, kind: ResolvedRegionKind) -> String {
     format!("{query} ({source})")
 }
 
-fn translate_user_region(region: &Region) -> Region {
-    Region {
-        name: region.name.clone(),
-        start: region.start.map(|coordinate| {
-            if coordinate > 0 {
-                coordinate - 1
-            } else {
-                coordinate
-            }
-        }),
-        end: region.end,
-    }
-}
-
 pub(super) fn resolve_region_search_matches(
     request: &RegionSearchRequest<'_>,
     query: &str,
 ) -> Result<Vec<RegionSearchMatch>, String> {
     let user_region = Region::parse(query).map_err(|error| error.to_string())?;
-    let region = translate_user_region(&user_region);
+    let region = normalize_user_search_region(&user_region);
     let resolved_regions = match gen_models::region::resolve_all(
         &region,
         request.conn,
@@ -263,7 +252,7 @@ pub(super) fn search_request_fixture() -> RegionSearchFixture {
 
 #[cfg(test)]
 mod tests {
-    use gen_core::region::Region;
+    use gen_core::region::{Region, normalize_user_search_region};
     use gen_graph::GenGraph;
     use gen_tui::plotter::PathStyle;
     use petgraph::visit::NodeIndexable;
@@ -271,7 +260,7 @@ mod tests {
 
     use super::{
         RegionSearchFixture, RegionSearchMatch, activate_search_match, remove_search_overlay,
-        resolve_region_search_matches, search_request_fixture, translate_user_region,
+        resolve_region_search_matches, search_request_fixture,
     };
     use crate::views::{
         annotation_track::{AnnotationSpan, annotation_span_from_resolved_region},
@@ -398,6 +387,10 @@ mod tests {
         ));
 
         let negative_match = match_for_query(&request, "model-gene:-3");
+        assert_eq!(
+            (negative_match.region.start, negative_match.region.end),
+            (-3, -3)
+        );
         let mut negative_controller = create_gen_graph_controller(request.graph.clone());
         let mut negative_overlays = Vec::new();
         activate_search_match(
@@ -417,9 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn test_user_region_coordinates_translate_to_zero_based_half_open() {
+    fn test_user_region_coordinates_normalize_to_zero_based_half_open() {
         assert_eq!(
-            translate_user_region(&Region::parse("foo:5-10").expect("should parse range")),
+            normalize_user_search_region(&Region::parse("foo:5-10").expect("should parse range")),
             Region {
                 name: "foo".to_string(),
                 start: Some(4),
@@ -427,7 +420,9 @@ mod tests {
             }
         );
         assert_eq!(
-            translate_user_region(&Region::parse("foo:5-5").expect("should parse single base")),
+            normalize_user_search_region(
+                &Region::parse("foo:5-5").expect("should parse single base")
+            ),
             Region {
                 name: "foo".to_string(),
                 start: Some(4),
@@ -435,7 +430,7 @@ mod tests {
             }
         );
         assert_eq!(
-            translate_user_region(&Region::parse("foo:5").expect("should parse point")),
+            normalize_user_search_region(&Region::parse("foo:5").expect("should parse point")),
             Region {
                 name: "foo".to_string(),
                 start: Some(4),
@@ -443,7 +438,9 @@ mod tests {
             }
         );
         assert_eq!(
-            translate_user_region(&Region::parse("foo:5..").expect("should parse open range")),
+            normalize_user_search_region(
+                &Region::parse("foo:5..").expect("should parse open range")
+            ),
             Region {
                 name: "foo".to_string(),
                 start: Some(4),
@@ -451,7 +448,7 @@ mod tests {
             }
         );
         assert_eq!(
-            translate_user_region(&Region::parse("foo").expect("should parse name")),
+            normalize_user_search_region(&Region::parse("foo").expect("should parse name")),
             Region {
                 name: "foo".to_string(),
                 start: None,
@@ -459,7 +456,7 @@ mod tests {
             }
         );
         assert_eq!(
-            translate_user_region(&Region::parse("foo:0").expect("should parse zero")),
+            normalize_user_search_region(&Region::parse("foo:0").expect("should parse zero")),
             Region {
                 name: "foo".to_string(),
                 start: Some(0),
@@ -467,7 +464,9 @@ mod tests {
             }
         );
         assert_eq!(
-            translate_user_region(&Region::parse("foo:0-5").expect("should parse mixed range")),
+            normalize_user_search_region(
+                &Region::parse("foo:0-5").expect("should parse mixed range")
+            ),
             Region {
                 name: "foo".to_string(),
                 start: Some(0),
@@ -475,7 +474,7 @@ mod tests {
             }
         );
         assert_eq!(
-            translate_user_region(
+            normalize_user_search_region(
                 &Region::parse("foo:-5--1").expect("should parse negative range")
             ),
             Region {

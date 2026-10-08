@@ -1689,8 +1689,8 @@ mod tests {
             &fixtures.join("simple.fa").to_str().unwrap().to_string(),
             &collection,
             Sample::DEFAULT_NAME,
-            false,
-            &[],
+            None,
+            None,
         )
         .unwrap();
         update_with_vcf(

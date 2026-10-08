@@ -1,8 +1,8 @@
 //! BED parsing and translation adapters.
 //!
-//! Source selection remains with the caller. Reader functions perform only identifier matching;
-//! record-based functions accept records already selected by an upstream provider so an indexed
-//! lookup can replace a scan without changing annotation construction or translation.
+//! The source of the BED file comes from the caller, this file works off a readable input.
+//! The readers here carry out parsing that input, matching identifiers, and returning an
+//! Annotation object for use downstream.
 
 use std::{
     io::{Cursor, Read},
