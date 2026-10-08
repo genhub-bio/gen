@@ -1,9 +1,12 @@
+use gen_models::db::DbContext;
 use pyo3::{exceptions::PyIndexError, prelude::*};
 
 use crate::python_api::{
     block_group::PySequenceGraph,
     jupyter_widget::{PyGraphController, build_widget},
 };
+
+mod metadata;
 
 /// The sequence graphs produced by a single import/update/derive call, all
 /// within one sample.
@@ -19,6 +22,7 @@ pub struct PySample {
     pub sample_name: String,
     #[pyo3(get)]
     pub block_groups: Vec<PySequenceGraph>,
+    pub(crate) context: DbContext,
 }
 
 impl PySample {
@@ -26,11 +30,13 @@ impl PySample {
         collection_name: String,
         sample_name: String,
         block_groups: Vec<PySequenceGraph>,
+        context: DbContext,
     ) -> Self {
         PySample {
             collection_name,
             sample_name,
             block_groups,
+            context,
         }
     }
 }

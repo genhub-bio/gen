@@ -9,16 +9,8 @@ use pyo3::{
     types::{PyBool, PyDict, PyFloat, PyInt, PyString},
 };
 
-use super::{PyRepository, run_operation_write};
-use crate::python_api::sample::PySample;
-
-fn sample_name(sample: &Bound<'_, PyAny>) -> PyResult<String> {
-    if let Ok(sample) = sample.extract::<PyRef<'_, PySample>>() {
-        Ok(sample.sample_name.clone())
-    } else {
-        sample.extract::<String>()
-    }
-}
+use super::PySample;
+use crate::python_api::repository::run_context_operation_write;
 
 fn metadata_value(value: &Bound<'_, PyAny>) -> PyResult<MetadataValue> {
     if value.is_instance_of::<PyString>() {
@@ -42,7 +34,7 @@ fn metadata_value(value: &Bound<'_, PyAny>) -> PyResult<MetadataValue> {
     }
 }
 
-impl PyRepository {
+impl PySample {
     fn sample_metadata(&self, sample_name: &str) -> PyResult<Vec<SampleMetadata>> {
         let connection = self.context.graph().conn();
         if Sample::select(connection)
@@ -63,19 +55,15 @@ impl PyRepository {
 }
 
 #[pymethods]
-impl PyRepository {
-    /// Add metadata to a Sample or its string ID (sample_name).
+impl PySample {
+    /// Add metadata to this sample.
     ///
     /// Keys must be strings; values must be strings, signed 64-bit integers,
     /// finite floats, or booleans. Existing keys are updated and other keys are preserved.
     /// The entire dictionary is validated before any values are written.
-    fn add_sample_metadata(
-        &self,
-        sample: &Bound<'_, PyAny>,
-        metadata: &Bound<'_, PyDict>,
-    ) -> PyResult<()> {
-        let sample_name = sample_name(sample)?;
-        let existing = self.sample_metadata(&sample_name)?;
+    fn add_metadata(&self, metadata: &Bound<'_, PyDict>) -> PyResult<()> {
+        let sample_name = &self.sample_name;
+        let existing = self.sample_metadata(sample_name)?;
         let values = metadata
             .iter()
             .map(|(key, value)| Ok((key.extract::<String>()?, metadata_value(&value)?)))
@@ -90,11 +78,11 @@ impl PyRepository {
 
         // Use the same transaction and history workflow as sequence updates so
         // metadata follows the sample through branch checkout and reset.
-        run_operation_write(
-            self,
+        run_context_operation_write(
+            &self.context,
             |context| {
                 for (key, value) in &values {
-                    SampleMetadata::upsert(context.graph().conn(), &sample_name, key, value)
+                    SampleMetadata::upsert(context.graph().conn(), sample_name, key, value)
                         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
                 }
                 Ok((
@@ -112,13 +100,14 @@ impl PyRepository {
         )
     }
 
-    /// Return a metadata dictionary for a Sample or its string ID (sample_name).
+    /// Return a fresh metadata dictionary for this sample.
     ///
     /// Values retain their string, integer, float, or boolean types. A sample without
     /// metadata returns an empty dictionary; an unknown sample raises ValueError.
-    fn get_sample_metadata<'py>(&self, sample: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
-        let metadata = PyDict::new(sample.py());
-        for entry in self.sample_metadata(&sample_name(sample)?)? {
+    #[getter]
+    fn metadata<'py>(&self, python: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let metadata = PyDict::new(python);
+        for entry in self.sample_metadata(&self.sample_name)? {
             match entry.value {
                 MetadataValue::Text(value) => metadata.set_item(entry.key, value)?,
                 MetadataValue::Integer(value) => metadata.set_item(entry.key, value)?,
@@ -153,62 +142,93 @@ mod tests {
                 )
                 .expect("should create sample");
             }
-            let repository =
-                Py::new(python, PyRepository { context }).expect("should create Python repository");
+            let repository = Py::new(
+                python,
+                PyRepository {
+                    context: context.clone(),
+                },
+            )
+            .expect("should create Python repository");
             let sample = Py::new(
                 python,
-                PySample::new("default".to_string(), "sample".to_string(), vec![]),
+                PySample::new(
+                    "default".to_string(),
+                    "sample".to_string(),
+                    vec![],
+                    context.clone(),
+                ),
             )
             .expect("should create Python sample");
-            py_run!(python, repository sample, r#"
-assert repository.get_sample_metadata(sample) == {}
+            let other = Py::new(
+                python,
+                PySample::new(
+                    "default".to_string(),
+                    "other".to_string(),
+                    vec![],
+                    context.clone(),
+                ),
+            )
+            .expect("should create other Python sample");
+            let missing = Py::new(
+                python,
+                PySample::new(
+                    "default".to_string(),
+                    "missing".to_string(),
+                    vec![],
+                    context,
+                ),
+            )
+            .expect("should create missing Python sample");
+            py_run!(python, repository sample other missing, r#"
+assert sample.metadata == {}
 values = {"label": "case", "count": 9223372036854775807, "score": 1.25, "enabled": True, "disabled": False}
-repository.add_sample_metadata(sample, values)
-assert repository.get_sample_metadata("sample") == values
-assert repository.get_sample_metadata("other") == {}
-result = repository.get_sample_metadata(sample)
+sample.add_metadata(values)
+assert sample.metadata == values
+assert other.metadata == {}
+result = sample.metadata
 assert type(result["count"]) is int
 assert type(result["score"]) is float
 assert type(result["enabled"]) is bool
 assert type(result["disabled"]) is bool
 result["label"] = "local change"
-assert repository.get_sample_metadata(sample) == values
-repository.add_sample_metadata("sample", {"count": "updated", "minimum": -9223372036854775808})
+assert sample.metadata == values
+sample.add_metadata({"count": "updated", "minimum": -9223372036854775808})
 values.update(count="updated", minimum=-9223372036854775808)
-assert repository.get_sample_metadata(sample) == values
-repository.add_sample_metadata(sample, values)
-repository.add_sample_metadata(sample, {})
-assert repository.get_sample_metadata(sample) == values
+assert sample.metadata == values
+sample.add_metadata(values)
+sample.add_metadata({})
+assert sample.metadata == values
 repository.checkout("metadata-branch", create=True)
-repository.add_sample_metadata(sample, {"label": "branch"})
-assert repository.get_sample_metadata(sample)["label"] == "branch"
+sample.add_metadata({"label": "branch"})
+assert sample.metadata["label"] == "branch"
 repository.checkout("main")
-assert repository.get_sample_metadata(sample) == values
+assert sample.metadata == values
 for invalid in [None, [], {}, float("nan"), float("inf"), float("-inf"), 2**63, -2**63 - 1]:
     try:
-        repository.add_sample_metadata(sample, {"first": "must not persist", "invalid": invalid})
+        sample.add_metadata({"first": "must not persist", "invalid": invalid})
     except (TypeError, ValueError, OverflowError):
         pass
     else:
         raise AssertionError("invalid metadata should be rejected")
-    assert repository.get_sample_metadata(sample) == values
+    assert sample.metadata == values
 for invalid in [{1: "invalid key"}, [("key", "value")]]:
     try:
-        repository.add_sample_metadata(sample, invalid)
+        sample.add_metadata(invalid)
     except TypeError:
         pass
     else:
         raise AssertionError("invalid metadata dictionary should be rejected")
-for method in [repository.get_sample_metadata, lambda sample, repository=repository: repository.add_sample_metadata(sample, {})]:
-    for invalid, error_type in [(42, TypeError), ("missing", ValueError)]:
-        try:
-            method(invalid)
-        except error_type:
-            pass
-        else:
-            raise AssertionError("invalid sample should be rejected")
-repository.add_sample_metadata(sample, {"after_errors": 2.0})
-assert repository.get_sample_metadata(sample)["after_errors"] == 2.0
+assert not hasattr(repository, "get_sample_metadata")
+assert not hasattr(repository, "add_sample_metadata")
+for method in [lambda missing=missing: missing.metadata, lambda missing=missing: missing.add_metadata({})]:
+    try:
+        method()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("missing sample should be rejected")
+sample.add_metadata({"after_errors": 2.0})
+assert sample.metadata["after_errors"] == 2.0
 "#);
         });
     }
