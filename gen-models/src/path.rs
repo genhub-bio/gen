@@ -950,17 +950,15 @@ impl Path {
         let tree = self.intervaltree(conn)?;
         let block_with_start = tree.query_point(deletion_start).next().unwrap().value;
         let block_with_end = tree.query_point(deletion_end).next().unwrap().value;
-        let start_offset = deletion_start - block_with_start.start;
-        let end_offset = deletion_end - block_with_end.start;
         let node_deletion_start = if block_with_start.strand == Strand::Forward {
-            block_with_start.sequence_start + start_offset
+            block_with_start.sequence_start + deletion_start - block_with_start.start
         } else {
-            block_with_start.sequence_end - start_offset
+            block_with_start.sequence_end - deletion_start + block_with_start.start
         };
         let node_deletion_end = if block_with_end.strand == Strand::Forward {
-            block_with_end.sequence_start + end_offset
+            block_with_end.sequence_start + deletion_end - block_with_end.start
         } else {
-            block_with_end.sequence_end - end_offset
+            block_with_end.sequence_end - deletion_end + block_with_end.start
         };
 
         let edges = Path::edges_for_path(conn, &self.id, None);
