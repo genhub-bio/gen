@@ -1,5 +1,7 @@
 """The public names, types and hash handling that make the API predictable for agents."""
 
+import gzip
+
 import gen
 
 from test_api import FIXTURES, RepositoryTestCase
@@ -212,7 +214,7 @@ class AssetTests(RepositoryTestCase):
         asset = self.repository.add_file(str(readme))
         self.assertTrue(asset.path.is_file())
         self.assertNotEqual(asset.path.name, "README.txt")
-        self.assertEqual(asset.path.read_text(), "notes for the design")
+        self.assertEqual(gzip.decompress(asset.path.read_bytes()), b"notes for the design")
         self.assertIn(self.repository.gen_dir, asset.path.parents)
 
     def test_save_as_copies_under_a_chosen_name(self):
@@ -243,7 +245,7 @@ class AssetTests(RepositoryTestCase):
         self.repository.import_fasta(str(FIXTURES / "simple.fa"))
         [asset] = self.repository.get_assets()
         self.assertEqual(asset.name, "simple.fa")
-        self.assertIn(">", asset.path.read_text())
+        self.assertIn(b">", gzip.decompress(asset.path.read_bytes()))
 
 
 class StitchTests(RepositoryTestCase):

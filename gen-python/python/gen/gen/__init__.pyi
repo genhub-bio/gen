@@ -106,9 +106,10 @@ class Asset:
     GenBank file that was imported, or an annotation file.
 
     Add one with `Repository.add_file()` and list them with `Repository.get_assets()`. The
-    content is stored once under a hashed filename inside `.gen`; `.name` is the file's original
-    name, `.path` locates the stored copy and `.save_as()` writes a copy under any name you
-    choose. Treat the stored copy as read-only.
+    content is stored once under a hashed filename inside `.gen`, and text files such as FASTA or
+    README notes are kept compressed. `.name` is the file's original name, `.path` locates the
+    stored copy, which may be compressed, and `.save_as()` writes the original, readable file under
+    any name you choose. Treat the stored copy as read-only.
     """
     @property
     def id(self) -> HashId:
@@ -123,8 +124,9 @@ class Asset:
     @property
     def path(self) -> pathlib.Path:
         r"""
-        Where the stored copy lives, as a `pathlib.Path` inside `.gen`. The filename is a hash, so
-        use `save_as()` for a copy you can name and share. Raises `FileNotFoundError` when the
+        Where the stored copy lives, as a `pathlib.Path` inside `.gen`. The filename is a hash and
+        the bytes may be compressed (BGZF), so use `save_as()` for a plain copy you can name, read
+        and share. Raises `FileNotFoundError` when the
         content has not been downloaded to this repository yet.
         """
     def save_as(

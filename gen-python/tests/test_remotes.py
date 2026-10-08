@@ -22,7 +22,7 @@ def archived_asset_bytes_by_id(repository):
         )
     }
     reachable_asset_ids = {str(asset.id) for asset in repository.get_assets()}
-    asset_directory = Path(repository.db_path).parent / "assets"
+    asset_directory = repository.gen_dir / "assets"
     archived_assets = {}
 
     for asset_id in reachable_asset_ids:
